@@ -14,3 +14,4 @@
 *.class
 *.log
 *.py
+gradle/gradle-daemon-jvm.properties

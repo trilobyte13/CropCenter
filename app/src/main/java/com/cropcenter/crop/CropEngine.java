@@ -37,12 +37,10 @@ public final class CropEngine {
         boolean lockedX = (mode == CenterMode.BOTH || mode == CenterMode.HORIZONTAL);
         boolean lockedY = (mode == CenterMode.BOTH || mode == CenterMode.VERTICAL);
 
-        // Both locked and free axes: max symmetric extent from center.
-        // Locked axes are capped at 2*min(center, imgDim-center).
-        // Free axes also use symmetric extent but could theoretically use full image
-        // — however since crop is centered, symmetric is the maximum possible.
-        float maxW = 2 * Math.min(cx, imgW - cx);
-        float maxH = 2 * Math.min(cy, imgH - cy);
+        // Locked axes: symmetric extent from center (crop stays centered on point).
+        // Free axes: full image extent (center will be shifted to fit later).
+        float maxW = lockedX ? 2 * Math.min(cx, imgW - cx) : imgW;
+        float maxH = lockedY ? 2 * Math.min(cy, imgH - cy) : imgH;
 
         float cropW, cropH;
         AspectRatio ar = state.getAspectRatio();
@@ -76,13 +74,31 @@ public final class CropEngine {
         cropW = Math.max(4, cropW);
         cropH = Math.max(4, cropH);
 
-        // Clamp center for free axes (non-rotated bounds)
+        // Clamp center for free axes — use image bounds (setCenter handles rotation clamping)
         if (!lockedX) cx = Math.max(cropW / 2, Math.min(imgW - cropW / 2, cx));
         if (!lockedY) cy = Math.max(cropH / 2, Math.min(imgH - cropH / 2, cy));
 
         state.setCropSizeSilent(Math.round(cropW), Math.round(cropH));
         state.setCropSizeDirty(false);
+        // setCenter applies rotation-aware clamping via binary search
         state.setCenter(cx, cy);
+
+        // If rotation clamping moved the center significantly, the crop may now be
+        // too large for the new center. Re-check and shrink if needed.
+        if (rotation != 0f) {
+            float finalCx = state.getCenterX();
+            float finalCy = state.getCenterY();
+            float recheck = maxScaleForRotation(finalCx, finalCy,
+                    state.getCropW(), state.getCropH(), imgW, imgH, rotation);
+            if (recheck < 0.99f) {
+                cropW = state.getCropW() * recheck;
+                cropH = state.getCropH() * recheck;
+                cropW = Math.max(4, cropW);
+                cropH = Math.max(4, cropH);
+                state.setCropSizeSilent(Math.round(cropW), Math.round(cropH));
+                state.setCenter(finalCx, finalCy);
+            }
+        }
     }
 
     /**
@@ -141,8 +157,10 @@ public final class CropEngine {
 
     /**
      * Auto-compute crop from selection points, respecting lock mode.
-     * Locked axes: center is set to the midpoint of points on that axis.
-     * Free axes: center is set to the image center (to maximize crop on that axis).
+     *
+     * Both:  center on selection midpoint for both axes (symmetric around points)
+     * H:     center horizontally on points, vertically on image center (max height)
+     * V:     center vertically on points, horizontally on image center (max width)
      */
     public static void autoComputeFromPoints(CropState state) {
         List<SelectionPoint> points = state.getSelectionPoints();
@@ -162,9 +180,10 @@ public final class CropEngine {
         float midPtX = (active == 1) ? minX : (minX + maxX) / 2f;
         float midPtY = (active == 1) ? minY : (minY + maxY) / 2f;
 
-        // Always center on the feature midpoint.
-        // Lock mode affects whether the crop is SYMMETRIC around the center (locked)
-        // or extends maximally in each direction (free) from the center.
+        // Always start centered on the selection midpoint.
+        // Locked axes: crop is symmetric around this center.
+        // Free axes: crop extends to max available size, but stays centered on
+        // the points as much as possible (recomputeCrop clamps if needed to fit).
         float fx = midPtX;
         float fy = midPtY;
 

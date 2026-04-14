@@ -195,7 +195,14 @@ public class CropState {
     public void setAspectRatio(AspectRatio ar) { this.aspectRatio = ar; cropSizeDirty = true; notifyChanged(); }
 
     public CenterMode getCenterMode() { return centerMode; }
-    public void setCenterMode(CenterMode mode) { this.centerMode = mode; notifyChanged(); }
+    public void setCenterMode(CenterMode mode) {
+        this.centerMode = mode;
+        // Don't set cropSizeDirty here — the button handler calls recomputeForLockChange()
+        // explicitly. Setting dirty here causes the listener to recompute IMMEDIATELY
+        // (runOnUiThread runs inline on UI thread) with the wrong center, racing with
+        // the handler's recomputeForLockChange that uses the correct selection midpoint.
+        notifyChanged();
+    }
 
     public EditorMode getEditorMode() { return editorMode; }
     public void setEditorMode(EditorMode mode) {

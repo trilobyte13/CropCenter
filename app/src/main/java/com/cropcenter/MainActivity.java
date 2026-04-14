@@ -108,6 +108,7 @@ public class MainActivity extends AppCompatActivity {
                 updateCropInfo();
                 updateZoomBadge();
                 updatePointControlsVisibility();
+                syncRotationUI();
                 editorView.invalidate();
             } finally {
                 inListener[0] = false;
@@ -503,6 +504,12 @@ public class MainActivity extends AppCompatActivity {
             applyLockMode();
             updateModeHighlight();
             updateLockHighlight();
+            // Only recompute crop when entering Select mode — Move mode preserves
+            // the current crop size and only changes the panning direction.
+            if (state.getEditorMode() == EditorMode.SELECT_FEATURE
+                    && !((CheckBox) findViewById(R.id.chkFreeze)).isChecked()) {
+                recomputeForLockChange();
+            }
             editorView.invalidate();
         };
         findViewById(R.id.btnModeMove).setOnClickListener(click);
@@ -523,9 +530,13 @@ public class MainActivity extends AppCompatActivity {
             setCurrentPref(pref);
             applyLockMode();
             updateLockHighlight();
-            if (!((CheckBox) findViewById(R.id.chkFreeze)).isChecked()) {
+            // In Select mode: recompute crop to reflect new lock axis.
+            // In Move mode: only the panning direction changes — crop size is preserved.
+            if (state.getEditorMode() == EditorMode.SELECT_FEATURE
+                    && !((CheckBox) findViewById(R.id.chkFreeze)).isChecked()) {
                 recomputeForLockChange();
             }
+            editorView.invalidate();
         };
         findViewById(R.id.btnLockBoth).setOnClickListener(lockClick);
         findViewById(R.id.btnLockH).setOnClickListener(lockClick);
@@ -533,6 +544,7 @@ public class MainActivity extends AppCompatActivity {
 
         ((CheckBox) findViewById(R.id.chkFreeze)).setOnCheckedChangeListener((btn, isChecked) -> {
             applyLockMode();
+            if (!isChecked) recomputeForLockChange(); // unfreezing restores lock pref → recompute
         });
     }
 
@@ -587,95 +599,79 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
+    private com.cropcenter.view.RotationRulerView rotationRuler;
+    private TextView txtRotDegrees;
+    private boolean rulerUpdating;
+
     private void setupRotation() {
-        findViewById(R.id.btnRotate).setOnClickListener(v -> showRotationDialog());
+        rotationRuler = findViewById(R.id.rotationRuler);
+        txtRotDegrees = findViewById(R.id.txtRotDegrees);
+
+        rotationRuler.setOnRotationChangedListener(deg -> {
+            if (rulerUpdating) return;
+            state.setRotationDegrees(deg);
+        });
+
+        // Tap degree readout → open precise input dialog
+        txtRotDegrees.setOnClickListener(v -> showPreciseRotationDialog());
+
+        // Start disabled (no image)
+        rotationRuler.setRulerEnabled(false);
     }
 
-    private void showRotationDialog() {
+    /** Sync ruler + readout to current state rotation. */
+    private void syncRotationUI() {
+        float deg = state.getRotationDegrees();
+        boolean hasImage = state.getSourceImage() != null;
+
+        rulerUpdating = true;
+        rotationRuler.setDegrees(deg);
+        rulerUpdating = false;
+        rotationRuler.setRulerEnabled(hasImage);
+
+        if (deg == 0f) {
+            txtRotDegrees.setVisibility(View.GONE);
+        } else {
+            txtRotDegrees.setVisibility(View.VISIBLE);
+            txtRotDegrees.setText(formatDeg(deg));
+        }
+    }
+
+    private static String formatDeg(float deg) {
+        if (deg == (int) deg) return "Rot " + (int) deg + "\u00B0";
+        return String.format("Rot %.1f\u00B0", deg);
+    }
+
+    /** Dialog for entering an exact rotation value. */
+    private void showPreciseRotationDialog() {
+        if (state.getSourceImage() == null) return;
         float density = getResources().getDisplayMetrics().density;
         int dp = (int) density;
 
-        android.widget.LinearLayout root = new android.widget.LinearLayout(this);
-        root.setOrientation(android.widget.LinearLayout.VERTICAL);
-        root.setPadding(20*dp, 12*dp, 20*dp, 8*dp);
-
         final float originalDeg = state.getRotationDegrees();
-        final float[] deg = {originalDeg};
 
-        // Value display
         EditText input = new EditText(this);
-        input.setText(String.format("%.2f", deg[0]));
-        input.setTextSize(20); input.setGravity(android.view.Gravity.CENTER);
+        input.setText(String.format("%.2f", originalDeg));
+        input.setTextSize(18); input.setGravity(android.view.Gravity.CENTER);
         input.setTextColor(0xFFCDD6F4); input.setBackgroundColor(0xFF313244);
         input.setInputType(android.text.InputType.TYPE_CLASS_NUMBER
                 | android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL
                 | android.text.InputType.TYPE_NUMBER_FLAG_SIGNED);
         input.setSingleLine(true);
-        root.addView(input);
-
-        Runnable applyFromInput = () -> {
-            try {
-                deg[0] = Math.max(-180f, Math.min(180f, Float.parseFloat(input.getText().toString().trim())));
-                state.setRotationDegrees(deg[0]);
-            } catch (NumberFormatException ignored) {}
-        };
-
-        Runnable updateInput = () -> {
-            input.setText(String.format("%.2f", deg[0]));
-            input.setSelection(input.getText().length());
-            state.setRotationDegrees(deg[0]);
-        };
-
-        // Nudge buttons: two rows
-        String[][] nudgeLabels = {
-            {"-90\u00B0", "-1\u00B0", "-0.1\u00B0", "0\u00B0", "+0.1\u00B0", "+1\u00B0", "+90\u00B0"},
-            {"-45\u00B0", "-0.5\u00B0", "-0.05\u00B0", "-0.01\u00B0", "+0.01\u00B0", "+0.05\u00B0", "+0.5\u00B0"}
-        };
-        float[][] nudgeVals = {
-            {-90f, -1f, -0.1f, 0f, 0.1f, 1f, 90f},  // 0 = absolute set
-            {-45f, -0.5f, -0.05f, -0.01f, 0.01f, 0.05f, 0.5f}
-        };
-        boolean[][] isAbsolute = {
-            {true, false, false, true, false, false, true},
-            {true, false, false, false, false, false, false}
-        };
-
-        for (int r = 0; r < 2; r++) {
-            android.widget.LinearLayout row = new android.widget.LinearLayout(this);
-            row.setOrientation(android.widget.LinearLayout.HORIZONTAL);
-            row.setGravity(android.view.Gravity.CENTER);
-            android.widget.LinearLayout.LayoutParams rLP = new android.widget.LinearLayout.LayoutParams(
-                    android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
-                    android.widget.LinearLayout.LayoutParams.WRAP_CONTENT);
-            rLP.topMargin = (r == 0) ? 12*dp : 4*dp;
-
-            for (int c = 0; c < nudgeLabels[r].length; c++) {
-                final float val = nudgeVals[r][c];
-                final boolean abs = isAbsolute[r][c];
-                TextView btn = new TextView(this);
-                btn.setText(nudgeLabels[r][c]); btn.setTextSize(11);
-                btn.setGravity(android.view.Gravity.CENTER);
-                btn.setPadding(2*dp, 8*dp, 2*dp, 8*dp);
-                btn.setTextColor(abs ? 0xFFCBA6F7 : 0xFFA6ADC8);
-                btn.setOnClickListener(b -> {
-                    if (abs) deg[0] = val;
-                    else deg[0] = Math.max(-180f, Math.min(180f, deg[0] + val));
-                    updateInput.run();
-                });
-                row.addView(btn, new android.widget.LinearLayout.LayoutParams(
-                        0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
-            }
-            root.addView(row, rLP);
-        }
+        input.setPadding(12*dp, 10*dp, 12*dp, 10*dp);
 
         new android.app.AlertDialog.Builder(this)
-                .setTitle("Rotate Image")
-                .setView(root)
-                .setPositiveButton("Apply", (d, w) -> applyFromInput.run())
-                .setNegativeButton("Cancel", (d, w) -> {
-                    // Revert to value before dialog opened
-                    state.setRotationDegrees(originalDeg);
+                .setTitle("Enter Rotation (\u00B0)")
+                .setView(input)
+                .setPositiveButton("Apply", (d, w) -> {
+                    try {
+                        float val = Math.max(-180f, Math.min(180f,
+                                Float.parseFloat(input.getText().toString().trim())));
+                        state.setRotationDegrees(val);
+                        syncRotationUI();
+                    } catch (NumberFormatException ignored) {}
                 })
+                .setNegativeButton("Cancel", null)
                 .show();
     }
 

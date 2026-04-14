@@ -10,7 +10,6 @@ import android.util.Log;
 import com.cropcenter.metadata.ExifPatcher;
 import com.cropcenter.metadata.GainMapComposer;
 import com.cropcenter.metadata.JpegMetadataInjector;
-import com.cropcenter.metadata.MpfPatcher;
 import com.cropcenter.metadata.SeftBuilder;
 import com.cropcenter.metadata.JpegSegment;
 import com.cropcenter.model.CropState;
@@ -74,20 +73,16 @@ public final class CropExporter {
 
         float rotation = state.getRotationDegrees();
         if (rotation != 0f) {
-            // Draw rotated: translate so image center aligns with crop center, then rotate
+            // Draw rotated around IMAGE center (matches CropEditorView preview rendering).
+            // The crop window at (sx, sy) clips the rotated image — same as the preview's
+            // axis-aligned crop rect over the rotated image.
             canvas.save();
-            float outCx = cropW / 2f;
-            float outCy = cropH / 2f;
-            canvas.rotate(rotation, outCx, outCy);
-            // Draw the source image centered in the output
-            float drawX = outCx - src.getWidth() / 2f;
-            float drawY = outCy - src.getHeight() / 2f;
-            // Offset for crop position (crop center vs image center)
-            float imgCx = src.getWidth() / 2f;
-            float imgCy = src.getHeight() / 2f;
-            float offX = imgCx - (state.hasCenter() ? state.getCenterX() : imgCx);
-            float offY = imgCy - (state.hasCenter() ? state.getCenterY() : imgCy);
-            canvas.drawBitmap(src, drawX + offX, drawY + offY, paint);
+            float drawX = -sx;  // position image so crop origin maps to canvas (0,0)
+            float drawY = -sy;
+            float pivotX = drawX + src.getWidth() / 2f;  // image center in canvas coords
+            float pivotY = drawY + src.getHeight() / 2f;
+            canvas.rotate(rotation, pivotX, pivotY);
+            canvas.drawBitmap(src, drawX, drawY, paint);
             canvas.restore();
         } else {
             // No rotation: direct blit
@@ -121,11 +116,11 @@ public final class CropExporter {
         // Generate thumbnail from the rendered bitmap (display orientation).
         byte[] thumbnail = generateThumbnail(bmp, 512);
 
-        // HDR path: generate properly cropped/rotated gain map.
-        // For no-grid: use HDR result directly (preserves gainmap in pixel data).
-        // For grid: extract the cropped gain map, then compose it with the grid primary.
+        // HDR path: generate a cropped Ultra HDR JPEG to extract the gain map from.
+        // The primary image always comes from the canvas rendering above (matches preview
+        // exactly, including rotation around image center). The gain map is extracted from
+        // the HDR path and composed with the canvas primary.
         byte[] originalBytes = state.getOriginalFileBytes();
-        boolean wantGrid = state.getExportConfig().includeGrid;
         boolean hasHdr = state.getGainMap() != null && originalBytes != null && UltraHdrCompat.isSupported();
 
         byte[] croppedGainMap = null;
@@ -139,44 +134,12 @@ public final class CropExporter {
                     cx, cy, cropW, cropH,
                     state.getRotationDegrees(), exifOrient);
 
-            if (hdrResult != null && !wantGrid) {
-                // No grid: use HDR result directly
-                bmp.recycle();
-
-                // Inject original EXIF (patched) to preserve camera metadata.
-                // This shifts byte offsets, so we must fix MPF afterward.
-                List<JpegSegment> meta = state.getJpegMeta();
-                if (meta != null && !meta.isEmpty()) {
-                    try {
-                        List<JpegSegment> exifOnly = new java.util.ArrayList<>();
-                        for (JpegSegment seg : ExifPatcher.patch(meta, cropW, cropH, thumbnail, 1)) {
-                            if (seg.isExif()) exifOnly.add(seg);
-                        }
-                        if (!exifOnly.isEmpty()) {
-                            int primaryEnd = findPrimaryEnd(hdrResult);
-                            if (primaryEnd <= 0) throw new IOException("Cannot find primary EOI");
-                            hdrResult = replaceExif(hdrResult, exifOnly);
-                            int newPrimaryEnd = findPrimaryEnd(hdrResult);
-                            if (newPrimaryEnd > 0 && newPrimaryEnd < hdrResult.length) {
-                                MpfPatcher.patch(hdrResult, newPrimaryEnd);
-                                Log.d(TAG, "EXIF injected + MPF fixed, primary " + primaryEnd + " → " + newPrimaryEnd);
-                            }
-                        }
-                    } catch (Exception e) {
-                        Log.w(TAG, "EXIF injection into HDR failed", e);
-                    }
-                }
-
-                hdrResult = appendSeftForState(hdrResult, state, cropW, cropH);
-                Log.d(TAG, "HDR export: " + hdrResult.length + " bytes");
-                return new ExportResult(hdrResult, "jpg");
-            } else if (hdrResult != null) {
-                // Grid enabled: extract the cropped gain map for composition with grid primary
+            if (hdrResult != null) {
                 int pe = findPrimaryEnd(hdrResult);
                 if (pe > 0 && pe < hdrResult.length) {
                     croppedGainMap = new byte[hdrResult.length - pe];
                     System.arraycopy(hdrResult, pe, croppedGainMap, 0, croppedGainMap.length);
-                    Log.d(TAG, "Extracted cropped gain map: " + croppedGainMap.length + " bytes");
+                    Log.d(TAG, "Extracted gain map: " + croppedGainMap.length + " bytes");
                 }
             } else {
                 Log.d(TAG, "HDR generation failed, falling back to non-HDR");
@@ -208,45 +171,6 @@ public final class CropExporter {
         jpegBytes = appendSeftForState(jpegBytes, state, cropW, cropH);
 
         return new ExportResult(jpegBytes, "jpg");
-    }
-
-    /**
-     * Replace EXIF in a JPEG: strip any existing EXIF APP1, insert ours after SOI.
-     * Preserves all non-EXIF APP segments (XMP, MPF, ICC) from the platform output.
-     */
-    private static byte[] replaceExif(byte[] jpeg, List<JpegSegment> exifSegments) throws IOException {
-        ByteArrayOutputStream out = new ByteArrayOutputStream(jpeg.length + 65536);
-        // SOI
-        out.write(0xFF);
-        out.write(0xD8);
-        // Our EXIF segments
-        for (JpegSegment seg : exifSegments) {
-            out.write(seg.data);
-        }
-        // Copy all non-EXIF segments from the platform output
-        int off = 2;
-        while (off < jpeg.length - 3) {
-            if ((jpeg[off] & 0xFF) != 0xFF) break;
-            int m = jpeg[off + 1] & 0xFF;
-            if (m == 0xDA || m == 0xD9) break; // SOS or EOI — copy rest as-is
-            if (m == 0x00 || m == 0x01 || (m >= 0xD0 && m <= 0xD7)) { off += 2; continue; }
-            int segLen = ((jpeg[off+2] & 0xFF) << 8) | (jpeg[off+3] & 0xFF);
-            if (segLen < 2 || off + 2 + segLen > jpeg.length) break;
-            int total = 2 + segLen;
-            // Skip EXIF APP1 (we replaced it with ours)
-            boolean isExif = m == 0xE1 && total > 10
-                    && jpeg[off+4] == 'E' && jpeg[off+5] == 'x'
-                    && jpeg[off+6] == 'i' && jpeg[off+7] == 'f';
-            if (!isExif) {
-                out.write(jpeg, off, total);
-            }
-            off += total;
-        }
-        // Copy remaining image data (DQT, SOF, SOS, entropy, EOI, gain map)
-        if (off < jpeg.length) {
-            out.write(jpeg, off, jpeg.length - off);
-        }
-        return out.toByteArray();
     }
 
     /**
@@ -287,7 +211,9 @@ public final class CropExporter {
     }
 
     private static byte[] generateThumbnail(Bitmap bmp, int maxDim) {
-        return generateThumbnail(bmp, maxDim, 40000); // ~40KB max to leave room in 64KB EXIF
+        // 20KB limit: fits alongside Samsung MakerNotes (~30-40KB) in the 64KB EXIF APP1.
+        // If the EXIF is unusually large, ExifPatcher.replaceThumbnail handles the overflow.
+        return generateThumbnail(bmp, maxDim, 20000);
     }
 
     private static byte[] generateThumbnail(Bitmap bmp, int maxDim, int maxBytes) {

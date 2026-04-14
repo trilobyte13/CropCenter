@@ -2,9 +2,11 @@ package com.cropcenter.util;
 
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.graphics.Canvas;
 import android.graphics.ColorSpace;
 import android.graphics.Gainmap;
 import android.graphics.Matrix;
+import android.graphics.Paint;
 import android.util.Log;
 
 import java.io.ByteArrayOutputStream;
@@ -14,12 +16,10 @@ import java.io.FileOutputStream;
 /**
  * Ultra HDR support using Android 14+ Gainmap API.
  *
- * Strategy: keep the decoded Bitmap in display orientation (BitmapFactory auto-rotates
- * on API 28+). Pure crops via createBitmap(src, x, y, w, h) preserve the gainmap.
- * Only user rotation requires a matrix transform that may lose the gainmap; in that
- * case we recover by cropping the original gainmap and re-attaching it.
- *
- * Output is always in display orientation (EXIF orientation = 1).
+ * Strategy: decode original with gainmap, render onto a cropW×cropH canvas using
+ * the exact same rotation/positioning as CropExporter (Canvas.rotate around image
+ * center). Apply the identical transform to the gainmap bitmap so gain map and
+ * primary are spatially aligned. Compress → Ultra HDR JPEG.
  */
 public final class UltraHdrCompat {
 
@@ -32,17 +32,10 @@ public final class UltraHdrCompat {
     }
 
     /**
-     * Produce an Ultra HDR JPEG by applying crop+rotation to the original image.
-     * Output is always in display orientation (EXIF orientation = 1).
+     * Produce an Ultra HDR JPEG using the same canvas rendering as CropExporter.
+     * The gain map undergoes the identical spatial transform as the primary,
+     * guaranteeing alignment regardless of rotation or crop position.
      *
-     * @param originalBytes  raw JPEG bytes of the original HDR image
-     * @param quality        JPEG quality (1-100)
-     * @param cacheDir       temp directory for file-based decode
-     * @param imgW, imgH     image dimensions in display orientation (after EXIF rotation)
-     * @param centerX, centerY  crop center in display coordinates
-     * @param cropW, cropH   crop dimensions
-     * @param userRotation   user-applied rotation in degrees
-     * @param exifOrientation EXIF orientation of the original file
      * @return Ultra HDR JPEG bytes, or null if failed
      */
     public static byte[] compressWithGainmap(byte[] originalBytes, int quality, File cacheDir,
@@ -73,81 +66,93 @@ public final class UltraHdrCompat {
                     + " expected=" + imgW + "x" + imgH
                     + " exif=" + exifOrientation);
 
-            // Ensure bitmap is in display orientation.
-            // BitmapFactory auto-rotates on API 28+; verify by comparing dimensions.
+            // Ensure display orientation
             boolean autoRotated = (current.getWidth() == imgW && current.getHeight() == imgH);
-
             if (!autoRotated && exifOrientation > 1) {
-                // Not auto-rotated: rotate to display orientation
                 Matrix m = BitmapUtils.orientationMatrix(exifOrientation);
                 Bitmap rotated = Bitmap.createBitmap(current, 0, 0,
                         current.getWidth(), current.getHeight(), m, true);
                 if (rotated != current) { current.recycle(); current = rotated; }
-                Log.d(TAG, "EXIF rotated to display: " + current.getWidth() + "x" + current.getHeight()
-                        + " hasGm=" + current.hasGainmap());
-            }
-            // Now `current` is in display orientation (imgW x imgH)
-
-            // Apply user rotation if any
-            if (userRotation != 0f) {
-                Matrix m = new Matrix();
-                m.setRotate(userRotation, current.getWidth() / 2f, current.getHeight() / 2f);
-                Bitmap rotated = Bitmap.createBitmap(current, 0, 0,
-                        current.getWidth(), current.getHeight(), m, true);
-                if (rotated != current) { current.recycle(); current = rotated; }
-                Log.d(TAG, "User rotated: " + current.getWidth() + "x" + current.getHeight()
+                Log.d(TAG, "EXIF rotated: " + current.getWidth() + "x" + current.getHeight()
                         + " hasGm=" + current.hasGainmap());
             }
 
-            // Compute crop origin — must match CropExporter's canvas rendering exactly:
-            //   sx = (int) Math.floor(centerX - cropW / 2f)
-            int sx, sy;
+            // Capture gainmap info before any destructive operations
+            Gainmap srcGm = current.hasGainmap() ? current.getGainmap() : null;
+            Bitmap gmBmp = srcGm != null ? srcGm.getGainmapContents() : null;
+
+            // Crop origin — matches CropExporter.export() exactly
+            float sx = centerX - cropW / 2f;
+            float sy = centerY - cropH / 2f;
+
+            // ── Render primary onto cropW×cropH canvas ──
+            // Same rotation/positioning as CropExporter: image at (-sx, -sy),
+            // rotated around image center in output coords.
+            Bitmap output = Bitmap.createBitmap(cropW, cropH, Bitmap.Config.ARGB_8888, true,
+                    ColorSpace.get(ColorSpace.Named.DISPLAY_P3));
+            Canvas canvas = new Canvas(output);
+            Paint paint = new Paint(Paint.FILTER_BITMAP_FLAG);
+            float drawX = -sx, drawY = -sy;
+
             if (userRotation != 0f) {
-                // After user rotation, bitmap may be larger. Map display coords to rotated space.
-                float rcx = current.getWidth() / 2f + (centerX - imgW / 2f);
-                float rcy = current.getHeight() / 2f + (centerY - imgH / 2f);
-                sx = (int) Math.floor(rcx - cropW / 2f);
-                sy = (int) Math.floor(rcy - cropH / 2f);
+                canvas.save();
+                canvas.rotate(userRotation,
+                        drawX + current.getWidth() / 2f,
+                        drawY + current.getHeight() / 2f);
+                canvas.drawBitmap(current, drawX, drawY, paint);
+                canvas.restore();
             } else {
-                sx = (int) Math.floor(centerX - cropW / 2f);
-                sy = (int) Math.floor(centerY - cropH / 2f);
+                canvas.drawBitmap(current, drawX, drawY, paint);
             }
 
-            // Clamp to bitmap bounds
-            sx = Math.max(0, Math.min(current.getWidth() - cropW, sx));
-            sy = Math.max(0, Math.min(current.getHeight() - cropH, sy));
-            int sw = Math.min(cropW, current.getWidth() - sx);
-            int sh = Math.min(cropH, current.getHeight() - sy);
+            // ── Apply identical transform to gainmap ──
+            if (srcGm != null && gmBmp != null) {
+                float gmScaleX = (float) gmBmp.getWidth() / current.getWidth();
+                float gmScaleY = (float) gmBmp.getHeight() / current.getHeight();
+                int gmOutW = Math.max(1, Math.round(cropW * gmScaleX));
+                int gmOutH = Math.max(1, Math.round(cropH * gmScaleY));
 
-            if (sw > 0 && sh > 0 && (sx != 0 || sy != 0 || sw != current.getWidth() || sh != current.getHeight())) {
-                Bitmap cropped = Bitmap.createBitmap(current, sx, sy, sw, sh);
-                if (cropped != current) { current.recycle(); current = cropped; }
-                Log.d(TAG, "After crop: " + current.getWidth() + "x" + current.getHeight()
-                        + " hasGm=" + current.hasGainmap());
-            }
+                Bitmap.Config gmConfig = gmBmp.getConfig() != null
+                        ? gmBmp.getConfig() : Bitmap.Config.ARGB_8888;
+                Bitmap gmOutput = Bitmap.createBitmap(gmOutW, gmOutH, gmConfig);
+                Canvas gmCanvas = new Canvas(gmOutput);
+                Paint gmPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
 
-            // Scale to exact output dimensions if needed
-            if (current.getWidth() != cropW || current.getHeight() != cropH) {
-                Bitmap scaled = Bitmap.createScaledBitmap(current, cropW, cropH, true);
-                if (scaled != current) { current.recycle(); current = scaled; }
-            }
+                float gmDrawX = -sx * gmScaleX;
+                float gmDrawY = -sy * gmScaleY;
 
-            // Recovery: if gainmap was lost during matrix transforms (rotation)
-            if (!current.hasGainmap()) {
-                current = recoverGainmap(current, originalBytes, cacheDir,
-                        centerX, centerY, cropW, cropH, imgW, imgH, userRotation);
-                if (current == null || !current.hasGainmap()) {
-                    Log.w(TAG, "Gainmap recovery failed — no HDR");
-                    if (current != null) { current.recycle(); current = null; }
-                    return null;
+                if (userRotation != 0f) {
+                    gmCanvas.save();
+                    gmCanvas.rotate(userRotation,
+                            gmDrawX + gmBmp.getWidth() / 2f,
+                            gmDrawY + gmBmp.getHeight() / 2f);
+                    gmCanvas.drawBitmap(gmBmp, gmDrawX, gmDrawY, gmPaint);
+                    gmCanvas.restore();
+                } else {
+                    gmCanvas.drawBitmap(gmBmp, gmDrawX, gmDrawY, gmPaint);
                 }
+
+                Gainmap newGm = new Gainmap(gmOutput);
+                newGm.setRatioMin(srcGm.getRatioMin()[0], srcGm.getRatioMin()[1], srcGm.getRatioMin()[2]);
+                newGm.setRatioMax(srcGm.getRatioMax()[0], srcGm.getRatioMax()[1], srcGm.getRatioMax()[2]);
+                newGm.setGamma(srcGm.getGamma()[0], srcGm.getGamma()[1], srcGm.getGamma()[2]);
+                newGm.setEpsilonSdr(srcGm.getEpsilonSdr()[0], srcGm.getEpsilonSdr()[1], srcGm.getEpsilonSdr()[2]);
+                newGm.setEpsilonHdr(srcGm.getEpsilonHdr()[0], srcGm.getEpsilonHdr()[1], srcGm.getEpsilonHdr()[2]);
+                newGm.setDisplayRatioForFullHdr(srcGm.getDisplayRatioForFullHdr());
+                newGm.setMinDisplayRatioForHdrTransition(srcGm.getMinDisplayRatioForHdrTransition());
+
+                output.setGainmap(newGm);
+                Log.d(TAG, "Gainmap rendered: " + gmOutW + "x" + gmOutH
+                        + " (scale " + gmScaleX + "x" + gmScaleY + ")");
             }
 
-            // Compress — produces Ultra HDR JPEG
-            ByteArrayOutputStream bos = new ByteArrayOutputStream();
-            current.compress(Bitmap.CompressFormat.JPEG, quality, bos);
-            byte[] result = bos.toByteArray();
             current.recycle(); current = null;
+
+            // Compress → Ultra HDR JPEG
+            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+            output.compress(Bitmap.CompressFormat.JPEG, quality, bos);
+            byte[] result = bos.toByteArray();
+            output.recycle();
 
             if (containsHdrgm(result)) {
                 Log.d(TAG, "Ultra HDR: " + result.length + " bytes");
@@ -162,75 +167,6 @@ public final class UltraHdrCompat {
         } finally {
             if (current != null) current.recycle();
             if (tmp != null) tmp.delete();
-        }
-    }
-
-    /**
-     * Recover a lost gainmap by re-decoding the original image, cropping the
-     * gainmap bitmap to match the output region, and re-attaching it.
-     */
-    private static Bitmap recoverGainmap(Bitmap current, byte[] originalBytes, File cacheDir,
-                                          float centerX, float centerY,
-                                          int cropW, int cropH,
-                                          int imgW, int imgH, float userRotation) {
-        Log.w(TAG, "Gainmap lost during transforms, recovering...");
-        Bitmap src2 = null;
-        File tmp2 = new File(cacheDir, "hdr_gm_recover.jpg");
-        try {
-            try (FileOutputStream fos2 = new FileOutputStream(tmp2)) { fos2.write(originalBytes); }
-            BitmapFactory.Options opts2 = new BitmapFactory.Options();
-            opts2.inPreferredColorSpace = ColorSpace.get(ColorSpace.Named.DISPLAY_P3);
-            src2 = BitmapFactory.decodeFile(tmp2.getAbsolutePath(), opts2);
-            tmp2.delete();
-            if (src2 == null || !src2.hasGainmap()) return current;
-
-            Gainmap srcGm = src2.getGainmap();
-            Bitmap gmBmp = srcGm.getGainmapContents();
-
-            // Map the display-space crop region to gainmap coordinates
-            float gmScaleX = (float) gmBmp.getWidth() / imgW;
-            float gmScaleY = (float) gmBmp.getHeight() / imgH;
-
-            Bitmap croppedGm;
-            if (userRotation != 0f) {
-                // Rotation makes precise crop mapping complex — scale full gainmap
-                croppedGm = Bitmap.createScaledBitmap(gmBmp, current.getWidth(), current.getHeight(), true);
-            } else {
-                // Pure crop: extract corresponding region from gainmap (floor to match canvas)
-                int gmSx = Math.max(0, (int) Math.floor((centerX - cropW / 2f) * gmScaleX));
-                int gmSy = Math.max(0, (int) Math.floor((centerY - cropH / 2f) * gmScaleY));
-                int gmSw = Math.round(cropW * gmScaleX);
-                int gmSh = Math.round(cropH * gmScaleY);
-                gmSw = Math.min(gmSw, gmBmp.getWidth() - gmSx);
-                gmSh = Math.min(gmSh, gmBmp.getHeight() - gmSy);
-                if (gmSw <= 0 || gmSh <= 0) return current;
-                Bitmap subGm = Bitmap.createBitmap(gmBmp, gmSx, gmSy, gmSw, gmSh);
-                croppedGm = Bitmap.createScaledBitmap(subGm, current.getWidth(), current.getHeight(), true);
-                if (subGm != croppedGm) subGm.recycle();
-            }
-
-            Gainmap newGm = new Gainmap(croppedGm);
-            newGm.setRatioMin(srcGm.getRatioMin()[0], srcGm.getRatioMin()[1], srcGm.getRatioMin()[2]);
-            newGm.setRatioMax(srcGm.getRatioMax()[0], srcGm.getRatioMax()[1], srcGm.getRatioMax()[2]);
-            newGm.setGamma(srcGm.getGamma()[0], srcGm.getGamma()[1], srcGm.getGamma()[2]);
-            newGm.setEpsilonSdr(srcGm.getEpsilonSdr()[0], srcGm.getEpsilonSdr()[1], srcGm.getEpsilonSdr()[2]);
-            newGm.setEpsilonHdr(srcGm.getEpsilonHdr()[0], srcGm.getEpsilonHdr()[1], srcGm.getEpsilonHdr()[2]);
-            newGm.setDisplayRatioForFullHdr(srcGm.getDisplayRatioForFullHdr());
-            newGm.setMinDisplayRatioForHdrTransition(srcGm.getMinDisplayRatioForHdrTransition());
-
-            // Set gainmap on mutable copy; only recycle current after success
-            Bitmap mutable = current.copy(Bitmap.Config.ARGB_8888, true);
-            mutable.setGainmap(newGm);
-            current.recycle();
-            Log.d(TAG, "Gainmap recovered and re-attached");
-            return mutable;
-
-        } catch (Exception e) {
-            Log.w(TAG, "Gainmap recovery failed", e);
-            return current;
-        } finally {
-            if (src2 != null) src2.recycle();
-            tmp2.delete();
         }
     }
 

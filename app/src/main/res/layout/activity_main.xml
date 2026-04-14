@@ -105,17 +105,9 @@
             android:layout_marginStart="2dp" android:buttonTint="@color/mauve" />
 
         <View android:layout_width="0dp" android:layout_height="0dp" android:layout_weight="1" />
-
-        <!-- Rotation -->
-        <com.google.android.material.button.MaterialButton android:id="@+id/btnRotate"
-            style="@style/Widget.MaterialComponents.Button.TextButton"
-            android:layout_width="wrap_content" android:layout_height="26dp"
-            android:text="Rotate" android:textSize="10sp" android:textColor="@color/subtext0"
-            android:minWidth="0dp" android:paddingHorizontal="6dp"
-            android:insetTop="0dp" android:insetBottom="0dp" />
     </LinearLayout>
 
-    <!-- Row 2: Point controls (always visible when points exist) -->
+    <!-- Row 2: Point controls -->
     <LinearLayout android:id="@+id/pointControlsRow"
         android:layout_width="match_parent" android:layout_height="32dp"
         android:background="@color/sidebar_bg" android:gravity="center_vertical"
@@ -143,7 +135,14 @@
         <View android:layout_width="0dp" android:layout_height="0dp" android:layout_weight="1" />
     </LinearLayout>
 
-    <!-- Row 3: Info bar -->
+    <!-- Row 3: Rotation ruler (scrollable) -->
+    <com.cropcenter.view.RotationRulerView
+        android:id="@+id/rotationRuler"
+        android:layout_width="match_parent"
+        android:layout_height="36dp"
+        android:background="@color/sidebar_bg" />
+
+    <!-- Info bar -->
     <LinearLayout
         android:layout_width="match_parent" android:layout_height="28dp"
         android:background="@color/mantle" android:gravity="center_vertical"
@@ -157,6 +156,11 @@
             android:layout_width="wrap_content" android:layout_height="wrap_content"
             android:textColor="@color/subtext0" android:textSize="10sp"
             android:layout_marginStart="10dp" />
+
+        <TextView android:id="@+id/txtRotDegrees"
+            android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:textColor="@color/mauve" android:textSize="10sp"
+            android:layout_marginStart="10dp" android:visibility="gone" />
 
         <TextView android:id="@+id/txtZoomBadge"
             android:layout_width="wrap_content" android:layout_height="wrap_content"
