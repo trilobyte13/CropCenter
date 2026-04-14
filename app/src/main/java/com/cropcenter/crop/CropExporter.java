@@ -3,10 +3,8 @@ package com.cropcenter.crop;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.ColorSpace;
-import android.graphics.Matrix;
 import android.graphics.Paint;
 import android.graphics.Rect;
-import android.os.Build;
 import android.util.Log;
 
 import com.cropcenter.metadata.ExifPatcher;
@@ -69,13 +67,12 @@ public final class CropExporter {
         }
 
         // Create output bitmap with Display P3 if ICC profile present
-        Bitmap.Config config = Bitmap.Config.ARGB_8888;
         Bitmap outBmp;
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && state.getIccProfile() != null) {
-            outBmp = Bitmap.createBitmap(cropW, cropH, config, true,
+        if (state.getIccProfile() != null) {
+            outBmp = Bitmap.createBitmap(cropW, cropH, Bitmap.Config.ARGB_8888, true,
                     ColorSpace.get(ColorSpace.Named.DISPLAY_P3));
         } else {
-            outBmp = Bitmap.createBitmap(cropW, cropH, config);
+            outBmp = Bitmap.createBitmap(cropW, cropH, Bitmap.Config.ARGB_8888);
         }
 
         Canvas canvas = new Canvas(outBmp);
@@ -137,22 +134,20 @@ public final class CropExporter {
         int exifOr = (originalBytes0 != null) ? com.cropcenter.util.BitmapUtils.readExifOrientation(originalBytes0) : 1;
         Bitmap thumbSrc = bmp;
         if (state.getRotationDegrees() == 0f && exifOr > 1) {
-            // Un-rotate to sensor orientation using the INVERSE of the EXIF orientation.
-            // The bmp is in display (rotated) space; we need sensor (un-rotated) space.
-            int inverseOr;
+            // Un-rotate to sensor orientation for the thumbnail.
+            // DON'T use BitmapUtils.applyOrientation — it recycles the input bitmap
+            // which we still need for the export. Create a copy instead.
+            android.graphics.Matrix thumbMatrix = new android.graphics.Matrix();
             switch (exifOr) {
-                case 2: inverseOr = 2; break; // flip H is self-inverse
-                case 3: inverseOr = 3; break; // 180° is self-inverse
-                case 4: inverseOr = 4; break; // flip V is self-inverse
-                case 5: inverseOr = 5; break; // transpose is self-inverse
-                case 6: inverseOr = 8; break; // 90° CW → 90° CCW
-                case 7: inverseOr = 7; break; // transverse is self-inverse
-                case 8: inverseOr = 6; break; // 90° CCW → 90° CW
-                default: inverseOr = 1; break;
+                case 2: thumbMatrix.setScale(-1, 1); break;
+                case 3: thumbMatrix.setRotate(180); break;
+                case 4: thumbMatrix.setScale(1, -1); break;
+                case 5: thumbMatrix.setRotate(-90); thumbMatrix.postScale(-1, 1); break;
+                case 6: thumbMatrix.setRotate(-90); break;
+                case 7: thumbMatrix.setRotate(90); thumbMatrix.postScale(-1, 1); break;
+                case 8: thumbMatrix.setRotate(90); break;
             }
-            if (inverseOr > 1) {
-                thumbSrc = BitmapUtils.applyOrientation(bmp, inverseOr);
-            }
+            thumbSrc = Bitmap.createBitmap(bmp, 0, 0, bmp.getWidth(), bmp.getHeight(), thumbMatrix, true);
         }
         byte[] thumbnail = generateThumbnail(thumbSrc, 512);
         if (thumbSrc != bmp) thumbSrc.recycle();
@@ -161,7 +156,10 @@ public final class CropExporter {
         // This works for ANY edit (rotation, grid, crop) — the platform regenerates
         // the gain map to match the new pixel content.
         byte[] originalBytes = state.getOriginalFileBytes();
-        if (state.getGainMap() != null && originalBytes != null && UltraHdrCompat.isSupported()) {
+        boolean wantGrid = state.getExportConfig().includeGrid;
+        // HDR path re-decodes original — grid is on bmp, not on original.
+        // Skip HDR path when grid export is requested; fall through to non-HDR which uses bmp.
+        if (!wantGrid && state.getGainMap() != null && originalBytes != null && UltraHdrCompat.isSupported()) {
             float cx = state.hasCenter() ? state.getCenterX() : state.getImageWidth() / 2f;
             float cy = state.hasCenter() ? state.getCenterY() : state.getImageHeight() / 2f;
             int exifOrient = com.cropcenter.util.BitmapUtils.readExifOrientation(originalBytes);
@@ -355,7 +353,6 @@ public final class CropExporter {
             smaller.recycle();
             byte[] result = bos.toByteArray();
             if (result.length <= maxBytes) return result;
-            }
             return null;
         } catch (Exception e) {
             Log.w(TAG, "Thumbnail generation failed", e);

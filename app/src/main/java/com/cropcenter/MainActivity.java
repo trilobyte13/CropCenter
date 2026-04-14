@@ -74,6 +74,15 @@ public class MainActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
+        // Handle edge-to-edge: apply system bar insets as padding to root layout
+        View root = findViewById(android.R.id.content);
+        androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(root, (v, insets) -> {
+            androidx.core.graphics.Insets sys = insets.getInsets(
+                    androidx.core.view.WindowInsetsCompat.Type.systemBars());
+            v.setPadding(sys.left, sys.top, sys.right, sys.bottom);
+            return insets;
+        });
+
         editorView = findViewById(R.id.editorView);
         txtZoomBadge = findViewById(R.id.txtZoomBadge);
         txtSidebarCropSize = findViewById(R.id.txtSidebarCropSize);
@@ -703,17 +712,15 @@ public class MainActivity extends AppCompatActivity {
         btnClear.setTextColor(hasPoints ? getResources().getColor(R.color.red, null) : disabledColor);
     }
 
-    /** Request MANAGE_EXTERNAL_STORAGE on API 30+ for Samsung Revert backup. */
+    /** Request MANAGE_EXTERNAL_STORAGE for Samsung Revert backup. */
     private void ensureStoragePermission() {
-        if (android.os.Build.VERSION.SDK_INT >= 30) {
-            if (!android.os.Environment.isExternalStorageManager()) {
-                try {
-                    Intent intent = new Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION);
-                    intent.setData(Uri.parse("package:" + getPackageName()));
-                    startActivity(intent);
-                } catch (Exception e) {
-                    Log.w(TAG, "Cannot request MANAGE_EXTERNAL_STORAGE", e);
-                }
+        if (!android.os.Environment.isExternalStorageManager()) {
+            try {
+                Intent intent = new Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION);
+                intent.setData(Uri.parse("package:" + getPackageName()));
+                startActivity(intent);
+            } catch (Exception e) {
+                Log.w(TAG, "Cannot request MANAGE_EXTERNAL_STORAGE", e);
             }
         }
     }

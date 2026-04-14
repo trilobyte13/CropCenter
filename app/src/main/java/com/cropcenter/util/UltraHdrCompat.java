@@ -4,7 +4,6 @@ import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.ColorSpace;
 import android.graphics.Matrix;
-import android.os.Build;
 import android.util.Log;
 
 import java.io.ByteArrayOutputStream;
@@ -26,7 +25,7 @@ public final class UltraHdrCompat {
     private UltraHdrCompat() {}
 
     public static boolean isSupported() {
-        return Build.VERSION.SDK_INT >= 34;
+        return true; // minSdk 35, Gainmap API always available
     }
 
     /**
@@ -48,8 +47,6 @@ public final class UltraHdrCompat {
                                               float centerX, float centerY,
                                               int cropW, int cropH,
                                               float userRotation, int exifOrientation) {
-        if (Build.VERSION.SDK_INT < 34) return null;
-
         Bitmap current = null;
         File tmp = null;
         try {
