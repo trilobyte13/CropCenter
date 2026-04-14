@@ -3,6 +3,7 @@ package com.cropcenter.util;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.ColorSpace;
+import android.graphics.Gainmap;
 import android.graphics.Matrix;
 import android.util.Log;
 
@@ -13,10 +14,12 @@ import java.io.FileOutputStream;
 /**
  * Ultra HDR support using Android 14+ Gainmap API.
  *
- * Strategy: apply ALL transforms (EXIF rotation, user rotation, crop) to the
- * decoded Bitmap that has the gainmap attached. The platform automatically
- * applies the same transforms to the gainmap when using createBitmap().
- * Then Bitmap.compress() produces a valid Ultra HDR JPEG.
+ * Strategy: keep the decoded Bitmap in display orientation (BitmapFactory auto-rotates
+ * on API 28+). Pure crops via createBitmap(src, x, y, w, h) preserve the gainmap.
+ * Only user rotation requires a matrix transform that may lose the gainmap; in that
+ * case we recover by cropping the original gainmap and re-attaching it.
+ *
+ * Output is always in display orientation (EXIF orientation = 1).
  */
 public final class UltraHdrCompat {
 
@@ -29,14 +32,14 @@ public final class UltraHdrCompat {
     }
 
     /**
-     * Produce an Ultra HDR JPEG by applying crop+rotation to the original image
-     * using platform Bitmap operations that preserve the gainmap.
+     * Produce an Ultra HDR JPEG by applying crop+rotation to the original image.
+     * Output is always in display orientation (EXIF orientation = 1).
      *
      * @param originalBytes  raw JPEG bytes of the original HDR image
      * @param quality        JPEG quality (1-100)
      * @param cacheDir       temp directory for file-based decode
-     * @param imgW, imgH     expected image dimensions after EXIF rotation
-     * @param centerX, centerY  crop center in image coords (post-EXIF-rotation space)
+     * @param imgW, imgH     image dimensions in display orientation (after EXIF rotation)
+     * @param centerX, centerY  crop center in display coordinates
      * @param cropW, cropH   crop dimensions
      * @param userRotation   user-applied rotation in degrees
      * @param exifOrientation EXIF orientation of the original file
@@ -70,27 +73,23 @@ public final class UltraHdrCompat {
                     + " expected=" + imgW + "x" + imgH
                     + " exif=" + exifOrientation);
 
-            // When no user rotation: keep pixels in sensor orientation (skip EXIF rotation).
-            // This preserves the original EXIF orientation tag.
-            // Crop coords need to be transformed from display space to sensor space.
-            //
-            // When user rotation is applied: apply EXIF rotation first (so user rotation
-            // is relative to the visual orientation), then user rotation, then crop.
-            // Output orientation will be 1 since the rotation changes the pixel orientation.
-
+            // Ensure bitmap is in display orientation.
+            // BitmapFactory auto-rotates on API 28+; verify by comparing dimensions.
             boolean autoRotated = (current.getWidth() == imgW && current.getHeight() == imgH);
 
-            if (userRotation != 0f) {
-                // Apply EXIF rotation if needed
-                if (!autoRotated && exifOrientation > 1) {
-                    Matrix m = exifMatrix(exifOrientation);
-                    Bitmap rotated = Bitmap.createBitmap(current, 0, 0,
-                            current.getWidth(), current.getHeight(), m, true);
-                    if (rotated != current) { current.recycle(); current = rotated; }
-                    Log.d(TAG, "EXIF rotated: " + current.getWidth() + "x" + current.getHeight());
-                }
+            if (!autoRotated && exifOrientation > 1) {
+                // Not auto-rotated: rotate to display orientation
+                Matrix m = exifMatrix(exifOrientation);
+                Bitmap rotated = Bitmap.createBitmap(current, 0, 0,
+                        current.getWidth(), current.getHeight(), m, true);
+                if (rotated != current) { current.recycle(); current = rotated; }
+                Log.d(TAG, "EXIF rotated to display: " + current.getWidth() + "x" + current.getHeight()
+                        + " hasGm=" + current.hasGainmap());
+            }
+            // Now `current` is in display orientation (imgW x imgH)
 
-                // Apply user rotation
+            // Apply user rotation if any
+            if (userRotation != 0f) {
                 Matrix m = new Matrix();
                 m.setRotate(userRotation, current.getWidth() / 2f, current.getHeight() / 2f);
                 Bitmap rotated = Bitmap.createBitmap(current, 0, 0,
@@ -98,45 +97,27 @@ public final class UltraHdrCompat {
                 if (rotated != current) { current.recycle(); current = rotated; }
                 Log.d(TAG, "User rotated: " + current.getWidth() + "x" + current.getHeight()
                         + " hasGm=" + current.hasGainmap());
-            } else if (autoRotated && exifOrientation > 1) {
-                // BitmapFactory auto-rotated. UN-rotate back to sensor orientation
-                // so the original EXIF orientation tag remains valid.
-                Matrix m = exifMatrix(inverseOrientation(exifOrientation));
-                Bitmap unRotated = Bitmap.createBitmap(current, 0, 0,
-                        current.getWidth(), current.getHeight(), m, true);
-                if (unRotated != current) { current.recycle(); current = unRotated; }
-                Log.d(TAG, "Un-rotated to sensor: " + current.getWidth() + "x" + current.getHeight()
-                        + " hasGm=" + current.hasGainmap());
             }
-            // If !autoRotated && no user rotation: already in sensor orientation, no transform needed.
 
-            // Compute crop coordinates in the current bitmap's coordinate space
+            // Compute crop region in the current bitmap's coordinate space
             int cx, cy;
             if (userRotation != 0f) {
-                // After EXIF + user rotation, bitmap is larger. Map display coords to rotated space.
+                // After user rotation, bitmap may be larger. Map display coords to rotated space.
                 cx = current.getWidth() / 2 + Math.round(centerX - imgW / 2f);
                 cy = current.getHeight() / 2 + Math.round(centerY - imgH / 2f);
             } else {
-                // In sensor space: transform display coords based on EXIF orientation
-                int[] sensorCoords = displayToSensor(Math.round(centerX), Math.round(centerY),
-                        imgW, imgH, exifOrientation);
-                cx = sensorCoords[0];
-                cy = sensorCoords[1];
+                // In display orientation: use display coords directly
+                cx = Math.round(centerX);
+                cy = Math.round(centerY);
             }
 
-            // For sensor-space crop (no user rotation), swap crop dims if orientation swaps W/H
-            int cw = cropW, ch = cropH;
-            if (userRotation == 0f && (exifOrientation >= 5 && exifOrientation <= 8)) {
-                cw = cropH; ch = cropW; // swap for sensor space
-            }
-
-            // Clamp crop center to valid bounds within the current bitmap
-            cx = Math.max(cw / 2, Math.min(current.getWidth() - cw / 2, cx));
-            cy = Math.max(ch / 2, Math.min(current.getHeight() - ch / 2, cy));
-            int sx = Math.max(0, cx - cw / 2);
-            int sy = Math.max(0, cy - ch / 2);
-            int sw = Math.min(cw, current.getWidth() - sx);
-            int sh = Math.min(ch, current.getHeight() - sy);
+            // Clamp crop to bitmap bounds
+            cx = Math.max(cropW / 2, Math.min(current.getWidth() - cropW / 2, cx));
+            cy = Math.max(cropH / 2, Math.min(current.getHeight() - cropH / 2, cy));
+            int sx = Math.max(0, cx - cropW / 2);
+            int sy = Math.max(0, cy - cropH / 2);
+            int sw = Math.min(cropW, current.getWidth() - sx);
+            int sh = Math.min(cropH, current.getHeight() - sy);
 
             if (sw > 0 && sh > 0 && (sx != 0 || sy != 0 || sw != current.getWidth() || sh != current.getHeight())) {
                 Bitmap cropped = Bitmap.createBitmap(current, sx, sy, sw, sh);
@@ -146,20 +127,23 @@ public final class UltraHdrCompat {
             }
 
             // Scale to exact output dimensions if needed
-            // For sensor space output, target is cw×ch (possibly swapped)
-            int targetW = (userRotation != 0f) ? cropW : cw;
-            int targetH = (userRotation != 0f) ? cropH : ch;
-            if (current.getWidth() != targetW || current.getHeight() != targetH) {
-                Bitmap scaled = Bitmap.createScaledBitmap(current, targetW, targetH, true);
+            if (current.getWidth() != cropW || current.getHeight() != cropH) {
+                Bitmap scaled = Bitmap.createScaledBitmap(current, cropW, cropH, true);
                 if (scaled != current) { current.recycle(); current = scaled; }
             }
 
+            // Recovery: if gainmap was lost during matrix transforms (rotation)
             if (!current.hasGainmap()) {
-                Log.w(TAG, "Gainmap lost during transforms");
-                return null;
+                current = recoverGainmap(current, originalBytes, cacheDir,
+                        centerX, centerY, cropW, cropH, imgW, imgH, userRotation);
+                if (current == null || !current.hasGainmap()) {
+                    Log.w(TAG, "Gainmap recovery failed — no HDR");
+                    if (current != null) { current.recycle(); current = null; }
+                    return null;
+                }
             }
 
-            // Step 4: Compress — produces Ultra HDR JPEG
+            // Compress — produces Ultra HDR JPEG
             ByteArrayOutputStream bos = new ByteArrayOutputStream();
             current.compress(Bitmap.CompressFormat.JPEG, quality, bos);
             byte[] result = bos.toByteArray();
@@ -181,6 +165,75 @@ public final class UltraHdrCompat {
         }
     }
 
+    /**
+     * Recover a lost gainmap by re-decoding the original image, cropping the
+     * gainmap bitmap to match the output region, and re-attaching it.
+     */
+    private static Bitmap recoverGainmap(Bitmap current, byte[] originalBytes, File cacheDir,
+                                          float centerX, float centerY,
+                                          int cropW, int cropH,
+                                          int imgW, int imgH, float userRotation) {
+        Log.w(TAG, "Gainmap lost during transforms, recovering...");
+        Bitmap src2 = null;
+        File tmp2 = new File(cacheDir, "hdr_gm_recover.jpg");
+        try {
+            try (FileOutputStream fos2 = new FileOutputStream(tmp2)) { fos2.write(originalBytes); }
+            BitmapFactory.Options opts2 = new BitmapFactory.Options();
+            opts2.inPreferredColorSpace = ColorSpace.get(ColorSpace.Named.DISPLAY_P3);
+            src2 = BitmapFactory.decodeFile(tmp2.getAbsolutePath(), opts2);
+            tmp2.delete();
+            if (src2 == null || !src2.hasGainmap()) return current;
+
+            Gainmap srcGm = src2.getGainmap();
+            Bitmap gmBmp = srcGm.getGainmapContents();
+
+            // Map the display-space crop region to gainmap coordinates
+            float gmScaleX = (float) gmBmp.getWidth() / imgW;
+            float gmScaleY = (float) gmBmp.getHeight() / imgH;
+
+            Bitmap croppedGm;
+            if (userRotation != 0f) {
+                // Rotation makes precise crop mapping complex — scale full gainmap
+                croppedGm = Bitmap.createScaledBitmap(gmBmp, current.getWidth(), current.getHeight(), true);
+            } else {
+                // Pure crop: extract corresponding region from gainmap
+                int gmSx = Math.max(0, Math.round((centerX - cropW / 2f) * gmScaleX));
+                int gmSy = Math.max(0, Math.round((centerY - cropH / 2f) * gmScaleY));
+                int gmSw = Math.round(cropW * gmScaleX);
+                int gmSh = Math.round(cropH * gmScaleY);
+                gmSw = Math.min(gmSw, gmBmp.getWidth() - gmSx);
+                gmSh = Math.min(gmSh, gmBmp.getHeight() - gmSy);
+                if (gmSw <= 0 || gmSh <= 0) return current;
+                Bitmap subGm = Bitmap.createBitmap(gmBmp, gmSx, gmSy, gmSw, gmSh);
+                croppedGm = Bitmap.createScaledBitmap(subGm, current.getWidth(), current.getHeight(), true);
+                if (subGm != croppedGm) subGm.recycle();
+            }
+
+            Gainmap newGm = new Gainmap(croppedGm);
+            newGm.setRatioMin(srcGm.getRatioMin()[0], srcGm.getRatioMin()[1], srcGm.getRatioMin()[2]);
+            newGm.setRatioMax(srcGm.getRatioMax()[0], srcGm.getRatioMax()[1], srcGm.getRatioMax()[2]);
+            newGm.setGamma(srcGm.getGamma()[0], srcGm.getGamma()[1], srcGm.getGamma()[2]);
+            newGm.setEpsilonSdr(srcGm.getEpsilonSdr()[0], srcGm.getEpsilonSdr()[1], srcGm.getEpsilonSdr()[2]);
+            newGm.setEpsilonHdr(srcGm.getEpsilonHdr()[0], srcGm.getEpsilonHdr()[1], srcGm.getEpsilonHdr()[2]);
+            newGm.setDisplayRatioForFullHdr(srcGm.getDisplayRatioForFullHdr());
+            newGm.setMinDisplayRatioForHdrTransition(srcGm.getMinDisplayRatioForHdrTransition());
+
+            // Set gainmap on mutable copy; only recycle current after success
+            Bitmap mutable = current.copy(Bitmap.Config.ARGB_8888, true);
+            mutable.setGainmap(newGm);
+            current.recycle();
+            Log.d(TAG, "Gainmap recovered and re-attached");
+            return mutable;
+
+        } catch (Exception e) {
+            Log.w(TAG, "Gainmap recovery failed", e);
+            return current;
+        } finally {
+            if (src2 != null) src2.recycle();
+            tmp2.delete();
+        }
+    }
+
     private static Matrix exifMatrix(int orientation) {
         Matrix m = new Matrix();
         switch (orientation) {
@@ -193,37 +246,6 @@ public final class UltraHdrCompat {
             case 8: m.setRotate(-90); break;
         }
         return m;
-    }
-
-    /** Get the inverse EXIF orientation (to undo an orientation transform). */
-    private static int inverseOrientation(int o) {
-        switch (o) {
-            case 2: return 2; // horizontal flip is its own inverse
-            case 3: return 3; // 180° is its own inverse
-            case 4: return 4; // vertical flip is its own inverse
-            case 5: return 5; // transpose is its own inverse
-            case 6: return 8; // 90° CW → 90° CCW
-            case 7: return 7; // transverse is its own inverse
-            case 8: return 6; // 90° CCW → 90° CW
-            default: return 1;
-        }
-    }
-
-    /**
-     * Transform display coordinates (post-EXIF-rotation) to sensor coordinates.
-     * This reverses the EXIF orientation transform on a single point.
-     */
-    private static int[] displayToSensor(int dx, int dy, int dispW, int dispH, int orientation) {
-        switch (orientation) {
-            case 2: return new int[]{dispW - dx, dy};               // flip H
-            case 3: return new int[]{dispW - dx, dispH - dy};       // 180°
-            case 4: return new int[]{dx, dispH - dy};               // flip V
-            case 5: return new int[]{dy, dx};                        // transpose
-            case 6: return new int[]{dispH - dy, dx};                // 90° CW
-            case 7: return new int[]{dispH - dy, dispW - dx};        // transverse
-            case 8: return new int[]{dy, dispW - dx};                // 90° CCW
-            default: return new int[]{dx, dy};                       // normal
-        }
     }
 
     private static boolean containsHdrgm(byte[] data) {

@@ -117,7 +117,61 @@ public final class ExifPatcher {
             int nextPtr = ifd0 + 2 + cnt0 * 12;
             if (nextPtr + 4 > data.length) return data;
             long ifd1Rel = ByteBufferUtils.readU32(data, nextPtr, le);
-            if (ifd1Rel == 0) return data; // no IFD1
+            if (ifd1Rel == 0) {
+                // No IFD1 — append thumbnail at end of EXIF data.
+                // Create minimal IFD1 with JPEGInterchangeFormat and JPEGInterchangeFormatLength.
+                if (newThumb == null || newThumb.length == 0) return data;
+                try {
+                    java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+                    out.write(data);
+
+                    // IFD1 will be at current end of TIFF data
+                    int ifd1Off = data.length - T; // offset relative to TIFF header
+                    // Write IFD1 pointer at end of IFD0
+                    byte[] updated = out.toByteArray();
+                    ByteBufferUtils.writeU32(updated, nextPtr, ifd1Off, le);
+
+                    out.reset();
+                    out.write(updated);
+
+                    // IFD1: count=3 entries (Compression, JPEGInterchangeFormat, JPEGInterchangeFormatLength)
+                    byte[] ifd1Buf = new byte[2 + 3 * 12 + 4]; // count + 3 entries + next IFD
+                    ByteBufferUtils.writeU16(ifd1Buf, 0, 3, le);
+                    // Tag 0x0103: Compression = 6 (JPEG)
+                    ByteBufferUtils.writeU16(ifd1Buf, 2, 0x0103, le);
+                    ByteBufferUtils.writeU16(ifd1Buf, 4, 3, le); // SHORT
+                    ByteBufferUtils.writeU32(ifd1Buf, 6, 1, le);
+                    ByteBufferUtils.writeU16(ifd1Buf, 10, 6, le); // JPEG compression
+                    // Tag 0x0201: JPEGInterchangeFormat
+                    int thumbDataOff = ifd1Off + ifd1Buf.length; // thumb starts right after IFD1
+                    ByteBufferUtils.writeU16(ifd1Buf, 14, 0x0201, le);
+                    ByteBufferUtils.writeU16(ifd1Buf, 16, 4, le); // LONG
+                    ByteBufferUtils.writeU32(ifd1Buf, 18, 1, le);
+                    ByteBufferUtils.writeU32(ifd1Buf, 22, thumbDataOff, le);
+                    // Tag 0x0202: JPEGInterchangeFormatLength
+                    ByteBufferUtils.writeU16(ifd1Buf, 26, 0x0202, le);
+                    ByteBufferUtils.writeU16(ifd1Buf, 28, 4, le); // LONG
+                    ByteBufferUtils.writeU32(ifd1Buf, 30, 1, le);
+                    ByteBufferUtils.writeU32(ifd1Buf, 34, newThumb.length, le);
+                    // Next IFD = 0
+                    ByteBufferUtils.writeU32(ifd1Buf, 38, 0, le);
+                    out.write(ifd1Buf);
+                    out.write(newThumb);
+
+                    byte[] result = out.toByteArray();
+                    // Update APP1 segment length
+                    int newSegLen = result.length - 2;
+                    if (newSegLen <= 65533) {
+                        result[2] = (byte)((newSegLen >> 8) & 0xFF);
+                        result[3] = (byte)(newSegLen & 0xFF);
+                        Log.d(TAG, "Created IFD1 with thumbnail: " + newThumb.length + " bytes");
+                        return result;
+                    }
+                } catch (Exception e) {
+                    Log.w(TAG, "Failed to create IFD1 for thumbnail", e);
+                }
+                return data;
+            }
             int ifd1 = (int)(T + ifd1Rel);
             if (ifd1 < T || ifd1 + 2 > data.length) return data;
 

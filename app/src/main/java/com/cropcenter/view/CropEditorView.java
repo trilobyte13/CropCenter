@@ -422,7 +422,7 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
 
         // Grid overlay (always drawn, on crop rect or full image)
         gridRenderer.draw(canvas, gridImgX, gridImgY, gridW, gridH,
-                state.getGridConfig(), density,
+                state.getGridConfig(), baseScale * zoom,
                 this::imageToScreenX, this::imageToScreenY);
 
         // Draw selection points and polygon (visible in all modes)

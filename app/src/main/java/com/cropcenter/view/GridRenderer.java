@@ -22,17 +22,18 @@ public class GridRenderer {
      * @param cropImgW    crop width in image pixels
      * @param cropImgH    crop height in image pixels
      * @param config      grid configuration
-     * @param density     display density for line width
+     * @param pixelsPerImagePixel  screen pixels per image pixel (baseScale * zoom)
      * @param imgToScreenX  converts image X to screen X
      * @param imgToScreenY  converts image Y to screen Y
      */
     public void draw(Canvas canvas, float cropImgX, float cropImgY,
-                     int cropImgW, int cropImgH, GridConfig config, float density,
+                     int cropImgW, int cropImgH, GridConfig config, float pixelsPerImagePixel,
                      CoordMapper imgToScreenX, CoordMapper imgToScreenY) {
         if (!config.enabled || config.columns <= 0 || config.rows <= 0) return;
 
         gridPaint.setColor(config.color);
-        gridPaint.setStrokeWidth(config.lineWidth * density);
+        // Scale line width by image-to-screen ratio so preview matches export
+        gridPaint.setStrokeWidth(Math.max(1, config.lineWidth * pixelsPerImagePixel));
         gridPaint.setStyle(Paint.Style.STROKE);
 
         float screenTop = imgToScreenY.map(cropImgY);

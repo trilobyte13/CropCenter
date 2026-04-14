@@ -127,39 +127,18 @@ public final class CropExporter {
                                                java.io.File cacheDir) throws IOException {
         int quality = state.getExportConfig().jpegQuality;
 
-        // Generate thumbnail from the rendered bitmap.
-        // When preserving EXIF orientation (no user rotation), un-rotate the thumbnail
-        // to match sensor orientation (EXIF viewer will re-rotate it for display).
-        byte[] originalBytes0 = state.getOriginalFileBytes();
-        int exifOr = (originalBytes0 != null) ? com.cropcenter.util.BitmapUtils.readExifOrientation(originalBytes0) : 1;
-        Bitmap thumbSrc = bmp;
-        if (state.getRotationDegrees() == 0f && exifOr > 1) {
-            // Un-rotate to sensor orientation for the thumbnail.
-            // DON'T use BitmapUtils.applyOrientation — it recycles the input bitmap
-            // which we still need for the export. Create a copy instead.
-            android.graphics.Matrix thumbMatrix = new android.graphics.Matrix();
-            switch (exifOr) {
-                case 2: thumbMatrix.setScale(-1, 1); break;
-                case 3: thumbMatrix.setRotate(180); break;
-                case 4: thumbMatrix.setScale(1, -1); break;
-                case 5: thumbMatrix.setRotate(-90); thumbMatrix.postScale(-1, 1); break;
-                case 6: thumbMatrix.setRotate(-90); break;
-                case 7: thumbMatrix.setRotate(90); thumbMatrix.postScale(-1, 1); break;
-                case 8: thumbMatrix.setRotate(90); break;
-            }
-            thumbSrc = Bitmap.createBitmap(bmp, 0, 0, bmp.getWidth(), bmp.getHeight(), thumbMatrix, true);
-        }
-        byte[] thumbnail = generateThumbnail(thumbSrc, 512);
-        if (thumbSrc != bmp) thumbSrc.recycle();
+        // Generate thumbnail from the rendered bitmap (display orientation).
+        byte[] thumbnail = generateThumbnail(bmp, 512);
 
-        // On API 34+, try to attach gainmap to our rendered bitmap for HDR output.
-        // This works for ANY edit (rotation, grid, crop) — the platform regenerates
-        // the gain map to match the new pixel content.
+        // HDR path: generate properly cropped/rotated gain map.
+        // For no-grid: use HDR result directly (preserves gainmap in pixel data).
+        // For grid: extract the cropped gain map, then compose it with the grid primary.
         byte[] originalBytes = state.getOriginalFileBytes();
         boolean wantGrid = state.getExportConfig().includeGrid;
-        // HDR path re-decodes original — grid is on bmp, not on original.
-        // Skip HDR path when grid export is requested; fall through to non-HDR which uses bmp.
-        if (!wantGrid && state.getGainMap() != null && originalBytes != null && UltraHdrCompat.isSupported()) {
+        boolean hasHdr = state.getGainMap() != null && originalBytes != null && UltraHdrCompat.isSupported();
+
+        byte[] croppedGainMap = null;
+        if (hasHdr) {
             float cx = state.hasCenter() ? state.getCenterX() : state.getImageWidth() / 2f;
             float cy = state.hasCenter() ? state.getCenterY() : state.getImageHeight() / 2f;
             int exifOrient = com.cropcenter.util.BitmapUtils.readExifOrientation(originalBytes);
@@ -168,7 +147,9 @@ public final class CropExporter {
                     state.getImageWidth(), state.getImageHeight(),
                     cx, cy, cropW, cropH,
                     state.getRotationDegrees(), exifOrient);
-            if (hdrResult != null) {
+
+            if (hdrResult != null && !wantGrid) {
+                // No grid: use HDR result directly
                 bmp.recycle();
 
                 // Inject original EXIF (patched) to preserve camera metadata.
@@ -177,24 +158,13 @@ public final class CropExporter {
                 if (meta != null && !meta.isEmpty()) {
                     try {
                         List<JpegSegment> exifOnly = new java.util.ArrayList<>();
-                        // No user rotation: pixels in sensor space, preserve original orientation
-                        // User rotation: pixels in display space, orientation = 1
-                        int outOrient = (state.getRotationDegrees() == 0f) ? exifOrient : 1;
-                        // EXIF dimensions must match the actual pixel dimensions of the output.
-                        // When preserving sensor orientation, swap if orientation swaps W/H.
-                        int exifW = cropW, exifH = cropH;
-                        if (outOrient >= 5 && outOrient <= 8) {
-                            exifW = cropH; exifH = cropW;
-                        }
-                        for (JpegSegment seg : ExifPatcher.patch(meta, exifW, exifH, thumbnail, outOrient)) {
+                        for (JpegSegment seg : ExifPatcher.patch(meta, cropW, cropH, thumbnail, 1)) {
                             if (seg.isExif()) exifOnly.add(seg);
                         }
                         if (!exifOnly.isEmpty()) {
                             int primaryEnd = findPrimaryEnd(hdrResult);
                             if (primaryEnd <= 0) throw new IOException("Cannot find primary EOI");
                             hdrResult = replaceExif(hdrResult, exifOnly);
-                            // After EXIF replacement, primary size changed.
-                            // Fix MPF offsets to point to the gain map at its new position.
                             int newPrimaryEnd = findPrimaryEnd(hdrResult);
                             if (newPrimaryEnd > 0 && newPrimaryEnd < hdrResult.length) {
                                 MpfPatcher.patch(hdrResult, newPrimaryEnd);
@@ -209,11 +179,20 @@ public final class CropExporter {
                 hdrResult = appendSeftForState(hdrResult, state, cropW, cropH);
                 Log.d(TAG, "HDR export: " + hdrResult.length + " bytes");
                 return new ExportResult(hdrResult, "jpg");
+            } else if (hdrResult != null) {
+                // Grid enabled: extract the cropped gain map for composition with grid primary
+                int pe = findPrimaryEnd(hdrResult);
+                if (pe > 0 && pe < hdrResult.length) {
+                    croppedGainMap = new byte[hdrResult.length - pe];
+                    System.arraycopy(hdrResult, pe, croppedGainMap, 0, croppedGainMap.length);
+                    Log.d(TAG, "Extracted cropped gain map: " + croppedGainMap.length + " bytes");
+                }
+            } else {
+                Log.d(TAG, "HDR generation failed, falling back to non-HDR");
             }
-            Log.d(TAG, "HDR attach failed, falling back to non-HDR");
         }
 
-        // Non-HDR pipeline
+        // Non-HDR pipeline (also used for grid+HDR with extracted gain map)
         ByteArrayOutputStream bos = new ByteArrayOutputStream();
         bmp.compress(Bitmap.CompressFormat.JPEG, quality, bos);
         byte[] jpegBytes = bos.toByteArray();
@@ -222,17 +201,16 @@ public final class CropExporter {
         // Inject original metadata
         List<JpegSegment> meta = state.getJpegMeta();
         if (meta != null && !meta.isEmpty()) {
-            // Non-HDR path also produces rotated pixels, so orientation = 1
             List<JpegSegment> patched = ExifPatcher.patch(meta, cropW, cropH, thumbnail, 1);
             jpegBytes = JpegMetadataInjector.inject(jpegBytes, patched);
         }
 
-        // Append HDR gain map bytes as fallback (may not be recognized as valid HDR
-        // since primary was re-encoded, but preserves the data)
-        byte[] gainMap = state.getGainMap();
-        if (gainMap != null && gainMap.length > 0) {
-            Log.d(TAG, "Appending gain map bytes: " + gainMap.length + " (fallback)");
-            jpegBytes = GainMapComposer.compose(jpegBytes, gainMap);
+        // Append gain map: prefer cropped version from HDR path, fall back to original
+        byte[] gainMapToAppend = (croppedGainMap != null) ? croppedGainMap : state.getGainMap();
+        if (gainMapToAppend != null && gainMapToAppend.length > 0) {
+            Log.d(TAG, "Appending gain map: " + gainMapToAppend.length
+                    + " bytes (" + (croppedGainMap != null ? "cropped" : "original fallback") + ")");
+            jpegBytes = GainMapComposer.compose(jpegBytes, gainMapToAppend);
         }
 
         // Append Samsung SEFT trailer
@@ -466,8 +444,9 @@ public final class CropExporter {
 
     private static void drawGrid(Canvas canvas, int w, int h, GridConfig grid) {
         Paint gp = new Paint();
+        gp.setAntiAlias(false);
         gp.setColor(grid.color);
-        gp.setStrokeWidth(grid.lineWidth);
+        gp.setStrokeWidth(Math.round(grid.lineWidth)); // integer width for crisp lines
         gp.setStyle(Paint.Style.STROKE);
 
         for (int i = 1; i < grid.columns; i++) {
