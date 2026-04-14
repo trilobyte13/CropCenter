@@ -1,0 +1,839 @@
+package com.cropcenter;
+
+import android.content.Intent;
+import android.database.Cursor;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.net.Uri;
+import android.os.Bundle;
+import android.os.ParcelFileDescriptor;
+import android.provider.OpenableColumns;
+import android.util.Log;
+import android.view.View;
+import android.widget.ArrayAdapter;
+import android.widget.CheckBox;
+import android.widget.EditText;
+import android.widget.LinearLayout;
+import android.widget.Spinner;
+import android.widget.AdapterView;
+import android.widget.TextView;
+import android.widget.Toast;
+
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
+import androidx.appcompat.app.AppCompatActivity;
+
+import com.cropcenter.crop.CropEngine;
+import com.cropcenter.crop.CropExporter;
+import com.cropcenter.metadata.GainMapExtractor;
+import com.cropcenter.metadata.JpegMetadataExtractor;
+import com.cropcenter.metadata.JpegSegment;
+import com.cropcenter.model.AspectRatio;
+import com.cropcenter.model.CenterMode;
+import com.cropcenter.model.CropState;
+import com.cropcenter.model.EditorMode;
+import com.cropcenter.util.BitmapUtils;
+import com.cropcenter.view.ColorPickerDialog;
+import com.cropcenter.view.CropEditorView;
+import com.cropcenter.view.GridSettingsDialog;
+import com.cropcenter.view.SaveDialog;
+import com.google.android.material.button.MaterialButton;
+
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+public class MainActivity extends AppCompatActivity {
+
+    private static final String TAG = "CropCenter";
+
+    private CropState state = new CropState();
+    private CropEditorView editorView;
+    private TextView txtSidebarCropSize, txtImageInfo, txtZoomBadge;
+
+    private final AtomicBoolean busy = new AtomicBoolean(false);
+    private Uri sourceUri; // URI of the opened file, for overwrite-in-place
+    private ActivityResultLauncher<String[]> openLauncher;
+    private ActivityResultLauncher<String> saveAsLauncher;
+
+    private static final String[] AR_LABELS = {
+        "4:5", "Free", "16:9", "3:2", "4:3", "5:4", "1:1", "3:4", "2:3", "9:16", "Custom"
+    };
+    private static final AspectRatio[] AR_VALUES = {
+        AspectRatio.R4_5, AspectRatio.FREE, AspectRatio.R16_9, AspectRatio.R3_2,
+        AspectRatio.R4_3, AspectRatio.R5_4, AspectRatio.R1_1, AspectRatio.R3_4,
+        AspectRatio.R2_3, AspectRatio.R9_16, null
+    };
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.activity_main);
+
+        editorView = findViewById(R.id.editorView);
+        txtZoomBadge = findViewById(R.id.txtZoomBadge);
+        txtSidebarCropSize = findViewById(R.id.txtSidebarCropSize);
+        txtImageInfo = findViewById(R.id.txtImageInfo);
+
+        editorView.setState(state);
+        editorView.setOnZoomChangedListener(this::updateZoomBadge);
+        editorView.setOnPointsChangedListener(this::updatePointButtonStates);
+        final boolean[] inListener = {false};
+        state.setListener(() -> runOnUiThread(() -> {
+            if (inListener[0]) return; // prevent recursion
+            inListener[0] = true;
+            try {
+                if (state.isCropSizeDirty()) {
+                    // Auto-set center if needed
+                    if (!state.hasCenter() && state.getSourceImage() != null) {
+                        state.setCenter(state.getImageWidth() / 2f, state.getImageHeight() / 2f);
+                    }
+                    if (state.hasCenter()) {
+                        CropEngine.recomputeCrop(state);
+                    }
+                }
+                updateCropInfo();
+                updateZoomBadge();
+                updatePointControlsVisibility();
+                editorView.invalidate();
+            } finally {
+                inListener[0] = false;
+            }
+        }));
+
+        openLauncher = registerForActivityResult(
+                new ActivityResultContracts.OpenDocument(),
+                uri -> {
+                    if (uri != null) {
+                        // Take persistable permission for overwrite-in-place
+                        try {
+                            getContentResolver().takePersistableUriPermission(uri,
+                                    Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+                        } catch (Exception ignored) {}
+                        sourceUri = uri;
+                        loadImage(uri);
+                    }
+                });
+
+        saveAsLauncher = registerForActivityResult(
+                new ActivityResultContracts.CreateDocument("image/jpeg"),
+                uri -> {
+                    if (uri != null) exportTo(uri);
+                });
+
+        // Toolbar
+        findViewById(R.id.btnOpen).setOnClickListener(v ->
+                openLauncher.launch(new String[]{"image/jpeg", "image/png"}));
+        findViewById(R.id.btnSave).setOnClickListener(v -> showSaveDialog());
+        setupARSpinner();
+        setupGridToggleMain();
+        setupPixelGridMain();
+
+        // Mode bar
+        setupModeButtons();
+        setupCenterModeButtons();
+        setupUndoRedo();
+        setupClearPointsButton();
+        setupRotation();
+
+        updateModeHighlight();
+        updateLockHighlight();
+        ensureStoragePermission();
+        handleIncomingIntent(getIntent());
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        Bitmap bmp = state.getSourceImage();
+        if (bmp != null && !bmp.isRecycled()) bmp.recycle();
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        handleIncomingIntent(intent);
+    }
+
+    private void handleIncomingIntent(Intent intent) {
+        if (intent == null) return;
+        String action = intent.getAction();
+        if (Intent.ACTION_SEND.equals(action) || Intent.ACTION_VIEW.equals(action)) {
+            Uri uri = intent.getParcelableExtra(Intent.EXTRA_STREAM);
+            if (uri == null) uri = intent.getData();
+            if (uri != null) {
+                try {
+                    getContentResolver().takePersistableUriPermission(uri,
+                            Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+                } catch (Exception ignored) {}
+                sourceUri = uri;
+                loadImage(uri);
+            }
+        }
+    }
+
+    // ── Save ──
+
+    private void showSaveDialog() {
+        if (state.getSourceImage() == null) return;
+        SaveDialog.show(this, state.getExportConfig(),
+                () -> {
+                    String name = state.getExportConfig().filename;
+                    if (name == null || name.isEmpty()) name = "crop";
+                    int dot = name.lastIndexOf('.');
+                    if (dot > 0) name = name.substring(0, dot);
+                    name += ("jpeg".equals(state.getExportConfig().format) ? ".jpg" : ".png");
+                    saveAsLauncher.launch(name);
+                },
+                sourceUri != null ? () -> exportTo(sourceUri) : null);
+    }
+
+    // ── AR Spinner ──
+
+    private void setupARSpinner() {
+        Spinner spinner = findViewById(R.id.spinnerAR);
+        ArrayAdapter<String> adapter = new ArrayAdapter<>(this,
+                android.R.layout.simple_spinner_item, AR_LABELS);
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        spinner.setAdapter(adapter);
+        // Default to 4:5 (index 0)
+        spinner.setSelection(0);
+        spinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int pos, long id) {
+                if (pos < AR_VALUES.length && AR_VALUES[pos] != null) {
+                    state.setAspectRatio(AR_VALUES[pos]); // sets dirty
+                    // Recompute: from points if any, otherwise ensure center exists
+                    if (!state.getSelectionPoints().isEmpty()) {
+                        CropEngine.autoComputeFromPoints(state);
+                    } else {
+                        ensureCropCenter();
+                    }
+                } else {
+                    showCustomARDialog();
+                }
+            }
+            @Override public void onNothingSelected(AdapterView<?> parent) {}
+        });
+    }
+
+    private void showCustomARDialog() {
+        android.app.AlertDialog.Builder builder = new android.app.AlertDialog.Builder(this);
+        builder.setTitle("Custom Aspect Ratio");
+
+        LinearLayout layout = new LinearLayout(this);
+        layout.setOrientation(LinearLayout.HORIZONTAL);
+        layout.setGravity(android.view.Gravity.CENTER);
+        int dp = (int) getResources().getDisplayMetrics().density;
+        layout.setPadding(20*dp, 16*dp, 20*dp, 8*dp);
+
+        EditText editW = new EditText(this);
+        editW.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+        editW.setText("16"); editW.setGravity(android.view.Gravity.CENTER);
+        layout.addView(editW, new LinearLayout.LayoutParams(60*dp, LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        TextView sep = new TextView(this);
+        sep.setText("  :  "); sep.setTextSize(16);
+        layout.addView(sep);
+
+        EditText editH = new EditText(this);
+        editH.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+        editH.setText("9"); editH.setGravity(android.view.Gravity.CENTER);
+        layout.addView(editH, new LinearLayout.LayoutParams(60*dp, LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        builder.setView(layout);
+        builder.setPositiveButton("Apply", (d, which) -> {
+            int w = parseIntOr(editW.getText().toString(), 16);
+            int h = parseIntOr(editH.getText().toString(), 9);
+            if (w <= 0) w = 1; if (h <= 0) h = 1;
+            state.setAspectRatio(new AspectRatio(w + ":" + h, w, h));
+            if (!state.getSelectionPoints().isEmpty()) {
+                CropEngine.autoComputeFromPoints(state);
+            } else {
+                ensureCropCenter();
+            }
+        });
+        builder.setNegativeButton("Cancel", null);
+        builder.show();
+    }
+
+    private void setupGridToggleMain() {
+        CheckBox chk = findViewById(R.id.chkGridMain);
+        chk.setOnCheckedChangeListener((btn, isChecked) -> {
+            state.getGridConfig().enabled = isChecked;
+            editorView.invalidate();
+        });
+        // Long-press to open grid settings
+        chk.setOnLongClickListener(v -> {
+            GridSettingsDialog.show(this, state.getGridConfig(), () -> editorView.invalidate());
+            return true;
+        });
+    }
+
+    private void setupPixelGridMain() {
+        CheckBox chk = findViewById(R.id.chkPixelGridMain);
+        chk.setOnCheckedChangeListener((btn, isChecked) -> {
+            state.getGridConfig().showPixelGrid = isChecked;
+            editorView.invalidate();
+        });
+        chk.setOnLongClickListener(v -> {
+            ColorPickerDialog.show(this, state.getGridConfig().pixelGridColor, color -> {
+                state.getGridConfig().pixelGridColor = color;
+                editorView.invalidate();
+            });
+            return true;
+        });
+    }
+
+    // ── Image loading ──
+    // Copies URI to a cache file first to guarantee raw byte access.
+    // Some ContentProviders (Samsung MediaStore) strip post-EOI data from JPEGs,
+    // which would lose the HDR gain map. Copying to local file bypasses this.
+
+    private void loadImage(Uri uri) {
+        if (!busy.compareAndSet(false, true)) {
+            Toast.makeText(this, "Busy", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        new Thread(() -> {
+            try {
+                // Copy URI to cache file for guaranteed raw access
+                File cacheFile = new File(getCacheDir(), "input_raw");
+                try (InputStream is = getContentResolver().openInputStream(uri);
+                     FileOutputStream fos = new FileOutputStream(cacheFile)) {
+                    if (is == null) throw new IOException("Cannot open URI");
+                    byte[] buf = new byte[8192]; int n;
+                    while ((n = is.read(buf)) != -1) fos.write(buf, 0, n);
+                }
+                // Read raw bytes from local file (no ContentProvider interference)
+                byte[] fileBytes;
+                try (FileInputStream fis = new FileInputStream(cacheFile)) {
+                    long fileLen = cacheFile.length();
+                    if (fileLen <= 0 || fileLen > 100_000_000) throw new IOException("Invalid file size: " + fileLen);
+                    fileBytes = new byte[(int) fileLen];
+                    int read = 0;
+                    while (read < fileBytes.length) {
+                        int n = fis.read(fileBytes, read, fileBytes.length - read);
+                        if (n < 0) break;
+                        read += n;
+                    }
+                }
+                cacheFile.delete();
+                Log.d(TAG, "Loaded " + fileBytes.length + " raw bytes (via cache)");
+                if (fileBytes.length > 8) {
+                    Log.d(TAG, "File head: " + hex(fileBytes, 0, 4)
+                            + " tail: " + hex(fileBytes, fileBytes.length - 4, 4));
+                }
+
+                Bitmap raw = BitmapFactory.decodeByteArray(fileBytes, 0, fileBytes.length);
+                if (raw == null || raw.getWidth() <= 0 || raw.getHeight() <= 0) {
+                    runOnUiThread(() -> Toast.makeText(this, "Failed to decode", Toast.LENGTH_SHORT).show());
+                    return;
+                }
+                Bitmap bmp = BitmapUtils.applyOrientation(raw,
+                        BitmapUtils.readExifOrientation(fileBytes));
+
+                // Get original filename and file path for Samsung Revert
+                String origName = getDisplayName(uri);
+                String[] pathAndId = getFilePathAndId(uri);
+
+                state.reset();
+                state.setOriginalFileBytes(fileBytes);
+                state.setOriginalFilename(origName);
+                if (pathAndId != null) {
+                    state.setOriginalFilePath(pathAndId[0]);
+                    try { state.setMediaStoreId(Long.parseLong(pathAndId[1])); }
+                    catch (NumberFormatException ignored) {}
+                }
+
+                boolean isJpeg = fileBytes.length > 2
+                        && (fileBytes[0] & 0xFF) == 0xFF && (fileBytes[1] & 0xFF) == 0xD8;
+                String metaInfo = "";
+
+                if (isJpeg) {
+                    state.setSourceFormat("jpeg");
+                    List<JpegSegment> meta = JpegMetadataExtractor.extract(fileBytes);
+                    state.setJpegMeta(meta);
+
+                    boolean hasExif = false, hasIcc = false, hasXmp = false, hasMpf = false;
+                    for (JpegSegment seg : meta) {
+                        if (seg.isExif()) hasExif = true;
+                        if (seg.isIcc()) hasIcc = true;
+                        if (seg.isXmp()) hasXmp = true;
+                        if (seg.isMpf()) hasMpf = true;
+                    }
+                    Log.d(TAG, "Segments: " + meta.size()
+                            + " EXIF=" + hasExif + " ICC=" + hasIcc
+                            + " XMP=" + hasXmp + " MPF=" + hasMpf);
+
+                    byte[] gainMap = GainMapExtractor.extract(fileBytes);
+                    state.setGainMap(gainMap);
+
+                    // Extract Samsung SEFT trailer
+                    byte[] seft = com.cropcenter.metadata.SeftExtractor.extract(fileBytes);
+                    state.setSeftTrailer(seft);
+
+                    boolean hasSeft = fileBytes.length >= 12
+                            && fileBytes[fileBytes.length-4] == 'S' && fileBytes[fileBytes.length-3] == 'E'
+                            && fileBytes[fileBytes.length-2] == 'F' && fileBytes[fileBytes.length-1] == 'T';
+
+                    Log.d(TAG, "HDR=" + (gainMap != null ? gainMap.length + "b" : "none")
+                            + " SEFT=" + hasSeft + " MPF=" + hasMpf + " XMP=" + hasXmp);
+
+                    StringBuilder sb = new StringBuilder();
+                    if (hasExif) sb.append("EXIF");
+                    if (hasIcc) { if (sb.length() > 0) sb.append("+"); sb.append("ICC"); }
+                    if (hasXmp) { if (sb.length() > 0) sb.append("+"); sb.append("XMP"); }
+                    if (gainMap != null) { if (sb.length() > 0) sb.append("+"); sb.append("HDR"); }
+                    if (hasSeft) { if (sb.length() > 0) sb.append("+"); sb.append("Samsung"); }
+                    metaInfo = sb.toString();
+                } else {
+                    state.setSourceFormat("png");
+                    metaInfo = "PNG";
+                }
+
+                final int w = bmp.getWidth(), h = bmp.getHeight();
+                final String info = w + "x" + h + "  " + metaInfo;
+                final boolean hasHdr = state.getGainMap() != null;
+
+                // Set default export filename: originalname_cropped
+                String exportName = "crop";
+                if (origName != null && !origName.isEmpty()) {
+                    int dot = origName.lastIndexOf('.');
+                    exportName = (dot > 0 ? origName.substring(0, dot) : origName) + "_cropped";
+                }
+                final String defName = exportName;
+
+                runOnUiThread(() -> {
+                    state.setSourceImage(bmp);
+                    state.getExportConfig().filename = defName;
+                    editorView.setState(state);
+                    editorView.clearUndoHistory();
+                    findViewById(R.id.btnSave).setEnabled(true);
+                    txtImageInfo.setText(info);
+                    // HDR diagnostic toast is shown on background thread above
+                });
+            } catch (Exception e) {
+                Log.e(TAG, "Load failed", e);
+                runOnUiThread(() -> Toast.makeText(this,
+                        "Load failed: " + e.getMessage(), Toast.LENGTH_SHORT).show());
+            } finally {
+                busy.set(false);
+            }
+        }).start();
+    }
+
+    // ── Export ──
+
+    private void exportTo(Uri uri) {
+        if (state.getSourceImage() == null) return;
+        if (!busy.compareAndSet(false, true)) {
+            Toast.makeText(this, "Busy", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        new Thread(() -> {
+            try {
+                // Save original to Samsung backup location (for Gallery Revert)
+                CropExporter.saveOriginalBackup(state);
+                CropExporter.ExportResult result = CropExporter.export(state, getCacheDir());
+                byte[] data = result.data;
+                boolean hasHdr = state.getGainMap() != null && state.getGainMap().length > 0;
+                Log.d(TAG, "Export: " + data.length + " bytes, HDR=" + hasHdr);
+
+                // Write to temp file first (guaranteed raw), then copy to SAF
+                File tmp = new File(getCacheDir(), "export_tmp." + result.extension);
+                try (FileOutputStream fos = new FileOutputStream(tmp)) {
+                    fos.write(data);
+                }
+
+                // Copy raw bytes to SAF URI
+                try (ParcelFileDescriptor pfd = getContentResolver().openFileDescriptor(uri, "w")) {
+                    if (pfd == null) throw new IOException("Cannot open fd");
+                    try (FileInputStream fis = new FileInputStream(tmp);
+                         FileOutputStream fos = new FileOutputStream(pfd.getFileDescriptor())) {
+                        byte[] buf = new byte[8192];
+                        int n; long total = 0;
+                        while ((n = fis.read(buf)) != -1) { fos.write(buf, 0, n); total += n; }
+                        fos.flush();
+                        fos.getChannel().truncate(total);
+                        Log.d(TAG, "Written " + total + " bytes to SAF");
+                    }
+                }
+
+                // Also save a diagnostic copy the user can check
+                File diagFile = new File(getCacheDir(), "last_export_diag.jpg");
+                try (FileOutputStream dFos = new FileOutputStream(diagFile)) { dFos.write(data); }
+                Log.d(TAG, "Diagnostic copy at: " + diagFile.getAbsolutePath() + " (" + diagFile.length() + " bytes)");
+
+                tmp.delete();
+
+                // Check if hdrgm XMP is in output (definitive HDR check)
+                boolean outputHasHdrgm = false;
+                String outputStr = new String(data, 0, Math.min(data.length, 65536));
+                if (outputStr.contains("hdrgm")) outputHasHdrgm = true;
+
+                final String msg = "Saved " + data.length / 1024 + "KB"
+                        + (outputHasHdrgm ? " [HDR OK]" : (hasHdr ? " [HDR FAILED]" : ""));
+                Log.d(TAG, msg + " tail=" + hex(data, data.length - 4, 4));
+                runOnUiThread(() -> Toast.makeText(this, msg, Toast.LENGTH_SHORT).show());
+            } catch (Exception e) {
+                Log.e(TAG, "Export failed", e);
+                runOnUiThread(() -> Toast.makeText(this,
+                        "Export failed: " + e.getMessage(), Toast.LENGTH_SHORT).show());
+            } finally {
+                busy.set(false);
+            }
+        }).start();
+    }
+
+    // ── Mode buttons ──
+
+    private void setupModeButtons() {
+        View.OnClickListener click = v -> {
+            int id = v.getId();
+            if (id == R.id.btnModeMove) {
+                state.setEditorMode(EditorMode.MOVE);
+            } else if (id == R.id.btnModeSelect) {
+                state.setEditorMode(EditorMode.SELECT_FEATURE);
+            }
+            applyLockMode();
+            updateModeHighlight();
+            updateLockHighlight();
+            editorView.invalidate();
+        };
+        findViewById(R.id.btnModeMove).setOnClickListener(click);
+        findViewById(R.id.btnModeSelect).setOnClickListener(click);
+    }
+
+    private CenterMode moveLockPref = CenterMode.HORIZONTAL;
+    private CenterMode selectLockPref = CenterMode.BOTH;
+
+    private void setupCenterModeButtons() {
+        View.OnClickListener lockClick = v -> {
+            int id = v.getId();
+            CenterMode pref;
+            if (id == R.id.btnLockBoth) pref = CenterMode.BOTH;
+            else if (id == R.id.btnLockH) pref = CenterMode.HORIZONTAL;
+            else pref = CenterMode.VERTICAL;
+
+            setCurrentPref(pref);
+            applyLockMode();
+            updateLockHighlight();
+            if (!((CheckBox) findViewById(R.id.chkFreeze)).isChecked()) {
+                recomputeForLockChange();
+            }
+        };
+        findViewById(R.id.btnLockBoth).setOnClickListener(lockClick);
+        findViewById(R.id.btnLockH).setOnClickListener(lockClick);
+        findViewById(R.id.btnLockV).setOnClickListener(lockClick);
+
+        ((CheckBox) findViewById(R.id.chkFreeze)).setOnCheckedChangeListener((btn, isChecked) -> {
+            applyLockMode();
+        });
+    }
+
+    private CenterMode getCurrentPref() {
+        return state.getEditorMode() == EditorMode.SELECT_FEATURE ? selectLockPref : moveLockPref;
+    }
+
+    private void setCurrentPref(CenterMode pref) {
+        if (state.getEditorMode() == EditorMode.SELECT_FEATURE) selectLockPref = pref;
+        else moveLockPref = pref;
+    }
+
+    private void applyLockMode() {
+        boolean frozen = ((CheckBox) findViewById(R.id.chkFreeze)).isChecked();
+        state.setCenterMode(frozen ? CenterMode.LOCKED : getCurrentPref());
+    }
+
+    private void updateLockHighlight() {
+        CenterMode pref = getCurrentPref();
+        int active = getResources().getColor(R.color.mauve, null);
+        int inactive = getResources().getColor(R.color.surface2, null);
+        ((MaterialButton) findViewById(R.id.btnLockBoth)).setTextColor(
+                pref == CenterMode.BOTH ? active : inactive);
+        ((MaterialButton) findViewById(R.id.btnLockH)).setTextColor(
+                pref == CenterMode.HORIZONTAL ? active : inactive);
+        ((MaterialButton) findViewById(R.id.btnLockV)).setTextColor(
+                pref == CenterMode.VERTICAL ? active : inactive);
+    }
+
+    private void recomputeForLockChange() {
+        if (!state.getSelectionPoints().isEmpty()) {
+            CropEngine.autoComputeFromPoints(state);
+        } else if (state.hasCenter()) {
+            state.markCropSizeDirty();
+            CropEngine.recomputeCrop(state);
+        }
+        editorView.invalidate();
+    }
+
+    private void setupUndoRedo() {
+        findViewById(R.id.btnUndo).setOnClickListener(v -> editorView.undo());
+        findViewById(R.id.btnRedo).setOnClickListener(v -> editorView.redo());
+    }
+
+    private void setupClearPointsButton() {
+        findViewById(R.id.btnClearPoints).setOnClickListener(v -> {
+            state.getSelectionPoints().clear();
+            editorView.clearUndoHistory();
+            editorView.resetCropToFullImage();
+            editorView.invalidate();
+            updatePointButtonStates();
+        });
+    }
+
+    private void setupRotation() {
+        findViewById(R.id.btnRotate).setOnClickListener(v -> showRotationDialog());
+    }
+
+    private void showRotationDialog() {
+        float density = getResources().getDisplayMetrics().density;
+        int dp = (int) density;
+
+        android.widget.LinearLayout root = new android.widget.LinearLayout(this);
+        root.setOrientation(android.widget.LinearLayout.VERTICAL);
+        root.setPadding(20*dp, 12*dp, 20*dp, 8*dp);
+
+        final float[] deg = {state.getRotationDegrees()};
+
+        // Value display
+        EditText input = new EditText(this);
+        input.setText(String.format("%.2f", deg[0]));
+        input.setTextSize(20); input.setGravity(android.view.Gravity.CENTER);
+        input.setTextColor(0xFFCDD6F4); input.setBackgroundColor(0xFF313244);
+        input.setInputType(android.text.InputType.TYPE_CLASS_NUMBER
+                | android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL
+                | android.text.InputType.TYPE_NUMBER_FLAG_SIGNED);
+        input.setSingleLine(true);
+        root.addView(input);
+
+        Runnable applyFromInput = () -> {
+            try {
+                deg[0] = Math.max(-180f, Math.min(180f, Float.parseFloat(input.getText().toString().trim())));
+                state.setRotationDegrees(deg[0]);
+            } catch (NumberFormatException ignored) {}
+        };
+
+        Runnable updateInput = () -> {
+            input.setText(String.format("%.2f", deg[0]));
+            input.setSelection(input.getText().length());
+            state.setRotationDegrees(deg[0]);
+        };
+
+        // Nudge buttons: two rows
+        String[][] nudgeLabels = {
+            {"-90\u00B0", "-1\u00B0", "-0.1\u00B0", "0\u00B0", "+0.1\u00B0", "+1\u00B0", "+90\u00B0"},
+            {"-45\u00B0", "-0.5\u00B0", "-0.05\u00B0", "-0.01\u00B0", "+0.01\u00B0", "+0.05\u00B0", "+0.5\u00B0"}
+        };
+        float[][] nudgeVals = {
+            {-90f, -1f, -0.1f, 0f, 0.1f, 1f, 90f},  // 0 = absolute set
+            {-45f, -0.5f, -0.05f, -0.01f, 0.01f, 0.05f, 0.5f}
+        };
+        boolean[][] isAbsolute = {
+            {true, false, false, true, false, false, true},
+            {true, false, false, false, false, false, false}
+        };
+
+        for (int r = 0; r < 2; r++) {
+            android.widget.LinearLayout row = new android.widget.LinearLayout(this);
+            row.setOrientation(android.widget.LinearLayout.HORIZONTAL);
+            row.setGravity(android.view.Gravity.CENTER);
+            android.widget.LinearLayout.LayoutParams rLP = new android.widget.LinearLayout.LayoutParams(
+                    android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                    android.widget.LinearLayout.LayoutParams.WRAP_CONTENT);
+            rLP.topMargin = (r == 0) ? 12*dp : 4*dp;
+
+            for (int c = 0; c < nudgeLabels[r].length; c++) {
+                final float val = nudgeVals[r][c];
+                final boolean abs = isAbsolute[r][c];
+                TextView btn = new TextView(this);
+                btn.setText(nudgeLabels[r][c]); btn.setTextSize(11);
+                btn.setGravity(android.view.Gravity.CENTER);
+                btn.setPadding(2*dp, 8*dp, 2*dp, 8*dp);
+                btn.setTextColor(abs ? 0xFFCBA6F7 : 0xFFA6ADC8);
+                btn.setOnClickListener(b -> {
+                    if (abs) deg[0] = val;
+                    else deg[0] = Math.max(-180f, Math.min(180f, deg[0] + val));
+                    updateInput.run();
+                });
+                row.addView(btn, new android.widget.LinearLayout.LayoutParams(
+                        0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+            }
+            root.addView(row, rLP);
+        }
+
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("Rotate Image")
+                .setView(root)
+                .setPositiveButton("Apply", (d, w) -> applyFromInput.run())
+                .setNegativeButton("Cancel", (d, w) -> {
+                    // Revert to original value
+                    state.setRotationDegrees(deg[0]);
+                })
+                .show();
+    }
+
+    private void updatePointControlsVisibility() {
+        // Row always visible, but update button enabled states
+        updatePointButtonStates();
+    }
+
+    private void updatePointButtonStates() {
+        boolean canUndo = editorView.canUndo();
+        boolean canRedo = editorView.canRedo();
+        boolean hasPoints = !state.getSelectionPoints().isEmpty();
+        int enabledColor = getResources().getColor(R.color.subtext0, null);
+        int disabledColor = getResources().getColor(R.color.surface1, null);
+
+        MaterialButton btnUndo = findViewById(R.id.btnUndo);
+        MaterialButton btnRedo = findViewById(R.id.btnRedo);
+        MaterialButton btnClear = findViewById(R.id.btnClearPoints);
+
+        btnUndo.setEnabled(canUndo);
+        btnUndo.setTextColor(canUndo ? enabledColor : disabledColor);
+        btnRedo.setEnabled(canRedo);
+        btnRedo.setTextColor(canRedo ? enabledColor : disabledColor);
+        btnClear.setEnabled(hasPoints);
+        btnClear.setTextColor(hasPoints ? getResources().getColor(R.color.red, null) : disabledColor);
+    }
+
+    /** Request MANAGE_EXTERNAL_STORAGE on API 30+ for Samsung Revert backup. */
+    private void ensureStoragePermission() {
+        if (android.os.Build.VERSION.SDK_INT >= 30) {
+            if (!android.os.Environment.isExternalStorageManager()) {
+                try {
+                    Intent intent = new Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION);
+                    intent.setData(Uri.parse("package:" + getPackageName()));
+                    startActivity(intent);
+                } catch (Exception e) {
+                    Log.w(TAG, "Cannot request MANAGE_EXTERNAL_STORAGE", e);
+                }
+            }
+        }
+    }
+
+    /** If no crop center exists, auto-set to image center so AR changes take effect. */
+    private void ensureCropCenter() {
+        if (!state.hasCenter() && state.getSourceImage() != null) {
+            state.markCropSizeDirty();
+            state.setCenter(state.getImageWidth() / 2f, state.getImageHeight() / 2f);
+        }
+    }
+
+    // ── UI updates ──
+
+    private void updateCropInfo() {
+        if (state.hasCenter()) {
+            txtSidebarCropSize.setText("Crop: " + state.getCropW() + " x " + state.getCropH());
+        } else if (state.getSourceImage() != null) {
+            txtSidebarCropSize.setText("Full image");
+        } else {
+            txtSidebarCropSize.setText("");
+        }
+    }
+
+    private void updateModeHighlight() {
+        EditorMode mode = state.getEditorMode();
+        int active = getResources().getColor(R.color.mauve, null);
+        int inactive = getResources().getColor(R.color.surface2, null);
+        ((MaterialButton) findViewById(R.id.btnModeMove)).setTextColor(
+                mode == EditorMode.MOVE ? active : inactive);
+        ((MaterialButton) findViewById(R.id.btnModeSelect)).setTextColor(
+                mode == EditorMode.SELECT_FEATURE ? active : inactive);
+
+        boolean isSelect = mode == EditorMode.SELECT_FEATURE;
+
+        // Both button only in Select mode
+        findViewById(R.id.btnLockBoth).setVisibility(isSelect ? View.VISIBLE : View.GONE);
+        // Auto-switch if Move mode and current pref is Both
+        if (!isSelect && moveLockPref == CenterMode.BOTH) {
+            moveLockPref = CenterMode.HORIZONTAL;
+            applyLockMode();
+        }
+
+        // Point controls row is always visible
+    }
+
+    private void updateZoomBadge() {
+        float zoom = editorView.getZoom();
+        if (zoom > 1.01f) {
+            txtZoomBadge.setVisibility(View.VISIBLE);
+            txtZoomBadge.setText(Math.round(zoom * 100) + "%");
+        } else {
+            txtZoomBadge.setVisibility(View.GONE);
+        }
+    }
+
+    // ── Utility ──
+
+    private String getDisplayName(Uri uri) {
+        try (Cursor c = getContentResolver().query(uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (c != null && c.moveToFirst()) {
+                int idx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                if (idx >= 0) return c.getString(idx);
+            }
+        } catch (Exception ignored) {}
+        return null;
+    }
+
+    /** Query MediaStore for file path and _ID. Returns [path, id] or null. */
+    private String[] getFilePathAndId(Uri uri) {
+        try {
+            // Try to get _ID and DATA from MediaStore
+            String[] proj = {"_id", "_data"};
+            try (Cursor c = getContentResolver().query(uri, proj, null, null, null)) {
+                if (c != null && c.moveToFirst()) {
+                    int idIdx = c.getColumnIndex("_id");
+                    int dataIdx = c.getColumnIndex("_data");
+                    String id = idIdx >= 0 ? c.getString(idIdx) : null;
+                    String path = dataIdx >= 0 ? c.getString(dataIdx) : null;
+                    if (path != null && id != null) {
+                        Log.d(TAG, "MediaStore: path=" + path + " id=" + id);
+                        return new String[]{path, id};
+                    }
+                }
+            }
+            // For SAF URIs, try to extract document ID
+            String docId = null;
+            if ("com.android.providers.media.documents".equals(uri.getAuthority())) {
+                docId = android.provider.DocumentsContract.getDocumentId(uri);
+                // docId format: "image:12345"
+                if (docId != null && docId.startsWith("image:")) {
+                    String msId = docId.substring(6);
+                    // Query MediaStore by ID
+                    Uri msUri = android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI;
+                    try (Cursor c = getContentResolver().query(msUri, new String[]{"_data"},
+                            "_id=?", new String[]{msId}, null)) {
+                        if (c != null && c.moveToFirst()) {
+                            String path = c.getString(0);
+                            if (path != null) return new String[]{path, msId};
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "getFilePathAndId failed", e);
+        }
+        return null;
+    }
+
+    private static String hex(byte[] d, int off, int len) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = off; i < off + len && i < d.length; i++) {
+            if (sb.length() > 0) sb.append(' ');
+            sb.append(String.format("%02X", d[i] & 0xFF));
+        }
+        return sb.toString();
+    }
+
+    private static int parseIntOr(String s, int def) {
+        try { return Integer.parseInt(s.trim()); } catch (NumberFormatException e) { return def; }
+    }
+
+}

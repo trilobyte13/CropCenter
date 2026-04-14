@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.CropCenter" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/mauve</item>
+        <item name="colorPrimaryVariant">@color/mauve</item>
+        <item name="colorOnPrimary">@color/crust</item>
+        <item name="colorSecondary">@color/blue</item>
+        <item name="android:colorBackground">@color/background</item>
+        <item name="android:windowBackground">@color/background</item>
+        <item name="colorSurface">@color/base</item>
+        <item name="colorOnSurface">@color/text</item>
+        <item name="android:textColor">@color/text</item>
+        <item name="android:statusBarColor">@color/mantle</item>
+        <item name="android:navigationBarColor">@color/crust</item>
+    </style>
+
+    <style name="SectionTitle">
+        <item name="android:textSize">11sp</item>
+        <item name="android:textColor">@color/mauve</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:textAllCaps">true</item>
+        <item name="android:letterSpacing">0.12</item>
+        <item name="android:paddingBottom">6dp</item>
+    </style>
+
+    <style name="ArButton" parent="Widget.MaterialComponents.Button.OutlinedButton">
+        <item name="android:textSize">12sp</item>
+        <item name="android:minHeight">32dp</item>
+        <item name="android:paddingStart">10dp</item>
+        <item name="android:paddingEnd">10dp</item>
+        <item name="strokeColor">@color/surface1</item>
+        <item name="android:textColor">@color/subtext0</item>
+        <item name="backgroundTint">@color/surface0</item>
+        <item name="cornerRadius">4dp</item>
+    </style>
+</resources>
