@@ -79,7 +79,7 @@ public final class UltraHdrCompat {
 
             if (!autoRotated && exifOrientation > 1) {
                 // Not auto-rotated: rotate to display orientation
-                Matrix m = exifMatrix(exifOrientation);
+                Matrix m = BitmapUtils.orientationMatrix(exifOrientation);
                 Bitmap rotated = Bitmap.createBitmap(current, 0, 0,
                         current.getWidth(), current.getHeight(), m, true);
                 if (rotated != current) { current.recycle(); current = rotated; }
@@ -99,23 +99,23 @@ public final class UltraHdrCompat {
                         + " hasGm=" + current.hasGainmap());
             }
 
-            // Compute crop region in the current bitmap's coordinate space
-            int cx, cy;
+            // Compute crop origin — must match CropExporter's canvas rendering exactly:
+            //   sx = (int) Math.floor(centerX - cropW / 2f)
+            int sx, sy;
             if (userRotation != 0f) {
                 // After user rotation, bitmap may be larger. Map display coords to rotated space.
-                cx = current.getWidth() / 2 + Math.round(centerX - imgW / 2f);
-                cy = current.getHeight() / 2 + Math.round(centerY - imgH / 2f);
+                float rcx = current.getWidth() / 2f + (centerX - imgW / 2f);
+                float rcy = current.getHeight() / 2f + (centerY - imgH / 2f);
+                sx = (int) Math.floor(rcx - cropW / 2f);
+                sy = (int) Math.floor(rcy - cropH / 2f);
             } else {
-                // In display orientation: use display coords directly
-                cx = Math.round(centerX);
-                cy = Math.round(centerY);
+                sx = (int) Math.floor(centerX - cropW / 2f);
+                sy = (int) Math.floor(centerY - cropH / 2f);
             }
 
-            // Clamp crop to bitmap bounds
-            cx = Math.max(cropW / 2, Math.min(current.getWidth() - cropW / 2, cx));
-            cy = Math.max(cropH / 2, Math.min(current.getHeight() - cropH / 2, cy));
-            int sx = Math.max(0, cx - cropW / 2);
-            int sy = Math.max(0, cy - cropH / 2);
+            // Clamp to bitmap bounds
+            sx = Math.max(0, Math.min(current.getWidth() - cropW, sx));
+            sy = Math.max(0, Math.min(current.getHeight() - cropH, sy));
             int sw = Math.min(cropW, current.getWidth() - sx);
             int sh = Math.min(cropH, current.getHeight() - sy);
 
@@ -196,9 +196,9 @@ public final class UltraHdrCompat {
                 // Rotation makes precise crop mapping complex — scale full gainmap
                 croppedGm = Bitmap.createScaledBitmap(gmBmp, current.getWidth(), current.getHeight(), true);
             } else {
-                // Pure crop: extract corresponding region from gainmap
-                int gmSx = Math.max(0, Math.round((centerX - cropW / 2f) * gmScaleX));
-                int gmSy = Math.max(0, Math.round((centerY - cropH / 2f) * gmScaleY));
+                // Pure crop: extract corresponding region from gainmap (floor to match canvas)
+                int gmSx = Math.max(0, (int) Math.floor((centerX - cropW / 2f) * gmScaleX));
+                int gmSy = Math.max(0, (int) Math.floor((centerY - cropH / 2f) * gmScaleY));
                 int gmSw = Math.round(cropW * gmScaleX);
                 int gmSh = Math.round(cropH * gmScaleY);
                 gmSw = Math.min(gmSw, gmBmp.getWidth() - gmSx);
@@ -232,20 +232,6 @@ public final class UltraHdrCompat {
             if (src2 != null) src2.recycle();
             tmp2.delete();
         }
-    }
-
-    private static Matrix exifMatrix(int orientation) {
-        Matrix m = new Matrix();
-        switch (orientation) {
-            case 2: m.setScale(-1, 1); break;
-            case 3: m.setRotate(180); break;
-            case 4: m.setScale(1, -1); break;
-            case 5: m.setRotate(90); m.postScale(-1, 1); break;
-            case 6: m.setRotate(90); break;
-            case 7: m.setRotate(-90); m.postScale(-1, 1); break;
-            case 8: m.setRotate(-90); break;
-        }
-        return m;
     }
 
     private static boolean containsHdrgm(byte[] data) {

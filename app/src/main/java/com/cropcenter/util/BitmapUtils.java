@@ -67,24 +67,28 @@ public final class BitmapUtils {
         return 1;
     }
 
+    /** Build a Matrix for the given EXIF orientation value (1-8). */
+    public static Matrix orientationMatrix(int orientation) {
+        Matrix m = new Matrix();
+        switch (orientation) {
+            case 2 -> m.setScale(-1, 1);
+            case 3 -> m.setRotate(180);
+            case 4 -> m.setScale(1, -1);
+            case 5 -> { m.setRotate(90); m.postScale(-1, 1); }
+            case 6 -> m.setRotate(90);
+            case 7 -> { m.setRotate(-90); m.postScale(-1, 1); }
+            case 8 -> m.setRotate(-90);
+        }
+        return m;
+    }
+
     /**
      * Apply EXIF orientation to a bitmap, returning a correctly rotated bitmap.
      * The input bitmap may be recycled if rotation was needed.
      */
     public static Bitmap applyOrientation(Bitmap bmp, int orientation) {
         if (orientation <= 1 || orientation > 8) return bmp;
-
-        Matrix m = new Matrix();
-        switch (orientation) {
-            case 2: m.setScale(-1, 1); break;                          // flip horizontal
-            case 3: m.setRotate(180); break;                            // rotate 180
-            case 4: m.setScale(1, -1); break;                          // flip vertical
-            case 5: m.setRotate(90); m.postScale(-1, 1); break;        // transpose
-            case 6: m.setRotate(90); break;                             // rotate 90 CW
-            case 7: m.setRotate(-90); m.postScale(-1, 1); break;       // transverse
-            case 8: m.setRotate(-90); break;                            // rotate 90 CCW
-        }
-
+        Matrix m = orientationMatrix(orientation);
         Bitmap rotated = Bitmap.createBitmap(bmp, 0, 0, bmp.getWidth(), bmp.getHeight(), m, true);
         if (rotated != bmp) bmp.recycle();
         return rotated;

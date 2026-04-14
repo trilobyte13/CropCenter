@@ -129,7 +129,16 @@ public class MainActivity extends AppCompatActivity {
                 });
 
         saveAsLauncher = registerForActivityResult(
-                new ActivityResultContracts.CreateDocument("image/jpeg"),
+                new ActivityResultContracts.CreateDocument("image/jpeg") {
+                    @Override
+                    public Intent createIntent(android.content.Context ctx, String input) {
+                        Intent intent = super.createIntent(ctx, input);
+                        if (input != null && input.endsWith(".png")) {
+                            intent.setType("image/png");
+                        }
+                        return intent;
+                    }
+                },
                 uri -> {
                     if (uri != null) exportTo(uri);
                 });
@@ -172,7 +181,7 @@ public class MainActivity extends AppCompatActivity {
         if (intent == null) return;
         String action = intent.getAction();
         if (Intent.ACTION_SEND.equals(action) || Intent.ACTION_VIEW.equals(action)) {
-            Uri uri = intent.getParcelableExtra(Intent.EXTRA_STREAM);
+            Uri uri = intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri.class);
             if (uri == null) uri = intent.getData();
             if (uri != null) {
                 try {
@@ -450,36 +459,17 @@ public class MainActivity extends AppCompatActivity {
                 // Save original to Samsung backup location (for Gallery Revert)
                 CropExporter.saveOriginalBackup(state);
                 CropExporter.ExportResult result = CropExporter.export(state, getCacheDir());
-                byte[] data = result.data;
+                byte[] data = result.data();
                 boolean hasHdr = state.getGainMap() != null && state.getGainMap().length > 0;
                 Log.d(TAG, "Export: " + data.length + " bytes, HDR=" + hasHdr);
 
-                // Write to temp file first (guaranteed raw), then copy to SAF
-                File tmp = new File(getCacheDir(), "export_tmp." + result.extension);
-                try (FileOutputStream fos = new FileOutputStream(tmp)) {
-                    fos.write(data);
+                // Write to SAF URI (wt = write + truncate)
+                try (java.io.OutputStream os = getContentResolver().openOutputStream(uri, "wt")) {
+                    if (os == null) throw new IOException("Cannot open output stream for " + uri);
+                    os.write(data);
+                    os.flush();
+                    Log.d(TAG, "Written " + data.length + " bytes to SAF");
                 }
-
-                // Copy raw bytes to SAF URI
-                try (ParcelFileDescriptor pfd = getContentResolver().openFileDescriptor(uri, "w")) {
-                    if (pfd == null) throw new IOException("Cannot open fd");
-                    try (FileInputStream fis = new FileInputStream(tmp);
-                         FileOutputStream fos = new FileOutputStream(pfd.getFileDescriptor())) {
-                        byte[] buf = new byte[8192];
-                        int n; long total = 0;
-                        while ((n = fis.read(buf)) != -1) { fos.write(buf, 0, n); total += n; }
-                        fos.flush();
-                        fos.getChannel().truncate(total);
-                        Log.d(TAG, "Written " + total + " bytes to SAF");
-                    }
-                }
-
-                // Also save a diagnostic copy the user can check
-                File diagFile = new File(getCacheDir(), "last_export_diag.jpg");
-                try (FileOutputStream dFos = new FileOutputStream(diagFile)) { dFos.write(data); }
-                Log.d(TAG, "Diagnostic copy at: " + diagFile.getAbsolutePath() + " (" + diagFile.length() + " bytes)");
-
-                tmp.delete();
 
                 // Check if hdrgm XMP is in output (definitive HDR check)
                 boolean outputHasHdrgm = false;
@@ -609,7 +599,8 @@ public class MainActivity extends AppCompatActivity {
         root.setOrientation(android.widget.LinearLayout.VERTICAL);
         root.setPadding(20*dp, 12*dp, 20*dp, 8*dp);
 
-        final float[] deg = {state.getRotationDegrees()};
+        final float originalDeg = state.getRotationDegrees();
+        final float[] deg = {originalDeg};
 
         // Value display
         EditText input = new EditText(this);
@@ -682,8 +673,8 @@ public class MainActivity extends AppCompatActivity {
                 .setView(root)
                 .setPositiveButton("Apply", (d, w) -> applyFromInput.run())
                 .setNegativeButton("Cancel", (d, w) -> {
-                    // Revert to original value
-                    state.setRotationDegrees(deg[0]);
+                    // Revert to value before dialog opened
+                    state.setRotationDegrees(originalDeg);
                 })
                 .show();
     }

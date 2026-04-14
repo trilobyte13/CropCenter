@@ -225,7 +225,6 @@ public class CropState {
     public byte[] getSeftTrailer() { return seftTrailer; }
     public void setSeftTrailer(byte[] seft) { this.seftTrailer = seft; }
 
-    /** Reset everything for a new image. */
     /** Check if all 4 corners of the crop rect, when un-rotated, are inside the image. */
     private static boolean cornersInside(float cx, float cy, float hw, float hh,
                                           float mx, float my, double cosR, double sinR,
@@ -242,6 +241,7 @@ public class CropState {
         return true;
     }
 
+    /** Reset everything for a new image. */
     public void reset() {
         sourceImage = null;
         originalFileBytes = null;

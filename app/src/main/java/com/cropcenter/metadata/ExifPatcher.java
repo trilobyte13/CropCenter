@@ -78,17 +78,17 @@ public final class ExifPatcher {
             int type = ByteBufferUtils.readU16(data, e + 2, le);
 
             switch (tag) {
-                case 0x0112: ByteBufferUtils.writeU16(data, e + 8, orientation, le); break;
-                case 0x0100: writeValue(data, e + 8, type, le, newW); break;
-                case 0x0101: writeValue(data, e + 8, type, le, newH); break;
-                case 0xA002: writeValue(data, e + 8, type, le, newW); break;
-                case 0xA003: writeValue(data, e + 8, type, le, newH); break;
-                case 0x8769: {
+                case 0x0112 -> ByteBufferUtils.writeU16(data, e + 8, orientation, le);
+                case 0x0100 -> writeValue(data, e + 8, type, le, newW);
+                case 0x0101 -> writeValue(data, e + 8, type, le, newH);
+                case 0xA002 -> writeValue(data, e + 8, type, le, newW);
+                case 0xA003 -> writeValue(data, e + 8, type, le, newH);
+                case 0x8769 -> {
                     long off = ByteBufferUtils.readU32(data, e + 8, le);
                     int subIFD = (int)(T + off);
                     if (subIFD > 0 && subIFD < data.length) scanIFD(data, subIFD, T, le, newW, newH, orientation);
-                    break;
                 }
+                default -> {}
             }
         }
 

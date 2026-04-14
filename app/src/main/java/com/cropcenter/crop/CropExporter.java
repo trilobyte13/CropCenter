@@ -33,14 +33,7 @@ public final class CropExporter {
 
     private static final String TAG = "CropExporter";
 
-    public static class ExportResult {
-        public final byte[] data;
-        public final String extension;
-        public ExportResult(byte[] data, String extension) {
-            this.data = data;
-            this.extension = extension;
-        }
-    }
+    public record ExportResult(byte[] data, String extension) {}
 
     private CropExporter() {}
 
@@ -115,17 +108,15 @@ public final class CropExporter {
             drawGrid(canvas, cropW, cropH, grid);
         }
 
-        String format = state.getExportConfig().format;
-        if ("jpeg".equals(format)) {
-            return exportJpeg(state, outBmp, cropW, cropH, cacheDir);
-        } else {
-            return exportPng(outBmp);
-        }
+        return switch (state.getExportConfig().format) {
+            case "jpeg" -> exportJpeg(state, outBmp, cropW, cropH, cacheDir);
+            default -> exportPng(state, outBmp, cropW, cropH);
+        };
     }
 
     private static ExportResult exportJpeg(CropState state, Bitmap bmp, int cropW, int cropH,
                                                java.io.File cacheDir) throws IOException {
-        int quality = state.getExportConfig().jpegQuality;
+        int quality = 100; // always max quality
 
         // Generate thumbnail from the rendered bitmap (display orientation).
         byte[] thumbnail = generateThumbnail(bmp, 512);
@@ -258,13 +249,6 @@ public final class CropExporter {
         return out.toByteArray();
     }
 
-    /**
-     * Generate a small JPEG thumbnail from a bitmap.
-     * @param maxDim  maximum width or height of the thumbnail
-     */
-    /**
-     * Generate a JPEG thumbnail that fits within maxBytes.
-     */
     /**
      * Find the end of the primary JPEG (position after first EOI).
      * Used to determine where the gain map starts.
@@ -435,11 +419,77 @@ public final class CropExporter {
         return result;
     }
 
-    private static ExportResult exportPng(Bitmap bmp) {
+    private static ExportResult exportPng(CropState state, Bitmap bmp, int cropW, int cropH) {
         ByteArrayOutputStream bos = new ByteArrayOutputStream();
         bmp.compress(Bitmap.CompressFormat.PNG, 100, bos);
         bmp.recycle();
-        return new ExportResult(bos.toByteArray(), "png");
+        byte[] pngBytes = bos.toByteArray();
+
+        // Inject EXIF metadata via PNG eXIf chunk (PNG 1.6 spec)
+        List<JpegSegment> meta = state.getJpegMeta();
+        if (meta != null) {
+            for (JpegSegment seg : ExifPatcher.patch(meta, cropW, cropH, null, 1)) {
+                if (seg.isExif()) {
+                    pngBytes = injectPngExif(pngBytes, seg.data);
+                    break; // only one EXIF segment
+                }
+            }
+        }
+
+        return new ExportResult(pngBytes, "png");
+    }
+
+    /**
+     * Inject EXIF data into a PNG as an eXIf chunk, inserted after IHDR.
+     * The eXIf chunk contains raw TIFF data (from EXIF APP1, minus the
+     * FF E1 length "Exif\0\0" wrapper).
+     */
+    private static byte[] injectPngExif(byte[] png, byte[] exifApp1) {
+        // exifApp1 = FF E1 LL LL "Exif\0\0" [TIFF data...]
+        // eXIf chunk data = just the TIFF data (starting at byte 10)
+        if (exifApp1.length <= 10) return png;
+        int tiffLen = exifApp1.length - 10;
+        byte[] tiffData = new byte[tiffLen];
+        System.arraycopy(exifApp1, 10, tiffData, 0, tiffLen);
+
+        // PNG structure: 8-byte signature, then chunks.
+        // Insert eXIf after the first chunk (IHDR).
+        if (png.length < 8 + 12) return png; // too small
+
+        // Find end of IHDR chunk: signature(8) + length(4) + "IHDR"(4) + data(13) + CRC(4) = 33
+        int ihdrLen = ((png[8] & 0xFF) << 24) | ((png[9] & 0xFF) << 16)
+                | ((png[10] & 0xFF) << 8) | (png[11] & 0xFF);
+        int insertPos = 8 + 4 + 4 + ihdrLen + 4; // after IHDR chunk
+        if (insertPos > png.length) return png;
+
+        // Build eXIf chunk: length(4) + "eXIf"(4) + tiffData + CRC(4)
+        byte[] chunkType = {'e', 'X', 'I', 'f'};
+        byte[] chunkLenBytes = {
+            (byte)(tiffLen >> 24), (byte)(tiffLen >> 16),
+            (byte)(tiffLen >> 8), (byte)(tiffLen)
+        };
+
+        // CRC32 covers chunk type + data
+        java.util.zip.CRC32 crc = new java.util.zip.CRC32();
+        crc.update(chunkType);
+        crc.update(tiffData);
+        long crcVal = crc.getValue();
+        byte[] crcBytes = {
+            (byte)(crcVal >> 24), (byte)(crcVal >> 16),
+            (byte)(crcVal >> 8), (byte)(crcVal)
+        };
+
+        int chunkTotal = 4 + 4 + tiffLen + 4;
+        byte[] result = new byte[png.length + chunkTotal];
+        System.arraycopy(png, 0, result, 0, insertPos);
+        System.arraycopy(chunkLenBytes, 0, result, insertPos, 4);
+        System.arraycopy(chunkType, 0, result, insertPos + 4, 4);
+        System.arraycopy(tiffData, 0, result, insertPos + 8, tiffLen);
+        System.arraycopy(crcBytes, 0, result, insertPos + 8 + tiffLen, 4);
+        System.arraycopy(png, insertPos, result, insertPos + chunkTotal, png.length - insertPos);
+
+        Log.d(TAG, "Injected eXIf chunk: " + tiffLen + " bytes TIFF data");
+        return result;
     }
 
     private static void drawGrid(Canvas canvas, int w, int h, GridConfig grid) {

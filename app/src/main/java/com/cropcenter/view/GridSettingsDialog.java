@@ -33,23 +33,24 @@ public class GridSettingsDialog {
         addLabel(crRow, "   Rows "); crRow.addView(editRows, fixed(dp44));
         root.addView(crRow);
 
-        // ── Presets ──
+        // ── Presets (2x2 through 8x8) ──
         LinearLayout pRow = row(ctx);
-        String[] pLabels = {"2x2", "3x3", "4x4", "5x5"};
-        int[][] pVals = {{2,2},{3,3},{4,4},{5,5}};
-        for (int i = 0; i < pLabels.length; i++) {
-            final int c = pVals[i][0], r = pVals[i][1];
+        int[][] presets = {{2,2},{3,3},{4,4},{5,5},{6,6},{7,7},{8,8}};
+        int dp4 = (int)(4 * density);
+        for (int i = 0; i < presets.length; i++) {
+            final int c = presets[i][0], r = presets[i][1];
             TextView btn = new TextView(ctx);
-            btn.setText(pLabels[i]); btn.setTextSize(12); btn.setGravity(Gravity.CENTER);
+            btn.setText(c + "x" + r); btn.setTextSize(11); btn.setGravity(Gravity.CENTER);
             btn.setBackgroundColor(0xFF313244); btn.setTextColor(0xFFA6ADC8);
-            btn.setPadding(dp8, (int)(4*density), dp8, (int)(4*density));
+            btn.setPadding(dp8, dp4, dp8, dp4);
             btn.setOnClickListener(v -> {
                 cfg.columns = c; cfg.rows = r;
                 editCols.setText(String.valueOf(c)); editRows.setText(String.valueOf(r));
                 onChange.onGridChanged();
             });
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-            if (i > 0) lp.leftMargin = (int)(4*density);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+            if (i > 0) lp.leftMargin = dp4;
             pRow.addView(btn, lp);
         }
         LinearLayout.LayoutParams pLP = matchWrap(); pLP.topMargin = dp8;
@@ -82,8 +83,8 @@ public class GridSettingsDialog {
 
         Runnable apply = () -> {
             try {
-                cfg.columns = clamp(Integer.parseInt(editCols.getText().toString().trim()), 1, 50);
-                cfg.rows = clamp(Integer.parseInt(editRows.getText().toString().trim()), 1, 50);
+                cfg.columns = Math.clamp(Integer.parseInt(editCols.getText().toString().trim()), 1, 50);
+                cfg.rows = Math.clamp(Integer.parseInt(editRows.getText().toString().trim()), 1, 50);
                 onChange.onGridChanged();
             } catch (NumberFormatException ignored) {}
         };
@@ -143,8 +144,5 @@ public class GridSettingsDialog {
     }
     private static LinearLayout.LayoutParams topMargin(int m) {
         LinearLayout.LayoutParams lp = matchWrap(); lp.topMargin = m; return lp;
-    }
-    private static int clamp(int v, int min, int max) {
-        return Math.max(min, Math.min(max, v));
     }
 }
