@@ -99,55 +99,6 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
     private void notifyPointsChanged() { if (onPointsChanged != null) onPointsChanged.run(); }
 
     /**
-     * Clamp a single axis for rotated images via binary search.
-     * Keeps the other axis fixed to prevent cross-axis sliding.
-     */
-    private float clampAxis(float movingVal, float fixedVal, boolean movingIsX,
-                            int imgW, int imgH, CropState st) {
-        float hw = st.getCropW() / 2f, hh = st.getCropH() / 2f;
-        float mx = imgW / 2f, my = imgH / 2f;
-        double rad = Math.toRadians(-st.getRotationDegrees());
-        double cosR = Math.cos(rad), sinR = Math.sin(rad);
-
-        float cx = movingIsX ? movingVal : fixedVal;
-        float cy = movingIsX ? fixedVal : movingVal;
-
-        if (allCornersInside(cx, cy, hw, hh, mx, my, cosR, sinR, imgW, imgH)) {
-            return movingVal;
-        }
-
-        float center = movingIsX ? mx : my;
-        float lo = 0f, hi = 1f, valid = center;
-        for (int i = 0; i < 25; i++) {
-            float t = (lo + hi) / 2f;
-            float test = center + (movingVal - center) * t;
-            float tcx = movingIsX ? test : fixedVal;
-            float tcy = movingIsX ? fixedVal : test;
-            if (allCornersInside(tcx, tcy, hw, hh, mx, my, cosR, sinR, imgW, imgH)) {
-                valid = test; lo = t;
-            } else {
-                hi = t;
-            }
-        }
-        return valid;
-    }
-
-    private static boolean allCornersInside(float cx, float cy, float hw, float hh,
-                                             float mx, float my, double cosR, double sinR,
-                                             int imgW, int imgH) {
-        float[] dxs = {-hw, hw, -hw, hw};
-        float[] dys = {-hh, -hh, hh, hh};
-        for (int i = 0; i < 4; i++) {
-            double px = cx + dxs[i] - mx;
-            double py = cy + dys[i] - my;
-            double ux = px * cosR - py * sinR + mx;
-            double uy = px * sinR + py * cosR + my;
-            if (ux < -0.5 || ux > imgW + 0.5 || uy < -0.5 || uy > imgH + 0.5) return false;
-        }
-        return true;
-    }
-
-    /**
      * Check if a SCREEN point is inside the visible (rotated) image content.
      * The image is drawn rotated by state.getRotationDegrees() around its center.
      * We un-rotate the screen point relative to the image center, then check

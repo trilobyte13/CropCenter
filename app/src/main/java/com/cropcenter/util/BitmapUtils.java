@@ -1,7 +1,10 @@
 package com.cropcenter.util;
 
 import android.graphics.Bitmap;
+import android.graphics.Canvas;
 import android.graphics.Matrix;
+import android.graphics.Paint;
+import android.graphics.Rect;
 
 /**
  * Reads EXIF orientation from raw JPEG bytes and rotates the bitmap accordingly.
@@ -65,6 +68,45 @@ public final class BitmapUtils {
             off += 2 + segLen;
         }
         return 1;
+    }
+
+    /**
+     * Draw a source bitmap onto a canvas representing the crop window, with optional rotation
+     * around the image center. Used by both CropExporter and UltraHdrCompat to ensure
+     * identical rendering.
+     *
+     * @param canvas   output canvas (cropW x cropH)
+     * @param src      source bitmap in display orientation
+     * @param sx       crop origin X = centerX - cropW/2
+     * @param sy       crop origin Y = centerY - cropH/2
+     * @param rotation rotation in degrees (0 = no rotation)
+     * @param paint    paint for bitmap drawing
+     */
+    public static void drawCropped(Canvas canvas, Bitmap src, float sx, float sy,
+                                    float rotation, Paint paint) {
+        float drawX = -sx;
+        float drawY = -sy;
+        if (rotation != 0f) {
+            canvas.save();
+            canvas.rotate(rotation,
+                    drawX + src.getWidth() / 2f,
+                    drawY + src.getHeight() / 2f);
+            canvas.drawBitmap(src, drawX, drawY, paint);
+            canvas.restore();
+        } else {
+            int cropW = canvas.getWidth(), cropH = canvas.getHeight();
+            int isx = (int) Math.floor(sx);
+            int isy = (int) Math.floor(sy);
+            int vx1 = Math.max(0, isx);
+            int vy1 = Math.max(0, isy);
+            int vx2 = Math.min(src.getWidth(), isx + cropW);
+            int vy2 = Math.min(src.getHeight(), isy + cropH);
+            if (vx2 > vx1 && vy2 > vy1) {
+                Rect srcRect = new Rect(vx1, vy1, vx2, vy2);
+                Rect dstRect = new Rect(vx1 - isx, vy1 - isy, vx2 - isx, vy2 - isy);
+                canvas.drawBitmap(src, srcRect, dstRect, paint);
+            }
+        }
     }
 
     /** Build a Matrix for the given EXIF orientation value (1-8). */

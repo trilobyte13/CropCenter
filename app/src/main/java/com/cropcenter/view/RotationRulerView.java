@@ -5,14 +5,17 @@ import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.util.AttributeSet;
 import android.view.MotionEvent;
+import android.view.ScaleGestureDetector;
 import android.view.VelocityTracker;
 import android.widget.OverScroller;
 import android.view.View;
 
 /**
- * Galaxy-style scrollable rotation ruler.
- * A wide ruler with tick marks that scrolls horizontally; the center indicator
- * shows the current rotation angle. Supports drag, fling, and snap-to-detent.
+ * Galaxy-style scrollable rotation ruler with pinch-to-zoom.
+ *
+ * Drag to scroll, fling for momentum. Pinch to zoom the ruler scale,
+ * enabling 0.01° precision at the highest zoom. After drag/fling settles,
+ * the value snaps to the nearest tick interval for the current zoom level.
  */
 public class RotationRulerView extends View {
 
@@ -22,12 +25,15 @@ public class RotationRulerView extends View {
 
     private static final float MIN_DEG = -180f;
     private static final float MAX_DEG = 180f;
-    private static final float[] DETENTS = {-180f, -90f, -45f, 0f, 45f, 90f, 180f};
-    private static final float SNAP_THRESHOLD_DEG = 0.8f;
 
     private float currentDegrees = 0f;
-    private float pixelsPerDegree;
     private boolean enabled = true;
+
+    // Zoom
+    private float basePixelsPerDegree;
+    private float pixelsPerDegree;
+    private static final float MIN_PPD_FACTOR = 1f;
+    private static final float MAX_PPD_FACTOR = 120f; // enough to show 0.01° ticks
 
     private final Paint minorTickPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint majorTickPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -39,6 +45,10 @@ public class RotationRulerView extends View {
     private final OverScroller scroller;
     private VelocityTracker velocityTracker;
     private float lastTouchX;
+    private boolean isDragging;
+
+    private final ScaleGestureDetector scaleDetector;
+    private boolean isScaling;
 
     private OnRotationChangedListener listener;
 
@@ -47,7 +57,8 @@ public class RotationRulerView extends View {
     public RotationRulerView(Context context, AttributeSet attrs, int defStyle) {
         super(context, attrs, defStyle);
         float density = context.getResources().getDisplayMetrics().density;
-        pixelsPerDegree = 12 * density;
+        basePixelsPerDegree = 12 * density;
+        pixelsPerDegree = basePixelsPerDegree;
 
         scroller = new OverScroller(context);
 
@@ -69,6 +80,26 @@ public class RotationRulerView extends View {
         labelPaint.setColor(0xFF6C7086);
         labelPaint.setTextSize(8 * density);
         labelPaint.setTextAlign(Paint.Align.CENTER);
+
+        scaleDetector = new ScaleGestureDetector(context, new ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            @Override
+            public boolean onScaleBegin(ScaleGestureDetector det) {
+                isScaling = true;
+                scroller.forceFinished(true);
+                return true;
+            }
+            @Override
+            public boolean onScale(ScaleGestureDetector det) {
+                pixelsPerDegree = Math.max(basePixelsPerDegree * MIN_PPD_FACTOR,
+                        Math.min(basePixelsPerDegree * MAX_PPD_FACTOR, pixelsPerDegree * det.getScaleFactor()));
+                invalidate();
+                return true;
+            }
+            @Override
+            public void onScaleEnd(ScaleGestureDetector det) {
+                isScaling = false;
+            }
+        });
     }
 
     public void setOnRotationChangedListener(OnRotationChangedListener l) { this.listener = l; }
@@ -88,32 +119,73 @@ public class RotationRulerView extends View {
         setAlpha(e ? 1f : 0.3f);
     }
 
+    // ── Tick configuration ──
+
+    private record TickConfig(float minor, float major) {}
+
+    /** Choose tick intervals based on how many degrees are visible on screen. */
+    private static TickConfig chooseTickConfig(float degreesVisible) {
+        if (degreesVisible > 270) return new TickConfig(10f, 45f);
+        if (degreesVisible > 90)  return new TickConfig(5f, 45f);
+        if (degreesVisible > 30)  return new TickConfig(1f, 10f);
+        if (degreesVisible > 10)  return new TickConfig(1f, 5f);
+        if (degreesVisible > 3)   return new TickConfig(0.5f, 1f);
+        if (degreesVisible > 1)   return new TickConfig(0.1f, 0.5f);
+        if (degreesVisible > 0.3) return new TickConfig(0.05f, 0.1f);
+        return new TickConfig(0.01f, 0.1f);
+    }
+
+    /** Snap a degree value to the nearest minor tick for the current zoom. */
+    private float snapToTick(float deg) {
+        float degreesVisible = getWidth() > 0 ? getWidth() / pixelsPerDegree : 30f;
+        TickConfig tc = chooseTickConfig(degreesVisible);
+        return snapTo(deg, tc.minor);
+    }
+
+    private static float snapTo(float val, float step) {
+        return Math.round(val / step) * step;
+    }
+
+    // ── Drawing ──
+
     @Override
     protected void onDraw(Canvas canvas) {
         int w = getWidth(), h = getHeight();
         float centerX = w / 2f;
-        float labelY = h - 1; // labels at very bottom
+        float labelY = h - 1;
         float tickTop = 2;
-        float tickBot = h - labelPaint.getTextSize() - 3; // leave room for labels
+        float tickBot = h - labelPaint.getTextSize() - 3;
 
-        float halfVisibleDeg = (centerX / pixelsPerDegree) + 1;
-        int iStart = Math.max((int) MIN_DEG, (int) Math.floor(currentDegrees - halfVisibleDeg));
-        int iEnd = Math.min((int) MAX_DEG, (int) Math.ceil(currentDegrees + halfVisibleDeg));
+        float degreesVisible = w / pixelsPerDegree;
+        TickConfig tc = chooseTickConfig(degreesVisible);
 
-        for (int deg = iStart; deg <= iEnd; deg++) {
+        // Use integer tick indices to avoid float accumulation errors.
+        // tickIndex * tc.minor = degree value.
+        int iStart = (int) Math.floor((currentDegrees - degreesVisible / 2f - tc.major) / tc.minor);
+        int iEnd = (int) Math.ceil((currentDegrees + degreesVisible / 2f + tc.major) / tc.minor);
+
+        // Multiplier to convert minor intervals to major check (integer comparison)
+        int majorEvery = Math.round(tc.major / tc.minor);
+        int detentEvery = Math.round(45f / tc.minor);
+
+        for (int i = iStart; i <= iEnd; i++) {
+            float deg = i * tc.minor;
+            if (deg < MIN_DEG || deg > MAX_DEG) continue;
+
             float x = centerX + (deg - currentDegrees) * pixelsPerDegree;
+            if (x < -10 || x > w + 10) continue;
 
-            boolean isDetent = false;
-            for (float d : DETENTS) if (deg == (int) d) { isDetent = true; break; }
+            boolean isDetent = detentEvery > 0 && i % detentEvery == 0;
+            boolean isMajor = majorEvery > 0 && i % majorEvery == 0;
 
             if (isDetent) {
                 canvas.drawLine(x, tickTop, x, tickBot, detentTickPaint);
-                canvas.drawText(deg + "\u00B0", x, labelY, labelPaint);
-            } else if (deg % 5 == 0) {
+                canvas.drawText(formatTickLabel(deg), x, labelY, labelPaint);
+            } else if (isMajor) {
                 float mid = (tickTop + tickBot) / 2f;
                 float halfH = (tickBot - tickTop) * 0.35f;
                 canvas.drawLine(x, mid - halfH, x, mid + halfH, majorTickPaint);
-                canvas.drawText(String.valueOf(deg), x, labelY, labelPaint);
+                canvas.drawText(formatTickLabel(deg), x, labelY, labelPaint);
             } else {
                 float mid = (tickTop + tickBot) / 2f;
                 float halfH = (tickBot - tickTop) * 0.18f;
@@ -122,7 +194,7 @@ public class RotationRulerView extends View {
         }
 
         // Zero marker
-        float zeroX = centerX + (0 - currentDegrees) * pixelsPerDegree;
+        float zeroX = centerX - currentDegrees * pixelsPerDegree;
         if (zeroX > -5 && zeroX < w + 5 && currentDegrees != 0f) {
             canvas.drawLine(zeroX, tickTop, zeroX, tickBot, zeroPaint);
         }
@@ -140,9 +212,21 @@ public class RotationRulerView extends View {
         canvas.drawLine(centerX, tickTop + triH, centerX, tickBot, indicatorPaint);
     }
 
+    private static String formatTickLabel(float deg) {
+        if (deg == Math.floor(deg)) return (int) deg + "\u00B0";
+        if (Math.abs(deg * 10 - Math.round(deg * 10)) < 0.001f)
+            return String.format("%.1f\u00B0", deg);
+        return String.format("%.2f\u00B0", deg);
+    }
+
+    // ── Touch handling ──
+
     @Override
     public boolean onTouchEvent(MotionEvent event) {
         if (!enabled) return false;
+
+        scaleDetector.onTouchEvent(event);
+
         if (velocityTracker == null) velocityTracker = VelocityTracker.obtain();
         velocityTracker.addMovement(event);
 
@@ -150,34 +234,42 @@ public class RotationRulerView extends View {
             case MotionEvent.ACTION_DOWN -> {
                 scroller.forceFinished(true);
                 lastTouchX = event.getX();
+                isDragging = true;
                 getParent().requestDisallowInterceptTouchEvent(true);
             }
             case MotionEvent.ACTION_MOVE -> {
-                float dx = event.getX() - lastTouchX;
-                lastTouchX = event.getX();
-                float newDeg = Math.max(MIN_DEG, Math.min(MAX_DEG,
-                        currentDegrees - dx / pixelsPerDegree));
-                if (newDeg != currentDegrees) {
-                    currentDegrees = newDeg;
-                    notifyChanged();
-                    invalidate();
+                if (!isScaling && event.getPointerCount() == 1) {
+                    float dx = event.getX() - lastTouchX;
+                    lastTouchX = event.getX();
+                    float newDeg = Math.max(MIN_DEG, Math.min(MAX_DEG,
+                            currentDegrees - dx / pixelsPerDegree));
+                    if (newDeg != currentDegrees) {
+                        currentDegrees = newDeg;
+                        notifyChanged();
+                        invalidate();
+                    }
                 }
+                lastTouchX = event.getX();
             }
             case MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                velocityTracker.computeCurrentVelocity(1000);
-                float velX = velocityTracker.getXVelocity();
+                isDragging = false;
+                if (!isScaling) {
+                    velocityTracker.computeCurrentVelocity(1000);
+                    float velX = velocityTracker.getXVelocity();
+                    if (Math.abs(velX) > 200) {
+                        int scale = 1000;
+                        int startX = (int) (currentDegrees * pixelsPerDegree * scale);
+                        int minX = (int) (MIN_DEG * pixelsPerDegree * scale);
+                        int maxX = (int) (MAX_DEG * pixelsPerDegree * scale);
+                        scroller.fling(startX, 0, (int) (-velX * scale), 0, minX, maxX, 0, 0);
+                        postInvalidateOnAnimation();
+                    } else {
+                        // Snap to nearest tick
+                        snapAndNotify();
+                    }
+                }
                 velocityTracker.recycle();
                 velocityTracker = null;
-
-                if (Math.abs(velX) > 200) {
-                    int startX = (int) (currentDegrees * pixelsPerDegree);
-                    int minX = (int) (MIN_DEG * pixelsPerDegree);
-                    int maxX = (int) (MAX_DEG * pixelsPerDegree);
-                    scroller.fling(startX, 0, (int) -velX, 0, minX, maxX, 0, 0);
-                    postInvalidateOnAnimation();
-                } else {
-                    snapToDetent();
-                }
             }
         }
         return true;
@@ -186,25 +278,28 @@ public class RotationRulerView extends View {
     @Override
     public void computeScroll() {
         if (scroller.computeScrollOffset()) {
-            float deg = scroller.getCurrX() / pixelsPerDegree;
+            int scale = 1000;
+            float deg = scroller.getCurrX() / (pixelsPerDegree * scale);
             deg = Math.max(MIN_DEG, Math.min(MAX_DEG, deg));
             if (deg != currentDegrees) {
                 currentDegrees = deg;
                 notifyChanged();
             }
             invalidate();
-            if (scroller.isFinished()) snapToDetent();
+            if (scroller.isFinished()) {
+                snapAndNotify();
+            }
         }
     }
 
-    private void snapToDetent() {
-        for (float d : DETENTS) {
-            if (Math.abs(currentDegrees - d) <= SNAP_THRESHOLD_DEG) {
-                currentDegrees = d;
-                notifyChanged();
-                invalidate();
-                return;
-            }
+    /** Snap currentDegrees to the nearest minor tick and notify. */
+    private void snapAndNotify() {
+        float snapped = snapToTick(currentDegrees);
+        snapped = Math.max(MIN_DEG, Math.min(MAX_DEG, snapped));
+        if (snapped != currentDegrees) {
+            currentDegrees = snapped;
+            notifyChanged();
+            invalidate();
         }
     }
 

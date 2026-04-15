@@ -86,24 +86,12 @@ public final class UltraHdrCompat {
             float sy = centerY - cropH / 2f;
 
             // ── Render primary onto cropW×cropH canvas ──
-            // Same rotation/positioning as CropExporter: image at (-sx, -sy),
-            // rotated around image center in output coords.
+            // Uses shared BitmapUtils.drawCropped — identical to CropExporter rendering.
             Bitmap output = Bitmap.createBitmap(cropW, cropH, Bitmap.Config.ARGB_8888, true,
                     ColorSpace.get(ColorSpace.Named.DISPLAY_P3));
             Canvas canvas = new Canvas(output);
             Paint paint = new Paint(Paint.FILTER_BITMAP_FLAG);
-            float drawX = -sx, drawY = -sy;
-
-            if (userRotation != 0f) {
-                canvas.save();
-                canvas.rotate(userRotation,
-                        drawX + current.getWidth() / 2f,
-                        drawY + current.getHeight() / 2f);
-                canvas.drawBitmap(current, drawX, drawY, paint);
-                canvas.restore();
-            } else {
-                canvas.drawBitmap(current, drawX, drawY, paint);
-            }
+            BitmapUtils.drawCropped(canvas, current, sx, sy, userRotation, paint);
 
             // ── Apply identical transform to gainmap ──
             if (srcGm != null && gmBmp != null) {

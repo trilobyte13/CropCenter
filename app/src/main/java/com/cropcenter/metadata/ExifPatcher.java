@@ -67,6 +67,53 @@ public final class ExifPatcher {
         return patch(segments, newW, newH, thumbnail, 1);
     }
 
+    /**
+     * Estimate max thumbnail bytes that will fit in the EXIF APP1 segment.
+     * Measures the EXIF size excluding the existing thumbnail, then returns
+     * the remaining space within the 65535-byte APP1 limit.
+     */
+    public static int maxThumbnailBytes(List<JpegSegment> segments) {
+        for (JpegSegment seg : segments) {
+            if (!seg.isExif()) continue;
+            byte[] data = seg.data;
+            int T = 10;
+            if (T + 8 > data.length) continue;
+            boolean le = data[T] == 0x49;
+
+            // Find IFD1 to locate existing thumbnail
+            long ifd0Rel = ByteBufferUtils.readU32(data, T + 4, le);
+            int ifd0 = (int)(T + ifd0Rel);
+            if (ifd0 < T || ifd0 + 2 > data.length) return 20000; // can't parse, use default
+            int cnt0 = ByteBufferUtils.readU16(data, ifd0, le);
+            int nextPtr = ifd0 + 2 + cnt0 * 12;
+            if (nextPtr + 4 > data.length) return 20000;
+            long ifd1Rel = ByteBufferUtils.readU32(data, nextPtr, le);
+
+            if (ifd1Rel == 0) {
+                // No IFD1: EXIF overhead = current segment + new IFD1 header (~42 bytes)
+                return 65535 - (data.length + 42);
+            }
+
+            int ifd1 = (int)(T + ifd1Rel);
+            if (ifd1 < T || ifd1 + 2 > data.length) return 20000;
+            int cnt1 = ByteBufferUtils.readU16(data, ifd1, le);
+            int oldThumbLen = 0;
+            for (int i = 0; i < cnt1; i++) {
+                int e = ifd1 + 2 + i * 12;
+                if (e + 12 > data.length) break;
+                int tag = ByteBufferUtils.readU16(data, e, le);
+                if (tag == 0x0202) { // JPEGInterchangeFormatLength
+                    oldThumbLen = (int) ByteBufferUtils.readU32(data, e + 8, le);
+                    break;
+                }
+            }
+            // Available = 65535 - (current segment size - old thumbnail size)
+            int exifOverhead = data.length - oldThumbLen;
+            return Math.max(0, 65535 - exifOverhead);
+        }
+        return 20000; // no EXIF segment found, use default
+    }
+
     private static void scanIFD(byte[] data, int ifdOff, int T, boolean le, int newW, int newH, int orientation) {
         if (ifdOff < 0 || ifdOff + 2 > data.length) return;
         int cnt = ByteBufferUtils.readU16(data, ifdOff, le);
@@ -92,12 +139,9 @@ public final class ExifPatcher {
             }
         }
 
-        // Follow next-IFD link (IFD0 → IFD1)
-        int nextPtr = ifdOff + 2 + cnt * 12;
-        if (nextPtr + 4 <= data.length) {
-            long next = ByteBufferUtils.readU32(data, nextPtr, le);
-            if (next > 0 && T + next < data.length) scanIFD(data, (int)(T + next), T, le, newW, newH, orientation);
-        }
+        // Don't follow the next-IFD link (IFD0 → IFD1).
+        // IFD1 is the thumbnail IFD — its dimension/orientation tags describe the thumbnail,
+        // not the primary. replaceThumbnail() handles the thumbnail data separately.
     }
 
     /**
@@ -217,19 +261,13 @@ public final class ExifPatcher {
             // Check APP1 size limit (65535 bytes max for segment length field)
             int newSegLen = newData.length - 2;
             if (newSegLen > 65533) {
-                // Thumbnail still too large even after CropExporter's reduction loop.
-                // Truncate thumbnail to fit.
-                int maxThumbSize = newThumb.length - (newSegLen - 65533);
-                if (maxThumbSize < 100) {
-                    Log.w(TAG, "Cannot fit any thumbnail in EXIF, removing it");
-                    // Remove thumbnail entirely by setting length to 0
-                    ByteBufferUtils.writeU32(data, thumbLenTag + 8, 0, le);
-                    return data;
-                }
-                // Rebuild with truncated thumbnail (it'll be invalid JPEG but won't corrupt the file)
-                byte[] trimmedThumb = new byte[maxThumbSize];
-                System.arraycopy(newThumb, 0, trimmedThumb, 0, maxThumbSize);
-                return replaceThumbnail(data, T, le, trimmedThumb);
+                // Thumbnail doesn't fit — report how many bytes are available
+                // so the caller can regenerate at a smaller size.
+                int overhead = newData.length - newThumb.length; // EXIF without thumbnail
+                int available = 65535 - overhead;
+                Log.w(TAG, "Thumbnail " + newThumb.length + " too large (avail=" + available
+                        + "), caller should retry smaller");
+                return data; // return unchanged — caller checks and retries
             }
 
             // Update thumbnail length to new size

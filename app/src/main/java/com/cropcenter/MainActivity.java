@@ -639,6 +639,9 @@ public class MainActivity extends AppCompatActivity {
 
     private static String formatDeg(float deg) {
         if (deg == (int) deg) return "Rot " + (int) deg + "\u00B0";
+        // Show full precision: 2 decimals if sub-0.1, 1 decimal otherwise
+        if (Math.abs(deg * 10 - Math.round(deg * 10)) > 0.001f)
+            return String.format("Rot %.2f\u00B0", deg);
         return String.format("Rot %.1f\u00B0", deg);
     }
 

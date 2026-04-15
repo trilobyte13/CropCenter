@@ -4,7 +4,6 @@ import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.ColorSpace;
 import android.graphics.Paint;
-import android.graphics.Rect;
 import android.util.Log;
 
 import com.cropcenter.metadata.ExifPatcher;
@@ -71,31 +70,7 @@ public final class CropExporter {
         Paint paint = new Paint(Paint.FILTER_BITMAP_FLAG | Paint.ANTI_ALIAS_FLAG);
         canvas.drawColor(0xFF0D0E14);
 
-        float rotation = state.getRotationDegrees();
-        if (rotation != 0f) {
-            // Draw rotated around IMAGE center (matches CropEditorView preview rendering).
-            // The crop window at (sx, sy) clips the rotated image — same as the preview's
-            // axis-aligned crop rect over the rotated image.
-            canvas.save();
-            float drawX = -sx;  // position image so crop origin maps to canvas (0,0)
-            float drawY = -sy;
-            float pivotX = drawX + src.getWidth() / 2f;  // image center in canvas coords
-            float pivotY = drawY + src.getHeight() / 2f;
-            canvas.rotate(rotation, pivotX, pivotY);
-            canvas.drawBitmap(src, drawX, drawY, paint);
-            canvas.restore();
-        } else {
-            // No rotation: direct blit
-            int vx1 = Math.max(0, sx);
-            int vy1 = Math.max(0, sy);
-            int vx2 = Math.min(src.getWidth(), sx + cropW);
-            int vy2 = Math.min(src.getHeight(), sy + cropH);
-            if (vx2 > vx1 && vy2 > vy1) {
-                Rect srcRect = new Rect(vx1, vy1, vx2, vy2);
-                Rect dstRect = new Rect(vx1 - sx, vy1 - sy, vx2 - sx, vy2 - sy);
-                canvas.drawBitmap(src, srcRect, dstRect, paint);
-            }
-        }
+        BitmapUtils.drawCropped(canvas, src, sx, sy, state.getRotationDegrees(), paint);
 
         // Optional grid overlay bake-in (independent of whether grid is visible on screen)
         GridConfig grid = state.getGridConfig();
@@ -113,8 +88,13 @@ public final class CropExporter {
                                                java.io.File cacheDir) throws IOException {
         int quality = 100; // always max quality
 
-        // Generate thumbnail from the rendered bitmap (display orientation).
-        byte[] thumbnail = generateThumbnail(bmp, 512);
+        // Generate thumbnail sized to fit the available EXIF space.
+        List<JpegSegment> metaForThumb = state.getJpegMeta();
+        int thumbBudget = (metaForThumb != null && !metaForThumb.isEmpty())
+                ? ExifPatcher.maxThumbnailBytes(metaForThumb) - 200 // margin for IFD changes
+                : 20000;
+        thumbBudget = Math.max(2000, Math.min(20000, thumbBudget));
+        byte[] thumbnail = generateThumbnail(bmp, 512, thumbBudget);
 
         // HDR path: generate a cropped Ultra HDR JPEG to extract the gain map from.
         // The primary image always comes from the canvas rendering above (matches preview
@@ -208,12 +188,6 @@ public final class CropExporter {
             }
         }
         return -1; // not found
-    }
-
-    private static byte[] generateThumbnail(Bitmap bmp, int maxDim) {
-        // 20KB limit: fits alongside Samsung MakerNotes (~30-40KB) in the 64KB EXIF APP1.
-        // If the EXIF is unusually large, ExifPatcher.replaceThumbnail handles the overflow.
-        return generateThumbnail(bmp, maxDim, 20000);
     }
 
     private static byte[] generateThumbnail(Bitmap bmp, int maxDim, int maxBytes) {
