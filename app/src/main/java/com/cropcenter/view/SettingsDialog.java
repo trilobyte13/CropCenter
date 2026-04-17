@@ -149,7 +149,8 @@ public class SettingsDialog {
         selNote.setTextSize(11); selNote.setTextColor(COLOR_OVER);
         selCard.addView(selNote, topMargin(dp4));
 
-        selCard.addView(colorRow(ctx, "Color", cfg.selectionColor, density, color -> {
+        selCard.addView(colorRow(ctx, "Color", cfg.selectionColor, density,
+                ColorPickerDialog.PALETTE_TRANSLUCENT, color -> {
             cfg.selectionColor = color; onChange.onChanged();
         }), topMargin(dp8));
 
@@ -196,6 +197,12 @@ public class SettingsDialog {
 
     private static LinearLayout colorRow(Context ctx, String label, int currentColor,
                                           float density, ColorPickerDialog.OnColorSelectedListener onPick) {
+        return colorRow(ctx, label, currentColor, density, ColorPickerDialog.PALETTE_OPAQUE, onPick);
+    }
+
+    private static LinearLayout colorRow(Context ctx, String label, int currentColor,
+                                          float density, int[] palette,
+                                          ColorPickerDialog.OnColorSelectedListener onPick) {
         int swatchSize = (int)(26 * density);
         final int[] tracked = {currentColor};
         LinearLayout row = row(ctx);
@@ -227,7 +234,7 @@ public class SettingsDialog {
         row.addView(btn, btnLP);
 
         View.OnClickListener openPicker = v ->
-                ColorPickerDialog.show(ctx, tracked[0], color -> {
+                ColorPickerDialog.show(ctx, tracked[0], palette, color -> {
                     tracked[0] = color;
                     swatchBg.setColor(color);
                     swatch.invalidate();

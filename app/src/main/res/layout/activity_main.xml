@@ -144,6 +144,13 @@
             android:text="Clear" android:textSize="11sp" android:textColor="@color/red"
             android:minWidth="0dp" android:paddingHorizontal="6dp"
             android:insetTop="0dp" android:insetBottom="0dp" />
+
+        <TextView android:id="@+id/btnAutoRotate"
+            android:layout_width="wrap_content" android:layout_height="22dp"
+            android:text="Auto" android:textSize="11sp" android:textColor="@color/subtext0"
+            android:gravity="center" android:paddingHorizontal="8dp"
+            android:layout_marginStart="4dp" android:background="@color/surface0"
+            android:visibility="gone" />
     </LinearLayout>
 
     <!-- Row 3: Rotation ruler (scrollable) -->
@@ -159,21 +166,28 @@
         android:background="@color/mantle" android:gravity="center_vertical"
         android:paddingHorizontal="10dp" android:orientation="horizontal">
 
-        <TextView android:id="@+id/txtImageInfo"
+        <!-- Order: image formats, original size, cropped size, zoom, rotation -->
+        <TextView android:id="@+id/txtImageFormats"
             android:layout_width="0dp" android:layout_height="wrap_content"
             android:layout_weight="1"
             android:textColor="@color/surface2" android:textSize="10sp"
             android:singleLine="true" android:ellipsize="end" />
 
+        <TextView android:id="@+id/txtImageInfo"
+            android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:textColor="@color/surface2" android:textSize="10sp"
+            android:layout_marginStart="8dp" android:singleLine="true" />
+
+        <TextView android:id="@+id/txtTransformArrow"
+            android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:text="→" android:textColor="@color/overlay0" android:textSize="10sp"
+            android:layout_marginStart="6dp" android:singleLine="true"
+            android:visibility="gone" />
+
         <TextView android:id="@+id/txtSidebarCropSize"
             android:layout_width="wrap_content" android:layout_height="wrap_content"
             android:textColor="@color/subtext0" android:textSize="10sp"
-            android:layout_marginStart="8dp" android:singleLine="true" />
-
-        <TextView android:id="@+id/txtRotDegrees"
-            android:layout_width="wrap_content" android:layout_height="wrap_content"
-            android:text="0°" android:textColor="@color/mauve" android:textSize="10sp"
-            android:layout_marginStart="8dp" android:singleLine="true" />
+            android:layout_marginStart="6dp" android:singleLine="true" />
 
         <TextView android:id="@+id/txtZoomBadge"
             android:layout_width="wrap_content" android:layout_height="wrap_content"
@@ -181,12 +195,10 @@
             android:layout_marginStart="8dp" android:visibility="gone"
             android:singleLine="true" />
 
-        <TextView android:id="@+id/btnAutoRotate"
-            android:layout_width="wrap_content" android:layout_height="20dp"
-            android:text="Auto" android:textSize="10sp" android:textColor="@color/subtext0"
-            android:gravity="center" android:paddingHorizontal="6dp"
-            android:layout_marginStart="8dp" android:background="@color/surface0"
-            android:visibility="gone" />
+        <TextView android:id="@+id/txtRotDegrees"
+            android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:text="0°" android:textColor="@color/mauve" android:textSize="10sp"
+            android:layout_marginStart="8dp" android:singleLine="true" />
     </LinearLayout>
 
 </LinearLayout>

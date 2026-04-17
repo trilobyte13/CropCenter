@@ -6,7 +6,6 @@ import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.net.Uri;
 import android.os.Bundle;
-import android.os.ParcelFileDescriptor;
 import android.provider.OpenableColumns;
 import android.util.Log;
 import android.view.View;
@@ -51,7 +50,7 @@ public class MainActivity extends AppCompatActivity {
 
     private CropState state = new CropState();
     private CropEditorView editorView;
-    private TextView txtSidebarCropSize, txtImageInfo, txtZoomBadge;
+    private TextView txtSidebarCropSize, txtImageInfo, txtImageFormats, txtZoomBadge, txtTransformArrow;
 
     private final AtomicBoolean busy = new AtomicBoolean(false);
     private Uri sourceUri; // URI of the opened file, for overwrite-in-place
@@ -85,6 +84,8 @@ public class MainActivity extends AppCompatActivity {
         txtZoomBadge = findViewById(R.id.txtZoomBadge);
         txtSidebarCropSize = findViewById(R.id.txtSidebarCropSize);
         txtImageInfo = findViewById(R.id.txtImageInfo);
+        txtImageFormats = findViewById(R.id.txtImageFormats);
+        txtTransformArrow = findViewById(R.id.txtTransformArrow);
 
         editorView.setState(state);
         editorView.setOnZoomChangedListener(this::updateZoomBadge);
@@ -147,6 +148,8 @@ public class MainActivity extends AppCompatActivity {
         findViewById(R.id.btnOpen).setOnClickListener(v ->
                 openLauncher.launch(new String[]{"image/jpeg", "image/png"}));
         findViewById(R.id.btnSave).setOnClickListener(v -> showSaveDialog());
+        // Sync initial button state: Save disabled until an image is loaded.
+        setBusyUi(false);
         findViewById(R.id.btnSettings).setOnClickListener(v ->
                 com.cropcenter.view.SettingsDialog.show(this, state.getGridConfig(),
                         () -> editorView.invalidate()));
@@ -229,8 +232,17 @@ public class MainActivity extends AppCompatActivity {
 
     private void showSaveDialog() {
         if (state.getSourceImage() == null) return;
+        if (busy.get()) {
+            Toast.makeText(this, "Busy — try again", Toast.LENGTH_SHORT).show();
+            return;
+        }
         SaveDialog.show(this, state.getExportConfig(),
                 () -> {
+                    // Check again — the dialog may have been open while another save started
+                    if (busy.get()) {
+                        Toast.makeText(this, "Busy — try again", Toast.LENGTH_SHORT).show();
+                        return;
+                    }
                     String name = state.getExportConfig().filename;
                     if (name == null || name.isEmpty()) name = "crop";
                     int dot = name.lastIndexOf('.');
@@ -238,7 +250,13 @@ public class MainActivity extends AppCompatActivity {
                     name += ("jpeg".equals(state.getExportConfig().format) ? ".jpg" : ".png");
                     saveAsLauncher.launch(name);
                 },
-                sourceUri != null ? () -> exportTo(sourceUri) : null);
+                sourceUri != null ? () -> {
+                    if (busy.get()) {
+                        Toast.makeText(this, "Busy — try again", Toast.LENGTH_SHORT).show();
+                        return;
+                    }
+                    exportTo(sourceUri);
+                } : null);
     }
 
     // ── AR Spinner ──
@@ -357,6 +375,7 @@ public class MainActivity extends AppCompatActivity {
             Toast.makeText(this, "Busy", Toast.LENGTH_SHORT).show();
             return;
         }
+        setBusyUi(true);
 
         new Thread(() -> {
             try {
@@ -456,7 +475,8 @@ public class MainActivity extends AppCompatActivity {
                 }
 
                 final int w = bmp.getWidth(), h = bmp.getHeight();
-                final String info = w + "\u00D7" + h + "  " + metaInfo;
+                final String sizeInfo = w + "\u00D7" + h;
+                final String formatsInfo = metaInfo;
                 final boolean hasHdr = state.getGainMap() != null;
 
                 // Set default export filename: originalname_cropped
@@ -472,8 +492,8 @@ public class MainActivity extends AppCompatActivity {
                     state.getExportConfig().filename = defName;
                     editorView.setState(state);
                     editorView.clearUndoHistory();
-                    findViewById(R.id.btnSave).setEnabled(true);
-                    txtImageInfo.setText(info);
+                    txtImageInfo.setText(sizeInfo);
+                    txtImageFormats.setText(formatsInfo);
                     // HDR diagnostic toast is shown on background thread above
                 });
             } catch (Exception e) {
@@ -482,6 +502,7 @@ public class MainActivity extends AppCompatActivity {
                         "Load failed: " + e.getMessage(), Toast.LENGTH_SHORT).show());
             } finally {
                 busy.set(false);
+                runOnUiThread(() -> setBusyUi(false));
             }
         }).start();
     }
@@ -491,43 +512,145 @@ public class MainActivity extends AppCompatActivity {
     private void exportTo(Uri uri) {
         if (state.getSourceImage() == null) return;
         if (!busy.compareAndSet(false, true)) {
-            Toast.makeText(this, "Busy", Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "Busy — try again", Toast.LENGTH_SHORT).show();
             return;
         }
+        setBusyUi(true);
+        showProgress("Saving\u2026");
         new Thread(() -> {
-            try {
-                // Save original to Samsung backup location (for Gallery Revert)
-                CropExporter.saveOriginalBackup(state);
-                CropExporter.ExportResult result = CropExporter.export(state, getCacheDir());
-                byte[] data = result.data();
-                boolean hasHdr = state.getGainMap() != null && state.getGainMap().length > 0;
-                Log.d(TAG, "Export: " + data.length + " bytes, HDR=" + hasHdr);
-
-                // Write to SAF URI (wt = write + truncate)
-                try (java.io.OutputStream os = getContentResolver().openOutputStream(uri, "wt")) {
-                    if (os == null) throw new IOException("Cannot open output stream for " + uri);
-                    os.write(data);
-                    os.flush();
-                    Log.d(TAG, "Written " + data.length + " bytes to SAF");
-                }
-
-                // Check if hdrgm XMP is in output (definitive HDR check)
-                boolean outputHasHdrgm = false;
-                String outputStr = new String(data, 0, Math.min(data.length, 65536));
-                if (outputStr.contains("hdrgm")) outputHasHdrgm = true;
-
-                final String msg = "Saved " + data.length / 1024 + "KB"
-                        + (outputHasHdrgm ? " [HDR OK]" : (hasHdr ? " [HDR FAILED]" : ""));
-                Log.d(TAG, msg + " tail=" + hex(data, data.length - 4, 4));
-                runOnUiThread(() -> Toast.makeText(this, msg, Toast.LENGTH_SHORT).show());
-            } catch (Exception e) {
-                Log.e(TAG, "Export failed", e);
-                runOnUiThread(() -> Toast.makeText(this,
-                        "Export failed: " + e.getMessage(), Toast.LENGTH_SHORT).show());
-            } finally {
+            try { doExport(uri); }
+            finally {
                 busy.set(false);
+                runOnUiThread(() -> setBusyUi(false));
+                hideProgress();
             }
         }).start();
+    }
+
+    /**
+     * Export pipeline: encode → write → verify → report.
+     *
+     * Success signal hierarchy:
+     *   1. Write path completes without exception → definitively saved.
+     *   2. Write path threw → read the file back to count persisted bytes.
+     *      Many SAF providers throw harmless EPIPE/IOException on close
+     *      yet persist the full payload, so readback is the ground truth.
+     *   3. Neither → genuine failure; delete the partial file.
+     */
+    private void doExport(Uri uri) {
+        final boolean isPng = "png".equals(state.getExportConfig().format);
+
+        // ── Phase 1: encode ──
+        byte[] data;
+        boolean srcHadHdr;
+        try {
+            CropExporter.saveOriginalBackup(state);
+            data = CropExporter.export(state, getCacheDir()).data();
+            srcHadHdr = state.getGainMap() != null && state.getGainMap().length > 0;
+            Log.d(TAG, "Encoded " + data.length + " bytes (srcHdr=" + srcHadHdr
+                    + " isPng=" + isPng + ")");
+        } catch (Exception e) {
+            Log.e(TAG, "Encode failed", e);
+            final String emsg = "Export failed: " + e.getMessage();
+            runOnUiThread(() -> Toast.makeText(this, emsg, Toast.LENGTH_SHORT).show());
+            return;
+        }
+
+        // ── Phase 2: write ──
+        // try-with-resources: close() runs after writeReturned=true, so close
+        // failures can't invalidate a successful write (the catch block sets
+        // writeException but writeReturned is already locked true).
+        boolean writeReturned = false;
+        Exception writeException = null;
+        try (java.io.OutputStream os = getContentResolver().openOutputStream(uri, "w")) {
+            if (os == null) throw new IOException("openOutputStream returned null");
+            os.write(data);
+            writeReturned = true;
+        } catch (Exception e) {
+            writeException = e;
+            Log.w(TAG, "Write path threw (may still have persisted)", e);
+        }
+
+        // ── Phase 3: verify ──
+        boolean savedOk = writeReturned;
+        long verifiedBytes = -1;
+        if (!savedOk) {
+            verifiedBytes = readbackByteCount(uri, data.length);
+            savedOk = verifiedBytes >= data.length;
+            if (savedOk) Log.d(TAG, "Recovered via readback: " + verifiedBytes + " bytes");
+        }
+        Log.d(TAG, "Save result: writeReturned=" + writeReturned
+                + " verifiedBytes=" + verifiedBytes + " expected=" + data.length
+                + " → savedOk=" + savedOk);
+
+        // ── Phase 4: report ──
+        if (savedOk) {
+            // HDR suffix is informational. PNG can't carry gain maps — that's a
+            // format limitation, NOT a failure, so suppress the suffix in that case.
+            // "[HDR FAILED]" only fires when JPEG export dropped an HDR source.
+            final String hdrSuffix;
+            if (!srcHadHdr)            hdrSuffix = "";
+            else if (outputHasHdrgm(data)) hdrSuffix = " [HDR OK]";
+            else if (isPng)            hdrSuffix = "";
+            else                       hdrSuffix = " [HDR dropped]";
+
+            final String msg = "Saved " + data.length / 1024 + "KB" + hdrSuffix;
+            runOnUiThread(() -> Toast.makeText(this, msg, Toast.LENGTH_SHORT).show());
+        } else {
+            final String emsg = writeException != null
+                    ? "Export failed: " + writeException.getMessage()
+                    : "Export failed";
+            runOnUiThread(() -> Toast.makeText(this, emsg, Toast.LENGTH_SHORT).show());
+            tryDeleteSafDocument(uri);
+        }
+    }
+
+    /**
+     * Read the file at {@code uri} back and return the number of bytes readable,
+     * short-circuiting as soon as {@code minBytes} is reached. Returns -1 if the
+     * provider can't serve the file at all. This is the authoritative verification
+     * when the write path throws — neither OpenableColumns.SIZE nor PFD.getStatSize
+     * are reliable across DocumentsProvider implementations.
+     */
+    private long readbackByteCount(Uri uri, int minBytes) {
+        long total = 0;
+        try (java.io.InputStream is = getContentResolver().openInputStream(uri)) {
+            if (is == null) return -1;
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = is.read(buf)) != -1) {
+                total += n;
+                if (total >= minBytes) return total;
+            }
+            return total;
+        } catch (Exception e) {
+            Log.w(TAG, "readbackByteCount: " + e.getMessage());
+            return total > 0 ? total : -1;
+        }
+    }
+
+    /** Scan the first 64KB for the XMP "hdrgm" namespace marker. */
+    private static boolean outputHasHdrgm(byte[] bytes) {
+        int limit = Math.min(bytes.length - 4, 65536);
+        for (int i = 0; i < limit; i++) {
+            if (bytes[i] == 'h' && bytes[i+1] == 'd' && bytes[i+2] == 'r'
+                    && bytes[i+3] == 'g' && bytes[i+4] == 'm') return true;
+        }
+        return false;
+    }
+
+    /** Best-effort delete of a SAF document URI. Silently ignores failures. */
+    private void tryDeleteSafDocument(Uri uri) {
+        try {
+            // Try DocumentsContract first (works for CREATE_DOCUMENT URIs)
+            if (android.provider.DocumentsContract.isDocumentUri(this, uri)) {
+                android.provider.DocumentsContract.deleteDocument(getContentResolver(), uri);
+                return;
+            }
+        } catch (Exception ignored) {}
+        try {
+            getContentResolver().delete(uri, null, null);
+        } catch (Exception ignored) {}
     }
 
     // ── Mode buttons ──
@@ -719,8 +842,23 @@ public class MainActivity extends AppCompatActivity {
         rulerUpdating = false;
         rotationRuler.setRulerEnabled(hasImage);
 
-        txtRotDegrees.setVisibility(View.VISIBLE);
-        txtRotDegrees.setText(formatDeg(deg));
+        // Clear the readout when there's nothing to rotate so the info bar
+        // doesn't display a stale "0°" against no image.
+        txtRotDegrees.setText(hasImage ? formatDeg(deg) : "");
+    }
+
+    /**
+     * Gate user-initiated entry points (Save, Open) on the busy flag so rapid
+     * taps during an in-flight save/load can't stack up showing "Busy" toasts
+     * interleaved with a success toast from a previous invocation. Must be
+     * called on the UI thread.
+     */
+    private void setBusyUi(boolean isBusy) {
+        View btnSave = findViewById(R.id.btnSave);
+        View btnOpen = findViewById(R.id.btnOpen);
+        boolean hasImage = state.getSourceImage() != null;
+        if (btnSave != null) btnSave.setEnabled(!isBusy && hasImage);
+        if (btnOpen != null) btnOpen.setEnabled(!isBusy);
     }
 
     private static String formatDeg(float deg) {
@@ -876,12 +1014,16 @@ public class MainActivity extends AppCompatActivity {
     // ── UI updates ──
 
     private void updateCropInfo() {
+        boolean hasImage = state.getSourceImage() != null;
         if (state.hasCenter()) {
             txtSidebarCropSize.setText(state.getCropW() + "\u00D7" + state.getCropH());
-        } else if (state.getSourceImage() != null) {
+        } else if (hasImage) {
             txtSidebarCropSize.setText("Full");
         } else {
             txtSidebarCropSize.setText("");
+        }
+        if (txtTransformArrow != null) {
+            txtTransformArrow.setVisibility(hasImage ? View.VISIBLE : View.GONE);
         }
     }
 
@@ -904,7 +1046,11 @@ public class MainActivity extends AppCompatActivity {
             applyLockMode();
         }
 
-        // Point controls row is always visible
+        // Undo/Redo/Clear only visible in Select mode (they act on selection points)
+        int pointCtrlVis = isSelect ? View.VISIBLE : View.GONE;
+        findViewById(R.id.btnUndo).setVisibility(pointCtrlVis);
+        findViewById(R.id.btnRedo).setVisibility(pointCtrlVis);
+        findViewById(R.id.btnClearPoints).setVisibility(pointCtrlVis);
     }
 
     private void updateZoomBadge() {
