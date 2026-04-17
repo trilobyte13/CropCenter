@@ -33,9 +33,7 @@ import com.cropcenter.model.CenterMode;
 import com.cropcenter.model.CropState;
 import com.cropcenter.model.EditorMode;
 import com.cropcenter.util.BitmapUtils;
-import com.cropcenter.view.ColorPickerDialog;
 import com.cropcenter.view.CropEditorView;
-import com.cropcenter.view.GridSettingsDialog;
 import com.cropcenter.view.SaveDialog;
 import com.google.android.material.button.MaterialButton;
 
@@ -61,7 +59,7 @@ public class MainActivity extends AppCompatActivity {
     private ActivityResultLauncher<String> saveAsLauncher;
 
     private static final String[] AR_LABELS = {
-        "4:5", "Free", "16:9", "3:2", "4:3", "5:4", "1:1", "3:4", "2:3", "9:16", "Custom"
+        "4:5", "Full", "16:9", "3:2", "4:3", "5:4", "1:1", "3:4", "2:3", "9:16", "Custom"
     };
     private static final AspectRatio[] AR_VALUES = {
         AspectRatio.R4_5, AspectRatio.FREE, AspectRatio.R16_9, AspectRatio.R3_2,
@@ -107,7 +105,8 @@ public class MainActivity extends AppCompatActivity {
                 }
                 updateCropInfo();
                 updateZoomBadge();
-                updatePointControlsVisibility();
+                updatePointButtonStates();
+                updateAutoRotateVisibility();
                 syncRotationUI();
                 editorView.invalidate();
             } finally {
@@ -148,9 +147,19 @@ public class MainActivity extends AppCompatActivity {
         findViewById(R.id.btnOpen).setOnClickListener(v ->
                 openLauncher.launch(new String[]{"image/jpeg", "image/png"}));
         findViewById(R.id.btnSave).setOnClickListener(v -> showSaveDialog());
+        findViewById(R.id.btnSettings).setOnClickListener(v ->
+                com.cropcenter.view.SettingsDialog.show(this, state.getGridConfig(),
+                        () -> editorView.invalidate()));
+
+        // Grid toggle (display-only — full grid settings in the Settings dialog)
+        CheckBox chkGrid = findViewById(R.id.chkGridMain);
+        chkGrid.setChecked(state.getGridConfig().enabled);
+        chkGrid.setOnCheckedChangeListener((b, c) -> {
+            state.getGridConfig().enabled = c;
+            editorView.invalidate();
+        });
+
         setupARSpinner();
-        setupGridToggleMain();
-        setupPixelGridMain();
 
         // Mode bar
         setupModeButtons();
@@ -158,6 +167,7 @@ public class MainActivity extends AppCompatActivity {
         setupUndoRedo();
         setupClearPointsButton();
         setupRotation();
+        setupAutoRotate();
 
         updateModeHighlight();
         updateLockHighlight();
@@ -165,11 +175,31 @@ public class MainActivity extends AppCompatActivity {
         handleIncomingIntent(getIntent());
     }
 
+    private volatile boolean isDestroyed = false;
+
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        isDestroyed = true;
         Bitmap bmp = state.getSourceImage();
         if (bmp != null && !bmp.isRecycled()) bmp.recycle();
+    }
+
+    /** Show the full-screen progress overlay with the given message. */
+    private void showProgress(String message) {
+        runOnUiThread(() -> {
+            if (isDestroyed) return;
+            View overlay = findViewById(R.id.progressOverlay);
+            ((TextView) findViewById(R.id.progressText)).setText(message);
+            overlay.setVisibility(View.VISIBLE);
+        });
+    }
+
+    private void hideProgress() {
+        runOnUiThread(() -> {
+            if (isDestroyed) return;
+            findViewById(R.id.progressOverlay).setVisibility(View.GONE);
+        });
     }
 
     @Override
@@ -215,12 +245,49 @@ public class MainActivity extends AppCompatActivity {
 
     private void setupARSpinner() {
         Spinner spinner = findViewById(R.id.spinnerAR);
-        ArrayAdapter<String> adapter = new ArrayAdapter<>(this,
-                android.R.layout.simple_spinner_item, AR_LABELS);
-        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        float density = getResources().getDisplayMetrics().density;
+        int padH = (int)(6 * density);
+        int padV = (int)(4 * density);
+
+        // Custom adapter with compact item views (tight padding, 12sp text)
+        ArrayAdapter<String> adapter = new ArrayAdapter<String>(this,
+                android.R.layout.simple_spinner_item, AR_LABELS) {
+            @Override
+            public View getView(int position, View convertView, android.view.ViewGroup parent) {
+                TextView tv = (TextView) super.getView(position, convertView, parent);
+                tv.setTextSize(12);
+                tv.setTextColor(0xFFCDD6F4);
+                tv.setPadding(padH, padV, padH, padV);
+                return tv;
+            }
+            @Override
+            public View getDropDownView(int position, View convertView, android.view.ViewGroup parent) {
+                TextView tv = (TextView) super.getDropDownView(position, convertView, parent);
+                tv.setTextSize(13);
+                tv.setTextColor(0xFFCDD6F4);
+                tv.setPadding(padH*2, padV*2, padH*2, padV*2);
+                return tv;
+            }
+        };
         spinner.setAdapter(adapter);
-        // Default to 4:5 (index 0)
         spinner.setSelection(0);
+
+        // Size the spinner to exactly fit the widest label + arrow.
+        android.graphics.Paint tp = new android.graphics.Paint();
+        tp.setTextSize(12 * getResources().getDisplayMetrics().scaledDensity);
+        float maxTextPx = 0;
+        for (String label : AR_LABELS) {
+            float w = tp.measureText(label);
+            if (w > maxTextPx) maxTextPx = w;
+        }
+        // Width = text + horizontal padding (both sides) + dropdown arrow (~24dp)
+        int totalPx = (int) maxTextPx + padH * 2 + (int)(24 * density);
+        spinner.setMinimumWidth(totalPx);
+        android.view.ViewGroup.LayoutParams lp = spinner.getLayoutParams();
+        if (lp != null) {
+            lp.width = totalPx;
+            spinner.setLayoutParams(lp); // triggers re-layout
+        }
         spinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override
             public void onItemSelected(AdapterView<?> parent, View view, int pos, long id) {
@@ -278,34 +345,6 @@ public class MainActivity extends AppCompatActivity {
         });
         builder.setNegativeButton("Cancel", null);
         builder.show();
-    }
-
-    private void setupGridToggleMain() {
-        CheckBox chk = findViewById(R.id.chkGridMain);
-        chk.setOnCheckedChangeListener((btn, isChecked) -> {
-            state.getGridConfig().enabled = isChecked;
-            editorView.invalidate();
-        });
-        // Long-press to open grid settings
-        chk.setOnLongClickListener(v -> {
-            GridSettingsDialog.show(this, state.getGridConfig(), () -> editorView.invalidate());
-            return true;
-        });
-    }
-
-    private void setupPixelGridMain() {
-        CheckBox chk = findViewById(R.id.chkPixelGridMain);
-        chk.setOnCheckedChangeListener((btn, isChecked) -> {
-            state.getGridConfig().showPixelGrid = isChecked;
-            editorView.invalidate();
-        });
-        chk.setOnLongClickListener(v -> {
-            ColorPickerDialog.show(this, state.getGridConfig().pixelGridColor, color -> {
-                state.getGridConfig().pixelGridColor = color;
-                editorView.invalidate();
-            });
-            return true;
-        });
     }
 
     // ── Image loading ──
@@ -417,7 +456,7 @@ public class MainActivity extends AppCompatActivity {
                 }
 
                 final int w = bmp.getWidth(), h = bmp.getHeight();
-                final String info = w + "x" + h + "  " + metaInfo;
+                final String info = w + "\u00D7" + h + "  " + metaInfo;
                 final boolean hasHdr = state.getGainMap() != null;
 
                 // Set default export filename: originalname_cropped
@@ -504,10 +543,8 @@ public class MainActivity extends AppCompatActivity {
             applyLockMode();
             updateModeHighlight();
             updateLockHighlight();
-            // Only recompute crop when entering Select mode — Move mode preserves
-            // the current crop size and only changes the panning direction.
-            if (state.getEditorMode() == EditorMode.SELECT_FEATURE
-                    && !((CheckBox) findViewById(R.id.chkFreeze)).isChecked()) {
+            // Only recompute crop when entering Select mode (and center not locked)
+            if (state.getEditorMode() == EditorMode.SELECT_FEATURE && !isCenterLocked() && !isPanning()) {
                 recomputeForLockChange();
             }
             editorView.invalidate();
@@ -530,11 +567,14 @@ public class MainActivity extends AppCompatActivity {
             setCurrentPref(pref);
             applyLockMode();
             updateLockHighlight();
-            // In Select mode: recompute crop to reflect new lock axis.
-            // In Move mode: only the panning direction changes — crop size is preserved.
-            if (state.getEditorMode() == EditorMode.SELECT_FEATURE
-                    && !((CheckBox) findViewById(R.id.chkFreeze)).isChecked()) {
+
+            if (state.getEditorMode() == EditorMode.SELECT_FEATURE && !isCenterLocked() && !isPanning()) {
+                // Select mode: recompute crop to reflect new lock axis
                 recomputeForLockChange();
+            } else if (state.getEditorMode() == EditorMode.MOVE && state.hasCenter()
+                    && !state.getSelectionPoints().isEmpty() && !isPanning()) {
+                // Move mode: recenter crop on selection for the new axis direction
+                recenterOnSelection();
             }
             editorView.invalidate();
         };
@@ -542,10 +582,39 @@ public class MainActivity extends AppCompatActivity {
         findViewById(R.id.btnLockH).setOnClickListener(lockClick);
         findViewById(R.id.btnLockV).setOnClickListener(lockClick);
 
-        ((CheckBox) findViewById(R.id.chkFreeze)).setOnCheckedChangeListener((btn, isChecked) -> {
+        // Pan checkbox: crop frozen, drag pans viewport
+        ((CheckBox) findViewById(R.id.chkPan)).setOnCheckedChangeListener((btn, isChecked) -> {
             applyLockMode();
-            if (!isChecked) recomputeForLockChange(); // unfreezing restores lock pref → recompute
+            updateLockHighlight();
+            // Recompute only when turning Pan off in Select mode
+            if (!isChecked
+                    && state.getEditorMode() == EditorMode.SELECT_FEATURE
+                    && !state.isCenterLocked()) {
+                recomputeForLockChange();
+            }
+            editorView.invalidate();
         });
+
+        // Lock checkbox: locks current auto-computed center from selection points.
+        // When unchecked in Select mode, selection recomputes automatically.
+        // In Move mode, unchecking does NOT recompute (user's current position is preserved).
+        ((CheckBox) findViewById(R.id.chkLockCenter)).setOnCheckedChangeListener((btn, isChecked) -> {
+            state.setCenterLocked(isChecked);
+            if (!isChecked
+                    && state.getEditorMode() == EditorMode.SELECT_FEATURE
+                    && !state.getSelectionPoints().isEmpty()) {
+                recomputeForLockChange();
+            }
+            editorView.invalidate();
+        });
+    }
+
+    private boolean isPanning() {
+        return ((CheckBox) findViewById(R.id.chkPan)).isChecked();
+    }
+
+    private boolean isCenterLocked() {
+        return state.isCenterLocked();
     }
 
     private CenterMode getCurrentPref() {
@@ -558,8 +627,29 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void applyLockMode() {
-        boolean frozen = ((CheckBox) findViewById(R.id.chkFreeze)).isChecked();
-        state.setCenterMode(frozen ? CenterMode.LOCKED : getCurrentPref());
+        boolean panning = isPanning();
+        state.setCenterMode(panning ? CenterMode.LOCKED : getCurrentPref());
+    }
+
+    /** Recenter the crop on selection points without resizing (for Move mode axis switch). */
+    private void recenterOnSelection() {
+        var points = state.getSelectionPoints();
+        float minX = Float.MAX_VALUE, minY = Float.MAX_VALUE;
+        float maxX = -Float.MAX_VALUE, maxY = -Float.MAX_VALUE;
+        int active = 0;
+        for (var p : points) {
+            if (!p.active) continue;
+            active++;
+            minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
+            maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y);
+        }
+        if (active == 0) return;
+        float midX = (active == 1) ? minX : (minX + maxX) / 2f;
+        float midY = (active == 1) ? minY : (minY + maxY) / 2f;
+
+        // Move the center to the selection midpoint without changing crop size
+        state.setCropSizeDirty(false);
+        state.setCenter(midX, midY);
     }
 
     private void updateLockHighlight() {
@@ -629,20 +719,16 @@ public class MainActivity extends AppCompatActivity {
         rulerUpdating = false;
         rotationRuler.setRulerEnabled(hasImage);
 
-        if (deg == 0f) {
-            txtRotDegrees.setVisibility(View.GONE);
-        } else {
-            txtRotDegrees.setVisibility(View.VISIBLE);
-            txtRotDegrees.setText(formatDeg(deg));
-        }
+        txtRotDegrees.setVisibility(View.VISIBLE);
+        txtRotDegrees.setText(formatDeg(deg));
     }
 
     private static String formatDeg(float deg) {
-        if (deg == (int) deg) return "Rot " + (int) deg + "\u00B0";
+        if (deg == (int) deg) return (int) deg + "\u00B0";
         // Show full precision: 2 decimals if sub-0.1, 1 decimal otherwise
         if (Math.abs(deg * 10 - Math.round(deg * 10)) > 0.001f)
-            return String.format("Rot %.2f\u00B0", deg);
-        return String.format("Rot %.1f\u00B0", deg);
+            return String.format("%.2f\u00B0", deg);
+        return String.format("%.1f\u00B0", deg);
     }
 
     /** Dialog for entering an exact rotation value. */
@@ -678,9 +764,73 @@ public class MainActivity extends AppCompatActivity {
                 .show();
     }
 
-    private void updatePointControlsVisibility() {
-        // Row always visible, but update button enabled states
-        updatePointButtonStates();
+    private void setupAutoRotate() {
+        TextView btn = findViewById(R.id.btnAutoRotate);
+        btn.setOnClickListener(v -> {
+            if (state.getSourceImage() == null) return;
+
+            if (editorView.isHorizonMode()) {
+                // Cancel horizon mode
+                editorView.setHorizonMode(false, null);
+                btn.setText("Auto");
+                btn.setTextColor(getResources().getColor(R.color.subtext0, null));
+                return;
+            }
+
+            // Try XMP metadata first (instant)
+            float metaAngle = com.cropcenter.util.HorizonDetector.detectFromMetadata(state.getJpegMeta());
+            if (!Float.isNaN(metaAngle)) {
+                state.setRotationDegrees(metaAngle);
+                syncRotationUI();
+                Toast.makeText(this, "From metadata: " + formatDeg(metaAngle), Toast.LENGTH_SHORT).show();
+                return;
+            }
+
+            // Enter horizon paint mode — user paints over the horizon area
+            btn.setText("Cancel");
+            btn.setTextColor(getResources().getColor(R.color.red, null));
+            editorView.setHorizonMode(true, () -> {
+                btn.setText("Auto");
+                btn.setTextColor(getResources().getColor(R.color.subtext0, null));
+
+                var points = editorView.getHorizonPoints();
+                float brushR = editorView.getHorizonBrushRadius();
+                Bitmap src = state.getSourceImage();
+
+                if (points.size() < 2 || src == null) {
+                    Toast.makeText(this, "Paint was too short", Toast.LENGTH_SHORT).show();
+                    return;
+                }
+
+                // Run detection on background thread using only the painted region
+                showProgress("Detecting horizon\u2026");
+                new Thread(() -> {
+                    float angle = com.cropcenter.util.HorizonDetector
+                            .detectFromPaintedRegion(src, points, brushR);
+                    runOnUiThread(() -> {
+                        if (isDestroyed) return;
+                        hideProgress();
+                        if (Float.isNaN(angle)) {
+                            Toast.makeText(this, "No line detected in painted area",
+                                    Toast.LENGTH_SHORT).show();
+                        } else {
+                            // Replace — detection returns the absolute rotation
+                            // needed for the painted line to become horizontal
+                            float newRot = Math.round(angle * 100f) / 100f;
+                            state.setRotationDegrees(newRot);
+                            syncRotationUI();
+                            Toast.makeText(this, formatDeg(newRot),
+                                    Toast.LENGTH_SHORT).show();
+                        }
+                    });
+                }).start();
+            });
+        });
+    }
+
+    private void updateAutoRotateVisibility() {
+        findViewById(R.id.btnAutoRotate).setVisibility(
+                state.getSourceImage() != null ? View.VISIBLE : View.GONE);
     }
 
     private void updatePointButtonStates() {
@@ -727,9 +877,9 @@ public class MainActivity extends AppCompatActivity {
 
     private void updateCropInfo() {
         if (state.hasCenter()) {
-            txtSidebarCropSize.setText("Crop: " + state.getCropW() + " x " + state.getCropH());
+            txtSidebarCropSize.setText(state.getCropW() + "\u00D7" + state.getCropH());
         } else if (state.getSourceImage() != null) {
-            txtSidebarCropSize.setText("Full image");
+            txtSidebarCropSize.setText("Full");
         } else {
             txtSidebarCropSize.setText("");
         }
@@ -761,7 +911,9 @@ public class MainActivity extends AppCompatActivity {
         float zoom = editorView.getZoom();
         if (zoom > 1.01f) {
             txtZoomBadge.setVisibility(View.VISIBLE);
-            txtZoomBadge.setText(Math.round(zoom * 100) + "%");
+            // Compact format: "2x", "25.6x" — avoids huge "25600%"
+            if (zoom < 10f) txtZoomBadge.setText(String.format("%.1fx", zoom));
+            else txtZoomBadge.setText(Math.round(zoom) + "x");
         } else {
             txtZoomBadge.setVisibility(View.GONE);
         }

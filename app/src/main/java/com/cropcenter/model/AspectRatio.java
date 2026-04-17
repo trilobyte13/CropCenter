@@ -1,7 +1,7 @@
 package com.cropcenter.model;
 
 public class AspectRatio {
-    public static final AspectRatio FREE = new AspectRatio("Free", 0, 0);
+    public static final AspectRatio FREE = new AspectRatio("Full", 0, 0);
     public static final AspectRatio R16_9 = new AspectRatio("16:9", 16, 9);
     public static final AspectRatio R3_2 = new AspectRatio("3:2", 3, 2);
     public static final AspectRatio R4_3 = new AspectRatio("4:3", 4, 3);

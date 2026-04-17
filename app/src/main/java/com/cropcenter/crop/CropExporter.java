@@ -57,9 +57,13 @@ public final class CropExporter {
             sy = 0;
         }
 
-        // Create output bitmap with Display P3 if ICC profile present
+        // Create output bitmap. Use Display P3 ONLY for JPEG when the source has an ICC
+        // profile (needed for Ultra HDR). PNG always uses sRGB — color-managed canvases
+        // can apply subtle filtering during rasterization, causing grid lines to render
+        // at inconsistent widths or drop out.
+        boolean isJpeg = "jpeg".equals(state.getExportConfig().format);
         Bitmap outBmp;
-        if (state.getIccProfile() != null) {
+        if (isJpeg && state.getIccProfile() != null) {
             outBmp = Bitmap.createBitmap(cropW, cropH, Bitmap.Config.ARGB_8888, true,
                     ColorSpace.get(ColorSpace.Named.DISPLAY_P3));
         } else {
@@ -75,7 +79,7 @@ public final class CropExporter {
         // Optional grid overlay bake-in (independent of whether grid is visible on screen)
         GridConfig grid = state.getGridConfig();
         if (state.getExportConfig().includeGrid) {
-            drawGrid(canvas, cropW, cropH, grid);
+            drawGridPixels(outBmp, cropW, cropH, grid);
         }
 
         return switch (state.getExportConfig().format) {
@@ -320,6 +324,8 @@ public final class CropExporter {
     }
 
     private static ExportResult exportPng(CropState state, Bitmap bmp, int cropW, int cropH) {
+        // bmp is guaranteed sRGB for PNG exports (see export()); grid was rasterized
+        // on it with exact pixel-width rectangles. Straight compress → PNG bytes.
         ByteArrayOutputStream bos = new ByteArrayOutputStream();
         bmp.compress(Bitmap.CompressFormat.PNG, 100, bos);
         bmp.recycle();
@@ -392,20 +398,50 @@ public final class CropExporter {
         return result;
     }
 
-    private static void drawGrid(Canvas canvas, int w, int h, GridConfig grid) {
-        Paint gp = new Paint();
-        gp.setAntiAlias(false);
-        gp.setColor(grid.color);
-        gp.setStrokeWidth(Math.round(grid.lineWidth)); // integer width for crisp lines
-        gp.setStyle(Paint.Style.STROKE);
+    /**
+     * Draw grid lines by directly setting pixels on the bitmap.
+     * Bypasses Canvas rasterization entirely — guaranteed to produce exact line widths
+     * regardless of bitmap color space or Canvas rendering quirks.
+     */
+    private static void drawGridPixels(Bitmap bmp, int w, int h, GridConfig grid) {
+        int lineW = Math.max(1, Math.round(grid.lineWidth));
+        int halfW = lineW / 2;
+        int color = grid.color;
 
+        // Vertical lines: write a (lineW × h) column of pixels for each
+        int[] vCol = new int[lineW * h];
+        java.util.Arrays.fill(vCol, color);
         for (int i = 1; i < grid.columns; i++) {
-            int x = Math.round(w * i / (float) grid.columns);
-            canvas.drawLine(x, 0, x, h, gp);
+            int x = Math.round((float)(w * i) / grid.columns);
+            int left = Math.max(0, x - halfW);
+            int right = Math.min(w, left + lineW);
+            int actualW = right - left;
+            if (actualW <= 0) continue;
+            if (actualW == lineW) {
+                bmp.setPixels(vCol, 0, lineW, left, 0, lineW, h);
+            } else {
+                int[] partial = new int[actualW * h];
+                java.util.Arrays.fill(partial, color);
+                bmp.setPixels(partial, 0, actualW, left, 0, actualW, h);
+            }
         }
+
+        // Horizontal lines: write a (w × lineW) row band for each
+        int[] hBand = new int[w * lineW];
+        java.util.Arrays.fill(hBand, color);
         for (int i = 1; i < grid.rows; i++) {
-            int y = Math.round(h * i / (float) grid.rows);
-            canvas.drawLine(0, y, w, y, gp);
+            int y = Math.round((float)(h * i) / grid.rows);
+            int top = Math.max(0, y - halfW);
+            int bot = Math.min(h, top + lineW);
+            int actualH = bot - top;
+            if (actualH <= 0) continue;
+            if (actualH == lineW) {
+                bmp.setPixels(hBand, 0, w, 0, top, w, lineW);
+            } else {
+                int[] partial = new int[w * actualH];
+                java.util.Arrays.fill(partial, color);
+                bmp.setPixels(partial, 0, w, 0, top, w, actualH);
+            }
         }
     }
 }

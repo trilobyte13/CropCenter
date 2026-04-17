@@ -45,10 +45,14 @@ public class RotationRulerView extends View {
     private final OverScroller scroller;
     private VelocityTracker velocityTracker;
     private float lastTouchX;
+    private float downX; // where finger touched down
+    private float totalDragDx; // cumulative drag distance since touchdown
     private boolean isDragging;
+    private static final float TAP_SLOP = 8f; // pixels — tap vs drag threshold
 
     private final ScaleGestureDetector scaleDetector;
     private boolean isScaling;
+    private boolean scalingOccurred; // true if any scaling happened during current gesture
 
     private OnRotationChangedListener listener;
 
@@ -85,6 +89,7 @@ public class RotationRulerView extends View {
             @Override
             public boolean onScaleBegin(ScaleGestureDetector det) {
                 isScaling = true;
+                scalingOccurred = true;
                 scroller.forceFinished(true);
                 return true;
             }
@@ -233,7 +238,9 @@ public class RotationRulerView extends View {
         switch (event.getActionMasked()) {
             case MotionEvent.ACTION_DOWN -> {
                 scroller.forceFinished(true);
-                lastTouchX = event.getX();
+                downX = lastTouchX = event.getX();
+                totalDragDx = 0;
+                scalingOccurred = false;
                 isDragging = true;
                 getParent().requestDisallowInterceptTouchEvent(true);
             }
@@ -241,6 +248,7 @@ public class RotationRulerView extends View {
                 if (!isScaling && event.getPointerCount() == 1) {
                     float dx = event.getX() - lastTouchX;
                     lastTouchX = event.getX();
+                    totalDragDx += Math.abs(dx);
                     float newDeg = Math.max(MIN_DEG, Math.min(MAX_DEG,
                             currentDegrees - dx / pixelsPerDegree));
                     if (newDeg != currentDegrees) {
@@ -254,6 +262,18 @@ public class RotationRulerView extends View {
             case MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                 isDragging = false;
                 if (!isScaling) {
+                    // Tap vs drag: total movement <= TAP_SLOP AND no scaling happened
+                    if (!scalingOccurred && totalDragDx <= TAP_SLOP
+                            && event.getActionMasked() == MotionEvent.ACTION_UP) {
+                        float centerX = getWidth() / 2f;
+                        float tappedDeg = currentDegrees + (downX - centerX) / pixelsPerDegree;
+                        tappedDeg = Math.max(MIN_DEG, Math.min(MAX_DEG, tappedDeg));
+                        currentDegrees = tappedDeg;
+                        snapAndNotify();
+                        velocityTracker.recycle();
+                        velocityTracker = null;
+                        return true;
+                    }
                     velocityTracker.computeCurrentVelocity(1000);
                     float velX = velocityTracker.getXVelocity();
                     if (Math.abs(velX) > 200) {

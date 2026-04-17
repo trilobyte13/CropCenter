@@ -163,6 +163,7 @@ public final class CropEngine {
      * V:     center vertically on points, horizontally on image center (max width)
      */
     public static void autoComputeFromPoints(CropState state) {
+        if (state.isCenterLocked()) return; // center locked — skip auto-recompute
         List<SelectionPoint> points = state.getSelectionPoints();
         float minX = Float.MAX_VALUE, minY = Float.MAX_VALUE;
         float maxX = -Float.MAX_VALUE, maxY = -Float.MAX_VALUE;

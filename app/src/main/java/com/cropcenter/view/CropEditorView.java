@@ -39,7 +39,15 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
     private final Paint polygonPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint infoPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint pixelGridPaint = new Paint();
+    private final Paint horizonPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final GridRenderer gridRenderer = new GridRenderer();
+
+    // Horizon paint mode
+    private boolean horizonMode;
+    private boolean horizonDrawing;
+    private final java.util.List<float[]> horizonPoints = new java.util.ArrayList<>(); // image coords
+    private final android.graphics.Path horizonScreenPath = new android.graphics.Path();
+    private Runnable onHorizonDrawn;
 
     // State
     private CropState state;
@@ -77,14 +85,15 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
         cropBorderPaint.setStyle(Paint.Style.STROKE);
         crosshairPaint.setColor(0xCCCBA6F7);
         crosshairPaint.setStrokeWidth(1f);
-        pointPaint.setColor(0xFFF9E2AF); // Catppuccin yellow (active)
+        // Point/polygon/horizon colors are set dynamically from GridConfig.selectionColor
         pointPaint.setStyle(Paint.Style.FILL);
-        inactivePointPaint.setColor(0x66F9E2AF); // transparent yellow (inactive)
         inactivePointPaint.setStyle(Paint.Style.FILL);
-        polygonPaint.setColor(0x22F9E2AF); // very transparent yellow fill
         polygonPaint.setStyle(Paint.Style.FILL);
-        infoPaint.setColor(0xFFCDD6F4); // text color
+        infoPaint.setColor(0xFFCDD6F4);
         infoPaint.setTextSize(24f);
+
+        horizonPaint.setStrokeWidth(3f);
+        horizonPaint.setStyle(Paint.Style.STROKE);
     }
 
     public void setState(CropState state) {
@@ -94,6 +103,26 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
     }
 
     public float getZoom() { return zoom; }
+
+    /** Enter horizon paint mode. User paints over the horizon region. */
+    public void setHorizonMode(boolean on, Runnable onDrawn) {
+        this.horizonMode = on;
+        this.horizonDrawing = false;
+        this.onHorizonDrawn = onDrawn;
+        horizonPoints.clear();
+        horizonScreenPath.reset();
+        invalidate();
+    }
+
+    public boolean isHorizonMode() { return horizonMode; }
+
+    /** Get the painted region points in image coordinates. */
+    public java.util.List<float[]> getHorizonPoints() { return horizonPoints; }
+
+    /** Brush radius in image pixels for the painted region. */
+    public float getHorizonBrushRadius() {
+        return 30f / (baseScale * zoom); // 30 screen pixels → image pixels
+    }
     public void setOnZoomChangedListener(Runnable r) { this.onZoomChanged = r; }
     public void setOnPointsChangedListener(Runnable r) { this.onPointsChanged = r; }
     private void notifyPointsChanged() { if (onPointsChanged != null) onPointsChanged.run(); }
@@ -380,11 +409,13 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
         if (!state.getSelectionPoints().isEmpty()) {
             java.util.List<SelectionPoint> points = state.getSelectionPoints();
 
-            // Use grid color for points and polygon
-            int gridColor = state.getGridConfig().color;
-            pointPaint.setColor(gridColor);
-            inactivePointPaint.setColor(withAlpha(gridColor, 0x66));
-            polygonPaint.setColor(withAlpha(gridColor, 0x22));
+            // Use the shared selection color (with its exact alpha) for points and polygon.
+            int selColor = state.getGridConfig().selectionColor;
+            pointPaint.setColor(selColor);
+            // Inactive points dimmed to half the user's chosen alpha for visual distinction
+            int userAlpha = (selColor >>> 24) & 0xFF;
+            inactivePointPaint.setColor(withAlpha(selColor, userAlpha / 2));
+            polygonPaint.setColor(selColor);
 
             // Draw polygon fill between active points
             android.graphics.Path path = new android.graphics.Path();
@@ -436,12 +467,63 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
                 }
             }
         }
+
+        // Horizon paint mode: show painted region and hint
+        if (horizonMode || horizonDrawing) {
+            int selColor = state.getGridConfig().selectionColor;
+            if (horizonDrawing && !horizonScreenPath.isEmpty()) {
+                // Paint the region using the user's exact selection color — no blending.
+                horizonPaint.setStyle(Paint.Style.STROKE);
+                horizonPaint.setStrokeWidth(60f);
+                horizonPaint.setColor(selColor);
+                horizonPaint.setStrokeCap(Paint.Cap.ROUND);
+                horizonPaint.setStrokeJoin(Paint.Join.ROUND);
+                canvas.drawPath(horizonScreenPath, horizonPaint);
+                // Reset defaults
+                horizonPaint.setStrokeWidth(3f);
+                horizonPaint.setStrokeCap(Paint.Cap.BUTT);
+            }
+            if (horizonMode && !horizonDrawing) {
+                // Waiting for paint — show hint in the exact selection color
+                infoPaint.setTextAlign(Paint.Align.CENTER);
+                infoPaint.setTextSize(14f * density);
+                infoPaint.setColor(selColor);
+                canvas.drawText("Paint over the horizon",
+                        getWidth() / 2f, getHeight() / 2f, infoPaint);
+            }
+        }
     }
 
     // ── Touch handling ──
 
     @Override
     public boolean onTouchEvent(MotionEvent event) {
+        if (horizonMode) {
+            float sx = event.getX(), sy = event.getY();
+            switch (event.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN -> {
+                    horizonPoints.clear();
+                    horizonScreenPath.reset();
+                    horizonScreenPath.moveTo(sx, sy);
+                    horizonPoints.add(new float[]{screenToImageX(sx), screenToImageY(sy)});
+                    horizonDrawing = true;
+                    getParent().requestDisallowInterceptTouchEvent(true);
+                }
+                case MotionEvent.ACTION_MOVE -> {
+                    horizonScreenPath.lineTo(sx, sy);
+                    horizonPoints.add(new float[]{screenToImageX(sx), screenToImageY(sy)});
+                    invalidate();
+                }
+                case MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    horizonPoints.add(new float[]{screenToImageX(sx), screenToImageY(sy)});
+                    horizonDrawing = false;
+                    horizonMode = false;
+                    invalidate();
+                    if (onHorizonDrawn != null) onHorizonDrawn.run();
+                }
+            }
+            return true;
+        }
         return gestureHandler.onTouchEvent(event);
     }
 

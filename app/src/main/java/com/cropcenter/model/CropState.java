@@ -36,6 +36,7 @@ public class CropState {
     private long mediaStoreId = -1;  // MediaStore _ID for Samsung Revert
     private CenterMode centerMode = CenterMode.BOTH;
     private EditorMode editorMode = EditorMode.MOVE;
+    private boolean centerLocked = false; // when true, auto-recompute from points is suppressed
     private final GridConfig gridConfig = new GridConfig();
     private final ExportConfig exportConfig = new ExportConfig();
 
@@ -211,6 +212,9 @@ public class CropState {
         notifyChanged();
     }
 
+    public boolean isCenterLocked() { return centerLocked; }
+    public void setCenterLocked(boolean locked) { this.centerLocked = locked; }
+
     public GridConfig getGridConfig() { return gridConfig; }
     public ExportConfig getExportConfig() { return exportConfig; }
 
@@ -258,7 +262,8 @@ public class CropState {
         hasCenter = false;
         cropSizeDirty = true;
         rotationDegrees = 0f;
-        aspectRatio = AspectRatio.R4_5;
+        centerLocked = false;
+        // aspectRatio preserved — it's a user preference, not image data
         originalFilename = null;
         originalFilePath = null;
         mediaStoreId = -1;
