@@ -13,10 +13,6 @@ public class JpegSegment {
         this.data = data;
     }
 
-    public int totalLength() {
-        return data.length;
-    }
-
     /** Check if this is an EXIF APP1 segment (starts with "Exif\0\0"). */
     public boolean isExif() {
         return marker == 0xE1 && data.length >= 10

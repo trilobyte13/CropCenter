@@ -3,6 +3,7 @@ package com.cropcenter.model;
 public class GridConfig {
     public boolean enabled = true;
     public boolean showPixelGrid = true;
+    public boolean includeInExport = false; // bake the grid into saved output
     public int columns = 4;
     public int rows = 4;
     public int color = 0xFFFFFFFF; // white — grid line color

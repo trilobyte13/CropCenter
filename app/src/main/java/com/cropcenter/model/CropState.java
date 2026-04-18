@@ -46,7 +46,6 @@ public class CropState {
     // ── Extracted metadata ──
     private List<JpegSegment> jpegMeta = new ArrayList<>();
     private byte[] gainMap;
-    private byte[] iccProfile;
     private byte[] seftTrailer; // Samsung SEFT trailer (appended after gain map)
 
     // ── Listener ──
@@ -175,7 +174,6 @@ public class CropState {
     }
 
     public boolean hasCenter() { return hasCenter; }
-    public void clearCenter() { hasCenter = false; notifyChanged(); }
 
     // ── Settings ──
 
@@ -230,9 +228,6 @@ public class CropState {
     public byte[] getGainMap() { return gainMap; }
     public void setGainMap(byte[] gm) { this.gainMap = gm; }
 
-    public byte[] getIccProfile() { return iccProfile; }
-    public void setIccProfile(byte[] icc) { this.iccProfile = icc; }
-
     public byte[] getSeftTrailer() { return seftTrailer; }
     public void setSeftTrailer(byte[] seft) { this.seftTrailer = seft; }
 
@@ -270,7 +265,6 @@ public class CropState {
         selectionPoints.clear();
         jpegMeta.clear();
         gainMap = null;
-        iccProfile = null;
         seftTrailer = null;
     }
 }

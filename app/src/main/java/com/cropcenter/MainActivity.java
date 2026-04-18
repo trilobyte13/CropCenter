@@ -32,6 +32,8 @@ import com.cropcenter.model.CenterMode;
 import com.cropcenter.model.CropState;
 import com.cropcenter.model.EditorMode;
 import com.cropcenter.util.BitmapUtils;
+import com.cropcenter.util.TextFormat;
+import com.cropcenter.util.UltraHdrCompat;
 import com.cropcenter.view.CropEditorView;
 import com.cropcenter.view.SaveDialog;
 import com.google.android.material.button.MaterialButton;
@@ -54,6 +56,20 @@ public class MainActivity extends AppCompatActivity {
 
     private final AtomicBoolean busy = new AtomicBoolean(false);
     private Uri sourceUri; // URI of the opened file, for overwrite-in-place
+    // Filename we asked SAF to create. When SAF silently auto-renames to avoid
+    // a collision (e.g. "vacation.jpg" → "vacation (1).jpg"), the returned URI's
+    // display name won't match this — that's how we detect the rename.
+    private String pendingSaveName;
+    // Set when we launch the SAF picker and cleared when its result arrives
+    // (URI or cancel) or the Replace confirmation finishes. Gates rapid taps
+    // between launch and result, and also between the result and the Replace
+    // dialog response — busy.get() doesn't flip until exportTo actually runs,
+    // so it isn't sufficient on its own.
+    private boolean savePending;
+    // One-shot prefix consumed by the next successful save's toast. Used when
+    // SAF auto-renamed a collision and we want the user to see both the rename
+    // notice and the save result as a single toast instead of two.
+    private String pendingSaveToastPrefix;
     private ActivityResultLauncher<String[]> openLauncher;
     private ActivityResultLauncher<String> saveAsLauncher;
 
@@ -92,11 +108,10 @@ public class MainActivity extends AppCompatActivity {
         editorView.setOnPointsChangedListener(this::updatePointButtonStates);
         final boolean[] inListener = {false};
         state.setListener(() -> runOnUiThread(() -> {
-            if (inListener[0]) return; // prevent recursion
+            if (inListener[0]) return;
             inListener[0] = true;
             try {
                 if (state.isCropSizeDirty()) {
-                    // Auto-set center if needed
                     if (!state.hasCenter() && state.getSourceImage() != null) {
                         state.setCenter(state.getImageWidth() / 2f, state.getImageHeight() / 2f);
                     }
@@ -119,12 +134,18 @@ public class MainActivity extends AppCompatActivity {
                 new ActivityResultContracts.OpenDocument(),
                 uri -> {
                     if (uri != null) {
-                        // Take persistable permission for overwrite-in-place
+                        // Take persistable permission for overwrite-in-place.
+                        // Non-fatal if it fails — we just lose the ability to
+                        // re-open this URI across app restarts.
                         try {
                             getContentResolver().takePersistableUriPermission(uri,
                                     Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
-                        } catch (Exception ignored) {}
-                        sourceUri = uri;
+                        } catch (Exception e) {
+                            Log.w(TAG, "takePersistableUriPermission failed for " + uri, e);
+                        }
+                        // NB: don't assign sourceUri here — loadImage assigns it only
+                        // after a successful decode, so a failed/blocked load can't
+                        // leave sourceUri pointing at a URI whose image isn't in state.
                         loadImage(uri);
                     }
                 });
@@ -141,20 +162,27 @@ public class MainActivity extends AppCompatActivity {
                     }
                 },
                 uri -> {
-                    if (uri != null) exportTo(uri);
+                    // SAF result: either a URI (user chose a file) or null (user
+                    // cancelled). Clear the pending-save flag in both cases so
+                    // the Save button re-enables.
+                    if (uri != null) {
+                        handleSaveAsResult(uri);
+                    } else {
+                        savePending = false;
+                        pendingSaveName = null;
+                    }
                 });
 
-        // Toolbar
         findViewById(R.id.btnOpen).setOnClickListener(v ->
                 openLauncher.launch(new String[]{"image/jpeg", "image/png"}));
         findViewById(R.id.btnSave).setOnClickListener(v -> showSaveDialog());
-        // Sync initial button state: Save disabled until an image is loaded.
+        // Save stays disabled until an image is loaded.
         setBusyUi(false);
         findViewById(R.id.btnSettings).setOnClickListener(v ->
                 com.cropcenter.view.SettingsDialog.show(this, state.getGridConfig(),
                         () -> editorView.invalidate()));
 
-        // Grid toggle (display-only — full grid settings in the Settings dialog)
+        // Display-only toggle; full grid settings live in the Settings dialog.
         CheckBox chkGrid = findViewById(R.id.chkGridMain);
         chkGrid.setChecked(state.getGridConfig().enabled);
         chkGrid.setOnCheckedChangeListener((b, c) -> {
@@ -178,12 +206,9 @@ public class MainActivity extends AppCompatActivity {
         handleIncomingIntent(getIntent());
     }
 
-    private volatile boolean isDestroyed = false;
-
     @Override
     protected void onDestroy() {
         super.onDestroy();
-        isDestroyed = true;
         Bitmap bmp = state.getSourceImage();
         if (bmp != null && !bmp.isRecycled()) bmp.recycle();
     }
@@ -191,7 +216,7 @@ public class MainActivity extends AppCompatActivity {
     /** Show the full-screen progress overlay with the given message. */
     private void showProgress(String message) {
         runOnUiThread(() -> {
-            if (isDestroyed) return;
+            if (isDestroyed()) return;
             View overlay = findViewById(R.id.progressOverlay);
             ((TextView) findViewById(R.id.progressText)).setText(message);
             overlay.setVisibility(View.VISIBLE);
@@ -200,7 +225,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void hideProgress() {
         runOnUiThread(() -> {
-            if (isDestroyed) return;
+            if (isDestroyed()) return;
             findViewById(R.id.progressOverlay).setVisibility(View.GONE);
         });
     }
@@ -218,11 +243,15 @@ public class MainActivity extends AppCompatActivity {
             Uri uri = intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri.class);
             if (uri == null) uri = intent.getData();
             if (uri != null) {
+                // Share/View intents often don't carry persistable permission —
+                // failure here is expected, not an error.
                 try {
                     getContentResolver().takePersistableUriPermission(uri,
                             Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
-                } catch (Exception ignored) {}
-                sourceUri = uri;
+                } catch (Exception e) {
+                    Log.d(TAG, "No persistable permission for shared URI: " + e.getMessage());
+                }
+                // sourceUri is assigned by loadImage on successful decode.
                 loadImage(uri);
             }
         }
@@ -230,33 +259,230 @@ public class MainActivity extends AppCompatActivity {
 
     // ── Save ──
 
+    /**
+     * Save button handler. Runs {@link SaveDialog} first (format + grid-bake
+     * options), and on its "Continue" the SAF picker opens with the correct
+     * extension pre-filled. Replace/Keep confirmation is handled downstream
+     * in {@link #handleSaveAsResult}.
+     */
     private void showSaveDialog() {
         if (state.getSourceImage() == null) return;
-        if (busy.get()) {
+        if (busy.get() || savePending) {
             Toast.makeText(this, "Busy — try again", Toast.LENGTH_SHORT).show();
             return;
         }
-        SaveDialog.show(this, state.getExportConfig(),
-                () -> {
-                    // Check again — the dialog may have been open while another save started
-                    if (busy.get()) {
-                        Toast.makeText(this, "Busy — try again", Toast.LENGTH_SHORT).show();
-                        return;
-                    }
-                    String name = state.getExportConfig().filename;
-                    if (name == null || name.isEmpty()) name = "crop";
-                    int dot = name.lastIndexOf('.');
-                    if (dot > 0) name = name.substring(0, dot);
-                    name += ("jpeg".equals(state.getExportConfig().format) ? ".jpg" : ".png");
-                    saveAsLauncher.launch(name);
-                },
-                sourceUri != null ? () -> {
-                    if (busy.get()) {
-                        Toast.makeText(this, "Busy — try again", Toast.LENGTH_SHORT).show();
-                        return;
-                    }
-                    exportTo(sourceUri);
-                } : null);
+        SaveDialog.show(this, state.getExportConfig(), state.getGridConfig(), () -> {
+            if (busy.get() || savePending) {
+                Toast.makeText(this, "Busy — try again", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            // Extension follows the format the user just picked in SaveDialog;
+            // if they change the extension in the SAF picker, applyFormatFromFilename
+            // updates ExportConfig.format again before encode.
+            String stem = state.getOriginalFilename();
+            if (stem == null || stem.isEmpty()) stem = "crop";
+            int dot = stem.lastIndexOf('.');
+            if (dot > 0) stem = stem.substring(0, dot);
+            String ext = "png".equals(state.getExportConfig().format) ? ".png" : ".jpg";
+            String name = stem + ext;
+            pendingSaveName = name;
+            savePending = true;
+            saveAsLauncher.launch(name);
+        });
+    }
+
+    /**
+     * Route the SAF-returned URI to the correct save path.
+     *
+     * SAF's {@code ACTION_CREATE_DOCUMENT} behaviour on filename collision is
+     * inconsistent across providers. The returned URI's display name tells us
+     * what actually happened:
+     *
+     *   (A) {@code chosen == requested}  — SAF kept the name. Either the
+     *       file didn't exist (new file) or SAF prompted "Replace?" and the
+     *       user accepted. Either way, write to {@code newUri} directly; SAF
+     *       already handled any confirmation, so no extra dialog from us.
+     *       This fixes the "two dialogs" bug.
+     *
+     *   (B) {@code chosen} matches the {@code requested (N).ext} auto-rename
+     *       pattern — SAF silently renamed to dodge a collision. The user's
+     *       typed-or-accepted name was in use; they got no confirmation.
+     *       If that conflicting name was our opened file, we offer an
+     *       in-place overwrite of {@code sourceUri} (delete the "(N)"
+     *       placeholder, write to sourceUri via the persistable grant).
+     *       Otherwise we can't target the conflicting file directly, so we
+     *       save to the renamed URI and toast the actual final name — the
+     *       rename no longer goes unnoticed. This fixes bug #1.
+     *
+     *   (C) {@code chosen} differs from {@code requested} but NOT in the
+     *       auto-rename pattern — the user deliberately changed the filename
+     *       in the picker. Save to {@code newUri} with no extra dialog.
+     *
+     * Bug #3 fix: {@code tryDeleteSafDocument(newUri)} is only called in
+     * case (B)-overwrite-original, where {@code newUri} is guaranteed to be
+     * a freshly-created "(N)" placeholder — never the opened file itself,
+     * which keeps its own URI in {@code sourceUri}.
+     */
+    private void handleSaveAsResult(Uri newUri) {
+        String requested = pendingSaveName;
+        pendingSaveName = null;
+
+        String chosen = getDisplayName(newUri);
+        applyFormatFromFilename(chosen);
+
+        // Case (A): SAF accepted the requested name exactly. Either no
+        // collision or SAF itself prompted and the user confirmed; save as-is.
+        if (requested != null && chosen != null && requested.equalsIgnoreCase(chosen)) {
+            savePending = false;
+            exportTo(newUri);
+            return;
+        }
+
+        // Case (B): SAF auto-renamed ("stem (N).ext"). A collision exists in
+        // the user's CHOSEN directory — NOT necessarily the opened file's
+        // directory. Offer Replace / Keep / Cancel on the chosen location.
+        if (looksLikeAutoRename(requested, chosen)) {
+            Runnable cleanupPlaceholder = () -> tryDeleteSafDocument(newUri);
+            final String safName = chosen;
+            final String targetName = requested;
+            new android.app.AlertDialog.Builder(this)
+                    .setTitle("Replace " + targetName + "?")
+                    .setMessage("A file with this name already exists in the "
+                            + "selected location.\n\n"
+                            + "Replace \u2014 overwrite it.\n"
+                            + "Keep \u2014 save as \"" + safName + "\" instead.\n"
+                            + "Cancel \u2014 don't save.")
+                    .setPositiveButton("Replace", (d, w) -> {
+                        savePending = false;
+                        replaceCollidingInChosenDir(newUri, targetName);
+                    })
+                    .setNeutralButton("Keep", (d, w) -> {
+                        // Keep the SAF-assigned name — newUri IS the target.
+                        savePending = false;
+                        exportTo(newUri);
+                    })
+                    .setNegativeButton("Cancel", (d, w) -> {
+                        cleanupPlaceholder.run();
+                        savePending = false;
+                    })
+                    // BACK or touch-outside behaves like Cancel.
+                    .setOnCancelListener(d -> {
+                        cleanupPlaceholder.run();
+                        savePending = false;
+                    })
+                    .show();
+            return;
+        }
+
+        // Case (C): user changed the name intentionally. Save as-is.
+        savePending = false;
+        exportTo(newUri);
+    }
+
+    /**
+     * Replace the colliding file in the user's chosen directory (NOT the
+     * opened file's directory).
+     *
+     * Sequence:
+     *   1. Derive the colliding file's URI by substituting the last path
+     *      segment of {@code newUri}'s document ID with {@code requestedName}.
+     *   2. Delete it via {@link DocumentsContract#deleteDocument}.
+     *   3. Rename {@code newUri} from "stem (N).ext" to {@code requestedName}
+     *      via {@link DocumentsContract#renameDocument}.
+     *   4. Write bytes to the renamed URI.
+     *
+     * Any step may fail (opaque-ID providers, missing permissions, etc.). On
+     * partial failure we fall through to saving at the SAF-assigned name so
+     * the user never loses their crop — a toast prefix explains what ended up
+     * on disk.
+     */
+    private void replaceCollidingInChosenDir(Uri newUri, String requestedName) {
+        Uri saveTarget = newUri;
+        boolean renamedOk = false;
+
+        Uri colliding = deriveSiblingUri(newUri, requestedName);
+        if (colliding != null) {
+            try {
+                android.provider.DocumentsContract.deleteDocument(
+                        getContentResolver(), colliding);
+            } catch (Exception e) {
+                Log.w(TAG, "Couldn't delete colliding " + requestedName
+                        + " (" + colliding + "): " + e.getMessage());
+            }
+        }
+
+        try {
+            Uri renamed = android.provider.DocumentsContract.renameDocument(
+                    getContentResolver(), newUri, requestedName);
+            if (renamed != null) {
+                saveTarget = renamed;
+                renamedOk = true;
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "Couldn't rename to " + requestedName + ": " + e.getMessage());
+        }
+
+        if (!renamedOk) {
+            String actual = getDisplayName(saveTarget);
+            if (actual == null) actual = "auto-renamed file";
+            pendingSaveToastPrefix = "Saved as " + actual
+                    + " (couldn't replace existing) \u2014 ";
+        }
+        exportTo(saveTarget);
+    }
+
+    /**
+     * Build a sibling document URI by swapping the last path segment of
+     * {@code src}'s document ID for {@code siblingName}. Works on providers
+     * that encode paths in their document IDs (notably the built-in external-
+     * storage provider). Returns null for opaque-ID providers.
+     *
+     * The returned URI isn't guaranteed to be actionable with our permission
+     * set — callers treat delete/rename failures on it as soft errors.
+     */
+    private static Uri deriveSiblingUri(Uri src, String siblingName) {
+        try {
+            String docId = android.provider.DocumentsContract.getDocumentId(src);
+            int slash = docId.lastIndexOf('/');
+            if (slash < 0) return null;
+            return android.provider.DocumentsContract.buildDocumentUri(
+                    src.getAuthority(),
+                    docId.substring(0, slash + 1) + siblingName);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * Detect SAF's auto-rename naming pattern: "{@code stem (N).ext}" where
+     * stem/ext match the requested filename. Used to separate an SAF silent
+     * rename from the user genuinely typing a different name in the picker.
+     */
+    private static boolean looksLikeAutoRename(String requested, String chosen) {
+        if (requested == null || chosen == null) return false;
+        int reqDot = requested.lastIndexOf('.');
+        int choDot = chosen.lastIndexOf('.');
+        if (reqDot < 0 || choDot < 0) return false;
+        String reqStem = requested.substring(0, reqDot);
+        String reqExt = requested.substring(reqDot);
+        String choStem = chosen.substring(0, choDot);
+        String choExt = chosen.substring(choDot);
+        if (!reqExt.equalsIgnoreCase(choExt)) return false;
+        // "stem (1)", "stem (2)", … — accept 1+ digits, optional whitespace
+        // between stem and paren for providers that use no space.
+        return choStem.matches("\\Q" + reqStem + "\\E\\s*\\(\\d+\\)");
+    }
+
+    /** Pick encoder based on the extension the user typed in the SAF picker. */
+    private void applyFormatFromFilename(String name) {
+        if (name == null) return;
+        String lower = name.toLowerCase(java.util.Locale.ROOT);
+        if (lower.endsWith(".png")) {
+            state.getExportConfig().format = "png";
+        } else if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) {
+            state.getExportConfig().format = "jpeg";
+        }
+        // Anything else leaves the format unchanged (source default).
     }
 
     // ── AR Spinner ──
@@ -379,7 +605,6 @@ public class MainActivity extends AppCompatActivity {
 
         new Thread(() -> {
             try {
-                // Copy URI to cache file for guaranteed raw access
                 File cacheFile = new File(getCacheDir(), "input_raw");
                 try (InputStream is = getContentResolver().openInputStream(uri);
                      FileOutputStream fos = new FileOutputStream(cacheFile)) {
@@ -387,7 +612,6 @@ public class MainActivity extends AppCompatActivity {
                     byte[] buf = new byte[8192]; int n;
                     while ((n = is.read(buf)) != -1) fos.write(buf, 0, n);
                 }
-                // Read raw bytes from local file (no ContentProvider interference)
                 byte[] fileBytes;
                 try (FileInputStream fis = new FileInputStream(cacheFile)) {
                     long fileLen = cacheFile.length();
@@ -415,7 +639,6 @@ public class MainActivity extends AppCompatActivity {
                 Bitmap bmp = BitmapUtils.applyOrientation(raw,
                         BitmapUtils.readExifOrientation(fileBytes));
 
-                // Get original filename and file path for Samsung Revert
                 String origName = getDisplayName(uri);
                 String[] pathAndId = getFilePathAndId(uri);
 
@@ -451,7 +674,6 @@ public class MainActivity extends AppCompatActivity {
                     byte[] gainMap = GainMapExtractor.extract(fileBytes);
                     state.setGainMap(gainMap);
 
-                    // Extract Samsung SEFT trailer
                     byte[] seft = com.cropcenter.metadata.SeftExtractor.extract(fileBytes);
                     state.setSeftTrailer(seft);
 
@@ -479,22 +701,16 @@ public class MainActivity extends AppCompatActivity {
                 final String formatsInfo = metaInfo;
                 final boolean hasHdr = state.getGainMap() != null;
 
-                // Set default export filename: originalname_cropped
-                String exportName = "crop";
-                if (origName != null && !origName.isEmpty()) {
-                    int dot = origName.lastIndexOf('.');
-                    exportName = (dot > 0 ? origName.substring(0, dot) : origName) + "_cropped";
-                }
-                final String defName = exportName;
-
                 runOnUiThread(() -> {
                     state.setSourceImage(bmp);
-                    state.getExportConfig().filename = defName;
+                    // Commit sourceUri only after the image is installed in state,
+                    // so Save (which overwrites sourceUri) is always in sync with
+                    // what's actually loaded. See also load-failure path below.
+                    sourceUri = uri;
                     editorView.setState(state);
                     editorView.clearUndoHistory();
                     txtImageInfo.setText(sizeInfo);
                     txtImageFormats.setText(formatsInfo);
-                    // HDR diagnostic toast is shown on background thread above
                 });
             } catch (Exception e) {
                 Log.e(TAG, "Load failed", e);
@@ -543,17 +759,36 @@ public class MainActivity extends AppCompatActivity {
         // ── Phase 1: encode ──
         byte[] data;
         boolean srcHadHdr;
+        boolean backupFailed = false;
         try {
-            CropExporter.saveOriginalBackup(state);
+            CropExporter.BackupStatus backup = CropExporter.saveOriginalBackup(state);
+            backupFailed = (backup == CropExporter.BackupStatus.FAILED);
             data = CropExporter.export(state, getCacheDir()).data();
             srcHadHdr = state.getGainMap() != null && state.getGainMap().length > 0;
             Log.d(TAG, "Encoded " + data.length + " bytes (srcHdr=" + srcHadHdr
-                    + " isPng=" + isPng + ")");
+                    + " isPng=" + isPng + " backup=" + backup + ")");
         } catch (Exception e) {
             Log.e(TAG, "Encode failed", e);
             final String emsg = "Export failed: " + e.getMessage();
-            runOnUiThread(() -> Toast.makeText(this, emsg, Toast.LENGTH_SHORT).show());
+            runOnUiThread(() -> {
+                if (isDestroyed()) return;
+                Toast.makeText(this, emsg, Toast.LENGTH_SHORT).show();
+            });
             return;
+        }
+
+        // saveOriginalBackup returns FAILED only when the source is a MediaStore
+        // file (so Gallery Revert is relevant) AND the backup couldn't be written.
+        // NOT_APPLICABLE sources and already-existing backups skip the warning.
+        // SAF's picker — not this app — decides whether the user is overwriting,
+        // so we warn any time the backup didn't survive regardless of URI identity.
+        if (backupFailed) {
+            runOnUiThread(() -> {
+                if (isDestroyed()) return;
+                Toast.makeText(this,
+                        "Warning: couldn't write revert backup — Gallery Revert won't work if you overwrite",
+                        Toast.LENGTH_LONG).show();
+            });
         }
 
         // ── Phase 2: write ──
@@ -587,20 +822,32 @@ public class MainActivity extends AppCompatActivity {
         if (savedOk) {
             // HDR suffix is informational. PNG can't carry gain maps — that's a
             // format limitation, NOT a failure, so suppress the suffix in that case.
-            // "[HDR FAILED]" only fires when JPEG export dropped an HDR source.
+            // "[HDR dropped]" only fires when JPEG export dropped an HDR source.
             final String hdrSuffix;
-            if (!srcHadHdr)            hdrSuffix = "";
-            else if (outputHasHdrgm(data)) hdrSuffix = " [HDR OK]";
-            else if (isPng)            hdrSuffix = "";
-            else                       hdrSuffix = " [HDR dropped]";
+            if (!srcHadHdr)                                  hdrSuffix = "";
+            else if (UltraHdrCompat.containsHdrgm(data))     hdrSuffix = " [HDR OK]";
+            else if (isPng)                                  hdrSuffix = "";
+            else                                             hdrSuffix = " [HDR dropped]";
 
-            final String msg = "Saved " + data.length / 1024 + "KB" + hdrSuffix;
-            runOnUiThread(() -> Toast.makeText(this, msg, Toast.LENGTH_SHORT).show());
+            // Consume any pending rename notice so the user sees one toast,
+            // not two ("Saved as X — name was in use" combined with size).
+            String prefix = pendingSaveToastPrefix;
+            pendingSaveToastPrefix = null;
+            final String msg = (prefix != null ? prefix : "Saved ")
+                    + data.length / 1024 + "KB" + hdrSuffix;
+            final int length = prefix != null ? Toast.LENGTH_LONG : Toast.LENGTH_SHORT;
+            runOnUiThread(() -> {
+                if (isDestroyed()) return;
+                Toast.makeText(this, msg, length).show();
+            });
         } else {
             final String emsg = writeException != null
                     ? "Export failed: " + writeException.getMessage()
                     : "Export failed";
-            runOnUiThread(() -> Toast.makeText(this, emsg, Toast.LENGTH_SHORT).show());
+            runOnUiThread(() -> {
+                if (isDestroyed()) return;
+                Toast.makeText(this, emsg, Toast.LENGTH_SHORT).show();
+            });
             tryDeleteSafDocument(uri);
         }
     }
@@ -627,16 +874,6 @@ public class MainActivity extends AppCompatActivity {
             Log.w(TAG, "readbackByteCount: " + e.getMessage());
             return total > 0 ? total : -1;
         }
-    }
-
-    /** Scan the first 64KB for the XMP "hdrgm" namespace marker. */
-    private static boolean outputHasHdrgm(byte[] bytes) {
-        int limit = Math.min(bytes.length - 4, 65536);
-        for (int i = 0; i < limit; i++) {
-            if (bytes[i] == 'h' && bytes[i+1] == 'd' && bytes[i+2] == 'r'
-                    && bytes[i+3] == 'g' && bytes[i+4] == 'm') return true;
-        }
-        return false;
     }
 
     /** Best-effort delete of a SAF document URI. Silently ignores failures. */
@@ -705,7 +942,6 @@ public class MainActivity extends AppCompatActivity {
         findViewById(R.id.btnLockH).setOnClickListener(lockClick);
         findViewById(R.id.btnLockV).setOnClickListener(lockClick);
 
-        // Pan checkbox: crop frozen, drag pans viewport
         ((CheckBox) findViewById(R.id.chkPan)).setOnCheckedChangeListener((btn, isChecked) -> {
             applyLockMode();
             updateLockHighlight();
@@ -718,9 +954,8 @@ public class MainActivity extends AppCompatActivity {
             editorView.invalidate();
         });
 
-        // Lock checkbox: locks current auto-computed center from selection points.
-        // When unchecked in Select mode, selection recomputes automatically.
-        // In Move mode, unchecking does NOT recompute (user's current position is preserved).
+        // Unlocking in Select mode re-derives the center from selection points;
+        // Move mode preserves the user's current position.
         ((CheckBox) findViewById(R.id.chkLockCenter)).setOnCheckedChangeListener((btn, isChecked) -> {
             state.setCenterLocked(isChecked);
             if (!isChecked
@@ -770,7 +1005,6 @@ public class MainActivity extends AppCompatActivity {
         float midX = (active == 1) ? minX : (minX + maxX) / 2f;
         float midY = (active == 1) ? minY : (minY + maxY) / 2f;
 
-        // Move the center to the selection midpoint without changing crop size
         state.setCropSizeDirty(false);
         state.setCenter(midX, midY);
     }
@@ -844,15 +1078,10 @@ public class MainActivity extends AppCompatActivity {
 
         // Clear the readout when there's nothing to rotate so the info bar
         // doesn't display a stale "0°" against no image.
-        txtRotDegrees.setText(hasImage ? formatDeg(deg) : "");
+        txtRotDegrees.setText(hasImage ? TextFormat.degrees(deg) : "");
     }
 
-    /**
-     * Gate user-initiated entry points (Save, Open) on the busy flag so rapid
-     * taps during an in-flight save/load can't stack up showing "Busy" toasts
-     * interleaved with a success toast from a previous invocation. Must be
-     * called on the UI thread.
-     */
+    /** Disable Save/Open while busy so rapid taps can't stack up. UI thread only. */
     private void setBusyUi(boolean isBusy) {
         View btnSave = findViewById(R.id.btnSave);
         View btnOpen = findViewById(R.id.btnOpen);
@@ -861,13 +1090,6 @@ public class MainActivity extends AppCompatActivity {
         if (btnOpen != null) btnOpen.setEnabled(!isBusy);
     }
 
-    private static String formatDeg(float deg) {
-        if (deg == (int) deg) return (int) deg + "\u00B0";
-        // Show full precision: 2 decimals if sub-0.1, 1 decimal otherwise
-        if (Math.abs(deg * 10 - Math.round(deg * 10)) > 0.001f)
-            return String.format("%.2f\u00B0", deg);
-        return String.format("%.1f\u00B0", deg);
-    }
 
     /** Dialog for entering an exact rotation value. */
     private void showPreciseRotationDialog() {
@@ -895,7 +1117,7 @@ public class MainActivity extends AppCompatActivity {
                         float val = Math.max(-180f, Math.min(180f,
                                 Float.parseFloat(input.getText().toString().trim())));
                         state.setRotationDegrees(val);
-                        syncRotationUI();
+                        // syncRotationUI runs via state listener — no manual call needed
                     } catch (NumberFormatException ignored) {}
                 })
                 .setNegativeButton("Cancel", null)
@@ -919,8 +1141,8 @@ public class MainActivity extends AppCompatActivity {
             float metaAngle = com.cropcenter.util.HorizonDetector.detectFromMetadata(state.getJpegMeta());
             if (!Float.isNaN(metaAngle)) {
                 state.setRotationDegrees(metaAngle);
-                syncRotationUI();
-                Toast.makeText(this, "From metadata: " + formatDeg(metaAngle), Toast.LENGTH_SHORT).show();
+                // syncRotationUI runs via state listener
+                Toast.makeText(this, "From metadata: " + TextFormat.degrees(metaAngle), Toast.LENGTH_SHORT).show();
                 return;
             }
 
@@ -946,7 +1168,7 @@ public class MainActivity extends AppCompatActivity {
                     float angle = com.cropcenter.util.HorizonDetector
                             .detectFromPaintedRegion(src, points, brushR);
                     runOnUiThread(() -> {
-                        if (isDestroyed) return;
+                        if (isDestroyed()) return;
                         hideProgress();
                         if (Float.isNaN(angle)) {
                             Toast.makeText(this, "No line detected in painted area",
@@ -956,8 +1178,8 @@ public class MainActivity extends AppCompatActivity {
                             // needed for the painted line to become horizontal
                             float newRot = Math.round(angle * 100f) / 100f;
                             state.setRotationDegrees(newRot);
-                            syncRotationUI();
-                            Toast.makeText(this, formatDeg(newRot),
+                            // syncRotationUI runs via state listener
+                            Toast.makeText(this, TextFormat.degrees(newRot),
                                     Toast.LENGTH_SHORT).show();
                         }
                     });
@@ -1038,9 +1260,8 @@ public class MainActivity extends AppCompatActivity {
 
         boolean isSelect = mode == EditorMode.SELECT_FEATURE;
 
-        // Both button only in Select mode
         findViewById(R.id.btnLockBoth).setVisibility(isSelect ? View.VISIBLE : View.GONE);
-        // Auto-switch if Move mode and current pref is Both
+        // BOTH is a Select-only option; fall back to Horizontal when leaving Select mode.
         if (!isSelect && moveLockPref == CenterMode.BOTH) {
             moveLockPref = CenterMode.HORIZONTAL;
             applyLockMode();
@@ -1073,7 +1294,9 @@ public class MainActivity extends AppCompatActivity {
                 int idx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME);
                 if (idx >= 0) return c.getString(idx);
             }
-        } catch (Exception ignored) {}
+        } catch (Exception e) {
+            Log.w(TAG, "getDisplayName query failed for " + uri, e);
+        }
         return null;
     }
 

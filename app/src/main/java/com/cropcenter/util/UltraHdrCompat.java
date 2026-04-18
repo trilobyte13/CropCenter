@@ -27,10 +27,6 @@ public final class UltraHdrCompat {
 
     private UltraHdrCompat() {}
 
-    public static boolean isSupported() {
-        return true; // minSdk 35, Gainmap API always available
-    }
-
     /**
      * Produce an Ultra HDR JPEG using the same canvas rendering as CropExporter.
      * The gain map undergoes the identical spatial transform as the primary,
@@ -46,7 +42,6 @@ public final class UltraHdrCompat {
         Bitmap current = null;
         File tmp = null;
         try {
-            // Decode original with gainmap
             tmp = new File(cacheDir, "hdr_src.jpg");
             try (FileOutputStream fos = new FileOutputStream(tmp)) {
                 fos.write(originalBytes);
@@ -66,7 +61,8 @@ public final class UltraHdrCompat {
                     + " expected=" + imgW + "x" + imgH
                     + " exif=" + exifOrientation);
 
-            // Ensure display orientation
+            // If the decoder returned the native sensor orientation, apply the
+            // EXIF rotation ourselves so the canvas matches display orientation.
             boolean autoRotated = (current.getWidth() == imgW && current.getHeight() == imgH);
             if (!autoRotated && exifOrientation > 1) {
                 Matrix m = BitmapUtils.orientationMatrix(exifOrientation);
@@ -77,23 +73,22 @@ public final class UltraHdrCompat {
                         + " hasGm=" + current.hasGainmap());
             }
 
-            // Capture gainmap info before any destructive operations
+            // Capture gainmap before the rendering step may drop it.
             Gainmap srcGm = current.hasGainmap() ? current.getGainmap() : null;
             Bitmap gmBmp = srcGm != null ? srcGm.getGainmapContents() : null;
 
-            // Crop origin — matches CropExporter.export() exactly
+            // Crop origin — matches CropExporter.export() exactly.
             float sx = centerX - cropW / 2f;
             float sy = centerY - cropH / 2f;
 
-            // ── Render primary onto cropW×cropH canvas ──
-            // Uses shared BitmapUtils.drawCropped — identical to CropExporter rendering.
+            // Render primary via shared BitmapUtils.drawCropped — identical to CropExporter.
             Bitmap output = Bitmap.createBitmap(cropW, cropH, Bitmap.Config.ARGB_8888, true,
                     ColorSpace.get(ColorSpace.Named.DISPLAY_P3));
             Canvas canvas = new Canvas(output);
             Paint paint = new Paint(Paint.FILTER_BITMAP_FLAG);
             BitmapUtils.drawCropped(canvas, current, sx, sy, userRotation, paint);
 
-            // ── Apply identical transform to gainmap ──
+            // Apply the same transform to the gain map so primary + gainmap stay aligned.
             if (srcGm != null && gmBmp != null) {
                 float gmScaleX = (float) gmBmp.getWidth() / current.getWidth();
                 float gmScaleY = (float) gmBmp.getHeight() / current.getHeight();
@@ -136,7 +131,6 @@ public final class UltraHdrCompat {
 
             current.recycle(); current = null;
 
-            // Compress → Ultra HDR JPEG
             ByteArrayOutputStream bos = new ByteArrayOutputStream();
             output.compress(Bitmap.CompressFormat.JPEG, quality, bos);
             byte[] result = bos.toByteArray();
@@ -158,9 +152,19 @@ public final class UltraHdrCompat {
         }
     }
 
-    private static boolean containsHdrgm(byte[] data) {
-        int limit = Math.min(data.length, 65536);
-        for (int i = 0; i < limit - 5; i++) {
+    /**
+     * Scan {@code data} for the XMP "hdrgm" namespace marker — the signature
+     * of an Ultra HDR gain map. Scans the full byte array (not a prefix window):
+     * a maxed-out EXIF thumbnail can push the XMP segment past any fixed offset.
+     * Linear but cheap (~5ms for 20MB on modern hardware) and runs at most once
+     * per export.
+     */
+    public static boolean containsHdrgm(byte[] data) {
+        if (data == null) return false;
+        // For a 5-byte pattern, last valid start index is (length - 5),
+        // so the exclusive loop bound is (length - 4).
+        int limit = data.length - 4;
+        for (int i = 0; i < limit; i++) {
             if (data[i] == 'h' && data[i+1] == 'd' && data[i+2] == 'r'
                     && data[i+3] == 'g' && data[i+4] == 'm') {
                 return true;

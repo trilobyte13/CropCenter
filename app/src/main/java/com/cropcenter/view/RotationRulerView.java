@@ -10,6 +10,8 @@ import android.view.VelocityTracker;
 import android.widget.OverScroller;
 import android.view.View;
 
+import com.cropcenter.util.TextFormat;
+
 /**
  * Galaxy-style scrollable rotation ruler with pinch-to-zoom.
  *
@@ -185,12 +187,12 @@ public class RotationRulerView extends View {
 
             if (isDetent) {
                 canvas.drawLine(x, tickTop, x, tickBot, detentTickPaint);
-                canvas.drawText(formatTickLabel(deg), x, labelY, labelPaint);
+                canvas.drawText(TextFormat.degrees(deg), x, labelY, labelPaint);
             } else if (isMajor) {
                 float mid = (tickTop + tickBot) / 2f;
                 float halfH = (tickBot - tickTop) * 0.35f;
                 canvas.drawLine(x, mid - halfH, x, mid + halfH, majorTickPaint);
-                canvas.drawText(formatTickLabel(deg), x, labelY, labelPaint);
+                canvas.drawText(TextFormat.degrees(deg), x, labelY, labelPaint);
             } else {
                 float mid = (tickTop + tickBot) / 2f;
                 float halfH = (tickBot - tickTop) * 0.18f;
@@ -204,7 +206,6 @@ public class RotationRulerView extends View {
             canvas.drawLine(zeroX, tickTop, zeroX, tickBot, zeroPaint);
         }
 
-        // Center indicator triangle
         float triH = 4 * getResources().getDisplayMetrics().density;
         indicatorPaint.setStyle(Paint.Style.FILL);
         android.graphics.Path tri = new android.graphics.Path();
@@ -217,12 +218,6 @@ public class RotationRulerView extends View {
         canvas.drawLine(centerX, tickTop + triH, centerX, tickBot, indicatorPaint);
     }
 
-    private static String formatTickLabel(float deg) {
-        if (deg == Math.floor(deg)) return (int) deg + "\u00B0";
-        if (Math.abs(deg * 10 - Math.round(deg * 10)) < 0.001f)
-            return String.format("%.1f\u00B0", deg);
-        return String.format("%.2f\u00B0", deg);
-    }
 
     // ── Touch handling ──
 
@@ -284,7 +279,6 @@ public class RotationRulerView extends View {
                         scroller.fling(startX, 0, (int) (-velX * scale), 0, minX, maxX, 0, 0);
                         postInvalidateOnAnimation();
                     } else {
-                        // Snap to nearest tick
                         snapAndNotify();
                     }
                 }

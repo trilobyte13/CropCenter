@@ -92,12 +92,10 @@ public class SettingsDialog {
         }
         gridCard.addView(presetRow, topMargin(dp8));
 
-        // Color + Width (side by side)
         gridCard.addView(colorRow(ctx, "Line color", cfg.color, density, color -> {
             cfg.color = color; onChange.onChanged();
         }), topMargin(dp12));
 
-        // Width slider
         LinearLayout wRow = row(ctx);
         addLabel(wRow, "Width");
         SeekBar wSeek = new SeekBar(ctx); wSeek.setMax(20); wSeek.setProgress((int)cfg.lineWidth);

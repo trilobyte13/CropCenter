@@ -128,37 +128,39 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
     private void notifyPointsChanged() { if (onPointsChanged != null) onPointsChanged.run(); }
 
     /**
-     * Check if a SCREEN point is inside the visible (rotated) image content.
-     * The image is drawn rotated by state.getRotationDegrees() around its center.
-     * We un-rotate the screen point relative to the image center, then check
-     * if it maps to valid image coordinates.
+     * Convert a SCREEN point to IMAGE pixel coordinates, accounting for the
+     * rotation applied at draw time. Returns a {@code float[2]} of image
+     * pixels (possibly outside the image bounds — caller checks).
      */
-    private boolean isInsideRotatedImage(float screenX, float screenY) {
-        if (state == null || state.getSourceImage() == null) return false;
-        int imgW = state.getImageWidth(), imgH = state.getImageHeight();
-        float rotation = state.getRotationDegrees();
-
+    private float[] screenToImagePixel(float screenX, float screenY) {
+        float rotation = (state == null) ? 0f : state.getRotationDegrees();
         if (rotation == 0f) {
-            float ix = screenToImageX(screenX);
-            float iy = screenToImageY(screenY);
-            return ix >= 0 && ix <= imgW && iy >= 0 && iy <= imgH;
+            return new float[]{ screenToImageX(screenX), screenToImageY(screenY) };
         }
-
-        // Image center in screen coords
+        // Un-rotate around the image center in screen space.
+        int imgW = state.getImageWidth(), imgH = state.getImageHeight();
         float scrCx = imageToScreenX(imgW / 2f);
         float scrCy = imageToScreenY(imgH / 2f);
-
-        // Un-rotate the screen point around the image center by -rotation
         double rad = Math.toRadians(-rotation);
         double dx = screenX - scrCx;
         double dy = screenY - scrCy;
         double unRotX = dx * Math.cos(rad) - dy * Math.sin(rad) + scrCx;
         double unRotY = dx * Math.sin(rad) + dy * Math.cos(rad) + scrCy;
+        return new float[]{
+                screenToImageX((float) unRotX),
+                screenToImageY((float) unRotY)
+        };
+    }
 
-        // Convert un-rotated screen point to image coords
-        float ix = screenToImageX((float) unRotX);
-        float iy = screenToImageY((float) unRotY);
-        return ix >= 0 && ix <= imgW && iy >= 0 && iy <= imgH;
+    /**
+     * Check if a SCREEN point is inside the visible (rotated) image content.
+     * The image is drawn rotated by state.getRotationDegrees() around its center.
+     */
+    private boolean isInsideRotatedImage(float screenX, float screenY) {
+        if (state == null || state.getSourceImage() == null) return false;
+        int imgW = state.getImageWidth(), imgH = state.getImageHeight();
+        float[] ip = screenToImagePixel(screenX, screenY);
+        return ip[0] >= 0 && ip[0] <= imgW && ip[1] >= 0 && ip[1] <= imgH;
     }
 
     private void clampViewport() {
@@ -214,8 +216,8 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
 
     private void pushUndo() {
         undoStack.add(snapshotPoints());
-        redoStack.clear(); // new action invalidates redo
-        if (undoStack.size() > 50) undoStack.remove(0); // cap history
+        redoStack.clear();
+        if (undoStack.size() > 50) undoStack.remove(0);
     }
 
     public boolean canUndo() { return !undoStack.isEmpty(); }
@@ -306,10 +308,9 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
         Bitmap bmp = state.getSourceImage();
         float scale = baseScale * zoom;
 
-        // Disable bitmap filtering when zoomed in far for crisp pixels
+        // Crisp pixels when zoomed past 4x
         imagePaint.setFilterBitmap(scale < 4f);
 
-        // Draw image
         float left = imageToScreenX(0);
         float top = imageToScreenY(0);
         float rotation = state.getRotationDegrees();
@@ -323,12 +324,11 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
         }
         canvas.drawBitmap(bmp, m, imagePaint);
 
-        // Pixel grid: show individual pixel boundaries when zoomed in >= 6x
+        // Pixel grid visible at >=6x zoom
         if (state.getGridConfig().showPixelGrid && scale >= 6f) {
             pixelGridPaint.setColor(state.getGridConfig().pixelGridColor);
             pixelGridPaint.setStrokeWidth(1f);
 
-            // Compute visible pixel range in image coordinates
             float visLeft = screenToImageX(0);
             float visTop = screenToImageY(0);
             float visRight = screenToImageX(getWidth());
@@ -351,7 +351,6 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
             }
         }
 
-        // Determine grid/crop region (full image if no crop center)
         float gridImgX, gridImgY;
         int gridW, gridH;
 
@@ -377,35 +376,29 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
             canvas.drawRect(0, cropT, cropL, cropB, dimPaint); // left
             canvas.drawRect(cropR, cropT, vw, cropB, dimPaint); // right
 
-            // Crop border
             canvas.drawRect(cropL, cropT, cropR, cropB, cropBorderPaint);
 
-            // Crosshair at center
             float scx = imageToScreenX(cx);
             float scy = imageToScreenY(cy);
             float armLen = 15;
             canvas.drawLine(scx - armLen, scy, scx + armLen, scy, crosshairPaint);
             canvas.drawLine(scx, scy - armLen, scx, scy + armLen, crosshairPaint);
 
-            // Crop size text
             infoPaint.setTextAlign(Paint.Align.LEFT);
             infoPaint.setTextSize(11f * density);
             infoPaint.setColor(0xAAA6ADC8);
             canvas.drawText(cw + " x " + ch, cropL + 4, cropT - 6, infoPaint);
         } else {
-            // No crop — grid covers full image
             gridImgX = 0;
             gridImgY = 0;
             gridW = bmp.getWidth();
             gridH = bmp.getHeight();
         }
 
-        // Grid overlay (always drawn, on crop rect or full image)
         gridRenderer.draw(canvas, gridImgX, gridImgY, gridW, gridH,
                 state.getGridConfig(), baseScale * zoom,
                 this::imageToScreenX, this::imageToScreenY);
 
-        // Draw selection points and polygon (visible in all modes)
         if (!state.getSelectionPoints().isEmpty()) {
             java.util.List<SelectionPoint> points = state.getSelectionPoints();
 
@@ -417,7 +410,6 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
             inactivePointPaint.setColor(withAlpha(selColor, userAlpha / 2));
             polygonPaint.setColor(selColor);
 
-            // Draw polygon fill between active points
             android.graphics.Path path = new android.graphics.Path();
             boolean first = true;
             int activeCount = 0;
@@ -442,7 +434,6 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
                 Paint pp = p.active ? pointPaint : inactivePointPaint;
 
                 if (pixelSize >= 6f) {
-                    // Zoomed in: fill the pixel square
                     int px = (int) Math.floor(p.x);
                     int py = (int) Math.floor(p.y);
                     float l = imageToScreenX(px);
@@ -450,13 +441,11 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
                     float r = imageToScreenX(px + 1);
                     float b = imageToScreenY(py + 1);
                     canvas.drawRect(l, t, r, b, pp);
-                    // Number
                     infoPaint.setTextAlign(Paint.Align.CENTER);
                     infoPaint.setTextSize(Math.min(pixelSize * 0.6f, 14f * density));
                     infoPaint.setColor(p.active ? 0xFF11111B : 0x88FFFFFF);
                     canvas.drawText(String.valueOf(idx), (l + r) / 2, (t + b) / 2 + infoPaint.getTextSize() * 0.35f, infoPaint);
                 } else {
-                    // Zoomed out: circle
                     float sx = imageToScreenX(p.x);
                     float sy = imageToScreenY(p.y);
                     canvas.drawCircle(sx, sy, 10, pp);
@@ -468,23 +457,21 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
             }
         }
 
-        // Horizon paint mode: show painted region and hint
         if (horizonMode || horizonDrawing) {
             int selColor = state.getGridConfig().selectionColor;
             if (horizonDrawing && !horizonScreenPath.isEmpty()) {
-                // Paint the region using the user's exact selection color — no blending.
+                // Paint with the user's exact selection color — no extra blending.
                 horizonPaint.setStyle(Paint.Style.STROKE);
                 horizonPaint.setStrokeWidth(60f);
                 horizonPaint.setColor(selColor);
                 horizonPaint.setStrokeCap(Paint.Cap.ROUND);
                 horizonPaint.setStrokeJoin(Paint.Join.ROUND);
                 canvas.drawPath(horizonScreenPath, horizonPaint);
-                // Reset defaults
                 horizonPaint.setStrokeWidth(3f);
                 horizonPaint.setStrokeCap(Paint.Cap.BUTT);
             }
             if (horizonMode && !horizonDrawing) {
-                // Waiting for paint — show hint in the exact selection color
+                // Waiting for paint — show hint in the selection color.
                 infoPaint.setTextAlign(Paint.Align.CENTER);
                 infoPaint.setTextSize(14f * density);
                 infoPaint.setColor(selColor);
@@ -500,22 +487,29 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
     public boolean onTouchEvent(MotionEvent event) {
         if (horizonMode) {
             float sx = event.getX(), sy = event.getY();
+            // Use the rotation-aware mapper: painted points are consumed by
+            // HorizonDetector.detectFromPaintedRegion, which operates on the
+            // UN-rotated source bitmap. Without un-rotation here, any rotation
+            // at paint time produces garbage horizon angles.
             switch (event.getActionMasked()) {
                 case MotionEvent.ACTION_DOWN -> {
                     horizonPoints.clear();
                     horizonScreenPath.reset();
                     horizonScreenPath.moveTo(sx, sy);
-                    horizonPoints.add(new float[]{screenToImageX(sx), screenToImageY(sy)});
+                    horizonPoints.add(screenToImagePixel(sx, sy));
                     horizonDrawing = true;
-                    getParent().requestDisallowInterceptTouchEvent(true);
+                    // getParent() is null between detach and re-attach (config
+                    // change mid-gesture); skip the request rather than NPE.
+                    android.view.ViewParent parent = getParent();
+                    if (parent != null) parent.requestDisallowInterceptTouchEvent(true);
                 }
                 case MotionEvent.ACTION_MOVE -> {
                     horizonScreenPath.lineTo(sx, sy);
-                    horizonPoints.add(new float[]{screenToImageX(sx), screenToImageY(sy)});
+                    horizonPoints.add(screenToImagePixel(sx, sy));
                     invalidate();
                 }
                 case MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    horizonPoints.add(new float[]{screenToImageX(sx), screenToImageY(sy)});
+                    horizonPoints.add(screenToImagePixel(sx, sy));
                     horizonDrawing = false;
                     horizonMode = false;
                     invalidate();

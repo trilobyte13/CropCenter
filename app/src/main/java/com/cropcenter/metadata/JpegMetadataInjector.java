@@ -44,7 +44,6 @@ public final class JpegMetadataInjector {
 
         Log.d(TAG, "Skipped " + (scanStart - 2) + " bytes of re-encoder APP markers");
 
-        // Build output: SOI + original segments + image data
         ByteArrayOutputStream out = new ByteArrayOutputStream(reencoded.length + 65536);
 
         // SOI

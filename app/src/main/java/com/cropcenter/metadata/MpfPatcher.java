@@ -62,6 +62,15 @@ public final class MpfPatcher {
                         long entryOffRel = ByteBufferUtils.readU32(jpeg, e + 8, le);
                         int entryOff = (int)(mpfStart + entryOffRel);
 
+                        // Validate entryOff — a malformed MPF with a huge/negative
+                        // relative offset would otherwise throw out of writeU32.
+                        if (entryOff < mpfStart || numImages <= 0
+                                || (long)entryOff + (long)numImages * 16L > jpeg.length) {
+                            Log.w(TAG, "MPF entry offset out of bounds: entryOff=" + entryOff
+                                    + " numImages=" + numImages + " fileLen=" + jpeg.length);
+                            return false;
+                        }
+
                         int gainMapSize = jpeg.length - primarySize;
                         int relativeOffset = primarySize - mpfStart;
 
@@ -70,7 +79,6 @@ public final class MpfPatcher {
                         // Log before
                         for (int img = 0; img < numImages; img++) {
                             int base = entryOff + img * 16;
-                            if (base + 16 > jpeg.length) break;
                             long attr = ByteBufferUtils.readU32(jpeg, base, le);
                             long size = ByteBufferUtils.readU32(jpeg, base + 4, le);
                             long dataOff = ByteBufferUtils.readU32(jpeg, base + 8, le);
@@ -79,18 +87,19 @@ public final class MpfPatcher {
                         }
 
                         // Update entry[0] (primary): update size
-                        if (numImages > 0 && entryOff + 16 <= jpeg.length) {
-                            ByteBufferUtils.writeU32(jpeg, entryOff + 4, primarySize, le);
-                            Log.d(TAG, "entry[0] size → " + primarySize);
-                        }
+                        ByteBufferUtils.writeU32(jpeg, entryOff + 4, primarySize, le);
+                        Log.d(TAG, "entry[0] size → " + primarySize);
 
-                        // Update entry[1+] (secondary): offset relative to mpfStart, size
-                        for (int img = 1; img < numImages; img++) {
-                            int base = entryOff + img * 16;
-                            if (base + 16 > jpeg.length) break;
+                        // Update ONLY entry[1] — the gain map slot in Ultra HDR.
+                        // Files with additional MP entries (depth maps, burst frames,
+                        // Apple Portrait layers) must leave those untouched; previously
+                        // this loop wrote the gain-map size/offset into every secondary
+                        // entry, silently corrupting the MPF index for multi-image files.
+                        if (numImages >= 2) {
+                            int base = entryOff + 16;
                             ByteBufferUtils.writeU32(jpeg, base + 4, gainMapSize, le);
                             ByteBufferUtils.writeU32(jpeg, base + 8, relativeOffset, le);
-                            Log.d(TAG, "entry[" + img + "] offset → " + relativeOffset
+                            Log.d(TAG, "entry[1] offset → " + relativeOffset
                                     + " size → " + gainMapSize);
                         }
 

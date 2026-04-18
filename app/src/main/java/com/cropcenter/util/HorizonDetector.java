@@ -151,7 +151,7 @@ public final class HorizonDetector {
             }
         }
 
-        // ── Edge detection (same pipeline as detectFromImage) ──
+        // ── Edge detection ──
         int[] pixels = new int[w * h];
         src.getPixels(pixels, 0, w, 0, 0, w, h);
         float[] buf1 = new float[w * h];
@@ -238,124 +238,6 @@ public final class HorizonDetector {
 
         if (Math.abs(tilt) < 0.005f) return 0f;
         if (Math.abs(tilt) > 30f) return Float.NaN;
-        return -Math.round(tilt * 100f) / 100f;
-    }
-
-    /**
-     * Detect horizon tilt via computer vision (Canny + Hough) on the full image.
-     *
-     * @return correction angle in degrees, or NaN if not detected
-     */
-    public static float detectFromImage(Bitmap src) {
-        if (src == null || src.getWidth() < 10 || src.getHeight() < 10) return Float.NaN;
-
-        try {
-            return detectImageInternal(src);
-        } catch (OutOfMemoryError e) {
-            Log.w(TAG, "OOM at full res, retrying at half scale");
-            try {
-                Bitmap half = Bitmap.createScaledBitmap(src,
-                        src.getWidth() / 2, src.getHeight() / 2, true);
-                float result = detectImageInternal(half);
-                half.recycle();
-                return result;
-            } catch (OutOfMemoryError e2) {
-                Log.e(TAG, "OOM at half scale");
-                return Float.NaN;
-            }
-        }
-    }
-
-    private static float detectImageInternal(Bitmap src) {
-        int w = src.getWidth(), h = src.getHeight();
-        Log.d(TAG, "CV processing " + w + "x" + h);
-
-        // ── 1. Grayscale ──
-        int[] pixels = new int[w * h];
-        src.getPixels(pixels, 0, w, 0, 0, w, h);
-        float[] buf1 = new float[w * h];
-        for (int i = 0; i < pixels.length; i++) {
-            int p = pixels[i];
-            buf1[i] = 0.299f * Color.red(p) + 0.587f * Color.green(p) + 0.114f * Color.blue(p);
-        }
-        pixels = null;
-
-        // ── 2. Gaussian blur 5×5 ──
-        float[] buf2 = gaussianBlur5x5(buf1, w, h);
-        buf1 = null;
-
-        // ── 3. Sobel gradient ──
-        buf1 = new float[w * h];
-        float[] gradDir = new float[w * h];
-        sobelGradient(buf2, w, h, buf1, gradDir);
-        buf2 = null;
-
-        // ── 4. Non-maximum suppression + direction filtering ──
-        // Only keep edges whose gradient direction is near-vertical (±35° from ±90°),
-        // meaning the edge itself is near-horizontal. This excludes vertical edges,
-        // diagonals, and texture that would dilute the horizon signal.
-        buf2 = nonMaxSuppression(buf1, gradDir, w, h);
-        // Zero out edges that aren't near-horizontal
-        for (int i = 0; i < w * h; i++) {
-            if (buf2[i] > 0) {
-                float dir = gradDir[i];
-                // Gradient direction: 0 = horizontal gradient = vertical edge
-                //                     ±π/2 = vertical gradient = horizontal edge
-                float absDir = Math.abs(dir);
-                // Keep if gradient is within 35° of vertical (edge within 35° of horizontal)
-                if (absDir < (float)(Math.PI / 2 - Math.PI * 35 / 180)
-                        || absDir > (float)(Math.PI / 2 + Math.PI * 35 / 180)) {
-                    buf2[i] = 0; // not a near-horizontal edge
-                }
-            }
-        }
-        gradDir = null;
-        buf1 = null;
-
-        // ── 5. Threshold + collect near-horizontal edge pixels ──
-        float threshold = computeThreshold(buf2, 0.15f);
-
-        int edgeCount = 0;
-        for (int y = 0; y < h; y++) {
-            int row = y * w;
-            for (int x = 0; x < w; x++) {
-                if (buf2[row + x] >= threshold) edgeCount++;
-            }
-        }
-        if (edgeCount < 50) {
-            Log.d(TAG, "Too few horizontal edge pixels: " + edgeCount);
-            return Float.NaN;
-        }
-
-        int[] edgeX = new int[edgeCount];
-        int[] edgeY = new int[edgeCount];
-        int ei = 0;
-        for (int y = 0; y < h; y++) {
-            int row = y * w;
-            for (int x = 0; x < w; x++) {
-                if (buf2[row + x] >= threshold) {
-                    edgeX[ei] = x;
-                    edgeY[ei] = y;
-                    ei++;
-                }
-            }
-        }
-        buf2 = null;
-
-        // ── 6. Hough: find strongest single line, coarse then fine ──
-        float coarseAngle = houghPass(edgeX, edgeY, edgeCount, w, h, 80f, 100f, 0.1f);
-        if (Float.isNaN(coarseAngle)) return Float.NaN;
-
-        float fineAngle = houghPass(edgeX, edgeY, edgeCount, w, h,
-                Math.max(80f, coarseAngle - 2f),
-                Math.min(100f, coarseAngle + 2f), 0.01f);
-        if (Float.isNaN(fineAngle)) fineAngle = coarseAngle;
-
-        float tilt = fineAngle - 90f;
-        Log.d(TAG, "CV tilt: " + String.format("%.3f", tilt) + "°");
-
-        if (Math.abs(tilt) < 0.005f) return 0f;
-        if (Math.abs(tilt) > 20f) return Float.NaN;
         return -Math.round(tilt * 100f) / 100f;
     }
 

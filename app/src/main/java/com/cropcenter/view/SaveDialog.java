@@ -5,14 +5,16 @@ import android.content.Context;
 import android.graphics.drawable.GradientDrawable;
 import android.view.Gravity;
 import android.widget.CheckBox;
-import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
 import com.cropcenter.model.ExportConfig;
+import com.cropcenter.model.GridConfig;
 
 /**
- * Pre-save dialog with filename, format, grid toggle, and Save As / Overwrite actions.
+ * Pre-save dialog: output format (JPEG/PNG) and grid-bake toggle. The filename
+ * and target directory are chosen by the SAF picker that follows — this dialog
+ * is just the format/options step.
  * Matches the Settings dialog visual style (Catppuccin Mocha cards).
  */
 public class SaveDialog {
@@ -23,39 +25,18 @@ public class SaveDialog {
     private static final int BG_SURFACE0  = 0xFF313244;
     private static final int BG_SURFACE1  = 0xFF45475A;
     private static final int COLOR_TEXT   = 0xFFCDD6F4;
-    private static final int COLOR_SUB    = 0xFFA6ADC8;
-    private static final int COLOR_OVER   = 0xFF6C7086;
     private static final int ACCENT_MAUVE = 0xFFCBA6F7;
 
-    public static void show(Context ctx, ExportConfig export,
-                            OnSaveListener onSaveAs, OnSaveListener onOverwrite) {
+    public static void show(Context ctx, ExportConfig export, GridConfig grid,
+                            OnSaveListener onSave) {
         float density = ctx.getResources().getDisplayMetrics().density;
         int dp4 = (int)(4 * density);
         int dp8 = (int)(8 * density);
-        int dp12 = (int)(12 * density);
         int dp16 = (int)(16 * density);
 
         LinearLayout root = new LinearLayout(ctx);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setPadding(dp16, dp8, dp16, dp8);
-
-        // ─── FILENAME card ───
-        LinearLayout nameCard = newCard(ctx, density);
-        addCardTitle(nameCard, "Filename");
-
-        EditText editName = new EditText(ctx);
-        editName.setText(export.filename);
-        editName.setTextSize(13);
-        editName.setTextColor(COLOR_TEXT);
-        editName.setSingleLine(true);
-        GradientDrawable nameBg = new GradientDrawable();
-        nameBg.setColor(BG_SURFACE1);
-        nameBg.setCornerRadius(4 * density);
-        editName.setBackground(nameBg);
-        editName.setPadding(dp8, dp8, dp8, dp8);
-        nameCard.addView(editName, topMargin(dp8));
-
-        root.addView(nameCard, topMargin(dp4));
 
         // ─── FORMAT card ───
         LinearLayout fmtCard = newCard(ctx, density);
@@ -85,14 +66,16 @@ public class SaveDialog {
         jpegBtn.setOnClickListener(v -> { isJpeg[0] = true; updateFormatHighlight.run(); });
         pngBtn.setOnClickListener(v -> { isJpeg[0] = false; updateFormatHighlight.run(); });
 
-        LinearLayout.LayoutParams jLP = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-        LinearLayout.LayoutParams pLP = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        LinearLayout.LayoutParams jLP = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        LinearLayout.LayoutParams pLP = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
         pLP.leftMargin = dp8;
         fmtRow.addView(jpegBtn, jLP);
         fmtRow.addView(pngBtn, pLP);
         fmtCard.addView(fmtRow, topMargin(dp8));
 
-        root.addView(fmtCard, topMargin(dp8));
+        root.addView(fmtCard, topMargin(dp4));
 
         // ─── OPTIONS card ───
         LinearLayout optCard = newCard(ctx, density);
@@ -102,46 +85,26 @@ public class SaveDialog {
         chkBake.setText("Export Grid");
         chkBake.setTextSize(12);
         chkBake.setTextColor(COLOR_TEXT);
-        chkBake.setChecked(export.includeGrid);
+        chkBake.setChecked(grid.includeInExport);
         chkBake.setButtonTintList(android.content.res.ColorStateList.valueOf(ACCENT_MAUVE));
         optCard.addView(chkBake, topMargin(dp4));
 
         root.addView(optCard, topMargin(dp8));
 
-        // Helper note
-        if (onOverwrite != null) {
-            TextView note = new TextView(ctx);
-            note.setText("Overwrite replaces the original file. "
-                       + "Save As creates a new file.");
-            note.setTextSize(10);
-            note.setTextColor(COLOR_OVER);
-            note.setPadding(dp4, dp4, dp4, dp4);
-            root.addView(note, topMargin(dp8));
-        }
-
         Runnable applySettings = () -> {
-            export.filename = editName.getText().toString().trim();
             export.format = isJpeg[0] ? "jpeg" : "png";
-            export.includeGrid = chkBake.isChecked();
+            grid.includeInExport = chkBake.isChecked();
         };
 
-        AlertDialog.Builder builder = new AlertDialog.Builder(ctx)
+        new AlertDialog.Builder(ctx)
                 .setTitle("Save Image")
                 .setView(root)
-                .setPositiveButton("Save As", (d, w) -> {
+                .setPositiveButton("Continue", (d, w) -> {
                     applySettings.run();
-                    onSaveAs.onSave();
+                    onSave.onSave();
                 })
-                .setNegativeButton("Cancel", null);
-
-        if (onOverwrite != null) {
-            builder.setNeutralButton("Overwrite", (d, w) -> {
-                applySettings.run();
-                onOverwrite.onSave();
-            });
-        }
-
-        builder.show();
+                .setNegativeButton("Cancel", null)
+                .show();
     }
 
     // ── UI helpers (shared visual language with SettingsDialog) ──
@@ -154,7 +117,7 @@ public class SaveDialog {
         bg.setCornerRadius(8 * density);
         card.setBackground(bg);
         int pad = (int)(12 * density);
-        card.setPadding(pad, (int)(10*density), pad, (int)(10*density));
+        card.setPadding(pad, (int)(10 * density), pad, (int)(10 * density));
         return card;
     }
 

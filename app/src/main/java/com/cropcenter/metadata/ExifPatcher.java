@@ -19,12 +19,15 @@ public final class ExifPatcher {
     private ExifPatcher() {}
 
     /**
-     * Patch dimensions and orientation. Optionally replace thumbnail.
-     * @param thumbnail    new JPEG thumbnail bytes, or null to keep original
-     * @param orientation  EXIF orientation value to set (1=normal, or original value to preserve)
+     * Patch the EXIF dimensions to {@code newW}×{@code newH}, normalise
+     * orientation to 1 (upright — we bake rotation into the primary JPEG),
+     * and optionally replace the thumbnail.
+     *
+     * @param thumbnail new JPEG thumbnail bytes, or null to keep original
      */
     public static List<JpegSegment> patch(List<JpegSegment> segments, int newW, int newH,
-                                           byte[] thumbnail, int orientation) {
+                                           byte[] thumbnail) {
+        final int orientation = 1; // always upright — rotation is baked into the pixels
         List<JpegSegment> result = new ArrayList<>(segments.size());
         for (JpegSegment seg : segments) {
             if (!seg.isExif()) {
@@ -43,10 +46,7 @@ public final class ExifPatcher {
                 continue;
             }
 
-            // Patch IFD tags
             scanIFD(data, ifdOff, T, le, newW, newH, orientation);
-
-            // Replace thumbnail if provided
             if (thumbnail != null) {
                 data = replaceThumbnail(data, T, le, thumbnail);
             }
@@ -54,17 +54,6 @@ public final class ExifPatcher {
             result.add(new JpegSegment(seg.marker, data));
         }
         return result;
-    }
-
-    /** Convenience: patch without thumbnail, orientation set to 1. */
-    public static List<JpegSegment> patch(List<JpegSegment> segments, int newW, int newH) {
-        return patch(segments, newW, newH, null, 1);
-    }
-
-    /** Convenience: patch with thumbnail, orientation set to 1. */
-    public static List<JpegSegment> patch(List<JpegSegment> segments, int newW, int newH,
-                                           byte[] thumbnail) {
-        return patch(segments, newW, newH, thumbnail, 1);
     }
 
     /**
@@ -90,8 +79,11 @@ public final class ExifPatcher {
             long ifd1Rel = ByteBufferUtils.readU32(data, nextPtr, le);
 
             if (ifd1Rel == 0) {
-                // No IFD1: EXIF overhead = current segment + new IFD1 header (~42 bytes)
-                return 65535 - (data.length + 42);
+                // No IFD1: EXIF overhead = current segment + new IFD1 header (~42 bytes).
+                // Clamp at 0 — if the current segment alone nearly fills the 64KB APP1
+                // budget, there's no room for a thumbnail and we should say so honestly
+                // rather than return a negative that relies on the caller to clamp.
+                return Math.max(0, 65535 - (data.length + 42));
             }
 
             int ifd1 = (int)(T + ifd1Rel);
@@ -242,8 +234,8 @@ public final class ExifPatcher {
             int absOldOff = T + oldThumbOff;
             if (absOldOff < 0 || absOldOff + oldThumbLen > data.length) return data;
 
-            // Build new segment: [before thumbnail] [new thumbnail] [after thumbnail]
-            // The thumbnail is always at the end of the EXIF data, so "after" is usually empty
+            // Splice new thumbnail into the segment; trailing data is usually
+            // empty since thumbnails live at the end of the EXIF payload.
             byte[] before = new byte[absOldOff];
             System.arraycopy(data, 0, before, 0, absOldOff);
 
@@ -270,7 +262,6 @@ public final class ExifPatcher {
                 return data; // return unchanged — caller checks and retries
             }
 
-            // Update thumbnail length to new size
             ByteBufferUtils.writeU32(newData, thumbLenTag + 8, newThumb.length, le);
 
             // Update APP1 segment length (bytes 2-3)

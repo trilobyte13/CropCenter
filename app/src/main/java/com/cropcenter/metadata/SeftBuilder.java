@@ -43,25 +43,22 @@ public final class SeftBuilder {
      * @param isCropped    whether a crop was applied (vs full-frame)
      * @param exifRotation original EXIF rotation value
      * @param utcTimestamp  Image_UTC_Data value (milliseconds)
-     * @param existingTrailer  existing SEFT trailer to preserve non-edit entries from, or null
      * @return complete SEFT trailer bytes ready to append after JPEG/gain map
      */
     public static byte[] build(String originalBackupPath, float cropCenterX, float cropCenterY,
                                 float cropWidth, float cropHeight, boolean isCropped,
-                                int exifRotation, long utcTimestamp, byte[] existingTrailer) {
+                                int exifRotation, long utcTimestamp) {
         try {
             ByteArrayOutputStream blocks = new ByteArrayOutputStream();
             java.util.List<int[]> directory = new java.util.ArrayList<>(); // [type, negOffset, blockSize]
 
-            // If there's an existing trailer, preserve non-edit entries
-            if (existingTrailer != null) {
-                preserveExistingEntries(existingTrailer, blocks, directory);
-            } else {
-                // Add basic Samsung metadata entries
-                if (utcTimestamp > 0) {
-                    addBlock(blocks, directory, 0x0a01, "Image_UTC_Data",
-                            String.valueOf(utcTimestamp).getBytes(StandardCharsets.UTF_8));
-                }
+            // Add basic Samsung metadata entries. (Preservation of an existing
+            // trailer's non-edit entries happens at the caller level — it
+            // appends the original trailer verbatim when one is present, so
+            // this builder only runs for the fresh-trailer case.)
+            if (utcTimestamp > 0) {
+                addBlock(blocks, directory, 0x0a01, "Image_UTC_Data",
+                        String.valueOf(utcTimestamp).getBytes(StandardCharsets.UTF_8));
             }
 
             // Build re-edit JSON with Samsung's exact formatting (escaped slashes)
@@ -140,7 +137,6 @@ public final class SeftBuilder {
             addBlock(blocks, directory, 0x0ba1, "Original_Path_Hash_Key",
                     hashKey.getBytes(StandardCharsets.UTF_8));
 
-            // Build SEFH directory
             byte[] blockData = blocks.toByteArray();
             return buildTrailer(blockData, directory);
 
@@ -179,8 +175,6 @@ public final class SeftBuilder {
 
     private static byte[] buildTrailer(byte[] blockData, java.util.List<int[]> dir) throws IOException {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
-
-        // Write all data blocks
         out.write(blockData);
 
         int sefhPos = out.size();
@@ -214,48 +208,11 @@ public final class SeftBuilder {
         return result;
     }
 
-    /** Preserve non-edit entries from an existing SEFT trailer. */
-    private static void preserveExistingEntries(byte[] trailer, ByteArrayOutputStream out,
-                                                 java.util.List<int[]> dir) throws IOException {
-        int len = trailer.length;
-        int sefhPos = -1;
-        for (int i = len - 12; i >= 0; i--) {
-            if (trailer[i] == 'S' && trailer[i+1] == 'E' && trailer[i+2] == 'F' && trailer[i+3] == 'H') {
-                sefhPos = i; break;
-            }
-        }
-        if (sefhPos < 0) return;
-
-        int entryCount = readU32LE(trailer, sefhPos + 8);
-        for (int i = 0; i < entryCount; i++) {
-            int eOff = sefhPos + 12 + i * 12;
-            if (eOff + 12 > len) break;
-            int blockType = (trailer[eOff+2] & 0xFF) | ((trailer[eOff+3] & 0xFF) << 8);
-            int negOffset = readU32LE(trailer, eOff + 4);
-            int blockSize = readU32LE(trailer, eOff + 8);
-            int dataPos = sefhPos - negOffset;
-
-            // Skip re-edit entries (we'll generate new ones)
-            if (blockType == 0x0ba1) continue;
-
-            if (dataPos >= 0 && dataPos + blockSize <= len) {
-                int startPos = out.size();
-                out.write(trailer, dataPos, blockSize);
-                dir.add(new int[]{blockType, startPos, blockSize});
-            }
-        }
-    }
-
     private static void writeU32LE(ByteArrayOutputStream out, int v) {
         out.write(v & 0xFF);
         out.write((v >> 8) & 0xFF);
         out.write((v >> 16) & 0xFF);
         out.write((v >> 24) & 0xFF);
-    }
-
-    private static int readU32LE(byte[] d, int off) {
-        return (d[off] & 0xFF) | ((d[off+1] & 0xFF) << 8)
-                | ((d[off+2] & 0xFF) << 16) | ((d[off+3] & 0xFF) << 24);
     }
 
     private static String sha256(String input) {

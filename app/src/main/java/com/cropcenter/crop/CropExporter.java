@@ -21,11 +21,8 @@ import java.io.IOException;
 import java.util.List;
 
 /**
- * Orchestrates the full export pipeline:
- *   1. Render cropped bitmap
- *   2. Compress to JPEG
- *   3. Inject original metadata (EXIF patched, ICC, XMP, MPF preserved)
- *   4. Append gain map and fix MPF offsets
+ * Full export pipeline: render → compress → inject original metadata
+ * (EXIF patched, ICC/XMP/MPF preserved) → append gain map and fix MPF offsets.
  */
 public final class CropExporter {
 
@@ -41,7 +38,6 @@ public final class CropExporter {
             throw new IOException("No image loaded");
         }
 
-        // If no crop center set, export full image
         int cropW, cropH, sx, sy;
         if (state.hasCenter()) {
             cropW = state.getCropW();
@@ -57,13 +53,16 @@ public final class CropExporter {
             sy = 0;
         }
 
-        // Create output bitmap. Use Display P3 ONLY for JPEG when the source has an ICC
-        // profile (needed for Ultra HDR). PNG always uses sRGB — color-managed canvases
-        // can apply subtle filtering during rasterization, causing grid lines to render
-        // at inconsistent widths or drop out.
+        // Create output bitmap. Use Display P3 ONLY for JPEG when the source
+        // carries a gain map (Ultra HDR): the gain map was tuned against a
+        // P3-gamut base, so composing it onto an sRGB primary produces a
+        // subtly wrong HDR boost. PNG always uses sRGB — color-managed canvases
+        // can apply subtle filtering during rasterization, causing grid lines
+        // to render at inconsistent widths or drop out.
         boolean isJpeg = "jpeg".equals(state.getExportConfig().format);
+        boolean hasGainMap = state.getGainMap() != null && state.getGainMap().length > 0;
         Bitmap outBmp;
-        if (isJpeg && state.getIccProfile() != null) {
+        if (isJpeg && hasGainMap) {
             outBmp = Bitmap.createBitmap(cropW, cropH, Bitmap.Config.ARGB_8888, true,
                     ColorSpace.get(ColorSpace.Named.DISPLAY_P3));
         } else {
@@ -78,7 +77,7 @@ public final class CropExporter {
 
         // Optional grid overlay bake-in (independent of whether grid is visible on screen)
         GridConfig grid = state.getGridConfig();
-        if (state.getExportConfig().includeGrid) {
+        if (grid.includeInExport) {
             drawGridPixels(outBmp, cropW, cropH, grid);
         }
 
@@ -90,22 +89,28 @@ public final class CropExporter {
 
     private static ExportResult exportJpeg(CropState state, Bitmap bmp, int cropW, int cropH,
                                                java.io.File cacheDir) throws IOException {
-        int quality = 100; // always max quality
+        int quality = 100;
 
         // Generate thumbnail sized to fit the available EXIF space.
+        // Use the full remaining APP1 budget (EXIF segments cap at 65535 bytes,
+        // minus IFD overhead) so the thumbnail matches camera-native resolution
+        // instead of being artificially shrunk to 20KB. 1024px matches the size
+        // Samsung/Galaxy cameras typically embed.
         List<JpegSegment> metaForThumb = state.getJpegMeta();
         int thumbBudget = (metaForThumb != null && !metaForThumb.isEmpty())
                 ? ExifPatcher.maxThumbnailBytes(metaForThumb) - 200 // margin for IFD changes
-                : 20000;
-        thumbBudget = Math.max(2000, Math.min(20000, thumbBudget));
-        byte[] thumbnail = generateThumbnail(bmp, 512, thumbBudget);
+                : 60000;
+        thumbBudget = Math.max(2000, Math.min(60000, thumbBudget));
+        byte[] thumbnail = generateThumbnail(bmp, 1024, thumbBudget);
 
         // HDR path: generate a cropped Ultra HDR JPEG to extract the gain map from.
         // The primary image always comes from the canvas rendering above (matches preview
         // exactly, including rotation around image center). The gain map is extracted from
         // the HDR path and composed with the canvas primary.
         byte[] originalBytes = state.getOriginalFileBytes();
-        boolean hasHdr = state.getGainMap() != null && originalBytes != null && UltraHdrCompat.isSupported();
+        // UltraHdrCompat requires the Android 14+ Gainmap API; minSdk 35
+        // guarantees availability, so no runtime check is needed.
+        boolean hasHdr = state.getGainMap() != null && originalBytes != null;
 
         byte[] croppedGainMap = null;
         if (hasHdr) {
@@ -136,10 +141,9 @@ public final class CropExporter {
         byte[] jpegBytes = bos.toByteArray();
         bmp.recycle();
 
-        // Inject original metadata
         List<JpegSegment> meta = state.getJpegMeta();
         if (meta != null && !meta.isEmpty()) {
-            List<JpegSegment> patched = ExifPatcher.patch(meta, cropW, cropH, thumbnail, 1);
+            List<JpegSegment> patched = ExifPatcher.patch(meta, cropW, cropH, thumbnail);
             jpegBytes = JpegMetadataInjector.inject(jpegBytes, patched);
         }
 
@@ -151,7 +155,6 @@ public final class CropExporter {
             jpegBytes = GainMapComposer.compose(jpegBytes, gainMapToAppend);
         }
 
-        // Append Samsung SEFT trailer
         jpegBytes = appendSeftForState(jpegBytes, state, cropW, cropH);
 
         return new ExportResult(jpegBytes, "jpg");
@@ -194,31 +197,60 @@ public final class CropExporter {
         return -1; // not found
     }
 
+    /**
+     * Produce an EXIF thumbnail JPEG that fits within {@code maxBytes}.
+     * Scales {@code bmp} down to {@code maxDim} on its longest side (never up),
+     * then tries decreasing quality levels until the compressed size fits.
+     * Falls back to halving the dimensions if even q50 is too large.
+     */
     private static byte[] generateThumbnail(Bitmap bmp, int maxDim, int maxBytes) {
         try {
             int w = bmp.getWidth(), h = bmp.getHeight();
 
-            // Scale to target size once, then try compressing at decreasing quality
-            float scale = Math.min((float) maxDim / w, (float) maxDim / h);
-            scale = Math.min(scale, 1f); // don't upscale
-            int tw = Math.max(1, Math.round(w * scale));
-            int th = Math.max(1, Math.round(h * scale));
-            Bitmap thumb = Bitmap.createScaledBitmap(bmp, tw, th, true);
+            // Compute scale in double precision: 512/5000 in float is
+            // 0.102399997f (not 0.1024), which can drop 4096*0.1024=409.6
+            // into 409.599988 and — once Math.round(float) delegates to
+            // (int)floor(x + 0.5f) — occasionally land on 409 instead of 410.
+            // Using double eliminates the drift entirely.
+            double scale = Math.min((double) maxDim / w, (double) maxDim / h);
+            scale = Math.min(scale, 1.0); // don't upscale
+            int tw = Math.max(1, (int) Math.round(w * scale));
+            int th = Math.max(1, (int) Math.round(h * scale));
+            Bitmap thumb = (tw == w && th == h) ? bmp : Bitmap.createScaledBitmap(bmp, tw, th, true);
 
-            for (int quality = 80; quality >= 40; quality -= 10) {
+            // Match camera fidelity when the EXIF budget allows; fall through to
+            // scale-down only at q50.
+            int[] qualities = { 90, 85, 80, 75, 70, 60, 50 };
+            for (int q : qualities) {
                 ByteArrayOutputStream bos = new ByteArrayOutputStream();
-                thumb.compress(Bitmap.CompressFormat.JPEG, quality, bos);
+                thumb.compress(Bitmap.CompressFormat.JPEG, q, bos);
                 byte[] result = bos.toByteArray();
-                if (result.length <= maxBytes) { if (thumb != bmp) thumb.recycle(); return result; }
+                if (result.length <= maxBytes) {
+                    Log.d(TAG, "Thumbnail: " + tw + "x" + th + " q" + q + " = " + result.length + "B");
+                    if (thumb != bmp) thumb.recycle();
+                    return result;
+                }
             }
-            // Still too large — reduce dimensions and try once more
-            Bitmap smaller = Bitmap.createScaledBitmap(bmp, tw / 2, th / 2, true);
+
+            // Still too large — halve dimensions and retry at mid quality.
+            // IMPORTANT: recompute from (w * scale * 0.5) rather than (tw / 2).
+            // Integer division on the already-rounded tw truncates: for a 4:5
+            // source like 4000×5000 at scale 0.2048 this produced 819/2 = 409
+            // instead of the correct round(409.6) = 410. Going through the
+            // original scale preserves full precision end-to-end.
             if (thumb != bmp) thumb.recycle();
+            int tw2 = Math.max(1, (int) Math.round(w * scale * 0.5));
+            int th2 = Math.max(1, (int) Math.round(h * scale * 0.5));
+            Bitmap smaller = Bitmap.createScaledBitmap(bmp, tw2, th2, true);
             ByteArrayOutputStream bos = new ByteArrayOutputStream();
-            smaller.compress(Bitmap.CompressFormat.JPEG, 60, bos);
+            smaller.compress(Bitmap.CompressFormat.JPEG, 70, bos);
             smaller.recycle();
             byte[] result = bos.toByteArray();
-            if (result.length <= maxBytes) return result;
+            if (result.length <= maxBytes) {
+                Log.d(TAG, "Thumbnail (halved): " + tw2 + "x" + th2 + " q70 = " + result.length + "B");
+                return result;
+            }
+            Log.w(TAG, "Thumbnail too large even at halved size: " + result.length + " > " + maxBytes);
             return null;
         } catch (Exception e) {
             Log.w(TAG, "Thumbnail generation failed", e);
@@ -226,15 +258,33 @@ public final class CropExporter {
         }
     }
 
+    /** Status of a {@link #saveOriginalBackup} attempt. */
+    public enum BackupStatus {
+        /** Not applicable — source isn't a MediaStore file we can back up. */
+        NOT_APPLICABLE,
+        /** A backup for this file was already on disk; left untouched. */
+        ALREADY_EXISTS,
+        /** Wrote a fresh backup. */
+        WRITTEN,
+        /** Backup was needed but writing failed — Gallery Revert will not work. */
+        FAILED
+    }
+
     /**
      * Save the original file to shared storage for Samsung Gallery Revert.
      * Uses /storage/emulated/0/.cropcenter/ which is readable by Gallery.
      * Must be called before overwriting the original file.
+     *
+     * @return a {@link BackupStatus} so the caller can surface FAILED cases
+     *         (missing storage permission, quota, etc.) to the user instead
+     *         of silently overwriting without a revertable backup.
      */
-    public static void saveOriginalBackup(CropState state) {
-        if (state.getOriginalFilePath() == null || state.getMediaStoreId() < 0) return;
+    public static BackupStatus saveOriginalBackup(CropState state) {
+        if (state.getOriginalFilePath() == null || state.getMediaStoreId() < 0) {
+            return BackupStatus.NOT_APPLICABLE;
+        }
         byte[] origBytes = state.getOriginalFileBytes();
-        if (origBytes == null) return;
+        if (origBytes == null) return BackupStatus.NOT_APPLICABLE;
 
         String backupPath = SeftBuilder.generateBackupPath(
                 state.getOriginalFilePath(), state.getMediaStoreId());
@@ -243,7 +293,7 @@ public final class CropExporter {
         // Don't overwrite an existing backup (might be from a previous edit)
         if (backupFile.exists()) {
             Log.d(TAG, "Backup already exists: " + backupPath);
-            return;
+            return BackupStatus.ALREADY_EXISTS;
         }
 
         try {
@@ -253,8 +303,10 @@ public final class CropExporter {
                 fos.write(origBytes);
             }
             Log.d(TAG, "Original backed up to: " + backupPath + " (" + origBytes.length + " bytes)");
+            return BackupStatus.WRITTEN;
         } catch (Exception e) {
             Log.w(TAG, "Cannot save backup to " + backupPath + ": " + e.getMessage());
+            return BackupStatus.FAILED;
         }
     }
 
@@ -310,7 +362,7 @@ public final class CropExporter {
         } else if (backupPath != null) {
             // No existing SEFT — generate new one for Galaxy Revert
             seft = SeftBuilder.build(backupPath, cx, cy, cw, ch,
-                    isCropped, exifRotation, System.currentTimeMillis(), null);
+                    isCropped, exifRotation, System.currentTimeMillis());
             if (seft == null) return jpeg;
             Log.d(TAG, "Generated new SEFT trailer: " + seft.length + " bytes");
         } else {
@@ -334,7 +386,7 @@ public final class CropExporter {
         // Inject EXIF metadata via PNG eXIf chunk (PNG 1.6 spec)
         List<JpegSegment> meta = state.getJpegMeta();
         if (meta != null) {
-            for (JpegSegment seg : ExifPatcher.patch(meta, cropW, cropH, null, 1)) {
+            for (JpegSegment seg : ExifPatcher.patch(meta, cropW, cropH, null)) {
                 if (seg.isExif()) {
                     pngBytes = injectPngExif(pngBytes, seg.data);
                     break; // only one EXIF segment
