@@ -1,270 +1,494 @@
 package com.cropcenter.model;
 
 import android.graphics.Bitmap;
+
 import com.cropcenter.metadata.JpegSegment;
+
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
 import java.util.List;
 
-/**
- * Central state object for the crop editor.
- * Holds all parameters, source image, and extracted metadata.
- */
-public class CropState {
+// Central state object for the crop editor. Holds all parameters, source image, and extracted
+// metadata.
+public class CropState
+{
+	public interface OnStateChangedListener
+	{
+		void onStateChanged();
+	}
 
-    public interface OnStateChangedListener {
-        void onStateChanged();
-    }
+	private final ExportConfig exportConfig = new ExportConfig();
+	private final GridConfig gridConfig = new GridConfig();
+	// Mutated only via addSelectionPoint / removeSelectionPoint* / replaceSelectionPoints /
+	// clearSelectionPoints. Callers never mutate directly — getSelectionPoints() returns an
+	// unmodifiable view.
+	private final List<SelectionPoint> selectionPoints = new ArrayList<>();
 
-    // ── Source image ──
-    private Bitmap sourceImage;
-    private byte[] originalFileBytes;
-    private String sourceFormat; // "jpeg" or "png"
+	private AspectRatio aspectRatio = AspectRatio.R4_5;
+	private Bitmap sourceImage;
+	private CenterMode centerMode = CenterMode.BOTH;
+	private EditorMode editorMode = EditorMode.MOVE;
+	private List<JpegSegment> jpegMeta = new ArrayList<>();
+	private OnStateChangedListener listener;
+	private String originalFilePath; // absolute path for Samsung Revert
+	private String originalFilename;
+	private String sourceFormat; // "jpeg" or "png"
+	private boolean centerLocked = false; // when true, auto-recompute from points is suppressed
+	private boolean cropSizeDirty = true;
+	private boolean hasCenter;
+	private byte[] gainMap;
+	private byte[] originalFileBytes;
+	private byte[] seftTrailer; // Samsung SEFT trailer (appended after gain map)
+	private float centerX;
+	private float centerY;
+	private float rotationDegrees = 0f; // precise rotation applied to source image
+	private int cropH;
+	private int cropW;
+	private long mediaStoreId = -1; // MediaStore _ID for Samsung Revert
 
-    // ── Crop parameters ──
-    private float centerX;
-    private float centerY;
-    private int cropW;
-    private int cropH;
-    private boolean hasCenter;
-    private boolean cropSizeDirty = true;
-    private float rotationDegrees = 0f; // precise rotation applied to source image
+	public void addSelectionPoint(SelectionPoint point)
+	{
+		selectionPoints.add(point);
+		notifyChanged();
+	}
 
-    // ── Settings ──
-    private AspectRatio aspectRatio = AspectRatio.R4_5;
-    private String originalFilename;
-    private String originalFilePath; // absolute path for Samsung Revert
-    private long mediaStoreId = -1;  // MediaStore _ID for Samsung Revert
-    private CenterMode centerMode = CenterMode.BOTH;
-    private EditorMode editorMode = EditorMode.MOVE;
-    private boolean centerLocked = false; // when true, auto-recompute from points is suppressed
-    private final GridConfig gridConfig = new GridConfig();
-    private final ExportConfig exportConfig = new ExportConfig();
+	public void clearSelectionPoints()
+	{
+		if (selectionPoints.isEmpty())
+		{
+			return;
+		}
+		selectionPoints.clear();
+		notifyChanged();
+	}
 
-    // ── Selection points (feature mode) ──
-    private final List<SelectionPoint> selectionPoints = new ArrayList<>();
+	public AspectRatio getAspectRatio()
+	{
+		return aspectRatio;
+	}
 
-    // ── Extracted metadata ──
-    private List<JpegSegment> jpegMeta = new ArrayList<>();
-    private byte[] gainMap;
-    private byte[] seftTrailer; // Samsung SEFT trailer (appended after gain map)
+	public CenterMode getCenterMode()
+	{
+		return centerMode;
+	}
 
-    // ── Listener ──
-    private OnStateChangedListener listener;
+	public float getCenterX()
+	{
+		return centerX;
+	}
 
-    public void setListener(OnStateChangedListener listener) {
-        this.listener = listener;
-    }
+	public float getCenterY()
+	{
+		return centerY;
+	}
 
-    private void notifyChanged() {
-        if (listener != null) listener.onStateChanged();
-    }
+	public int getCropH()
+	{
+		return cropH;
+	}
 
-    // ── Source image ──
+	public int getCropW()
+	{
+		return cropW;
+	}
 
-    public Bitmap getSourceImage() { return sourceImage; }
-    public void setSourceImage(Bitmap bmp) { this.sourceImage = bmp; notifyChanged(); }
+	public EditorMode getEditorMode()
+	{
+		return editorMode;
+	}
 
-    public byte[] getOriginalFileBytes() { return originalFileBytes; }
-    public void setOriginalFileBytes(byte[] bytes) { this.originalFileBytes = bytes; }
+	public ExportConfig getExportConfig()
+	{
+		return exportConfig;
+	}
 
-    public String getSourceFormat() { return sourceFormat; }
-    public void setSourceFormat(String fmt) { this.sourceFormat = fmt; }
+	public byte[] getGainMap()
+	{
+		return gainMap;
+	}
 
-    public String getOriginalFilename() { return originalFilename; }
-    public void setOriginalFilename(String name) { this.originalFilename = name; }
+	public GridConfig getGridConfig()
+	{
+		return gridConfig;
+	}
 
-    public String getOriginalFilePath() { return originalFilePath; }
-    public void setOriginalFilePath(String path) { this.originalFilePath = path; }
+	public int getImageHeight()
+	{
+		return sourceImage != null ? sourceImage.getHeight() : 0;
+	}
 
-    public long getMediaStoreId() { return mediaStoreId; }
-    public void setMediaStoreId(long id) { this.mediaStoreId = id; }
+	public int getImageWidth()
+	{
+		return sourceImage != null ? sourceImage.getWidth() : 0;
+	}
 
-    public int getImageWidth() { return sourceImage != null ? sourceImage.getWidth() : 0; }
-    public int getImageHeight() { return sourceImage != null ? sourceImage.getHeight() : 0; }
+	public List<JpegSegment> getJpegMeta()
+	{
+		return jpegMeta;
+	}
 
-    // ── Crop parameters ──
+	public long getMediaStoreId()
+	{
+		return mediaStoreId;
+	}
 
-    public float getCenterX() { return centerX; }
-    public float getCenterY() { return centerY; }
-    /** Set center without bounds clamping or notification — used before recomputeCrop. */
-    public void setCenterUnclamped(float x, float y) {
-        this.centerX = x;
-        this.centerY = y;
-        this.hasCenter = true;
-        // No notifyChanged — caller will trigger notify via recomputeCrop → setCenter
-    }
+	public byte[] getOriginalFileBytes()
+	{
+		return originalFileBytes;
+	}
 
-    public void setCenter(float x, float y) {
-        // Clamp so crop rect stays fully inside the (possibly rotated) image.
-        if (sourceImage != null && cropW > 0 && cropH > 0) {
-            int imgW = sourceImage.getWidth();
-            int imgH = sourceImage.getHeight();
+	public String getOriginalFilePath()
+	{
+		return originalFilePath;
+	}
 
-            if (rotationDegrees == 0f) {
-                if (cropW < imgW) {
-                    x = Math.max(cropW / 2f, Math.min(imgW - cropW / 2f, x));
-                } else {
-                    x = imgW / 2f;
-                }
-                if (cropH < imgH) {
-                    y = Math.max(cropH / 2f, Math.min(imgH - cropH / 2f, y));
-                } else {
-                    y = imgH / 2f;
-                }
-            } else {
-                // For rotated images: clamp each axis independently via binary search.
-                // This prevents clamping X from affecting Y and vice versa.
-                float mx = imgW / 2f, my = imgH / 2f;
-                double rad = Math.toRadians(-rotationDegrees);
-                double cosR = Math.cos(rad), sinR = Math.sin(rad);
-                float hw = cropW / 2f, hh = cropH / 2f;
+	public String getOriginalFilename()
+	{
+		return originalFilename;
+	}
 
-                // First clamp X (keeping Y fixed)
-                if (!cornersInside(x, y, hw, hh, mx, my, cosR, sinR, imgW, imgH)) {
-                    float lo = 0f, hi = 1f;
-                    float validX = mx;
-                    for (int i = 0; i < 25; i++) {
-                        float t = (lo + hi) / 2f;
-                        float tx = mx + (x - mx) * t;
-                        if (cornersInside(tx, y, hw, hh, mx, my, cosR, sinR, imgW, imgH)) {
-                            validX = tx; lo = t;
-                        } else {
-                            hi = t;
-                        }
-                    }
-                    x = validX;
-                }
+	public float getRotationDegrees()
+	{
+		return rotationDegrees;
+	}
 
-                // Then clamp Y (keeping clamped X fixed)
-                if (!cornersInside(x, y, hw, hh, mx, my, cosR, sinR, imgW, imgH)) {
-                    float lo = 0f, hi = 1f;
-                    float validY = my;
-                    for (int i = 0; i < 25; i++) {
-                        float t = (lo + hi) / 2f;
-                        float ty = my + (y - my) * t;
-                        if (cornersInside(x, ty, hw, hh, mx, my, cosR, sinR, imgW, imgH)) {
-                            validY = ty; lo = t;
-                        } else {
-                            hi = t;
-                        }
-                    }
-                    y = validY;
-                }
-            }
-        }
-        this.centerX = x;
-        this.centerY = y;
-        this.hasCenter = true;
-        notifyChanged();
-    }
+	public byte[] getSeftTrailer()
+	{
+		return seftTrailer;
+	}
 
+	// Unmodifiable view of the selection points. Callers that need to mutate must go through
+	// addSelectionPoint / removeSelectionPoint / clearSelectionPoints / replaceSelectionPoints so
+	// each change fires notifyChanged exactly once — previously callers mutated the backing list
+	// directly and had to remember to trigger recomputes themselves.
+	public List<SelectionPoint> getSelectionPoints()
+	{
+		return Collections.unmodifiableList(selectionPoints);
+	}
 
-    public int getCropW() { return cropW; }
-    public int getCropH() { return cropH; }
-    public void setCropSize(int w, int h) {
-        this.cropW = w;
-        this.cropH = h;
-        notifyChanged();
-    }
+	public String getSourceFormat()
+	{
+		return sourceFormat;
+	}
 
-    /** Set crop size without triggering listener — used during batch updates in recomputeCrop. */
-    public void setCropSizeSilent(int w, int h) {
-        this.cropW = w;
-        this.cropH = h;
-    }
+	public Bitmap getSourceImage()
+	{
+		return sourceImage;
+	}
 
-    public boolean hasCenter() { return hasCenter; }
+	public boolean hasCenter()
+	{
+		return hasCenter;
+	}
 
-    // ── Settings ──
+	public boolean isCenterLocked()
+	{
+		return centerLocked;
+	}
 
-    public boolean isCropSizeDirty() { return cropSizeDirty; }
-    public void setCropSizeDirty(boolean dirty) { this.cropSizeDirty = dirty; }
-    public void markCropSizeDirty() { this.cropSizeDirty = true; }
+	public boolean isCropSizeDirty()
+	{
+		return cropSizeDirty;
+	}
 
-    public float getRotationDegrees() { return rotationDegrees; }
-    public void setRotationDegrees(float deg) {
-        if (Float.isNaN(deg) || Float.isInfinite(deg)) deg = 0f;
-        deg = Math.max(-180f, Math.min(180f, deg));
-        this.rotationDegrees = deg;
-        this.cropSizeDirty = true;
-        notifyChanged();
-    }
+	public void markCropSizeDirty()
+	{
+		this.cropSizeDirty = true;
+	}
 
-    public AspectRatio getAspectRatio() { return aspectRatio; }
-    public void setAspectRatio(AspectRatio ar) { this.aspectRatio = ar; cropSizeDirty = true; notifyChanged(); }
+	public boolean removeSelectionPoint(SelectionPoint point)
+	{
+		boolean removed = selectionPoints.remove(point);
+		if (removed)
+		{
+			notifyChanged();
+		}
+		return removed;
+	}
 
-    public CenterMode getCenterMode() { return centerMode; }
-    public void setCenterMode(CenterMode mode) {
-        this.centerMode = mode;
-        // Don't set cropSizeDirty here — the button handler calls recomputeForLockChange()
-        // explicitly. Setting dirty here causes the listener to recompute IMMEDIATELY
-        // (runOnUiThread runs inline on UI thread) with the wrong center, racing with
-        // the handler's recomputeForLockChange that uses the correct selection midpoint.
-        notifyChanged();
-    }
+	public SelectionPoint removeSelectionPointAt(int index)
+	{
+		SelectionPoint removed = selectionPoints.remove(index);
+		notifyChanged();
+		return removed;
+	}
 
-    public EditorMode getEditorMode() { return editorMode; }
-    public void setEditorMode(EditorMode mode) {
-        this.editorMode = mode;
-        // Don't set cropSizeDirty — mode changes don't affect crop size
-        notifyChanged();
-    }
+	// Replace all selection points atomically (used for undo/redo snapshot restores).
+	public void replaceSelectionPoints(Collection<SelectionPoint> newPoints)
+	{
+		selectionPoints.clear();
+		selectionPoints.addAll(newPoints);
+		notifyChanged();
+	}
 
-    public boolean isCenterLocked() { return centerLocked; }
-    public void setCenterLocked(boolean locked) { this.centerLocked = locked; }
+	// Reset everything for a new image.
+	public void reset()
+	{
+		sourceImage = null;
+		originalFileBytes = null;
+		sourceFormat = null;
+		centerX = 0;
+		centerY = 0;
+		cropW = 0;
+		cropH = 0;
+		hasCenter = false;
+		cropSizeDirty = true;
+		rotationDegrees = 0f;
+		centerLocked = false;
+		// aspectRatio preserved — it's a user preference, not image data
+		originalFilename = null;
+		originalFilePath = null;
+		mediaStoreId = -1;
+		selectionPoints.clear();
+		jpegMeta.clear();
+		gainMap = null;
+		seftTrailer = null;
+	}
 
-    public GridConfig getGridConfig() { return gridConfig; }
-    public ExportConfig getExportConfig() { return exportConfig; }
+	public void setAspectRatio(AspectRatio ar)
+	{
+		this.aspectRatio = ar;
+		cropSizeDirty = true;
+		notifyChanged();
+	}
 
-    // ── Selection points ──
+	public void setCenter(float x, float y)
+	{
+		// Clamp so crop rect stays fully inside the (possibly rotated) image.
+		if (sourceImage != null && cropW > 0 && cropH > 0)
+		{
+			int imgW = sourceImage.getWidth();
+			int imgH = sourceImage.getHeight();
 
-    public List<SelectionPoint> getSelectionPoints() { return selectionPoints; }
+			if (rotationDegrees == 0f)
+			{
+				if (cropW < imgW)
+				{
+					x = Math.clamp(x, cropW / 2f, imgW - cropW / 2f);
+				}
+				else
+				{
+					x = imgW / 2f;
+				}
+				if (cropH < imgH)
+				{
+					y = Math.clamp(y, cropH / 2f, imgH - cropH / 2f);
+				}
+				else
+				{
+					y = imgH / 2f;
+				}
+			}
+			else
+			{
+				// For rotated images: clamp each axis independently via binary search. This
+				// prevents clamping X from affecting Y and vice versa.
+				float imageMidX = imgW / 2f;
+				float imageMidY = imgH / 2f;
+				double rad = Math.toRadians(-rotationDegrees);
+				double cosR = Math.cos(rad);
+				double sinR = Math.sin(rad);
+				float halfWidth = cropW / 2f;
+				float halfHeight = cropH / 2f;
 
-    // ── Metadata ──
+				// First clamp X (keeping Y fixed)
+				if (!cornersInside(x, y, halfWidth, halfHeight,
+					imageMidX, imageMidY, cosR, sinR, imgW, imgH))
+				{
+					float loFraction = 0f;
+					float hiFraction = 1f;
+					float validX = imageMidX;
+					for (int i = 0; i < 25; i++)
+					{
+						float midFraction = (loFraction + hiFraction) / 2f;
+						float testX = imageMidX + (x - imageMidX) * midFraction;
+						if (cornersInside(testX, y, halfWidth, halfHeight,
+							imageMidX, imageMidY, cosR, sinR, imgW, imgH))
+						{
+							validX = testX;
+							loFraction = midFraction;
+						}
+						else
+						{
+							hiFraction = midFraction;
+						}
+					}
+					x = validX;
+				}
 
-    public List<JpegSegment> getJpegMeta() { return jpegMeta; }
-    public void setJpegMeta(List<JpegSegment> meta) { this.jpegMeta = meta; }
+				// Then clamp Y (keeping clamped X fixed)
+				if (!cornersInside(x, y, halfWidth, halfHeight,
+					imageMidX, imageMidY, cosR, sinR, imgW, imgH))
+				{
+					float loFraction = 0f;
+					float hiFraction = 1f;
+					float validY = imageMidY;
+					for (int i = 0; i < 25; i++)
+					{
+						float midFraction = (loFraction + hiFraction) / 2f;
+						float testY = imageMidY + (y - imageMidY) * midFraction;
+						if (cornersInside(x, testY, halfWidth, halfHeight,
+							imageMidX, imageMidY, cosR, sinR, imgW, imgH))
+						{
+							validY = testY;
+							loFraction = midFraction;
+						}
+						else
+						{
+							hiFraction = midFraction;
+						}
+					}
+					y = validY;
+				}
+			}
+		}
+		this.centerX = x;
+		this.centerY = y;
+		this.hasCenter = true;
+		notifyChanged();
+	}
 
-    public byte[] getGainMap() { return gainMap; }
-    public void setGainMap(byte[] gm) { this.gainMap = gm; }
+	public void setCenterLocked(boolean locked)
+	{
+		this.centerLocked = locked;
+	}
 
-    public byte[] getSeftTrailer() { return seftTrailer; }
-    public void setSeftTrailer(byte[] seft) { this.seftTrailer = seft; }
+	public void setCenterMode(CenterMode mode)
+	{
+		this.centerMode = mode;
+		// Don't set cropSizeDirty here — the button handler calls recomputeForLockChange()
+		// explicitly. Setting dirty here causes the listener to recompute IMMEDIATELY
+		// (runOnUiThread runs inline on UI thread) with the wrong center, racing with
+		// the handler's recomputeForLockChange that uses the correct selection midpoint.
+		notifyChanged();
+	}
 
-    /** Check if all 4 corners of the crop rect, when un-rotated, are inside the image. */
-    private static boolean cornersInside(float cx, float cy, float hw, float hh,
-                                          float mx, float my, double cosR, double sinR,
-                                          int imgW, int imgH) {
-        float[] dxs = {-hw, hw, -hw, hw};
-        float[] dys = {-hh, -hh, hh, hh};
-        for (int i = 0; i < 4; i++) {
-            double px = cx + dxs[i] - mx;
-            double py = cy + dys[i] - my;
-            double ux = px * cosR - py * sinR + mx;
-            double uy = px * sinR + py * cosR + my;
-            if (ux < -0.5 || ux > imgW + 0.5 || uy < -0.5 || uy > imgH + 0.5) return false;
-        }
-        return true;
-    }
+	// Set center without bounds clamping or notification — used before recomputeCrop.
+	public void setCenterUnclamped(float x, float y)
+	{
+		this.centerX = x;
+		this.centerY = y;
+		this.hasCenter = true;
+		// No notifyChanged — caller will trigger notify via recomputeCrop → setCenter
+	}
 
-    /** Reset everything for a new image. */
-    public void reset() {
-        sourceImage = null;
-        originalFileBytes = null;
-        sourceFormat = null;
-        centerX = centerY = 0;
-        cropW = cropH = 0;
-        hasCenter = false;
-        cropSizeDirty = true;
-        rotationDegrees = 0f;
-        centerLocked = false;
-        // aspectRatio preserved — it's a user preference, not image data
-        originalFilename = null;
-        originalFilePath = null;
-        mediaStoreId = -1;
-        selectionPoints.clear();
-        jpegMeta.clear();
-        gainMap = null;
-        seftTrailer = null;
-    }
+	public void setCropSize(int width, int height)
+	{
+		this.cropW = width;
+		this.cropH = height;
+		notifyChanged();
+	}
+
+	public void setCropSizeDirty(boolean dirty)
+	{
+		this.cropSizeDirty = dirty;
+	}
+
+	// Set crop size without triggering listener — used during batch updates in recomputeCrop.
+	public void setCropSizeSilent(int width, int height)
+	{
+		this.cropW = width;
+		this.cropH = height;
+	}
+
+	public void setEditorMode(EditorMode mode)
+	{
+		this.editorMode = mode;
+		// Don't set cropSizeDirty — mode changes don't affect crop size
+		notifyChanged();
+	}
+
+	public void setGainMap(byte[] gm)
+	{
+		this.gainMap = gm;
+	}
+
+	public void setJpegMeta(List<JpegSegment> meta)
+	{
+		this.jpegMeta = meta;
+	}
+
+	public void setListener(OnStateChangedListener listener)
+	{
+		this.listener = listener;
+	}
+
+	public void setMediaStoreId(long id)
+	{
+		this.mediaStoreId = id;
+	}
+
+	public void setOriginalFileBytes(byte[] bytes)
+	{
+		this.originalFileBytes = bytes;
+	}
+
+	public void setOriginalFilePath(String path)
+	{
+		this.originalFilePath = path;
+	}
+
+	public void setOriginalFilename(String name)
+	{
+		this.originalFilename = name;
+	}
+
+	public void setRotationDegrees(float deg)
+	{
+		if (Float.isNaN(deg) || Float.isInfinite(deg))
+		{
+			deg = 0f;
+		}
+		deg = Math.clamp(deg, -180f, 180f);
+		this.rotationDegrees = deg;
+		this.cropSizeDirty = true;
+		notifyChanged();
+	}
+
+	public void setSeftTrailer(byte[] seft)
+	{
+		this.seftTrailer = seft;
+	}
+
+	public void setSourceFormat(String fmt)
+	{
+		this.sourceFormat = fmt;
+	}
+
+	public void setSourceImage(Bitmap bmp)
+	{
+		this.sourceImage = bmp;
+		notifyChanged();
+	}
+
+	private void notifyChanged()
+	{
+		if (listener != null)
+		{
+			listener.onStateChanged();
+		}
+	}
+
+	// Check if all 4 corners of the crop rect, when un-rotated, are inside the image.
+	private static boolean cornersInside(float centerX, float centerY, float halfWidth, float halfHeight,
+		float imageMidX, float imageMidY, double cosR, double sinR,
+		int imgW, int imgH)
+	{
+		float[] cornerDx = { -halfWidth, halfWidth, -halfWidth, halfWidth };
+		float[] cornerDy = { -halfHeight, -halfHeight, halfHeight, halfHeight };
+		for (int i = 0; i < 4; i++)
+		{
+			double deltaX = centerX + cornerDx[i] - imageMidX;
+			double deltaY = centerY + cornerDy[i] - imageMidY;
+			double unrotatedX = deltaX * cosR - deltaY * sinR + imageMidX;
+			double unrotatedY = deltaX * sinR + deltaY * cosR + imageMidY;
+			if (unrotatedX < -0.5 || unrotatedX > imgW + 0.5
+				|| unrotatedY < -0.5 || unrotatedY > imgH + 0.5)
+			{
+				return false;
+			}
+		}
+		return true;
+	}
 }

@@ -1,101 +1,133 @@
 package com.cropcenter.util;
 
-/**
- * Endian-aware read/write helpers for raw byte arrays.
- * Used throughout the metadata pipeline for JPEG/TIFF/MPF parsing.
- * All methods validate bounds and throw IndexOutOfBoundsException on overflow.
- */
-public final class ByteBufferUtils {
+// Endian-aware read/write helpers for raw byte arrays. Used throughout the metadata pipeline for
+// JPEG/TIFF/MPF parsing. All methods validate bounds and throw IndexOutOfBoundsException on
+// overflow.
+public final class ByteBufferUtils
+{
+	private ByteBufferUtils() {}
 
-    private ByteBufferUtils() {}
+	// ── Endian-dispatched ──
 
-    private static void checkRead(byte[] d, int off, int len) {
-        if (d == null || off < 0 || off + len > d.length) {
-            throw new IndexOutOfBoundsException(
-                "read " + len + " at " + off + ", length=" + (d == null ? "null" : d.length));
-        }
-    }
+	public static int readU16(byte[] data, int offset, boolean isLittleEndian)
+	{
+		return isLittleEndian ? readU16LE(data, offset) : readU16BE(data, offset);
+	}
 
-    private static void checkWrite(byte[] d, int off, int len) {
-        if (d == null || off < 0 || off + len > d.length) {
-            throw new IndexOutOfBoundsException(
-                "write " + len + " at " + off + ", length=" + (d == null ? "null" : d.length));
-        }
-    }
+	public static long readU32(byte[] data, int offset, boolean isLittleEndian)
+	{
+		return isLittleEndian ? readU32LE(data, offset) : readU32BE(data, offset);
+	}
 
-    // ── Big-endian ──
+	public static void writeU16(byte[] data, int offset, int value, boolean isLittleEndian)
+	{
+		if (isLittleEndian)
+		{
+			writeU16LE(data, offset, value);
+		}
+		else
+		{
+			writeU16BE(data, offset, value);
+		}
+	}
 
-    public static int readU16BE(byte[] d, int off) {
-        checkRead(d, off, 2);
-        return ((d[off] & 0xFF) << 8) | (d[off + 1] & 0xFF);
-    }
+	public static void writeU32(byte[] data, int offset, long value, boolean isLittleEndian)
+	{
+		if (isLittleEndian)
+		{
+			writeU32LE(data, offset, value);
+		}
+		else
+		{
+			writeU32BE(data, offset, value);
+		}
+	}
 
-    public static long readU32BE(byte[] d, int off) {
-        checkRead(d, off, 4);
-        return ((long)(d[off] & 0xFF) << 24)
-             | ((long)(d[off+1] & 0xFF) << 16)
-             | ((long)(d[off+2] & 0xFF) << 8)
-             | (d[off+3] & 0xFF);
-    }
+	// ── Big-endian ──
 
-    public static void writeU16BE(byte[] d, int off, int v) {
-        checkWrite(d, off, 2);
-        d[off]   = (byte)((v >> 8) & 0xFF);
-        d[off+1] = (byte)(v & 0xFF);
-    }
+	public static int readU16BE(byte[] data, int offset)
+	{
+		checkRead(data, offset, 2);
+		return ((data[offset] & 0xFF) << 8) | (data[offset + 1] & 0xFF);
+	}
 
-    public static void writeU32BE(byte[] d, int off, long v) {
-        checkWrite(d, off, 4);
-        d[off]   = (byte)((v >> 24) & 0xFF);
-        d[off+1] = (byte)((v >> 16) & 0xFF);
-        d[off+2] = (byte)((v >> 8) & 0xFF);
-        d[off+3] = (byte)(v & 0xFF);
-    }
+	public static long readU32BE(byte[] data, int offset)
+	{
+		checkRead(data, offset, 4);
+		return ((long) (data[offset] & 0xFF) << 24)
+			| ((long) (data[offset + 1] & 0xFF) << 16)
+			| ((long) (data[offset + 2] & 0xFF) << 8)
+			| (data[offset + 3] & 0xFF);
+	}
 
-    // ── Little-endian ──
+	public static void writeU16BE(byte[] data, int offset, int value)
+	{
+		checkWrite(data, offset, 2);
+		data[offset]     = (byte) ((value >> 8) & 0xFF);
+		data[offset + 1] = (byte) (value & 0xFF);
+	}
 
-    public static int readU16LE(byte[] d, int off) {
-        checkRead(d, off, 2);
-        return (d[off] & 0xFF) | ((d[off + 1] & 0xFF) << 8);
-    }
+	public static void writeU32BE(byte[] data, int offset, long value)
+	{
+		checkWrite(data, offset, 4);
+		data[offset]     = (byte) ((value >> 24) & 0xFF);
+		data[offset + 1] = (byte) ((value >> 16) & 0xFF);
+		data[offset + 2] = (byte) ((value >> 8) & 0xFF);
+		data[offset + 3] = (byte) (value & 0xFF);
+	}
 
-    public static long readU32LE(byte[] d, int off) {
-        checkRead(d, off, 4);
-        return (d[off] & 0xFF)
-             | ((long)(d[off+1] & 0xFF) << 8)
-             | ((long)(d[off+2] & 0xFF) << 16)
-             | ((long)(d[off+3] & 0xFF) << 24);
-    }
+	// ── Little-endian ──
 
-    public static void writeU16LE(byte[] d, int off, int v) {
-        checkWrite(d, off, 2);
-        d[off]   = (byte)(v & 0xFF);
-        d[off+1] = (byte)((v >> 8) & 0xFF);
-    }
+	public static int readU16LE(byte[] data, int offset)
+	{
+		checkRead(data, offset, 2);
+		return (data[offset] & 0xFF) | ((data[offset + 1] & 0xFF) << 8);
+	}
 
-    public static void writeU32LE(byte[] d, int off, long v) {
-        checkWrite(d, off, 4);
-        d[off]   = (byte)(v & 0xFF);
-        d[off+1] = (byte)((v >> 8) & 0xFF);
-        d[off+2] = (byte)((v >> 16) & 0xFF);
-        d[off+3] = (byte)((v >> 24) & 0xFF);
-    }
+	public static long readU32LE(byte[] data, int offset)
+	{
+		checkRead(data, offset, 4);
+		return (data[offset] & 0xFF)
+			| ((long) (data[offset + 1] & 0xFF) << 8)
+			| ((long) (data[offset + 2] & 0xFF) << 16)
+			| ((long) (data[offset + 3] & 0xFF) << 24);
+	}
 
-    // ── Endian-dispatched ──
+	public static void writeU16LE(byte[] data, int offset, int value)
+	{
+		checkWrite(data, offset, 2);
+		data[offset]     = (byte) (value & 0xFF);
+		data[offset + 1] = (byte) ((value >> 8) & 0xFF);
+	}
 
-    public static int readU16(byte[] d, int off, boolean le) {
-        return le ? readU16LE(d, off) : readU16BE(d, off);
-    }
+	public static void writeU32LE(byte[] data, int offset, long value)
+	{
+		checkWrite(data, offset, 4);
+		data[offset]     = (byte) (value & 0xFF);
+		data[offset + 1] = (byte) ((value >> 8) & 0xFF);
+		data[offset + 2] = (byte) ((value >> 16) & 0xFF);
+		data[offset + 3] = (byte) ((value >> 24) & 0xFF);
+	}
 
-    public static long readU32(byte[] d, int off, boolean le) {
-        return le ? readU32LE(d, off) : readU32BE(d, off);
-    }
+	// ── Bounds checks ──
 
-    public static void writeU16(byte[] d, int off, int v, boolean le) {
-        if (le) writeU16LE(d, off, v); else writeU16BE(d, off, v);
-    }
+	private static void checkRead(byte[] data, int offset, int length)
+	{
+		if (data == null || offset < 0 || offset + length > data.length)
+		{
+			String dataLen = data == null ? "null" : String.valueOf(data.length);
+			throw new IndexOutOfBoundsException(
+				"read " + length + " at " + offset + ", length=" + dataLen);
+		}
+	}
 
-    public static void writeU32(byte[] d, int off, long v, boolean le) {
-        if (le) writeU32LE(d, off, v); else writeU32BE(d, off, v);
-    }
+	private static void checkWrite(byte[] data, int offset, int length)
+	{
+		if (data == null || offset < 0 || offset + length > data.length)
+		{
+			String dataLen = data == null ? "null" : String.valueOf(data.length);
+			throw new IndexOutOfBoundsException(
+				"write " + length + " at " + offset + ", length=" + dataLen);
+		}
+	}
 }

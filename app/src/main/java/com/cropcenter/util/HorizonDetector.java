@@ -6,392 +6,572 @@ import android.util.Log;
 
 import com.cropcenter.metadata.JpegSegment;
 
+import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/**
- * Detects the horizon tilt angle for auto-rotation correction.
- *
- * Strategy (in priority order):
- *   1. XMP metadata: look for device roll angle (most accurate, ~0.01° precision)
- *   2. Computer vision: Canny edges + Radon variance maximization (fallback)
- */
-public final class HorizonDetector {
+// Detects the horizon tilt angle for auto-rotation correction.
+//
+// Strategy (in priority order):
+//   1. XMP metadata: look for device roll angle (most accurate, ~0.01° precision)
+//   2. Computer vision: Canny edges + Radon variance maximization (fallback)
+public final class HorizonDetector
+{
+	private static final String TAG = "HorizonDetector";
 
-    private static final String TAG = "HorizonDetector";
+	private HorizonDetector() {}
 
-    private HorizonDetector() {}
+	/**
+	 * Detect horizon tilt from EXIF/XMP metadata if available.
+	 *
+	 * @param meta JPEG metadata segments (from JpegMetadataExtractor)
+	 * @return correction angle in degrees, or NaN if no roll data found
+	 */
+	public static float detectFromMetadata(List<JpegSegment> meta)
+	{
+		if (meta == null)
+		{
+			return Float.NaN;
+		}
 
-    /**
-     * Detect horizon tilt from EXIF/XMP metadata if available.
-     *
-     * @param meta JPEG metadata segments (from JpegMetadataExtractor)
-     * @return correction angle in degrees, or NaN if no roll data found
-     */
-    public static float detectFromMetadata(List<JpegSegment> meta) {
-        if (meta == null) return Float.NaN;
+		for (JpegSegment seg : meta)
+		{
+			if (!seg.isXmp())
+			{
+				continue;
+			}
 
-        for (JpegSegment seg : meta) {
-            if (!seg.isXmp()) continue;
+			// XMP data starts after "http://ns.adobe.com/xap/1.0/\0" (29 bytes) + APP1 header (4 bytes)
+			// seg.data() = FF E1 LL LL [XMP identifier] [XML...]
+			String xmpId = "http://ns.adobe.com/xap/1.0/\0";
+			int xmlStart = 4 + xmpId.length();
+			byte[] segData = seg.data();
+			if (segData.length <= xmlStart)
+			{
+				continue;
+			}
 
-            // XMP data starts after "http://ns.adobe.com/xap/1.0/\0" (29 bytes) + APP1 header (4 bytes)
-            // seg.data = FF E1 LL LL [XMP identifier] [XML...]
-            String xmpId = "http://ns.adobe.com/xap/1.0/\0";
-            int xmlStart = 4 + xmpId.length();
-            if (seg.data.length <= xmlStart) continue;
+			String xml = new String(segData, xmlStart, segData.length - xmlStart);
 
-            String xml = new String(seg.data, xmlStart, seg.data.length - xmlStart);
+			// Search for roll angle in common XMP properties. Different cameras use different
+			// namespaces: GCamera:Roll, Device:Roll, samsung:LensRoll, exif:Roll, or generic
+			// Roll/Tilt attributes.
+			float roll = findXmpFloat(xml, "Roll");
+			if (!Float.isNaN(roll))
+			{
+				Log.d(TAG, "Found XMP Roll: " + roll + "°");
+				// Roll > 0 typically means CW tilt → need CCW correction
+				return normalizeMetadataAngle(roll);
+			}
 
-            // Search for roll angle in common XMP properties.
-            // Different cameras use different namespaces:
-            //   GCamera:Roll, Device:Roll, samsung:LensRoll, exif:Roll,
-            //   or generic Roll/Tilt attributes
-            float roll = findXmpFloat(xml, "Roll");
-            if (!Float.isNaN(roll)) {
-                Log.d(TAG, "Found XMP Roll: " + roll + "°");
-                // Roll > 0 typically means CW tilt → need CCW correction
-                if (Math.abs(roll) < 0.005f) return 0f;
-                if (Math.abs(roll) > 25f) return Float.NaN;
-                return -Math.round(roll * 100f) / 100f;
-            }
+			// Some cameras store pitch/tilt instead of roll
+			float tilt = findXmpFloat(xml, "Tilt");
+			if (!Float.isNaN(tilt))
+			{
+				Log.d(TAG, "Found XMP Tilt: " + tilt + "°");
+				return normalizeMetadataAngle(tilt);
+			}
+		}
 
-            // Some cameras store pitch/tilt instead of roll
-            float tilt = findXmpFloat(xml, "Tilt");
-            if (!Float.isNaN(tilt)) {
-                Log.d(TAG, "Found XMP Tilt: " + tilt + "°");
-                if (Math.abs(tilt) < 0.005f) return 0f;
-                if (Math.abs(tilt) > 25f) return Float.NaN;
-                return -Math.round(tilt * 100f) / 100f;
-            }
-        }
+		// Also check extended XMP (APP1 segments with different identifier)
+		for (JpegSegment seg : meta)
+		{
+			byte[] segData = seg.data();
+			if (seg.marker() != 0xE1 || segData.length < 50)
+			{
+				continue;
+			}
+			// Try to find roll in any APP1 segment that contains XML-like content
+			String raw = new String(segData, 4, Math.min(segData.length - 4, 65000));
+			if (!raw.contains("Roll") && !raw.contains("roll") && !raw.contains("Tilt"))
+			{
+				continue;
+			}
 
-        // Also check extended XMP (APP1 segments with different identifier)
-        for (JpegSegment seg : meta) {
-            if (seg.marker != 0xE1 || seg.data.length < 50) continue;
-            // Try to find roll in any APP1 segment that contains XML-like content
-            String raw = new String(seg.data, 4, Math.min(seg.data.length - 4, 65000));
-            if (!raw.contains("Roll") && !raw.contains("roll") && !raw.contains("Tilt")) continue;
+			float roll = findXmpFloat(raw, "Roll");
+			if (!Float.isNaN(roll))
+			{
+				Log.d(TAG, "Found Roll in APP1: " + roll + "°");
+				return normalizeMetadataAngle(roll);
+			}
+		}
 
-            float roll = findXmpFloat(raw, "Roll");
-            if (!Float.isNaN(roll)) {
-                Log.d(TAG, "Found Roll in APP1: " + roll + "°");
-                if (Math.abs(roll) < 0.005f) return 0f;
-                if (Math.abs(roll) > 25f) return Float.NaN;
-                return -Math.round(roll * 100f) / 100f;
-            }
-        }
+		return Float.NaN;
+	}
 
-        return Float.NaN;
-    }
+	// Convert a raw roll/tilt reading from metadata into the UI's correction-angle convention:
+	// snap near-zero values to exact zero, reject implausibly-large tilts as NaN (bad sensor data),
+	// and otherwise invert and round to 2 decimal places. Shared across all XMP/APP1 entry points.
+	private static float normalizeMetadataAngle(float deg)
+	{
+		if (Math.abs(deg) < 0.005f)
+		{
+			return 0f;
+		}
+		if (Math.abs(deg) > 25f)
+		{
+			return Float.NaN;
+		}
+		return -Math.round(deg * 100f) / 100f;
+	}
 
-    /**
-     * Search XMP XML for a float attribute whose name ends with the given suffix.
-     * Handles patterns like: namespace:Roll="1.23" or Roll="1.23"
-     */
-    private static float findXmpFloat(String xml, String attrSuffix) {
-        // Match: anyPrefix:Suffix="number" or Suffix="number"
-        Pattern p = Pattern.compile("\\w*:?" + attrSuffix + "\\s*=\\s*\"([^\"]+)\"",
-                Pattern.CASE_INSENSITIVE);
-        Matcher m = p.matcher(xml);
-        while (m.find()) {
-            try {
-                return Float.parseFloat(m.group(1).trim());
-            } catch (NumberFormatException ignored) {}
-        }
-        return Float.NaN;
-    }
+	/**
+	 * Detect horizon angle using only edges within a user-painted region.
+	 * The painted points define a brush stroke; only edge pixels near this stroke are used for
+	 * the Hough line detection.
+	 *
+	 * @param src         source bitmap
+	 * @param paintPoints list of (x,y) image-coordinate points from the paint stroke
+	 * @param brushRadius radius in image pixels around each paint point
+	 * @return correction angle in degrees, or NaN if not detected
+	 */
+	public static float detectFromPaintedRegion(Bitmap src, List<float[]> paintPoints,
+		float brushRadius)
+	{
+		if (src == null || src.getWidth() < 10 || src.getHeight() < 10
+			|| paintPoints == null || paintPoints.size() < 2)
+		{
+			return Float.NaN;
+		}
 
-    /**
-     * Detect horizon angle using only edges within a user-painted region.
-     * The painted points define a brush stroke; only edge pixels near this
-     * stroke are used for the Hough line detection.
-     *
-     * @param src         source bitmap
-     * @param paintPoints list of (x,y) image-coordinate points from the paint stroke
-     * @param brushRadius radius in image pixels around each paint point
-     * @return correction angle in degrees, or NaN if not detected
-     */
-    public static float detectFromPaintedRegion(Bitmap src, java.util.List<float[]> paintPoints,
-                                                 float brushRadius) {
-        if (src == null || src.getWidth() < 10 || src.getHeight() < 10
-                || paintPoints == null || paintPoints.size() < 2) return Float.NaN;
+		try
+		{
+			return detectPaintedInternal(src, paintPoints, brushRadius);
+		}
+		catch (OutOfMemoryError e)
+		{
+			Log.w(TAG, "OOM in painted detection");
+			return Float.NaN;
+		}
+	}
 
-        try {
-            return detectPaintedInternal(src, paintPoints, brushRadius);
-        } catch (OutOfMemoryError e) {
-            Log.w(TAG, "OOM in painted detection");
-            return Float.NaN;
-        }
-    }
+	// ── Image processing primitives ──
 
-    private static float detectPaintedInternal(Bitmap src, java.util.List<float[]> paintPoints,
-                                                float brushRadius) {
-        int w = src.getWidth(), h = src.getHeight();
+	private static float computeThreshold(float[] edges, float topFraction)
+	{
+		float maxVal = 0;
+		int nonZero = 0;
+		for (float v : edges)
+		{
+			if (v > 0)
+			{
+				nonZero++;
+				if (v > maxVal)
+				{
+					maxVal = v;
+				}
+			}
+		}
+		if (nonZero == 0 || maxVal == 0)
+		{
+			return Float.MAX_VALUE;
+		}
+		int bins = 256;
+		int[] hist = new int[bins];
+		for (float v : edges)
+		{
+			if (v > 0)
+			{
+				hist[Math.min(bins - 1, (int) (v / maxVal * (bins - 1)))]++;
+			}
+		}
+		int target = (int) (nonZero * (1f - topFraction));
+		int cumulative = 0;
+		for (int i = 0; i < bins; i++)
+		{
+			cumulative += hist[i];
+			if (cumulative >= target)
+			{
+				return (i / (float) (bins - 1)) * maxVal;
+			}
+		}
+		return maxVal * 0.5f;
+	}
 
-        // ── Build mask from paint stroke ──
-        // For efficiency, rasterize the stroke into a boolean grid at 1/4 resolution
-        int mw = w / 4, mh = h / 4;
-        float mScale = 4f;
-        boolean[] mask = new boolean[mw * mh];
-        float mr = brushRadius / mScale;
-        float mr2 = mr * mr;
+	private static float detectPaintedInternal(Bitmap src, List<float[]> paintPoints,
+		float brushRadius)
+	{
+		int width = src.getWidth();
+		int height = src.getHeight();
 
-        for (float[] pt : paintPoints) {
-            int cx = (int)(pt[0] / mScale), cy = (int)(pt[1] / mScale);
-            int r = (int) Math.ceil(mr);
-            for (int dy = -r; dy <= r; dy++) {
-                int my = cy + dy;
-                if (my < 0 || my >= mh) continue;
-                for (int dx = -r; dx <= r; dx++) {
-                    int mx = cx + dx;
-                    if (mx < 0 || mx >= mw) continue;
-                    if (dx * dx + dy * dy <= mr2) mask[my * mw + mx] = true;
-                }
-            }
-        }
+		// ── Build mask from paint stroke ──
+		// For efficiency, rasterize the stroke into a boolean grid at 1/4 resolution
+		int maskWidth = width / 4;
+		int maskHeight = height / 4;
+		float maskScale = 4f;
+		boolean[] mask = new boolean[maskWidth * maskHeight];
+		float maskRadius = brushRadius / maskScale;
+		float maskRadiusSquared = maskRadius * maskRadius;
 
-        // ── Edge detection ──
-        int[] pixels = new int[w * h];
-        src.getPixels(pixels, 0, w, 0, 0, w, h);
-        float[] buf1 = new float[w * h];
-        for (int i = 0; i < pixels.length; i++) {
-            int p = pixels[i];
-            buf1[i] = 0.299f * Color.red(p) + 0.587f * Color.green(p) + 0.114f * Color.blue(p);
-        }
-        pixels = null;
+		for (float[] paintPoint : paintPoints)
+		{
+			int centerX = (int) (paintPoint[0] / maskScale);
+			int centerY = (int) (paintPoint[1] / maskScale);
+			int radius = (int) Math.ceil(maskRadius);
+			for (int dy = -radius; dy <= radius; dy++)
+			{
+				int maskY = centerY + dy;
+				if (maskY < 0 || maskY >= maskHeight)
+				{
+					continue;
+				}
+				for (int dx = -radius; dx <= radius; dx++)
+				{
+					int maskX = centerX + dx;
+					if (maskX < 0 || maskX >= maskWidth)
+					{
+						continue;
+					}
+					if (dx * dx + dy * dy <= maskRadiusSquared)
+					{
+						mask[maskY * maskWidth + maskX] = true;
+					}
+				}
+			}
+		}
 
-        float[] buf2 = gaussianBlur5x5(buf1, w, h);
-        buf1 = null;
+		// ── Edge detection ──
+		int[] pixels = new int[width * height];
+		src.getPixels(pixels, 0, width, 0, 0, width, height);
+		float[] luminance = new float[width * height];
+		for (int i = 0; i < pixels.length; i++)
+		{
+			int pixel = pixels[i];
+			luminance[i] = 0.299f * Color.red(pixel)
+				+ 0.587f * Color.green(pixel)
+				+ 0.114f * Color.blue(pixel);
+		}
+		pixels = null;
 
-        buf1 = new float[w * h];
-        float[] gradDir = new float[w * h];
-        sobelGradient(buf2, w, h, buf1, gradDir);
-        buf2 = null;
+		float[] blurred = gaussianBlur5x5(luminance, width, height);
+		luminance = null;
 
-        buf2 = nonMaxSuppression(buf1, gradDir, w, h);
+		float[] gradientMag = new float[width * height];
+		float[] gradientDir = new float[width * height];
+		sobelGradient(blurred, width, height, gradientMag, gradientDir);
+		blurred = null;
 
-        // Direction filter: keep only near-horizontal edges
-        for (int i = 0; i < w * h; i++) {
-            if (buf2[i] > 0) {
-                float absDir = Math.abs(gradDir[i]);
-                if (absDir < (float)(Math.PI / 2 - Math.PI * 35 / 180)
-                        || absDir > (float)(Math.PI / 2 + Math.PI * 35 / 180)) {
-                    buf2[i] = 0;
-                }
-            }
-        }
-        gradDir = null;
-        buf1 = null;
+		float[] edges = nonMaxSuppression(gradientMag, gradientDir, width, height);
 
-        // ── Collect edge pixels WITHIN the painted mask ──
-        float threshold = computeThreshold(buf2, 0.15f);
-        int edgeCount = 0;
-        for (int y = 0; y < h; y++) {
-            int my = y / 4;
-            if (my >= mh) my = mh - 1;
-            int row = y * w;
-            for (int x = 0; x < w; x++) {
-                int mx = x / 4;
-                if (mx >= mw) mx = mw - 1;
-                if (buf2[row + x] >= threshold && mask[my * mw + mx]) edgeCount++;
-            }
-        }
+		// Direction filter: keep only near-horizontal edges
+		for (int i = 0; i < width * height; i++)
+		{
+			if (edges[i] > 0)
+			{
+				float absDirection = Math.abs(gradientDir[i]);
+				if (absDirection < (float) (Math.PI / 2 - Math.PI * 35 / 180)
+					|| absDirection > (float) (Math.PI / 2 + Math.PI * 35 / 180))
+				{
+					edges[i] = 0;
+				}
+			}
+		}
+		gradientDir = null;
+		gradientMag = null;
 
-        if (edgeCount < 30) {
-            Log.d(TAG, "Too few masked edge pixels: " + edgeCount);
-            return Float.NaN;
-        }
+		// ── Collect edge pixels WITHIN the painted mask ──
+		float threshold = computeThreshold(edges, 0.15f);
+		int edgeCount = 0;
+		for (int y = 0; y < height; y++)
+		{
+			int maskY = y / 4;
+			if (maskY >= maskHeight)
+			{
+				maskY = maskHeight - 1;
+			}
+			int rowOffset = y * width;
+			for (int x = 0; x < width; x++)
+			{
+				int maskX = x / 4;
+				if (maskX >= maskWidth)
+				{
+					maskX = maskWidth - 1;
+				}
+				if (edges[rowOffset + x] >= threshold && mask[maskY * maskWidth + maskX])
+				{
+					edgeCount++;
+				}
+			}
+		}
 
-        int[] edgeX = new int[edgeCount];
-        int[] edgeY = new int[edgeCount];
-        int ei = 0;
-        for (int y = 0; y < h; y++) {
-            int my = y / 4;
-            if (my >= mh) my = mh - 1;
-            int row = y * w;
-            for (int x = 0; x < w; x++) {
-                int mx = x / 4;
-                if (mx >= mw) mx = mw - 1;
-                if (buf2[row + x] >= threshold && mask[my * mw + mx]) {
-                    edgeX[ei] = x;
-                    edgeY[ei] = y;
-                    ei++;
-                }
-            }
-        }
-        buf2 = null;
-        mask = null;
-        Log.d(TAG, "Masked edge pixels: " + edgeCount);
+		if (edgeCount < 30)
+		{
+			Log.d(TAG, "Too few masked edge pixels: " + edgeCount);
+			return Float.NaN;
+		}
 
-        // ── Hough: coarse then fine ──
-        float coarseAngle = houghPass(edgeX, edgeY, edgeCount, w, h, 80f, 100f, 0.1f);
-        if (Float.isNaN(coarseAngle)) return Float.NaN;
+		int[] edgeX = new int[edgeCount];
+		int[] edgeY = new int[edgeCount];
+		int edgeIndex = 0;
+		for (int y = 0; y < height; y++)
+		{
+			int maskY = y / 4;
+			if (maskY >= maskHeight)
+			{
+				maskY = maskHeight - 1;
+			}
+			int rowOffset = y * width;
+			for (int x = 0; x < width; x++)
+			{
+				int maskX = x / 4;
+				if (maskX >= maskWidth)
+				{
+					maskX = maskWidth - 1;
+				}
+				if (edges[rowOffset + x] >= threshold && mask[maskY * maskWidth + maskX])
+				{
+					edgeX[edgeIndex] = x;
+					edgeY[edgeIndex] = y;
+					edgeIndex++;
+				}
+			}
+		}
+		edges = null;
+		mask = null;
+		Log.d(TAG, "Masked edge pixels: " + edgeCount);
 
-        float fineAngle = houghPass(edgeX, edgeY, edgeCount, w, h,
-                Math.max(80f, coarseAngle - 2f),
-                Math.min(100f, coarseAngle + 2f), 0.01f);
-        if (Float.isNaN(fineAngle)) fineAngle = coarseAngle;
+		// ── Hough: coarse then fine ──
+		float coarseAngle = houghPass(edgeX, edgeY, edgeCount, width, height, 80f, 100f, 0.1f);
+		if (Float.isNaN(coarseAngle))
+		{
+			return Float.NaN;
+		}
 
-        float tilt = fineAngle - 90f;
-        Log.d(TAG, "Painted region tilt: " + String.format("%.3f", tilt) + "°");
+		float fineAngle = houghPass(edgeX, edgeY, edgeCount, width, height,
+			Math.max(80f, coarseAngle - 2f),
+			Math.min(100f, coarseAngle + 2f), 0.01f);
+		if (Float.isNaN(fineAngle))
+		{
+			fineAngle = coarseAngle;
+		}
 
-        if (Math.abs(tilt) < 0.005f) return 0f;
-        if (Math.abs(tilt) > 30f) return Float.NaN;
-        return -Math.round(tilt * 100f) / 100f;
-    }
+		float tilt = fineAngle - 90f;
+		Log.d(TAG, "Painted region tilt: " + String.format(Locale.ROOT, "%.3f", tilt) + "°");
 
-    /**
-     * Hough transform: find the angle of the single strongest near-horizontal line.
-     * Uses max-single-bin (longest line wins) rather than sum-of-squares (all edges).
-     */
-    private static float houghPass(int[] edgeX, int[] edgeY, int edgeCount,
-                                    int w, int h, float minDeg, float maxDeg, float stepDeg) {
-        int numAngles = (int) ((maxDeg - minDeg) / stepDeg) + 1;
-        float diagonal = (float) Math.hypot(w, h);
-        int numBins = (int) (2 * diagonal) + 1;
-        int distOff = (int) diagonal;
+		if (Math.abs(tilt) < 0.005f)
+		{
+			return 0f;
+		}
+		if (Math.abs(tilt) > 30f)
+		{
+			return Float.NaN;
+		}
+		return -Math.round(tilt * 100f) / 100f;
+	}
 
-        double[] cosA = new double[numAngles];
-        double[] sinA = new double[numAngles];
-        for (int i = 0; i < numAngles; i++) {
-            double rad = Math.toRadians(minDeg + i * stepDeg);
-            cosA[i] = Math.cos(rad);
-            sinA[i] = Math.sin(rad);
-        }
+	// Search XMP XML for a float attribute whose name is exactly attrSuffix, optionally with a
+	// namespace prefix. Handles patterns like: namespace:Roll="1.23" or Roll="1.23".
+	// The earlier version used "\\w*:?Suffix" which greedy-matched unrelated names like
+	// CameraRoll or GyroRoll — any attribute whose name ends in the literal suffix — and
+	// silently returned their value as the horizon angle.
+	private static float findXmpFloat(String xml, String attrSuffix)
+	{
+		// Require either the start of a token (non-word char) or start of string, then an
+		// optional namespace prefix that ends in ':', then the exact suffix followed by
+		// whitespace or '='. This rules out AbcRoll, CameraRoll, GyroRoll, etc.
+		Pattern pattern = Pattern.compile(
+			"(?:^|[^\\w:])(?:\\w+:)?" + Pattern.quote(attrSuffix) + "\\s*=\\s*\"([^\"]+)\"",
+			Pattern.CASE_INSENSITIVE);
+		Matcher matcher = pattern.matcher(xml);
+		while (matcher.find())
+		{
+			try
+			{
+				return Float.parseFloat(matcher.group(1).trim());
+			}
+			catch (NumberFormatException ignored)
+			{
+			}
+		}
+		return Float.NaN;
+	}
 
-        int[] hist = new int[numBins];
-        int[] peakPerAngle = new int[numAngles]; // strongest single bin per angle
+	private static float[] gaussianBlur5x5(float[] src, int width, int height)
+	{
+		float[] kernel = {
+				1 / 273f, 4 / 273f,  7 / 273f,  4 / 273f, 1 / 273f,
+				4 / 273f, 16 / 273f, 26 / 273f, 16 / 273f, 4 / 273f,
+				7 / 273f, 26 / 273f, 41 / 273f, 26 / 273f, 7 / 273f,
+				4 / 273f, 16 / 273f, 26 / 273f, 16 / 273f, 4 / 273f,
+				1 / 273f, 4 / 273f,  7 / 273f,  4 / 273f, 1 / 273f,
+		};
+		float[] dst = new float[width * height];
+		for (int y = 2; y < height - 2; y++)
+		{
+			for (int x = 2; x < width - 2; x++)
+			{
+				float sum = 0;
+				for (int kernelY = -2; kernelY <= 2; kernelY++)
+				{
+					int rowOffset = (y + kernelY) * width;
+					for (int kernelX = -2; kernelX <= 2; kernelX++)
+					{
+						sum += src[rowOffset + (x + kernelX)]
+							* kernel[(kernelY + 2) * 5 + (kernelX + 2)];
+					}
+				}
+				dst[y * width + x] = sum;
+			}
+		}
+		return dst;
+	}
 
-        for (int ai = 0; ai < numAngles; ai++) {
-            java.util.Arrays.fill(hist, 0);
-            double ca = cosA[ai], sa = sinA[ai];
-            for (int i = 0; i < edgeCount; i++) {
-                int bin = (int) (edgeX[i] * ca + edgeY[i] * sa) + distOff;
-                if (bin >= 0 && bin < numBins) hist[bin]++;
-            }
-            int maxBin = 0;
-            for (int b = 0; b < numBins; b++) {
-                if (hist[b] > maxBin) maxBin = hist[b];
-            }
-            peakPerAngle[ai] = maxBin;
-        }
+	// Hough transform: find the angle of the single strongest near-horizontal line. Uses
+	// max-single-bin (longest line wins) rather than sum-of-squares (all edges).
+	private static float houghPass(int[] edgeX, int[] edgeY, int edgeCount,
+		int width, int height, float minDeg, float maxDeg, float stepDeg)
+	{
+		int numAngles = (int) ((maxDeg - minDeg) / stepDeg) + 1;
+		float diagonal = (float) Math.hypot(width, height);
+		int numBins = (int) (2 * diagonal) + 1;
+		int distanceOffset = (int) diagonal;
 
-        // Find the angle whose strongest single line has the most votes
-        int bestAi = 0, bestPeak = 0;
-        for (int ai = 0; ai < numAngles; ai++) {
-            if (peakPerAngle[ai] > bestPeak) {
-                bestPeak = peakPerAngle[ai];
-                bestAi = ai;
-            }
-        }
+		double[] cosTable = new double[numAngles];
+		double[] sinTable = new double[numAngles];
+		for (int i = 0; i < numAngles; i++)
+		{
+			double rad = Math.toRadians(minDeg + i * stepDeg);
+			cosTable[i] = Math.cos(rad);
+			sinTable[i] = Math.sin(rad);
+		}
 
-        // Line must span at least 3% of image width
-        if (bestPeak < Math.max(15, w * 3 / 100)) return Float.NaN;
+		int[] histogram = new int[numBins];
+		int[] peakPerAngle = new int[numAngles]; // strongest single bin per angle
 
-        float bestAngle = minDeg + bestAi * stepDeg;
+		for (int angleIdx = 0; angleIdx < numAngles; angleIdx++)
+		{
+			Arrays.fill(histogram, 0);
+			double cos = cosTable[angleIdx];
+			double sin = sinTable[angleIdx];
+			for (int i = 0; i < edgeCount; i++)
+			{
+				int bin = (int) (edgeX[i] * cos + edgeY[i] * sin) + distanceOffset;
+				if (bin >= 0 && bin < numBins)
+				{
+					histogram[bin]++;
+				}
+			}
+			int maxBin = 0;
+			for (int bin = 0; bin < numBins; bin++)
+			{
+				if (histogram[bin] > maxBin)
+				{
+					maxBin = histogram[bin];
+				}
+			}
+			peakPerAngle[angleIdx] = maxBin;
+		}
 
-        // Parabolic interpolation for sub-bin accuracy
-        if (bestAi > 0 && bestAi < numAngles - 1) {
-            float sL = peakPerAngle[bestAi - 1];
-            float sC = peakPerAngle[bestAi];
-            float sR = peakPerAngle[bestAi + 1];
-            float denom = sL - 2 * sC + sR;
-            if (denom != 0) {
-                float delta = (sL - sR) / (2f * denom);
-                delta = Math.max(-0.5f, Math.min(0.5f, delta));
-                bestAngle += delta * stepDeg;
-            }
-        }
+		// Find the angle whose strongest single line has the most votes
+		int bestAngleIdx = 0;
+		int bestPeak = 0;
+		for (int angleIdx = 0; angleIdx < numAngles; angleIdx++)
+		{
+			if (peakPerAngle[angleIdx] > bestPeak)
+			{
+				bestPeak = peakPerAngle[angleIdx];
+				bestAngleIdx = angleIdx;
+			}
+		}
 
-        return bestAngle;
-    }
+		// Line must span at least 3% of image width
+		if (bestPeak < Math.max(15, width * 3 / 100))
+		{
+			return Float.NaN;
+		}
 
-    // ── Image processing primitives ──
+		float bestAngle = minDeg + bestAngleIdx * stepDeg;
 
-    private static float[] gaussianBlur5x5(float[] src, int w, int h) {
-        float[] k = {
-            1/273f, 4/273f,  7/273f,  4/273f, 1/273f,
-            4/273f, 16/273f, 26/273f, 16/273f, 4/273f,
-            7/273f, 26/273f, 41/273f, 26/273f, 7/273f,
-            4/273f, 16/273f, 26/273f, 16/273f, 4/273f,
-            1/273f, 4/273f,  7/273f,  4/273f, 1/273f,
-        };
-        float[] dst = new float[w * h];
-        for (int y = 2; y < h - 2; y++) {
-            for (int x = 2; x < w - 2; x++) {
-                float sum = 0;
-                for (int ky = -2; ky <= 2; ky++) {
-                    int row = (y + ky) * w;
-                    for (int kx = -2; kx <= 2; kx++) {
-                        sum += src[row + (x + kx)] * k[(ky + 2) * 5 + (kx + 2)];
-                    }
-                }
-                dst[y * w + x] = sum;
-            }
-        }
-        return dst;
-    }
+		// Parabolic interpolation for sub-bin accuracy
+		if (bestAngleIdx > 0 && bestAngleIdx < numAngles - 1)
+		{
+			float scoreLeft = peakPerAngle[bestAngleIdx - 1];
+			float scoreCenter = peakPerAngle[bestAngleIdx];
+			float scoreRight = peakPerAngle[bestAngleIdx + 1];
+			float denom = scoreLeft - 2 * scoreCenter + scoreRight;
+			if (denom != 0)
+			{
+				float delta = Math.clamp((scoreLeft - scoreRight) / (2f * denom), -0.5f, 0.5f);
+				bestAngle += delta * stepDeg;
+			}
+		}
 
-    private static void sobelGradient(float[] src, int w, int h, float[] mag, float[] dir) {
-        for (int y = 1; y < h - 1; y++) {
-            int prevRow = (y - 1) * w, curRow = y * w, nextRow = (y + 1) * w;
-            for (int x = 1; x < w - 1; x++) {
-                float tl = src[prevRow + x - 1], tc = src[prevRow + x], tr = src[prevRow + x + 1];
-                float ml = src[curRow + x - 1],                         mr = src[curRow + x + 1];
-                float bl = src[nextRow + x - 1], bc = src[nextRow + x], br = src[nextRow + x + 1];
-                float gx = -tl + tr - 2*ml + 2*mr - bl + br;
-                float gy = -tl - 2*tc - tr + bl + 2*bc + br;
-                int i = curRow + x;
-                mag[i] = (float) Math.hypot(gx, gy);
-                dir[i] = (float) Math.atan2(gy, gx);
-            }
-        }
-    }
+		return bestAngle;
+	}
 
-    private static float[] nonMaxSuppression(float[] mag, float[] dir, int w, int h) {
-        float[] out = new float[w * h];
-        for (int y = 1; y < h - 1; y++) {
-            for (int x = 1; x < w - 1; x++) {
-                int i = y * w + x;
-                float m = mag[i];
-                if (m == 0) continue;
-                float angle = dir[i];
-                if (angle < 0) angle += (float) Math.PI;
-                float n1, n2;
-                if (angle < Math.PI / 8 || angle >= 7 * Math.PI / 8) {
-                    n1 = mag[y * w + x - 1]; n2 = mag[y * w + x + 1];
-                } else if (angle < 3 * Math.PI / 8) {
-                    n1 = mag[(y-1)*w + x+1]; n2 = mag[(y+1)*w + x-1];
-                } else if (angle < 5 * Math.PI / 8) {
-                    n1 = mag[(y-1)*w + x]; n2 = mag[(y+1)*w + x];
-                } else {
-                    n1 = mag[(y-1)*w + x-1]; n2 = mag[(y+1)*w + x+1];
-                }
-                out[i] = (m >= n1 && m >= n2) ? m : 0;
-            }
-        }
-        return out;
-    }
+	private static float[] nonMaxSuppression(float[] magnitude, float[] direction, int width, int height)
+	{
+		float[] out = new float[width * height];
+		for (int y = 1; y < height - 1; y++)
+		{
+			for (int x = 1; x < width - 1; x++)
+			{
+				int i = y * width + x;
+				float center = magnitude[i];
+				if (center == 0)
+				{
+					continue;
+				}
+				float angle = direction[i];
+				if (angle < 0)
+				{
+					angle += (float) Math.PI;
+				}
+				// Sample the two neighbours along the gradient direction
+				float neighbour1;
+				float neighbour2;
+				if (angle < Math.PI / 8 || angle >= 7 * Math.PI / 8)
+				{
+					neighbour1 = magnitude[y * width + x - 1];
+					neighbour2 = magnitude[y * width + x + 1];
+				}
+				else if (angle < 3 * Math.PI / 8)
+				{
+					neighbour1 = magnitude[(y - 1) * width + x + 1];
+					neighbour2 = magnitude[(y + 1) * width + x - 1];
+				}
+				else if (angle < 5 * Math.PI / 8)
+				{
+					neighbour1 = magnitude[(y - 1) * width + x];
+					neighbour2 = magnitude[(y + 1) * width + x];
+				}
+				else
+				{
+					neighbour1 = magnitude[(y - 1) * width + x - 1];
+					neighbour2 = magnitude[(y + 1) * width + x + 1];
+				}
+				out[i] = (center >= neighbour1 && center >= neighbour2) ? center : 0;
+			}
+		}
+		return out;
+	}
 
-    private static float computeThreshold(float[] edges, float topFraction) {
-        float maxVal = 0;
-        int nonZero = 0;
-        for (float v : edges) {
-            if (v > 0) { nonZero++; if (v > maxVal) maxVal = v; }
-        }
-        if (nonZero == 0 || maxVal == 0) return Float.MAX_VALUE;
-        int bins = 256;
-        int[] hist = new int[bins];
-        for (float v : edges) {
-            if (v > 0) hist[Math.min(bins - 1, (int) (v / maxVal * (bins - 1)))]++;
-        }
-        int target = (int) (nonZero * (1f - topFraction));
-        int cumulative = 0;
-        for (int i = 0; i < bins; i++) {
-            cumulative += hist[i];
-            if (cumulative >= target) return (i / (float) (bins - 1)) * maxVal;
-        }
-        return maxVal * 0.5f;
-    }
+	private static void sobelGradient(float[] src, int width, int height,
+		float[] magnitude, float[] direction)
+	{
+		for (int y = 1; y < height - 1; y++)
+		{
+			int prevRow = (y - 1) * width;
+			int curRow = y * width;
+			int nextRow = (y + 1) * width;
+			for (int x = 1; x < width - 1; x++)
+			{
+				float topLeft  = src[prevRow + x - 1];
+				float topCent  = src[prevRow + x];
+				float topRight = src[prevRow + x + 1];
+				float midLeft  = src[curRow + x - 1];
+				float midRight = src[curRow + x + 1];
+				float botLeft  = src[nextRow + x - 1];
+				float botCent  = src[nextRow + x];
+				float botRight = src[nextRow + x + 1];
+				float gradX = -topLeft + topRight - 2 * midLeft + 2 * midRight - botLeft + botRight;
+				float gradY = -topLeft - 2 * topCent - topRight + botLeft + 2 * botCent + botRight;
+				int i = curRow + x;
+				magnitude[i] = (float) Math.hypot(gradX, gradY);
+				direction[i] = (float) Math.atan2(gradY, gradX);
+			}
+		}
+	}
 }
