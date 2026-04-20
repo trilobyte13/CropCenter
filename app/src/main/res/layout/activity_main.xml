@@ -88,16 +88,16 @@
         android:background="@color/sidebar_bg" android:gravity="center_vertical"
         android:paddingHorizontal="4dp" android:orientation="horizontal">
 
-        <com.google.android.material.button.MaterialButton android:id="@+id/btnModeMove"
-            style="@style/Widget.MaterialComponents.Button.TextButton"
-            android:layout_width="wrap_content" android:layout_height="26dp"
-            android:text="Move" android:textSize="11sp" android:textColor="@color/mauve"
-            android:minWidth="0dp" android:paddingHorizontal="6dp"
-            android:insetTop="0dp" android:insetBottom="0dp" />
         <com.google.android.material.button.MaterialButton android:id="@+id/btnModeSelect"
             style="@style/Widget.MaterialComponents.Button.TextButton"
             android:layout_width="wrap_content" android:layout_height="26dp"
-            android:text="Select" android:textSize="11sp" android:textColor="@color/surface2"
+            android:text="Select" android:textSize="11sp" android:textColor="@color/mauve"
+            android:minWidth="0dp" android:paddingHorizontal="6dp"
+            android:insetTop="0dp" android:insetBottom="0dp" />
+        <com.google.android.material.button.MaterialButton android:id="@+id/btnModeMove"
+            style="@style/Widget.MaterialComponents.Button.TextButton"
+            android:layout_width="wrap_content" android:layout_height="26dp"
+            android:text="Move" android:textSize="11sp" android:textColor="@color/surface2"
             android:minWidth="0dp" android:paddingHorizontal="6dp"
             android:insetTop="0dp" android:insetBottom="0dp" />
 

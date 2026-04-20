@@ -9,7 +9,7 @@ CropCenter is a native Android image cropping tool focused on precise center-bas
 **Target/Compile SDK**: 36
 **Language**: Java 21
 **Build**: AGP 9.1.1, Gradle 9.3.1
-**SLOC**: ~3,500 Java + ~240 XML
+**LSLOC**: ~3,600 Java + ~240 XML (UCC-style: statements + control structures + declarations, excluding scaffolding braces)
 
 ---
 
@@ -26,9 +26,9 @@ CropCenter is a native Android image cropping tool focused on precise center-bas
 |     Image + crop overlay + grid + selection points         |
 |                                                            |
 +------------------------------------------------------------+
-| Mode: [Move] [Select] | Lock: [Both] [H] [V] [Freeze]    |
+| Mode: [Select] [Move] | Lock: [Both] [H] [V] [Freeze]    |
 +------------------------------------------------------------+
-| Points: [Undo] [Redo] [Clear]                             |
+| Points: [Undo] [Redo] [Clear]        [Auto] (if loaded)   |
 +------------------------------------------------------------+
 | Rotation ruler (scrollable, Galaxy-style)                  |
 +------------------------------------------------------------+
@@ -40,15 +40,17 @@ CropCenter is a native Android image cropping tool focused on precise center-bas
 
 | Component | Class | Purpose |
 |-----------|-------|---------|
-| State | `model/CropState` | Central state with listener, crop params, metadata |
-| Crop Math | `crop/CropEngine` | Computes crop from center + AR + lock + rotation |
+| State | `model/CropState` | Central state: crop params, metadata, rotation anchor (stable intent center for no-selection rotations) |
+| Crop Math | `crop/CropEngine` | Computes crop from center + AR + lock + rotation; parity-snaps to pixel grid |
+| Horizon | `util/HorizonDetector` | Auto-rotation: metadata pass first, fallback to painted-region Hough transform |
 | Export | `crop/CropExporter` | Full pipeline: crop, rotate, compress, HDR, EXIF, SEFT |
 | Editor | `view/CropEditorView` | Custom View: rendering + gestures + undo/redo |
 | Gestures | `view/TouchGestureHandler` | Pinch zoom, tap, drag, long-press |
-| Grid | `view/GridRenderer` | Grid overlay with pixel-snapped lines |
+| Grid | `view/GridRenderer` | Grid overlay with parity-aware pixel-snapped lines |
 | Rotation | `view/RotationRulerView` | Galaxy-style scrollable ruler with snap-to-detent |
 | Color Picker | `view/ColorPickerDialog` | Tap-to-select grid + alpha + hex input |
 | Grid Settings | `view/GridSettingsDialog` | Cols, rows, presets (2x2-8x8), color, width |
+| Settings | `view/SettingsDialog` | About dialog showing build-time Version string |
 | Save Dialog | `view/SaveDialog` | Filename, format, export grid, overwrite option |
 
 ### Metadata Pipeline
@@ -96,20 +98,23 @@ CropCenter is a native Android image cropping tool focused on precise center-bas
 
 ### 2. Editor Modes
 
-#### Move Mode (Default)
-- Drag to reposition the crop rectangle
-- Respects lock direction: H moves X only, V moves Y only, Both moves freely
-- Crop size is **never recomputed** in Move mode -- only position changes
-- Crop rectangle cannot be dragged outside image bounds (rotation-aware binary search)
-- Tap does nothing (prevents accidental crop placement)
-
-#### Select Mode
+#### Select Mode (Default)
 - Tap to place selection points around a feature
 - Tap on existing point to remove it
 - Long-press to remove nearest point
 - Auto-computes maximum crop at current AR centered on the selection points
 - Points can't be placed outside rotated image content
 - Clearing all points resets crop to full image
+- Single selection snaps the tapped pixel's center: the grid's midline covers the marked pixel
+
+#### Move Mode
+- Drag to reposition the crop rectangle
+- Respects lock direction: H moves X only, V moves Y only, Both moves freely
+- Crop size is **never recomputed** in Move mode — only position changes
+- Crop borders always land on whole-pixel boundaries: the drag's fractional accumulator lives in a separate "anchor" state so sub-pixel motion builds up across events while the displayed center snaps each frame to the parity that keeps `cropImgX = centerX − cropW/2` integer
+- Crop rectangle cannot be dragged outside image bounds (rotation-aware binary search)
+- Cross-axis drift on a locked axis is bounded to 0.5 px per event and rejected above that threshold
+- Tap does nothing (prevents accidental crop placement)
 
 ### 3. Lock Modes
 
@@ -125,7 +130,7 @@ CropCenter is a native Android image cropping tool focused on precise center-bas
 - Free axis: center = midpoint of points (best-effort), crop extent = full image dimension; center shifts only if needed to keep the crop in bounds
 - With rotation: a second pass of `maxScaleForRotation` shrinks the crop if the rotation-clamped center makes it too large
 
-Per-mode lock preferences (Both/H/V) are remembered independently for Move and Select. "Both" button is only visible in Select mode.
+Per-mode lock preferences (Both/H/V) are remembered independently for Move and Select. Defaults are **V** in Move and **Both** in Select. "Both" button is only visible in Select mode.
 
 ### 4. Aspect Ratio
 
@@ -146,9 +151,14 @@ Per-mode lock preferences (Both/H/V) are remembered independently for Move and S
 - Degree readout in info bar (visible only when rotation != 0), tappable for exact numeric input
 - Ruler disabled (30% opacity, no touch) when no image loaded
 
+**Auto-rotate button** (in the Points row, hidden until an image is loaded):
+- First attempts horizon detection from JPEG metadata via `HorizonDetector.detectFromMetadata`
+- Falls back to `detectFromPaintedRegion` — a Canny-style edge detection + Hough transform over the user-painted horizon region on the source bitmap
+
 **Rotation + crop interaction**:
 - Crop auto-resizes to fit within rotated image bounds
 - Center clamping uses 4-corner un-rotation check with binary search
+- No-selection rotations use a stable "intent anchor" (`CropState.anchor{X,Y}`) so repeated rotations don't drift the crop center across recomputes. The anchor is updated when the user pans/drags or resets, and left alone through rotation ticks and AR changes
 - Export canvas rotates around image center (matches preview exactly)
 
 ### 6. Zoom and Pan
@@ -168,7 +178,7 @@ Viewport clamped to prevent panning image off screen. Bitmap filtering disabled 
 - Long-press opens settings dialog
 - Presets: 2x2 through 8x8
 - Configurable color (via color picker), line width (1-20px)
-- Grid lines snap to pixel boundaries in image space
+- Grid-line snap depends on crop-dimension parity: even crop dim → line drawn between pixels (integer coord); odd crop dim → line drawn through a pixel's center (half-integer coord). Single selection forces an odd crop dim so the midline covers the tapped pixel
 - Line width scales by image-to-screen ratio (preview matches export)
 - Anti-aliased OFF for crisp export lines
 - Pixel grid at 6x+ zoom (separate toggle + configurable color via long-press)
@@ -242,6 +252,11 @@ Canvas-rendered bitmap -> Bitmap.compress(PNG) -> inject EXIF via eXIf chunk
 - ICC profiles preserved as raw APP2 segments
 - XMP with hdrgm namespace preserved from original
 - MPF offsets recalculated after primary size changes
+
+### 11. Settings / About
+
+Settings dialog (opened via the gear icon in the toolbar) shows:
+- **Version** — the build's compile timestamp injected as `BuildConfig.BUILD_TIME` by `app/build.gradle` and displayed by `SettingsDialog`. Used to verify which APK is installed on the device.
 
 ---
 

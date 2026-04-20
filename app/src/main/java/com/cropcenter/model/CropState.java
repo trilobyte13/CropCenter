@@ -28,7 +28,7 @@ public class CropState
 	private AspectRatio aspectRatio = AspectRatio.R4_5;
 	private Bitmap sourceImage;
 	private CenterMode centerMode = CenterMode.BOTH;
-	private EditorMode editorMode = EditorMode.MOVE;
+	private EditorMode editorMode = EditorMode.SELECT_FEATURE;
 	private List<JpegSegment> jpegMeta = new ArrayList<>();
 	private OnStateChangedListener listener;
 	private String originalFilePath; // absolute path for Samsung Revert
@@ -40,6 +40,8 @@ public class CropState
 	private byte[] gainMap;
 	private byte[] originalFileBytes;
 	private byte[] seftTrailer; // Samsung SEFT trailer (appended after gain map)
+	private float anchorX; // stable "intent" center for no-selection rotations
+	private float anchorY;
 	private float centerX;
 	private float centerY;
 	private float rotationDegrees = 0f; // precise rotation applied to source image
@@ -61,6 +63,16 @@ public class CropState
 		}
 		selectionPoints.clear();
 		notifyChanged();
+	}
+
+	public float getAnchorX()
+	{
+		return anchorX;
+	}
+
+	public float getAnchorY()
+	{
+		return anchorY;
 	}
 
 	public AspectRatio getAspectRatio()
@@ -228,6 +240,8 @@ public class CropState
 		sourceImage = null;
 		originalFileBytes = null;
 		sourceFormat = null;
+		anchorX = 0;
+		anchorY = 0;
 		centerX = 0;
 		centerY = 0;
 		cropW = 0;
@@ -244,6 +258,17 @@ public class CropState
 		jpegMeta.clear();
 		gainMap = null;
 		seftTrailer = null;
+	}
+
+	// Stable rotation anchor for the no-selection case — parity-snapping in recomputeCrop
+	// can shift state.centerX by 0.5 pixel, and reading centerX back on the next rotation
+	// recompute would accumulate drift. Callers that move the crop (user drag, image load)
+	// also call setAnchor so the next recompute uses a fresh starting position; rotation
+	// and AR changes leave the anchor alone.
+	public void setAnchor(float x, float y)
+	{
+		this.anchorX = x;
+		this.anchorY = y;
 	}
 
 	public void setAspectRatio(AspectRatio ar)

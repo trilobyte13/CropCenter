@@ -6,6 +6,10 @@ android {
     namespace 'com.cropcenter'
     compileSdk 36
 
+    buildFeatures {
+        buildConfig true
+    }
+
     defaultConfig {
         applicationId "com.cropcenter"
         minSdk 35
@@ -13,6 +17,12 @@ android {
         versionCode 1
         versionName "1.0"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+
+        // Expose the build timestamp so the Settings dialog can show which APK is installed.
+        // Uses a human-readable form; wrapping in escaped quotes since buildConfigField
+        // takes the literal Java expression.
+        def buildTime = new Date().format("yyyy-MM-dd HH:mm:ss", TimeZone.getDefault())
+        buildConfigField "String", "BUILD_TIME", "\"${buildTime}\""
     }
 
     buildTypes {

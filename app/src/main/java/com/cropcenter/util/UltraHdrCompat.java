@@ -64,20 +64,26 @@ public final class UltraHdrCompat
 				+ " expected=" + imgW + "x" + imgH
 				+ " exif=" + exifOrientation);
 
-			// If the decoder returned the native sensor orientation, apply the EXIF rotation
-			// ourselves so the canvas matches display orientation.
-			boolean autoRotated = (current.getWidth() == imgW && current.getHeight() == imgH);
-			if (!autoRotated && exifOrientation > 1)
+			// BitmapFactory.decodeFile does not auto-apply EXIF orientation. For orientations
+			// that swap dimensions (5/6/7/8) the previous heuristic "autoRotated = decoded W/H
+			// matches display W/H" worked incidentally. But for orientations 2/3/4 — mirror,
+			// 180°, vertical flip — the decoded dimensions equal the display dimensions even
+			// though the pixels still need the EXIF matrix, so the heuristic silently
+			// skipped the transform and the exported HDR primary was rendered un-mirrored /
+			// un-flipped. Always apply the matrix when orientation > 1. Use filter=false:
+			// EXIF transforms are pure mirror / 90° / 180° operations — lossless integer
+			// pixel remaps — and bilinear would only add softening.
+			if (exifOrientation > 1)
 			{
 				Matrix matrix = BitmapUtils.orientationMatrix(exifOrientation);
 				Bitmap rotated = Bitmap.createBitmap(current, 0, 0,
-					current.getWidth(), current.getHeight(), matrix, true);
+					current.getWidth(), current.getHeight(), matrix, false);
 				if (rotated != current)
 				{
 					current.recycle();
 					current = rotated;
 				}
-				Log.d(TAG, "EXIF rotated: " + current.getWidth() + "x" + current.getHeight()
+				Log.d(TAG, "EXIF applied: " + current.getWidth() + "x" + current.getHeight()
 					+ " hasGm=" + current.hasGainmap());
 			}
 
@@ -114,13 +120,25 @@ public final class UltraHdrCompat
 				float gmDrawX = -srcX * gmScaleX;
 				float gmDrawY = -srcY * gmScaleY;
 
-				if (userRotation != 0f)
+				if (Math.abs(userRotation) >= BitmapUtils.ROTATION_EPSILON)
 				{
 					gmCanvas.save();
 					gmCanvas.rotate(userRotation,
 						gmDrawX + gmBmp.getWidth() / 2f,
 						gmDrawY + gmBmp.getHeight() / 2f);
-					gmCanvas.drawBitmap(gmBmp, gmDrawX, gmDrawY, gmPaint);
+					// Cardinal rotations: disable bilinear so nearest-neighbor reads
+					// pixels verbatim — matches the primary path and keeps the gain
+					// map aligned pixel-for-pixel with the primary.
+					if (BitmapUtils.isCardinalRotation(userRotation))
+					{
+						Paint gmNearest = new Paint(gmPaint);
+						gmNearest.setFilterBitmap(false);
+						gmCanvas.drawBitmap(gmBmp, gmDrawX, gmDrawY, gmNearest);
+					}
+					else
+					{
+						gmCanvas.drawBitmap(gmBmp, gmDrawX, gmDrawY, gmPaint);
+					}
 					gmCanvas.restore();
 				}
 				else

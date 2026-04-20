@@ -91,7 +91,7 @@ public class MainActivity extends AppCompatActivity
 
 	private ActivityResultLauncher<String[]> openLauncher;
 	private ActivityResultLauncher<String> saveAsLauncher;
-	private CenterMode moveLockPref = CenterMode.HORIZONTAL;
+	private CenterMode moveLockPref = CenterMode.VERTICAL;
 	private CenterMode selectLockPref = CenterMode.BOTH;
 	private CropEditorView editorView;
 	private CropState state = new CropState();
@@ -157,9 +157,13 @@ public class MainActivity extends AppCompatActivity
 				{
 					if (!state.hasCenter() && state.getSourceImage() != null)
 					{
-						state.setCenter(
-							state.getImageWidth() / 2f,
-							state.getImageHeight() / 2f);
+						float initialCx = state.getImageWidth() / 2f;
+						float initialCy = state.getImageHeight() / 2f;
+						state.setCenter(initialCx, initialCy);
+						// Seed the rotation anchor so the no-selection recompute has a
+						// stable starting position (image center) to re-read each
+						// rotation tick.
+						state.setAnchor(initialCx, initialCy);
 					}
 					if (state.hasCenter())
 					{
@@ -471,8 +475,11 @@ public class MainActivity extends AppCompatActivity
 	{
 		if (!state.hasCenter() && state.getSourceImage() != null)
 		{
+			float imgMidX = state.getImageWidth() / 2f;
+			float imgMidY = state.getImageHeight() / 2f;
 			state.markCropSizeDirty();
-			state.setCenter(state.getImageWidth() / 2f, state.getImageHeight() / 2f);
+			state.setCenter(imgMidX, imgMidY);
+			state.setAnchor(imgMidX, imgMidY);
 		}
 	}
 
@@ -1002,6 +1009,13 @@ public class MainActivity extends AppCompatActivity
 		float[] mid = CropEngine.selectionMidpoint(points);
 		state.setCropSizeDirty(false);
 		state.setCenter(mid[0], mid[1]);
+		// Move mode: user just moved the crop to the selection midpoint. Update the
+		// rotation anchor so subsequent rotations start from here.
+		state.setAnchor(mid[0], mid[1]);
+		// Snap the display center to the pixel grid — in Move mode the crop borders
+		// must land on whole-pixel boundaries, but a half-integer selection midpoint
+		// paired with even cropW (or vice versa) would otherwise leave them mid-pixel.
+		CropEngine.recomputeCrop(state);
 	}
 
 	private void recomputeForLockChange()
@@ -1850,10 +1864,10 @@ public class MainActivity extends AppCompatActivity
 		boolean isSelect = mode == EditorMode.SELECT_FEATURE;
 
 		findViewById(R.id.btnLockBoth).setVisibility(isSelect ? View.VISIBLE : View.GONE);
-		// BOTH is a Select-only option; fall back to Horizontal when leaving Select mode.
+		// BOTH is a Select-only option; fall back to Vertical when leaving Select mode.
 		if (!isSelect && moveLockPref == CenterMode.BOTH)
 		{
-			moveLockPref = CenterMode.HORIZONTAL;
+			moveLockPref = CenterMode.VERTICAL;
 			applyLockMode();
 		}
 

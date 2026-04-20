@@ -266,12 +266,15 @@ public final class CropExporter
 		int halfLineWidth = lineWidth / 2;
 		int color = grid.color;
 
-		// Vertical lines: write a (lineWidth × height) column of pixels for each
+		// Vertical lines: write a (lineWidth × height) column of pixels for each. Position
+		// matches GridRenderer's crop-dimension-parity snap — even dim → line between
+		// pixels (preview drawX integer → rasterises to a specific pixel index); odd dim →
+		// line covers pixel (preview drawX half-int → covers pixel floor(drawX)).
 		int[] vertColumn = new int[lineWidth * height];
 		Arrays.fill(vertColumn, color);
 		for (int i = 1; i < grid.columns; i++)
 		{
-			int x = Math.round((float) (width * i) / grid.columns);
+			int x = gridLinePixel(i, grid.columns, width);
 			int left = Math.max(0, x - halfLineWidth);
 			int right = Math.min(width, left + lineWidth);
 			int actualWidth = right - left;
@@ -285,12 +288,12 @@ public final class CropExporter
 			bmp.setPixels(band, 0, actualWidth, left, 0, actualWidth, height);
 		}
 
-		// Horizontal lines: write a (width × lineWidth) row band for each
+		// Horizontal lines: same rule.
 		int[] horizBand = new int[width * lineWidth];
 		Arrays.fill(horizBand, color);
 		for (int i = 1; i < grid.rows; i++)
 		{
-			int y = Math.round((float) (height * i) / grid.rows);
+			int y = gridLinePixel(i, grid.rows, height);
 			int top = Math.max(0, y - halfLineWidth);
 			int bottom = Math.min(height, top + lineWidth);
 			int actualHeight = bottom - top;
@@ -310,6 +313,33 @@ public final class CropExporter
 		int[] buf = new int[size];
 		Arrays.fill(buf, color);
 		return buf;
+	}
+
+	// Pixel index for grid line i of a count-N grid along one axis. Matches GridRenderer's
+	// cropDim-parity snap:
+	//   • Even dim → preview drawX = round(raw) (integer, pixel boundary). Exporter picks
+	//     that same pixel index.
+	//   • Odd dim → preview drawX = floor(raw) + 0.5 (pixel center). Exporter covers
+	//     pixel floor(raw).
+	// The middle line (i = count / 2) uses dim / 2 which is floor(cropCenter) — pixel
+	// index for a line at the crop's geometric middle. Second-half lines mirror the first
+	// half around the bitmap center so (i, count − i) pairs stay symmetric.
+	private static int gridLinePixel(int i, int count, int dim)
+	{
+		if (i * 2 == count)
+		{
+			return dim / 2;
+		}
+		boolean dimEven = (dim & 1) == 0;
+		if (i * 2 < count)
+		{
+			double raw = (double) dim * i / count;
+			return dimEven ? (int) Math.round(raw) : (int) Math.floor(raw);
+		}
+		int mirrorI = count - i;
+		double mirrorRaw = (double) dim * mirrorI / count;
+		int mirrorX = dimEven ? (int) Math.round(mirrorRaw) : (int) Math.floor(mirrorRaw);
+		return dimEven ? dim - mirrorX : dim - mirrorX - 1;
 	}
 
 	private static ExportResult exportJpeg(CropState state, Bitmap bmp, int cropW, int cropH,

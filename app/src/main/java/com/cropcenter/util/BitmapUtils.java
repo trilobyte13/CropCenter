@@ -10,10 +10,18 @@ import android.graphics.Rect;
 // BitmapFactory.decodeByteArray() does NOT auto-apply EXIF rotation.
 public final class BitmapUtils
 {
+	// Rotation values with magnitude below this threshold (degrees) are treated as
+	// 0 for rendering purposes. The rotation ruler resolves at 0.1°, so any
+	// sub-0.05° residue is below user control — honoring it forces an unnecessary
+	// bilinear pass over the entire image for what the user sees as "0°".
+	public static final float ROTATION_EPSILON = 0.05f;
+
 	private BitmapUtils() {}
 
 	// Apply EXIF orientation to a bitmap, returning a correctly rotated bitmap.
-	// The input bitmap may be recycled if rotation was needed.
+	// The input bitmap may be recycled if rotation was needed. EXIF orientations
+	// are pure mirror / 90° / 180° transforms — lossless integer-pixel remaps —
+	// so createBitmap uses filter=false to guarantee no bilinear softening.
 	public static Bitmap applyOrientation(Bitmap bmp, int orientation)
 	{
 		if (orientation <= 1 || orientation > 8)
@@ -21,7 +29,7 @@ public final class BitmapUtils
 			return bmp;
 		}
 		Matrix matrix = orientationMatrix(orientation);
-		Bitmap rotated = Bitmap.createBitmap(bmp, 0, 0, bmp.getWidth(), bmp.getHeight(), matrix, true);
+		Bitmap rotated = Bitmap.createBitmap(bmp, 0, 0, bmp.getWidth(), bmp.getHeight(), matrix, false);
 		if (rotated != bmp)
 		{
 			bmp.recycle();
@@ -46,13 +54,29 @@ public final class BitmapUtils
 	{
 		float drawX = -srcX;
 		float drawY = -srcY;
-		if (rotation != 0f)
+		if (Math.abs(rotation) >= ROTATION_EPSILON)
 		{
 			canvas.save();
 			canvas.rotate(rotation,
 				drawX + src.getWidth() / 2f,
 				drawY + src.getHeight() / 2f);
-			canvas.drawBitmap(src, drawX, drawY, paint);
+
+			// Cardinal rotations (±90°, 180°, ±270°) are pure integer-pixel remaps
+			// at the integer / half-integer pivots the parity invariant produces.
+			// Disable bilinear filtering so nearest-neighbor sampling inherits
+			// source pixels verbatim rather than cross-blending adjacent ones.
+			// Non-cardinal rotations require bilinear — interpolation is inherent
+			// to the geometry.
+			if (isCardinalRotation(rotation))
+			{
+				Paint nearestPaint = new Paint(paint);
+				nearestPaint.setFilterBitmap(false);
+				canvas.drawBitmap(src, drawX, drawY, nearestPaint);
+			}
+			else
+			{
+				canvas.drawBitmap(src, drawX, drawY, paint);
+			}
 			canvas.restore();
 		}
 		else
@@ -73,6 +97,18 @@ public final class BitmapUtils
 				canvas.drawBitmap(src, srcRect, dstRect, paint);
 			}
 		}
+	}
+
+	// True when `rotation` is within ROTATION_EPSILON of an exact multiple of 90°
+	// (±90°, 180°, ±270°, …). Cardinal rotations map integer source pixels to
+	// integer destination pixels and are therefore losslessly expressible with
+	// nearest-neighbor sampling. Non-cardinal rotations require bilinear filtering.
+	public static boolean isCardinalRotation(float rotation)
+	{
+		float normalized = ((rotation % 360f) + 360f) % 360f;
+		return Math.abs(normalized - 90f) < ROTATION_EPSILON
+			|| Math.abs(normalized - 180f) < ROTATION_EPSILON
+			|| Math.abs(normalized - 270f) < ROTATION_EPSILON;
 	}
 
 	// Build a Matrix for the given EXIF orientation value (1-8).

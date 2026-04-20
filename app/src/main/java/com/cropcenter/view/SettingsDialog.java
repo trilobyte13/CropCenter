@@ -12,6 +12,7 @@ import android.widget.ScrollView;
 import android.widget.SeekBar;
 import android.widget.TextView;
 
+import com.cropcenter.BuildConfig;
 import com.cropcenter.model.GridConfig;
 import com.cropcenter.util.ThemeColors;
 
@@ -176,6 +177,19 @@ public class SettingsDialog
 			}), topMargin(dp8));
 
 		root.addView(selCard, topMargin(dp8));
+
+		// ─── BUILD INFO card ───
+		LinearLayout buildCard = newCard(ctx, density);
+		addCardTitle(buildCard, "Build");
+
+		TextView buildTime = new TextView(ctx);
+		buildTime.setText("Version: " + BuildConfig.BUILD_TIME);
+		buildTime.setTextSize(11);
+		buildTime.setTextColor(ThemeColors.SUBTEXT0);
+		buildTime.setTypeface(android.graphics.Typeface.MONOSPACE);
+		buildCard.addView(buildTime, topMargin(dp4));
+
+		root.addView(buildCard, topMargin(dp8));
 
 		Runnable apply = () ->
 		{

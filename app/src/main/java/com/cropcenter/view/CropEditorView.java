@@ -16,6 +16,7 @@ import com.cropcenter.model.CenterMode;
 import com.cropcenter.model.CropState;
 import com.cropcenter.model.EditorMode;
 import com.cropcenter.model.SelectionPoint;
+import com.cropcenter.util.BitmapUtils;
 import com.cropcenter.util.ThemeColors;
 
 import java.util.ArrayList;
@@ -191,13 +192,36 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
 		if (mode == EditorMode.MOVE && state.hasCenter()
 			&& state.getCenterMode() != CenterMode.LOCKED)
 		{
-			// Drag to move center — respect lock direction
+			// Drag to move center — respect lock direction. The anchor is a fractional
+			// drag accumulator that holds the user's "intent" position; centerX is what
+			// recomputeCrop parity-snaps to the pixel grid for display. Reading newCx/newCy
+			// from the anchor (not centerX) lets sub-pixel motion accumulate across events —
+			// otherwise a slow drag at high zoom would make no progress because each event
+			// would read back the just-snapped centerX.
+			//
+			// Resync the anchor to centerX when the gap exceeds 1 pixel. Parity snapping
+			// alone moves them apart by at most 0.5 px, so a larger gap means the anchor
+			// went stale: rotation or AR change shrunk the crop and setCenter's clamp pulled
+			// centerX inward while the anchor stayed put; or the user switched Select→Move
+			// without a selection and the anchor reflects an old intent. Without this
+			// resync the first drag event absorbs into the clamp and produces no motion.
 			float scale = baseScale * zoom;
 			CenterMode lock = state.getCenterMode();
-			float newCx = state.getCenterX();
-			float newCy = state.getCenterY();
+			if (Math.abs(state.getAnchorX() - state.getCenterX()) > 1f
+				|| Math.abs(state.getAnchorY() - state.getCenterY()) > 1f)
+			{
+				state.setAnchor(state.getCenterX(), state.getCenterY());
+			}
 
-			float origCx = newCx, origCy = newCy;
+			float newCx = state.getAnchorX();
+			float newCy = state.getAnchorY();
+			// Cache the pre-drag SNAPPED center for the cross-axis drift test below.
+			// Comparing to the anchor would let up to 0.5 px of parity offset leak past
+			// the 0.5-px reject threshold, which on a rotated image can accumulate into
+			// visible drift along a "locked" axis across many events.
+			float preCx = state.getCenterX();
+			float preCy = state.getCenterY();
+
 			if (lock == CenterMode.HORIZONTAL)
 			{
 				newCx += dx / scale;
@@ -212,27 +236,32 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
 				newCy += dy / scale;
 			}
 
-			// Test if the proposed position is valid without cross-axis drift. setCenter clamps
-			// both axes, which can cause the non-moving axis to shift. Instead: test the move,
-			// and only accept it if the non-moving axis stays put.
+			// setCenter clamps both axes jointly (binary search under rotation). On a
+			// locked axis we only want motion on the unlocked axis — reject moves that
+			// would drift the locked axis more than 0.5 px from its pre-drag position.
 			state.setCropSizeDirty(false);
 			state.setCenter(newCx, newCy);
 
 			boolean reject = false;
 			if (lock == CenterMode.HORIZONTAL)
 			{
-				reject = Math.abs(state.getCenterY() - origCy) > 0.5f;
+				reject = Math.abs(state.getCenterY() - preCy) > 0.5f;
 			}
 			else if (lock == CenterMode.VERTICAL)
 			{
-				reject = Math.abs(state.getCenterX() - origCx) > 0.5f;
+				reject = Math.abs(state.getCenterX() - preCx) > 0.5f;
 			}
 
-			if (reject)
+			if (!reject)
 			{
-				// Move would cause drift on locked axis — revert to previous position
-				state.setCenter(origCx, origCy);
+				// Advance the anchor to the clamped (still fractional) drag position
+				// so the next event continues accumulating from here.
+				state.setAnchor(state.getCenterX(), state.getCenterY());
 			}
+			// Snap the display center so crop borders land on whole-pixel boundaries.
+			// When rejected, the anchor is unchanged — recomputeCrop re-derives the
+			// snapped center from the unchanged anchor, restoring the pre-drag position.
+			CropEngine.recomputeCrop(state);
 			invalidate();
 		}
 		else
@@ -291,7 +320,12 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
 				return;
 			}
 			pushUndo();
-			state.addSelectionPoint(new SelectionPoint(ix, iy));
+			// Snap to the center of the tapped pixel (image X in [P, P+1) → P + 0.5). This
+			// means a single selection has cropCenter = P + 0.5 → odd cropW → the grid's
+			// middle line lands on pixel P's center and visibly covers the point's marker.
+			float snappedX = (float) Math.floor(ix) + 0.5f;
+			float snappedY = (float) Math.floor(iy) + 0.5f;
+			state.addSelectionPoint(new SelectionPoint(snappedX, snappedY));
 			CropEngine.autoComputeFromPoints(state);
 			invalidate();
 			notifyPointsChanged();
@@ -385,8 +419,13 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
 	// Reset crop to full image centered with current AR.
 	public void resetCropToFullImage()
 	{
+		float imgMidX = state.getImageWidth() / 2f;
+		float imgMidY = state.getImageHeight() / 2f;
 		state.markCropSizeDirty();
-		state.setCenterUnclamped(state.getImageWidth() / 2f, state.getImageHeight() / 2f);
+		state.setCenterUnclamped(imgMidX, imgMidY);
+		// Reset the rotation anchor too — the user's "intent" is now the image center,
+		// not whatever point was selected before (which may have been far away).
+		state.setAnchor(imgMidX, imgMidY);
 		CropEngine.recomputeCrop(state);
 	}
 
@@ -461,7 +500,10 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
 		Matrix matrix = new Matrix();
 		matrix.setScale(scale, scale);
 		matrix.postTranslate(left, top);
-		if (rotation != 0f)
+		// Treat sub-UI-resolution residues as exactly zero — skipping postRotate keeps
+		// the identity transform path (crisper preview) when the user has returned the
+		// ruler to "0" but a tiny float residue remains.
+		if (Math.abs(rotation) >= BitmapUtils.ROTATION_EPSILON)
 		{
 			float imgCx = left + bmp.getWidth() * scale / 2f;
 			float imgCy = top + bmp.getHeight() * scale / 2f;
