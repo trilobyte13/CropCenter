@@ -7,6 +7,7 @@ import android.provider.DocumentsContract;
 import android.util.Log;
 import android.widget.Toast;
 
+import com.cropcenter.crop.CropExporter;
 import com.cropcenter.util.SafFileHelper;
 import com.cropcenter.util.StoragePermissionHelper;
 
@@ -20,8 +21,10 @@ import java.io.FileOutputStream;
  * granted), then SAF direct overwrite, then SAF delete-then-rename. Verifies the end state and
  * surfaces a failure dialog when disk doesn't match the intent.
  *
- * Reads CropState (for backup tagging inside the ExportPipeline it delegates to) but otherwise
- * lives downstream of the save flow — SaveController.showReplaceDialog decides whether to
+ * Also writes the Samsung Gallery Revert backup of the original file — the backup runs inside
+ * the ExportPipeline.exportTo onSavedBg callback so it executes on the background thread
+ * after the placeholder write but before any of the fallback paths below touch the original.
+ * Lives downstream of the save flow — SaveController.showReplaceDialog decides whether to
  * invoke this.
  */
 final class ReplaceStrategy
@@ -68,6 +71,20 @@ final class ReplaceStrategy
 	{
 		exportPipeline.exportTo(newUri, data ->
 		{
+			// Samsung Gallery Revert backup happens here, on the background-executor thread, NOT
+			// in every Save As — the backup is only needed when we're actually overwriting the
+			// original. Runs after doExport's verified placeholder write but BEFORE any of the
+			// file-I/O / SAF-fallback paths below touch the original on disk. If the backup
+			// write fails we still proceed (user already chose Replace) but warn so they know
+			// Revert is dead.
+			CropExporter.BackupStatus backup = CropExporter.saveOriginalBackup(host.getState());
+			if (backup == CropExporter.BackupStatus.FAILED)
+			{
+				host.runOnUiThread(() -> host.toastIfAlive(
+					"Warning: couldn't write revert backup — Gallery Revert won't work",
+					Toast.LENGTH_LONG));
+			}
+
 			// A. File I/O. Writes the encoded bytes directly from `data` — avoids re-reading the
 			// placeholder through FUSE/MediaStore layers that may not be in sync yet. Verifies
 			// the target's on-disk length matches before reporting success. When this path

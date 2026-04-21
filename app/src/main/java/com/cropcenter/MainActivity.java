@@ -185,7 +185,9 @@ public class MainActivity extends AppCompatActivity implements SaveHost, UiHost,
 
 		ui.updateModeHighlight();
 		ui.updateLockHighlight();
-		permissions.ensureStoragePermission();
+		// MANAGE_EXTERNAL_STORAGE is no longer requested at startup — Replace's failure dialog
+		// (showReplaceFailureDialog) offers the grant prompt only when an overwrite actually
+		// hits a permission-bound failure. Most Save As flows never need this permission.
 		handleIncomingIntent(getIntent());
 	}
 

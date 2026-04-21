@@ -123,12 +123,11 @@ final class SaveController
 	}
 
 	/**
-	 * Save button handler. First re-checks MANAGE_EXTERNAL_STORAGE (it survives app UPDATE but
-	 * is typically revoked on uninstall-then-reinstall) and offers to open Settings if missing —
-	 * without it, Replace can leave an extra copy when the colliding file was created by a
-	 * previous install. Then runs SaveDialog (format + grid-bake options); on its "Continue"
+	 * Save button handler. Runs SaveDialog (format + grid-bake options); on its "Continue"
 	 * the SAF picker opens with the correct extension pre-filled. Replace/Keep confirmation is
-	 * handled downstream in handleSaveAsResult().
+	 * handled downstream in handleSaveAsResult(); that's also where MANAGE_EXTERNAL_STORAGE
+	 * is prompted if the user actually hits a collision — ordinary Save As flows no longer
+	 * carry the overwrite-oriented permission UX.
 	 */
 	void showSaveDialog()
 	{
@@ -139,20 +138,6 @@ final class SaveController
 		if (host.getBusy().get() || savePending)
 		{
 			host.showBusyToast();
-			return;
-		}
-		if (!permissions.hasStoragePermission())
-		{
-			String message = "Without it, Replace can leave an extra copy when overwriting files "
-				+ "created by a previous install of CropCenter. Grant now, then tap Save "
-				+ "again when you return.";
-			new AlertDialog.Builder(host.getActivity())
-				.setTitle("Grant \u201CAll files access\u201D for reliable overwrite?")
-				.setMessage(message)
-				.setPositiveButton("Grant",
-					(dialog, which) -> permissions.openStoragePermissionSettings())
-				.setNegativeButton("Continue without", (dialog, which) -> openSaveOptionsDialog())
-				.show();
 			return;
 		}
 		openSaveOptionsDialog();

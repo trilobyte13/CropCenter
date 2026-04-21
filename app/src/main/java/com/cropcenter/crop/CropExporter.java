@@ -4,6 +4,7 @@ import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.ColorSpace;
 import android.graphics.Paint;
+import android.graphics.Rect;
 import android.util.Log;
 
 import com.cropcenter.metadata.ExifPatcher;
@@ -51,7 +52,6 @@ public final class CropExporter
 	private static final String TAG = "CropExporter";
 	private static final int CANVAS_BG = 0xFF0D0E14; // opaque very-dark-navy — visible at rotation corners
 	private static final int MAX_THUMBNAIL_BUDGET = 60_000; // JPEG thumbnail cap (leaves room under APP1 limit)
-	private static final int MIN_THUMBNAIL_BUDGET = 2_000;  // floor for the EXIF thumbnail
 	private static final int THUMBNAIL_DEFAULT_BUDGET = 60_000; // when no EXIF to measure against
 	private static final int THUMBNAIL_MAX_DIM = 1024;
 	private static final int THUMBNAIL_MARGIN_BYTES = 200; // margin for IFD changes beyond measured size
@@ -367,7 +367,10 @@ public final class CropExporter
 		int thumbBudget = (metaForThumb != null && !metaForThumb.isEmpty())
 			? ExifPatcher.maxThumbnailBytes(metaForThumb) - THUMBNAIL_MARGIN_BYTES
 			: THUMBNAIL_DEFAULT_BUDGET;
-		thumbBudget = Math.clamp(thumbBudget, MIN_THUMBNAIL_BUDGET, MAX_THUMBNAIL_BUDGET);
+		// No MIN clamp: if the EXIF payload has so little headroom that a meaningful thumbnail
+		// won't fit, let generateThumbnail return null and preserve the existing thumbnail
+		// rather than generating one that replaceThumbnail will silently reject for overflow.
+		thumbBudget = Math.clamp(thumbBudget, 0, MAX_THUMBNAIL_BUDGET);
 		byte[] thumbnail = generateThumbnail(bmp, THUMBNAIL_MAX_DIM, thumbBudget);
 
 		// HDR path: generate a cropped Ultra HDR JPEG to extract the gain map from. The primary
@@ -543,9 +546,22 @@ public final class CropExporter
 	 * Produce an EXIF thumbnail JPEG that fits within maxBytes. Scales bmp down to maxDim on
 	 * its longest side (never up), then tries decreasing quality levels until the compressed
 	 * size fits. Falls back to halving the dimensions if even q50 is too large.
+	 *
+	 * The thumbnail is rendered into an sRGB bitmap regardless of `bmp`'s color space: when
+	 * `bmp` is DISPLAY_P3 (used for HDR JPEG exports), Bitmap.compress would embed an APP2 ICC
+	 * profile (~500-600 bytes) inside the thumbnail JPEG, and that overhead combined with a
+	 * tight `maxBytes` budget can cause `ExifPatcher.replaceThumbnail` to silently reject the
+	 * thumbnail for APP1 overflow. sRGB compression produces a plain baseline JPEG with no ICC
+	 * segment, matching camera-native thumbnails and keeping the byte budget predictable.
 	 */
 	private static byte[] generateThumbnail(Bitmap bmp, int maxDim, int maxBytes)
 	{
+		if (maxBytes <= 0)
+		{
+			Log.w(TAG, "Thumbnail budget ≤ 0 — skipping generation");
+			return null;
+		}
+		Bitmap thumb = null;
 		try
 		{
 			int width = bmp.getWidth();
@@ -559,9 +575,8 @@ public final class CropExporter
 			scale = Math.min(scale, 1.0); // don't upscale
 			int thumbWidth = Math.max(1, (int) Math.round(width * scale));
 			int thumbHeight = Math.max(1, (int) Math.round(height * scale));
-			Bitmap thumb = (thumbWidth == width && thumbHeight == height)
-				? bmp
-				: Bitmap.createScaledBitmap(bmp, thumbWidth, thumbHeight, true);
+
+			thumb = renderSrgbThumb(bmp, thumbWidth, thumbHeight);
 
 			// Match camera fidelity when the EXIF budget allows; fall through to scale-down only at q50.
 			int[] qualities = { 90, 85, 80, 75, 70, 60, 50 };
@@ -574,10 +589,6 @@ public final class CropExporter
 				{
 					Log.d(TAG, "Thumbnail: " + thumbWidth + "x" + thumbHeight
 						+ " q" + quality + " = " + result.length + "B");
-					if (thumb != bmp)
-					{
-						thumb.recycle();
-					}
 					return result;
 				}
 			}
@@ -587,16 +598,12 @@ public final class CropExporter
 			// division on the already-rounded thumbWidth truncates: for a 4:5 source like 4000×5000
 			// at scale 0.2048 this produced 819/2 = 409 instead of the correct round(409.6) = 410.
 			// Going through the original scale preserves full precision end-to-end.
-			if (thumb != bmp)
-			{
-				thumb.recycle();
-			}
+			thumb.recycle();
 			int halvedWidth = Math.max(1, (int) Math.round(width * scale * 0.5));
 			int halvedHeight = Math.max(1, (int) Math.round(height * scale * 0.5));
-			Bitmap smaller = Bitmap.createScaledBitmap(bmp, halvedWidth, halvedHeight, true);
+			thumb = renderSrgbThumb(bmp, halvedWidth, halvedHeight);
 			ByteArrayOutputStream bos = new ByteArrayOutputStream();
-			smaller.compress(Bitmap.CompressFormat.JPEG, 70, bos);
-			smaller.recycle();
+			thumb.compress(Bitmap.CompressFormat.JPEG, 70, bos);
 			byte[] result = bos.toByteArray();
 			if (result.length <= maxBytes)
 			{
@@ -612,6 +619,30 @@ public final class CropExporter
 			Log.w(TAG, "Thumbnail generation failed", e);
 			return null;
 		}
+		finally
+		{
+			if (thumb != null && !thumb.isRecycled())
+			{
+				thumb.recycle();
+			}
+		}
+	}
+
+	/**
+	 * Render `src` into a fresh sRGB ARGB_8888 bitmap at the requested dimensions using a
+	 * bilinear-filtered Canvas draw. The output is guaranteed to compress to a plain baseline
+	 * JPEG with no ICC profile APP2 segment, regardless of `src`'s color space.
+	 */
+	private static Bitmap renderSrgbThumb(Bitmap src, int width, int height)
+	{
+		Bitmap out = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888, true,
+			ColorSpace.get(ColorSpace.Named.SRGB));
+		Canvas canvas = new Canvas(out);
+		Rect srcRect = new Rect(0, 0, src.getWidth(), src.getHeight());
+		Rect dstRect = new Rect(0, 0, width, height);
+		Paint paint = new Paint(Paint.FILTER_BITMAP_FLAG);
+		canvas.drawBitmap(src, srcRect, dstRect, paint);
+		return out;
 	}
 
 	/**

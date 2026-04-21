@@ -111,18 +111,18 @@ final class ExportPipeline
 		boolean isPng = ExportConfig.FORMAT_PNG.equals(host.getState().getExportConfig().format());
 
 		// ── Phase 1: encode ──
+		// Backup writing used to live in this phase but now runs only when the Replace flow
+		// needs it (ReplaceStrategy.replaceColliding). Plain Save As / Keep paths no longer
+		// pay the backup I/O for a save that isn't actually overwriting the original.
 		byte[] data;
 		boolean srcHadHdr;
-		boolean backupFailed = false;
 		try
 		{
-			CropExporter.BackupStatus backup = CropExporter.saveOriginalBackup(host.getState());
-			backupFailed = (backup == CropExporter.BackupStatus.FAILED);
 			data = CropExporter.export(host.getState(), host.getActivity().getCacheDir()).data();
 			srcHadHdr = host.getState().getGainMap() != null
 				&& host.getState().getGainMap().length > 0;
 			Log.d(TAG, "Encoded " + data.length + " bytes (srcHdr=" + srcHadHdr
-				+ " isPng=" + isPng + " backup=" + backup + ")");
+				+ " isPng=" + isPng + ")");
 		}
 		catch (Exception e)
 		{
@@ -130,18 +130,6 @@ final class ExportPipeline
 			final String emsg = "Export failed: " + e.getMessage();
 			host.runOnUiThread(() -> host.toastIfAlive(emsg, Toast.LENGTH_SHORT));
 			return null;
-		}
-
-		// saveOriginalBackup returns FAILED only when the source is a MediaStore file (so Gallery
-		// Revert is relevant) AND the backup couldn't be written. NOT_APPLICABLE sources and
-		// already-existing backups skip the warning. SAF's picker — not this app — decides whether
-		// the user is overwriting, so we warn any time the backup didn't survive regardless of URI
-		// identity.
-		if (backupFailed)
-		{
-			host.runOnUiThread(() -> host.toastIfAlive(
-				"Warning: couldn't write revert backup — Gallery Revert won't work if you overwrite",
-				Toast.LENGTH_LONG));
 		}
 
 		// ── Phase 2: write ──

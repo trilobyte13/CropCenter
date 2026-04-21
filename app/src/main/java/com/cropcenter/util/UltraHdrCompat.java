@@ -112,7 +112,7 @@ public final class UltraHdrCompat
 
 				Bitmap.Config gmConfig = gmBmp.getConfig() != null
 					? gmBmp.getConfig()
-						: Bitmap.Config.ARGB_8888;
+					: Bitmap.Config.ARGB_8888;
 				Bitmap gmOutput = Bitmap.createBitmap(gmOutW, gmOutH, gmConfig);
 				Canvas gmCanvas = new Canvas(gmOutput);
 				Paint gmPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
