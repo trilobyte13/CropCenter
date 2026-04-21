@@ -1,15 +1,95 @@
 package com.cropcenter.model;
 
-public class GridConfig
+/**
+ * Immutable grid + selection-paint settings. Callers mutate via CropState.updateGridConfig,
+ * which replaces the current instance with one produced by one or more withXxx transformers.
+ *
+ * Field meanings:
+ *   enabled            — master toggle for the preview grid
+ *   includeInExport    — bake the grid into saved output
+ *   showPixelGrid      — show the pixel grid when zoom ≥ 6x
+ *   lineWidth          — grid stroke width in image pixels
+ *   color              — grid line color (default white)
+ *   columns / rows     — grid cell count
+ *   pixelGridColor     — pixel-grid stroke color (default black)
+ *   selectionColor     — shared color for selection points, polygon fill, and horizon paint
+ */
+public record GridConfig(
+	boolean enabled,
+	boolean includeInExport,
+	boolean showPixelGrid,
+	float lineWidth,
+	int color,
+	int columns,
+	int pixelGridColor,
+	int rows,
+	int selectionColor)
 {
-	public boolean enabled = true;
-	public boolean includeInExport = false;         // bake the grid into saved output
-	public boolean showPixelGrid = true;
-	public float lineWidth = 1f;
-	public int color = 0xFFFFFFFF;                  // white — grid line color
-	public int columns = 4;
-	public int pixelGridColor = 0xFF000000;         // black
-	public int rows = 4;
-	// Shared color for selection points, selection polygon, and horizon paint area.
-	public int selectionColor = 0x800000FF;         // standard transparent blue (50% alpha)
+	public static GridConfig defaults()
+	{
+		return new GridConfig(
+			true,          // enabled
+			false,         // includeInExport
+			true,          // showPixelGrid
+			1f,            // lineWidth
+			0xFFFFFFFF,    // color — white
+			4,             // columns
+			0xFF000000,    // pixelGridColor — black
+			4,             // rows
+			0x800000FF);   // selectionColor — 50% transparent blue
+	}
+
+	public GridConfig withColor(int color)
+	{
+		return new GridConfig(enabled, includeInExport, showPixelGrid, lineWidth,
+			color, columns, pixelGridColor, rows, selectionColor);
+	}
+
+	public GridConfig withColumns(int columns)
+	{
+		return new GridConfig(enabled, includeInExport, showPixelGrid, lineWidth,
+			color, columns, pixelGridColor, rows, selectionColor);
+	}
+
+	public GridConfig withEnabled(boolean enabled)
+	{
+		return new GridConfig(enabled, includeInExport, showPixelGrid, lineWidth,
+			color, columns, pixelGridColor, rows, selectionColor);
+	}
+
+	public GridConfig withIncludeInExport(boolean includeInExport)
+	{
+		return new GridConfig(enabled, includeInExport, showPixelGrid, lineWidth,
+			color, columns, pixelGridColor, rows, selectionColor);
+	}
+
+	public GridConfig withLineWidth(float lineWidth)
+	{
+		return new GridConfig(enabled, includeInExport, showPixelGrid, lineWidth,
+			color, columns, pixelGridColor, rows, selectionColor);
+	}
+
+	public GridConfig withPixelGridColor(int pixelGridColor)
+	{
+		return new GridConfig(enabled, includeInExport, showPixelGrid, lineWidth,
+			color, columns, pixelGridColor, rows, selectionColor);
+	}
+
+	public GridConfig withRows(int rows)
+	{
+		return new GridConfig(enabled, includeInExport, showPixelGrid, lineWidth,
+			color, columns, pixelGridColor, rows, selectionColor);
+	}
+
+	public GridConfig withSelectionColor(int selectionColor)
+	{
+		return new GridConfig(enabled, includeInExport, showPixelGrid, lineWidth,
+			color, columns, pixelGridColor, rows, selectionColor);
+	}
+
+	public GridConfig withShowPixelGrid(boolean showPixelGrid)
+	{
+		return new GridConfig(enabled, includeInExport, showPixelGrid, lineWidth,
+			color, columns, pixelGridColor, rows, selectionColor);
+	}
 }

@@ -6,8 +6,10 @@ import android.graphics.Matrix;
 import android.graphics.Paint;
 import android.graphics.Rect;
 
-// Reads EXIF orientation from raw JPEG bytes and rotates the bitmap accordingly.
-// BitmapFactory.decodeByteArray() does NOT auto-apply EXIF rotation.
+/**
+ * Reads EXIF orientation from raw JPEG bytes and rotates the bitmap accordingly.
+ * BitmapFactory.decodeByteArray() does NOT auto-apply EXIF rotation.
+ */
 public final class BitmapUtils
 {
 	// Rotation values with magnitude below this threshold (degrees) are treated as
@@ -18,10 +20,12 @@ public final class BitmapUtils
 
 	private BitmapUtils() {}
 
-	// Apply EXIF orientation to a bitmap, returning a correctly rotated bitmap.
-	// The input bitmap may be recycled if rotation was needed. EXIF orientations
-	// are pure mirror / 90° / 180° transforms — lossless integer-pixel remaps —
-	// so createBitmap uses filter=false to guarantee no bilinear softening.
+	/**
+	 * Apply EXIF orientation to a bitmap, returning a correctly rotated bitmap.
+	 * The input bitmap may be recycled if rotation was needed. EXIF orientations
+	 * are pure mirror / 90° / 180° transforms — lossless integer-pixel remaps —
+	 * so createBitmap uses filter=false to guarantee no bilinear softening.
+	 */
 	public static Bitmap applyOrientation(Bitmap bmp, int orientation)
 	{
 		if (orientation <= 1 || orientation > 8)
@@ -42,10 +46,17 @@ public final class BitmapUtils
 	 * around the image center. Used by both CropExporter and UltraHdrCompat to ensure identical
 	 * rendering.
 	 *
+	 * The zero-rotation fast path reduces srcX/srcY to integer pixel coordinates via Math.floor
+	 * and uses an integer-rect blit. That is lossless under the pixel-alignment invariant
+	 * documented in HANDOFF.md — cropCenter's parity is always matched to cropW/cropH so
+	 * srcX = centerX − cropW/2 is already a whole-pixel value on entry. Callers that supply a
+	 * half-integer srcX therefore violate the invariant upstream; the floor is defensive, not
+	 * lossy in normal operation.
+	 *
 	 * @param canvas   output canvas (cropW x cropH)
 	 * @param src      source bitmap in display orientation
-	 * @param srcX     crop origin X = centerX - cropW/2
-	 * @param srcY     crop origin Y = centerY - cropH/2
+	 * @param srcX     crop origin X = centerX - cropW/2 (integer per parity invariant)
+	 * @param srcY     crop origin Y = centerY - cropH/2 (integer per parity invariant)
 	 * @param rotation rotation in degrees (0 = no rotation)
 	 * @param paint    paint for bitmap drawing
 	 */
@@ -99,10 +110,12 @@ public final class BitmapUtils
 		}
 	}
 
-	// True when `rotation` is within ROTATION_EPSILON of an exact multiple of 90°
-	// (±90°, 180°, ±270°, …). Cardinal rotations map integer source pixels to
-	// integer destination pixels and are therefore losslessly expressible with
-	// nearest-neighbor sampling. Non-cardinal rotations require bilinear filtering.
+	/**
+	 * True when `rotation` is within ROTATION_EPSILON of an exact multiple of 90°
+	 * (±90°, 180°, ±270°, …). Cardinal rotations map integer source pixels to
+	 * integer destination pixels and are therefore losslessly expressible with
+	 * nearest-neighbor sampling. Non-cardinal rotations require bilinear filtering.
+	 */
 	public static boolean isCardinalRotation(float rotation)
 	{
 		float normalized = ((rotation % 360f) + 360f) % 360f;
@@ -111,7 +124,9 @@ public final class BitmapUtils
 			|| Math.abs(normalized - 270f) < ROTATION_EPSILON;
 	}
 
-	// Build a Matrix for the given EXIF orientation value (1-8).
+	/**
+	 * Build a Matrix for the given EXIF orientation value (1-8).
+	 */
 	public static Matrix orientationMatrix(int orientation)
 	{
 		Matrix matrix = new Matrix();
@@ -136,8 +151,10 @@ public final class BitmapUtils
 		return matrix;
 	}
 
-	// Read EXIF orientation tag from raw JPEG bytes. Returns orientation value (1-8), or 1 if
-	// not found.
+	/**
+	 * Read EXIF orientation tag from raw JPEG bytes. Returns orientation value (1-8), or 1 if
+	 * not found.
+	 */
 	public static int readExifOrientation(byte[] jpeg)
 	{
 		try

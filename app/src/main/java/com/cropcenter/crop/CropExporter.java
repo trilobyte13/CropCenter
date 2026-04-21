@@ -25,11 +25,15 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.zip.CRC32;
 
-// Full export pipeline: render → compress → inject original metadata (EXIF patched, ICC/XMP/MPF
-// preserved) → append gain map and fix MPF offsets.
+/**
+ * Full export pipeline: render → compress → inject original metadata (EXIF patched, ICC/XMP/MPF
+ * preserved) → append gain map and fix MPF offsets.
+ */
 public final class CropExporter
 {
-	// Status of a saveOriginalBackup() attempt.
+	/**
+	 * Status of a saveOriginalBackup() attempt.
+	 */
 	public enum BackupStatus
 	{
 		// Not applicable — source isn't a MediaStore file we can back up.
@@ -70,10 +74,10 @@ public final class CropExporter
 		{
 			cropW = state.getCropW();
 			cropH = state.getCropH();
-			float centerX = state.getCenterX();
-			float centerY = state.getCenterY();
-			srcX = (int) Math.floor(centerX - cropW / 2f);
-			srcY = (int) Math.floor(centerY - cropH / 2f);
+			// getCropImgX/Y return the invariant-guaranteed integer origin — centerX/cropW parity
+			// is kept matched by CropEngine so the subtraction lands on a whole pixel.
+			srcX = state.getCropImgX();
+			srcY = state.getCropImgY();
 		}
 		else
 		{
@@ -88,7 +92,7 @@ public final class CropExporter
 		// sRGB primary produces a subtly wrong HDR boost. PNG always uses sRGB — color-managed
 		// canvases can apply subtle filtering during rasterization, causing grid lines to render
 		// at inconsistent widths or drop out.
-		boolean isJpeg = ExportConfig.FORMAT_JPEG.equals(state.getExportConfig().format);
+		boolean isJpeg = ExportConfig.FORMAT_JPEG.equals(state.getExportConfig().format());
 		boolean hasGainMap = state.getGainMap() != null && state.getGainMap().length > 0;
 		Bitmap outBmp;
 		if (isJpeg && hasGainMap)
@@ -109,12 +113,12 @@ public final class CropExporter
 
 		// Optional grid overlay bake-in (independent of whether grid is visible on screen)
 		GridConfig grid = state.getGridConfig();
-		if (grid.includeInExport)
+		if (grid.includeInExport())
 		{
 			drawGridPixels(outBmp, cropW, cropH, grid);
 		}
 
-		return switch (state.getExportConfig().format)
+		return switch (state.getExportConfig().format())
 		{
 			case ExportConfig.FORMAT_JPEG -> exportJpeg(state, outBmp, cropW, cropH, cacheDir);
 			default -> exportPng(state, outBmp, cropW, cropH);
@@ -174,10 +178,12 @@ public final class CropExporter
 		}
 	}
 
-	// Append Samsung SEFT trailer.
-	// - If existing SEFT: re-append it verbatim (preserves Gallery's Revert data)
-	// - If no existing SEFT but have backup info: generate new SEFT for Revert
-	// - Otherwise: no SEFT appended
+	/**
+	 * Append Samsung SEFT trailer.
+	 * - If existing SEFT: re-append it verbatim (preserves Gallery's Revert data)
+	 * - If no existing SEFT but have backup info: generate new SEFT for Revert
+	 * - Otherwise: no SEFT appended
+	 */
 	private static byte[] appendSeft(byte[] jpeg, byte[] existingSeft, String backupPath,
 		float normCenterX, float normCenterY, float normCropW, float normCropH,
 		boolean isCropped, int exifRotation)
@@ -211,7 +217,9 @@ public final class CropExporter
 		return result;
 	}
 
-	// Compute SEFT params from state and delegate to appendSeft.
+	/**
+	 * Compute SEFT params from state and delegate to appendSeft.
+	 */
 	private static byte[] appendSeftForState(byte[] jpeg, CropState state, int cropW, int cropH)
 	{
 		int imgW = state.getImageWidth();
@@ -257,14 +265,16 @@ public final class CropExporter
 			normCenterX, normCenterY, normCropW, normCropH, isCropped, exifOrient);
 	}
 
-	// Draw grid lines by directly setting pixels on the bitmap. Bypasses Canvas rasterization
-	// entirely — guaranteed to produce exact line widths regardless of bitmap color space or
-	// Canvas rendering quirks.
+	/**
+	 * Draw grid lines by directly setting pixels on the bitmap. Bypasses Canvas rasterization
+	 * entirely — guaranteed to produce exact line widths regardless of bitmap color space or
+	 * Canvas rendering quirks.
+	 */
 	private static void drawGridPixels(Bitmap bmp, int width, int height, GridConfig grid)
 	{
-		int lineWidth = Math.max(1, Math.round(grid.lineWidth));
+		int lineWidth = Math.max(1, Math.round(grid.lineWidth()));
 		int halfLineWidth = lineWidth / 2;
-		int color = grid.color;
+		int color = grid.color();
 
 		// Vertical lines: write a (lineWidth × height) column of pixels for each. Position
 		// matches GridRenderer's crop-dimension-parity snap — even dim → line between
@@ -272,9 +282,9 @@ public final class CropExporter
 		// line covers pixel (preview drawX half-int → covers pixel floor(drawX)).
 		int[] vertColumn = new int[lineWidth * height];
 		Arrays.fill(vertColumn, color);
-		for (int i = 1; i < grid.columns; i++)
+		for (int i = 1; i < grid.columns(); i++)
 		{
-			int x = gridLinePixel(i, grid.columns, width);
+			int x = gridLinePixel(i, grid.columns(), width);
 			int left = Math.max(0, x - halfLineWidth);
 			int right = Math.min(width, left + lineWidth);
 			int actualWidth = right - left;
@@ -291,9 +301,9 @@ public final class CropExporter
 		// Horizontal lines: same rule.
 		int[] horizBand = new int[width * lineWidth];
 		Arrays.fill(horizBand, color);
-		for (int i = 1; i < grid.rows; i++)
+		for (int i = 1; i < grid.rows(); i++)
 		{
-			int y = gridLinePixel(i, grid.rows, height);
+			int y = gridLinePixel(i, grid.rows(), height);
 			int top = Math.max(0, y - halfLineWidth);
 			int bottom = Math.min(height, top + lineWidth);
 			int actualHeight = bottom - top;
@@ -315,15 +325,17 @@ public final class CropExporter
 		return buf;
 	}
 
-	// Pixel index for grid line i of a count-N grid along one axis. Matches GridRenderer's
-	// cropDim-parity snap:
-	//   • Even dim → preview drawX = round(raw) (integer, pixel boundary). Exporter picks
-	//     that same pixel index.
-	//   • Odd dim → preview drawX = floor(raw) + 0.5 (pixel center). Exporter covers
-	//     pixel floor(raw).
-	// The middle line (i = count / 2) uses dim / 2 which is floor(cropCenter) — pixel
-	// index for a line at the crop's geometric middle. Second-half lines mirror the first
-	// half around the bitmap center so (i, count − i) pairs stay symmetric.
+	/**
+	 * Pixel index for grid line i of a count-N grid along one axis. Matches GridRenderer's
+	 * cropDim-parity snap:
+	 *   • Even dim → preview drawX = round(raw) (integer, pixel boundary). Exporter picks
+	 *     that same pixel index.
+	 *   • Odd dim → preview drawX = floor(raw) + 0.5 (pixel center). Exporter covers
+	 *     pixel floor(raw).
+	 * The middle line (i = count / 2) uses dim / 2 which is floor(cropCenter) — pixel
+	 * index for a line at the crop's geometric middle. Second-half lines mirror the first
+	 * half around the bitmap center so (i, count − i) pairs stay symmetric.
+	 */
 	private static int gridLinePixel(int i, int count, int dim)
 	{
 		if (i * 2 == count)
@@ -454,8 +466,10 @@ public final class CropExporter
 		return new ExportResult(pngBytes, "png");
 	}
 
-	// Find the end of the primary JPEG (position after first EOI). Used to determine where the
-	// gain map starts.
+	/**
+	 * Find the end of the primary JPEG (position after first EOI). Used to determine where the
+	 * gain map starts.
+	 */
 	private static int findPrimaryEnd(byte[] jpeg)
 	{
 		// Walk JPEG markers to find the primary's EOI
@@ -525,9 +539,11 @@ public final class CropExporter
 		return -1; // not found
 	}
 
-	// Produce an EXIF thumbnail JPEG that fits within maxBytes. Scales bmp down to maxDim on
-	// its longest side (never up), then tries decreasing quality levels until the compressed
-	// size fits. Falls back to halving the dimensions if even q50 is too large.
+	/**
+	 * Produce an EXIF thumbnail JPEG that fits within maxBytes. Scales bmp down to maxDim on
+	 * its longest side (never up), then tries decreasing quality levels until the compressed
+	 * size fits. Falls back to halving the dimensions if even q50 is too large.
+	 */
 	private static byte[] generateThumbnail(Bitmap bmp, int maxDim, int maxBytes)
 	{
 		try
@@ -598,8 +614,10 @@ public final class CropExporter
 		}
 	}
 
-	// Inject EXIF data into a PNG as an eXIf chunk, inserted after IHDR. The eXIf chunk
-	// contains raw TIFF data (from EXIF APP1, minus the FF E1 length "Exif\0\0" wrapper).
+	/**
+	 * Inject EXIF data into a PNG as an eXIf chunk, inserted after IHDR. The eXIf chunk
+	 * contains raw TIFF data (from EXIF APP1, minus the FF E1 length "Exif\0\0" wrapper).
+	 */
 	private static byte[] injectPngExif(byte[] png, byte[] exifApp1)
 	{
 		// exifApp1 = FF E1 LL LL "Exif\0\0" [TIFF data...]

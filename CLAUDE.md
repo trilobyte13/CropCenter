@@ -27,9 +27,12 @@ be corrected as they are touched.
 
 A class may become a `record` when **every field is effectively immutable** in
 practice — no setters, no internal mutation, no external `.field = x;`
-assignments. `AspectRatio` and `JpegSegment` qualify; `SelectionPoint` (whose
-`active` flag toggles), `GridConfig`, and `ExportConfig` (mutable config bags)
-do not.
+assignments. `AspectRatio`, `ExportConfig`, `GridConfig`, and `JpegSegment`
+qualify; `SelectionPoint` (whose `active` flag toggles) does not. Mutable
+"config" records should expose `withXxx(value)` transformers alongside their
+accessors so callers can fold a single-field change through
+`CropState.updateExportConfig` / `updateGridConfig` without building a fresh
+instance by hand.
 
 - Record components become method accessors: `point.x()` not `point.x`. When
   converting an existing class, grep for `.field` access sites and update them
@@ -267,17 +270,28 @@ string multiple calls together.
 
 ## Comments
 
+- **Class and outside-method documentation uses Javadoc (`/** ... */`).**
+  Always — even for a one-liner. A single-sentence description becomes a
+  three-line block:
+
+  ```java
+  /**
+   * Parse the thing. Returns null on error.
+   */
+  public Thing parse(String s)
+  ```
+
+  This applies to classes, interfaces, enums, records, and every method
+  declaration (public / private / protected / static alike). Inline
+  `/** Foo. */` on one line is still out — expand to the multi-line form.
 - **In-method comments use `//`.** Always. Even multi-line ones.
   Don't use `/* ... */` for a one-liner tucked inside a method or branch —
-  `// note` not `/* note */`. `/* ... */` has no place except at the very
-  top of a block (method/class Javadoc) when the rules below say Javadoc.
-- **Single-line class or method documentation uses `//`**, not one-liner
-  Javadoc. `/** Foo. */` becomes `// Foo.`.
-- **Multi-line Javadoc uses `/** ... */`** and is only necessary when:
-  - The method has `@param` / `@return` / `@throws` tags worth documenting, or
-  - The description genuinely needs multiple paragraphs.
-  A two-sentence description above a non-tag method is a `//` block, not a
-  Javadoc block.
+  `// note` not `/* note */`. `/* ... */` has no place inside a method body.
+- **Field-level comments use `//`**, not Javadoc. Fields tend to carry
+  short annotations about invariants or lifecycle that read more naturally
+  as inline notes than as a doc block.
+- **Section dividers inside a class use `//`**, e.g. `// ── Bounds checks ──`.
+  They group related members rather than document a single declaration.
 - **No HTML or Javadoc inline tags in comments.** Do not write `<p>`, `<br>`,
   `<cite>`, `<code>`, `{@code ...}`, or `{@link ...}`. This is an Android app
   — Javadoc is not rendered as HTML for end users, and the tags clutter the
@@ -439,8 +453,21 @@ grep -rnE '^\s*(if|else if|for|while)\s*\([^)]*\)\s+[a-zA-Z_]' app/src/main/java
 # Hand-rolled Math.max(lo, Math.min(hi, x)) — use Math.clamp instead:
 grep -rnE 'Math\.max\([^,]+,\s*Math\.min\(' app/src/main/java
 
-# Single-line /** ... */ Javadoc (use // instead):
+# Single-line /** ... */ Javadoc on one physical line — expand to multi-line:
 grep -rnE '^\s*/\*\*[^*]*\*/\s*$' app/src/main/java
+
+# // comments directly above a class or method declaration (use Javadoc instead):
+awk '
+  /^\s*\/\// { if (!in_comment) { in_comment=1; comment_ln=NR } next }
+  /^\s*$/    { in_comment=0; next }
+  {
+    if (in_comment && $0~/^[[:space:]]*(public|private|protected|static|final|abstract|@Override|@Deprecated|void|boolean|byte\[\]|int|long|float|double|String|[A-Z][A-Za-z0-9_<>]*)\b.*\(/)
+      print FILENAME":"comment_ln" // above method (use Javadoc)"
+    else if (in_comment && $0~/^[[:space:]]*(public |private |protected )?(final |abstract |static )*(class|interface|enum|record)\b/)
+      print FILENAME":"comment_ln" // above type decl (use Javadoc)"
+    in_comment=0
+  }
+' $(find app/src/main/java -name '*.java')
 
 # In-method /* ... */ inline block comments (use // instead):
 grep -rnE '/\*[^*\n/][^\n]*\*/' app/src/main/java

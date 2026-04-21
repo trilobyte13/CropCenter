@@ -154,9 +154,11 @@ public final class SeftBuilder
 		}
 	}
 
-	// Generate the backup path for the original file.
-	// Uses shared storage so Samsung Gallery can read it for Revert.
-	// Format: /storage/emulated/0/.cropcenter/{SHA256(sourcePath)}_{mediaId}.jpg
+	/**
+	 * Generate the backup path for the original file.
+	 * Uses shared storage so Samsung Gallery can read it for Revert.
+	 * Format: /storage/emulated/0/.cropcenter/{SHA256(sourcePath)}_{mediaId}.jpg
+	 */
 	public static String generateBackupPath(String sourceFilePath, long mediaId)
 	{
 		String hash = sha256(sourceFilePath);

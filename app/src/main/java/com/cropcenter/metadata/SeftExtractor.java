@@ -2,9 +2,11 @@ package com.cropcenter.metadata;
 
 import android.util.Log;
 
-// Extracts the Samsung SEFT trailer from a JPEG file. The SEFT trailer is appended after the last
-// JPEG EOI (after gain map if present). Layout: [SEFT data blocks][SEFH directory][4-byte size
-// LE][4-byte "SEFT" magic]
+/**
+ * Extracts the Samsung SEFT trailer from a JPEG file. The SEFT trailer is appended after the last
+ * JPEG EOI (after gain map if present). Layout: [SEFT data blocks][SEFH directory][4-byte size
+ * LE][4-byte "SEFT" magic]
+ */
 public final class SeftExtractor
 {
 	private static final String TAG = "SeftExtractor";

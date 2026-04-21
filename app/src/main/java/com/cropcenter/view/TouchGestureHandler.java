@@ -5,11 +5,13 @@ import android.view.GestureDetector;
 import android.view.MotionEvent;
 import android.view.ScaleGestureDetector;
 
-// Handles touch gestures for the crop editor:
-//  - Single finger drag: set center (click mode) or pan (browse mode)
-//  - Two finger pinch: zoom with pivot
-//  - Double tap: fit image to view
-//  - Long press: remove point in select mode
+/**
+ * Handles touch gestures for the crop editor:
+ *  - Single finger drag: set center (click mode) or pan (browse mode)
+ *  - Two finger pinch: zoom with pivot
+ *  - Double tap: fit image to view
+ *  - Long press: remove point in select mode
+ */
 public class TouchGestureHandler
 {
 	public interface Callback

@@ -17,10 +17,12 @@ public record AspectRatio(String label, float width, float height)
 		FREE, R16_9, R3_2, R4_3, R5_4, R1_1, R4_5, R3_4, R2_3, R9_16
 	};
 
-	// Any non-positive dimension means "no constraint" — catches both the canonical FREE
-	// (0, 0) and malformed external constructions like (4, 0) or (-1, -1) that would
-	// otherwise produce ratio()==0 and poison CropEngine's Math.round(cropW / ratio) with
-	// Integer.MAX_VALUE.
+	/**
+	 * Any non-positive dimension means "no constraint" — catches both the canonical FREE
+	 * (0, 0) and malformed external constructions like (4, 0) or (-1, -1) that would
+	 * otherwise produce ratio()==0 and poison CropEngine's Math.round(cropW / ratio) with
+	 * Integer.MAX_VALUE.
+	 */
 	public boolean isFree()
 	{
 		return width <= 0 || height <= 0;

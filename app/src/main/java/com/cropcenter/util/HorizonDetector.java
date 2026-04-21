@@ -12,11 +12,13 @@ import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-// Detects the horizon tilt angle for auto-rotation correction.
-//
-// Strategy (in priority order):
-//   1. XMP metadata: look for device roll angle (most accurate, ~0.01° precision)
-//   2. Computer vision: Canny edges + Radon variance maximization (fallback)
+/**
+ * Detects the horizon tilt angle for auto-rotation correction.
+ *
+ * Strategy (in priority order):
+ *   1. XMP metadata: look for device roll angle (most accurate, ~0.01° precision)
+ *   2. Computer vision: Canny edges + Radon variance maximization (fallback)
+ */
 public final class HorizonDetector
 {
 	private static final String TAG = "HorizonDetector";
@@ -101,9 +103,11 @@ public final class HorizonDetector
 		return Float.NaN;
 	}
 
-	// Convert a raw roll/tilt reading from metadata into the UI's correction-angle convention:
-	// snap near-zero values to exact zero, reject implausibly-large tilts as NaN (bad sensor data),
-	// and otherwise invert and round to 2 decimal places. Shared across all XMP/APP1 entry points.
+	/**
+	 * Convert a raw roll/tilt reading from metadata into the UI's correction-angle convention:
+	 * snap near-zero values to exact zero, reject implausibly-large tilts as NaN (bad sensor data),
+	 * and otherwise invert and round to 2 decimal places. Shared across all XMP/APP1 entry points.
+	 */
 	private static float normalizeMetadataAngle(float deg)
 	{
 		if (Math.abs(deg) < 0.005f)
@@ -361,11 +365,13 @@ public final class HorizonDetector
 		return -Math.round(tilt * 100f) / 100f;
 	}
 
-	// Search XMP XML for a float attribute whose name is exactly attrSuffix, optionally with a
-	// namespace prefix. Handles patterns like: namespace:Roll="1.23" or Roll="1.23".
-	// The earlier version used "\\w*:?Suffix" which greedy-matched unrelated names like
-	// CameraRoll or GyroRoll — any attribute whose name ends in the literal suffix — and
-	// silently returned their value as the horizon angle.
+	/**
+	 * Search XMP XML for a float attribute whose name is exactly attrSuffix, optionally with a
+	 * namespace prefix. Handles patterns like: namespace:Roll="1.23" or Roll="1.23".
+	 * The earlier version used "\\w*:?Suffix" which greedy-matched unrelated names like
+	 * CameraRoll or GyroRoll — any attribute whose name ends in the literal suffix — and
+	 * silently returned their value as the horizon angle.
+	 */
 	private static float findXmpFloat(String xml, String attrSuffix)
 	{
 		// Require either the start of a token (non-word char) or start of string, then an
@@ -418,8 +424,10 @@ public final class HorizonDetector
 		return dst;
 	}
 
-	// Hough transform: find the angle of the single strongest near-horizontal line. Uses
-	// max-single-bin (longest line wins) rather than sum-of-squares (all edges).
+	/**
+	 * Hough transform: find the angle of the single strongest near-horizontal line. Uses
+	 * max-single-bin (longest line wins) rather than sum-of-squares (all edges).
+	 */
 	private static float houghPass(int[] edgeX, int[] edgeY, int edgeCount,
 		int width, int height, float minDeg, float maxDeg, float stepDeg)
 	{

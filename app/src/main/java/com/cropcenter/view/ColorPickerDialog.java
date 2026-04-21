@@ -20,8 +20,10 @@ import com.cropcenter.util.ThemeColors;
 
 import java.util.Locale;
 
-// Color picker: grid of preset colors, alpha slider, and hex input. The hex field always
-// reflects the current selection and its background acts as the live preview.
+/**
+ * Color picker: grid of preset colors, alpha slider, and hex input. The hex field always
+ * reflects the current selection and its background acts as the live preview.
+ */
 public class ColorPickerDialog
 {
 	public interface OnColorSelectedListener
@@ -213,8 +215,10 @@ public class ColorPickerDialog
 			.show();
 	}
 
-	// Paint the hex EditText's background with the current color and pick a contrasting text color
-	// (ITU-R BT.601 luma: Y' = 0.299R + 0.587G + 0.114B).
+	/**
+	 * Paint the hex EditText's background with the current color and pick a contrasting text color
+	 * (ITU-R BT.601 luma: Y' = 0.299R + 0.587G + 0.114B).
+	 */
 	private static void applySwatchPreview(EditText hexInput, int color, float density)
 	{
 		GradientDrawable bg = new GradientDrawable();
@@ -229,7 +233,9 @@ public class ColorPickerDialog
 		hexInput.setTextColor(lum > LUMA_CONTRAST_CUTOFF ? Color.BLACK : Color.WHITE);
 	}
 
-	// Grid view that draws color swatches in a tap-to-select grid.
+	/**
+	 * Grid view that draws color swatches in a tap-to-select grid.
+	 */
 	private static class ColorGridView extends View
 	{
 		interface OnColorTapListener

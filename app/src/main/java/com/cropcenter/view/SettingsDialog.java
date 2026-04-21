@@ -13,19 +13,20 @@ import android.widget.SeekBar;
 import android.widget.TextView;
 
 import com.cropcenter.BuildConfig;
+import com.cropcenter.model.CropState;
 import com.cropcenter.model.GridConfig;
 import com.cropcenter.util.ThemeColors;
 
-// Unified settings panel — grid customization, pixel grid customization, and shared
-// selection/paint color. Uses the shared Catppuccin Mocha palette throughout.
+/**
+ * Unified settings panel — grid customization, pixel grid customization, and shared
+ * selection/paint color. Uses the shared Catppuccin Mocha palette throughout.
+ *
+ * All mutations flow through CropState.updateGridConfig so each user action fires the
+ * state listener exactly once — callers don't need to pass an invalidate callback.
+ */
 public class SettingsDialog
 {
-	public interface OnChangedListener
-	{
-		void onChanged();
-	}
-
-	public static void show(Context ctx, GridConfig cfg, OnChangedListener onChange)
+	public static void show(Context ctx, CropState state)
 	{
 		float density = ctx.getResources().getDisplayMetrics().density;
 		int dp2 = (int) (2 * density);
@@ -34,6 +35,8 @@ public class SettingsDialog
 		int dp8 = (int) (8 * density);
 		int dp12 = (int) (12 * density);
 		int dp16 = (int) (16 * density);
+
+		GridConfig cfg = state.getGridConfig();
 
 		// Outer container with scroll for small screens
 		ScrollView scroll = new ScrollView(ctx);
@@ -49,8 +52,8 @@ public class SettingsDialog
 
 		// Cols × Rows
 		LinearLayout crRow = row(ctx);
-		EditText editCols = numInput(ctx, String.valueOf(cfg.columns), density);
-		EditText editRows = numInput(ctx, String.valueOf(cfg.rows), density);
+		EditText editCols = numInput(ctx, String.valueOf(cfg.columns()), density);
+		EditText editRows = numInput(ctx, String.valueOf(cfg.rows()), density);
 		addLabel(crRow, "Columns");
 		LinearLayout.LayoutParams colsLP = new LinearLayout.LayoutParams(
 			(int) (48 * density), (int) (30 * density));
@@ -79,11 +82,9 @@ public class SettingsDialog
 			TextView btn = chipButton(ctx, cols + "\u00D7" + rows, density);
 			btn.setOnClickListener(view ->
 			{
-				cfg.columns = cols;
-				cfg.rows = rows;
+				state.updateGridConfig(g -> g.withColumns(cols).withRows(rows));
 				editCols.setText(String.valueOf(cols));
 				editRows.setText(String.valueOf(rows));
-				onChange.onChanged();
 			});
 			// layout_weight=1 with width=0 → each chip gets equal share of row width
 			LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
@@ -96,26 +97,23 @@ public class SettingsDialog
 		}
 		gridCard.addView(presetRow, topMargin(dp8));
 
-		gridCard.addView(colorRow(ctx, "Line color", cfg.color, density, color ->
-		{
-			cfg.color = color;
-			onChange.onChanged();
-		}), topMargin(dp12));
+		gridCard.addView(colorRow(ctx, "Line color", cfg.color(), density, color ->
+			state.updateGridConfig(g -> g.withColor(color))), topMargin(dp12));
 
 		LinearLayout wRow = row(ctx);
 		addLabel(wRow, "Width");
 		SeekBar wSeek = new SeekBar(ctx);
 		wSeek.setMax(20);
-		wSeek.setProgress((int) cfg.lineWidth);
-		TextView txtW = valueChip(ctx, String.valueOf((int) cfg.lineWidth), density);
+		wSeek.setProgress((int) cfg.lineWidth());
+		TextView txtW = valueChip(ctx, String.valueOf((int) cfg.lineWidth()), density);
 		wSeek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener()
 		{
 			@Override
 			public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser)
 			{
-				cfg.lineWidth = Math.max(1, progress);
-				txtW.setText(String.valueOf(Math.max(1, progress)));
-				onChange.onChanged();
+				int clamped = Math.max(1, progress);
+				state.updateGridConfig(g -> g.withLineWidth(clamped));
+				txtW.setText(String.valueOf(clamped));
 			}
 
 			@Override
@@ -142,20 +140,14 @@ public class SettingsDialog
 		chkPixel.setText("Show at 6\u00D7 zoom or higher");
 		chkPixel.setTextSize(12);
 		chkPixel.setTextColor(ThemeColors.TEXT);
-		chkPixel.setChecked(cfg.showPixelGrid);
+		chkPixel.setChecked(cfg.showPixelGrid());
 		chkPixel.setButtonTintList(android.content.res.ColorStateList.valueOf(ThemeColors.MAUVE));
 		chkPixel.setOnCheckedChangeListener((button, isChecked) ->
-		{
-			cfg.showPixelGrid = isChecked;
-			onChange.onChanged();
-		});
+			state.updateGridConfig(g -> g.withShowPixelGrid(isChecked)));
 		pixelCard.addView(chkPixel, topMargin(dp4));
 
-		pixelCard.addView(colorRow(ctx, "Color", cfg.pixelGridColor, density, color ->
-		{
-			cfg.pixelGridColor = color;
-			onChange.onChanged();
-		}), topMargin(dp8));
+		pixelCard.addView(colorRow(ctx, "Color", cfg.pixelGridColor(), density, color ->
+			state.updateGridConfig(g -> g.withPixelGridColor(color))), topMargin(dp8));
 
 		root.addView(pixelCard, topMargin(dp8));
 
@@ -169,12 +161,9 @@ public class SettingsDialog
 		selNote.setTextColor(ThemeColors.OVERLAY0);
 		selCard.addView(selNote, topMargin(dp4));
 
-		selCard.addView(colorRow(ctx, "Color", cfg.selectionColor, density,
+		selCard.addView(colorRow(ctx, "Color", cfg.selectionColor(), density,
 			ColorPickerDialog.PALETTE_TRANSLUCENT, color ->
-			{
-				cfg.selectionColor = color;
-				onChange.onChanged();
-			}), topMargin(dp8));
+				state.updateGridConfig(g -> g.withSelectionColor(color))), topMargin(dp8));
 
 		root.addView(selCard, topMargin(dp8));
 
@@ -195,9 +184,11 @@ public class SettingsDialog
 		{
 			try
 			{
-				cfg.columns = Math.clamp(Integer.parseInt(editCols.getText().toString().trim()), 1, 50);
-				cfg.rows = Math.clamp(Integer.parseInt(editRows.getText().toString().trim()), 1, 50);
-				onChange.onChanged();
+				int newCols = Math.clamp(
+					Integer.parseInt(editCols.getText().toString().trim()), 1, 50);
+				int newRows = Math.clamp(
+					Integer.parseInt(editRows.getText().toString().trim()), 1, 50);
+				state.updateGridConfig(g -> g.withColumns(newCols).withRows(newRows));
 			}
 			catch (NumberFormatException ignored)
 			{
@@ -232,7 +223,9 @@ public class SettingsDialog
 		parent.addView(tv);
 	}
 
-	// Compact chip-style preset button (used with layout_weight in rows).
+	/**
+	 * Compact chip-style preset button (used with layout_weight in rows).
+	 */
 	private static TextView chipButton(Context ctx, String text, float density)
 	{
 		TextView btn = new TextView(ctx);
@@ -306,7 +299,9 @@ public class SettingsDialog
 		return row;
 	}
 
-	// Card container with rounded background.
+	/**
+	 * Card container with rounded background.
+	 */
 	private static LinearLayout newCard(Context ctx, float density)
 	{
 		LinearLayout card = new LinearLayout(ctx);
@@ -354,7 +349,9 @@ public class SettingsDialog
 		return layoutParams;
 	}
 
-	// Small rounded readout chip for numeric values.
+	/**
+	 * Small rounded readout chip for numeric values.
+	 */
 	private static TextView valueChip(Context ctx, String text, float density)
 	{
 		TextView tv = new TextView(ctx);

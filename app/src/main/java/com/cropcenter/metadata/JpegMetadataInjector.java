@@ -8,8 +8,10 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.util.List;
 
-// Injects original metadata segments into a re-encoded JPEG. Strips the re-encoder's own APP/COM
-// markers (JFIF, sRGB ICC, etc.) and replaces them with the original segments from the source file.
+/**
+ * Injects original metadata segments into a re-encoded JPEG. Strips the re-encoder's own APP/COM
+ * markers (JFIF, sRGB ICC, etc.) and replaces them with the original segments from the source file.
+ */
 public final class JpegMetadataInjector
 {
 	private static final String TAG = "JpegMetadataInjector";

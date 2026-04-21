@@ -8,11 +8,13 @@ import java.io.ByteArrayOutputStream;
 import java.util.ArrayList;
 import java.util.List;
 
-// Patches EXIF metadata segments in-place:
-//  - Sets Orientation tag to 1 (Normal)
-//  - Updates ImageWidth, ImageLength, PixelXDimension, PixelYDimension
-//  - Replaces thumbnail JPEG with new one if provided
-//  - Preserves all other tags and data verbatim
+/**
+ * Patches EXIF metadata segments in-place:
+ *  - Sets Orientation tag to 1 (Normal)
+ *  - Updates ImageWidth, ImageLength, PixelXDimension, PixelYDimension
+ *  - Replaces thumbnail JPEG with new one if provided
+ *  - Preserves all other tags and data verbatim
+ */
 public final class ExifPatcher
 {
 	private static final String TAG = "ExifPatcher";
@@ -26,9 +28,11 @@ public final class ExifPatcher
 
 	private ExifPatcher() {}
 
-	// Estimate max thumbnail bytes that will fit in the EXIF APP1 segment. Measures the EXIF
-	// size excluding the existing thumbnail, then returns the remaining space within the
-	// 65535-byte APP1 limit.
+	/**
+	 * Estimate max thumbnail bytes that will fit in the EXIF APP1 segment. Measures the EXIF
+	 * size excluding the existing thumbnail, then returns the remaining space within the
+	 * 65535-byte APP1 limit.
+	 */
 	public static int maxThumbnailBytes(List<JpegSegment> segments)
 	{
 		for (JpegSegment seg : segments)
@@ -141,9 +145,11 @@ public final class ExifPatcher
 		return result;
 	}
 
-	// Replace the EXIF thumbnail JPEG. Rebuilds the APP1 segment with new thumbnail bytes.
-	// Finds IFD1's JPEGInterchangeFormat/Length, replaces the old thumbnail data, and updates
-	// the segment length and tag values.
+	/**
+	 * Replace the EXIF thumbnail JPEG. Rebuilds the APP1 segment with new thumbnail bytes.
+	 * Finds IFD1's JPEGInterchangeFormat/Length, replaces the old thumbnail data, and updates
+	 * the segment length and tag values.
+	 */
 	private static byte[] replaceThumbnail(byte[] data, int tiffStart, boolean isLittleEndian, byte[] newThumb)
 	{
 		try

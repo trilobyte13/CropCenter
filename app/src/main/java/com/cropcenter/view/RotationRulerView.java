@@ -15,11 +15,13 @@ import android.widget.OverScroller;
 import com.cropcenter.util.TextFormat;
 import com.cropcenter.util.ThemeColors;
 
-// Galaxy-style scrollable rotation ruler with pinch-to-zoom.
-//
-// Drag to scroll, fling for momentum. Pinch to zoom the ruler scale, enabling 0.01° precision at
-// the highest zoom. After drag/fling settles, the value snaps to the nearest tick interval for
-// the current zoom level.
+/**
+ * Galaxy-style scrollable rotation ruler with pinch-to-zoom.
+ *
+ * Drag to scroll, fling for momentum. Pinch to zoom the ruler scale, enabling 0.01° precision at
+ * the highest zoom. After drag/fling settles, the value snaps to the nearest tick interval for
+ * the current zoom level.
+ */
 public class RotationRulerView extends View
 {
 	public interface OnRotationChangedListener
@@ -363,7 +365,9 @@ public class RotationRulerView extends View
 		}
 	}
 
-	// Snap currentDegrees to the nearest minor tick and notify.
+	/**
+	 * Snap currentDegrees to the nearest minor tick and notify.
+	 */
 	private void snapAndNotify()
 	{
 		float snapped = Math.clamp(snapToTick(currentDegrees), MIN_DEG, MAX_DEG);
@@ -375,7 +379,9 @@ public class RotationRulerView extends View
 		}
 	}
 
-	// Snap a degree value to the nearest minor tick for the current zoom.
+	/**
+	 * Snap a degree value to the nearest minor tick for the current zoom.
+	 */
 	private float snapToTick(float deg)
 	{
 		float degreesVisible = getWidth() > 0 ? getWidth() / pixelsPerDegree : 30f;
@@ -383,7 +389,9 @@ public class RotationRulerView extends View
 		return snapTo(deg, tc.minor);
 	}
 
-	// Choose tick intervals based on how many degrees are visible on screen.
+	/**
+	 * Choose tick intervals based on how many degrees are visible on screen.
+	 */
 	private static TickConfig chooseTickConfig(float degreesVisible)
 	{
 		if (degreesVisible > 270)

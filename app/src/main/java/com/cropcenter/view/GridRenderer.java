@@ -5,21 +5,25 @@ import android.graphics.Paint;
 
 import com.cropcenter.model.GridConfig;
 
-// Draws grid overlay lines within the crop rectangle. Positioning is keyed on the crop
-// DIMENSION'S parity, so the grid's visual behavior flips as the cropped size crosses
-// even ↔ odd:
-//   • Even cropW/cropH — lines snap to integer image coords (pixel boundaries). A stroke-1
-//     line at an integer coord straddles a pixel boundary ("between pixels").
-//   • Odd cropW/cropH — lines snap to pixel centers (N + 0.5). A stroke-1 line at a pixel
-//     center sits fully on one pixel ("covers pixels").
-// The middle line (if one exists, i = N/2 for even count) uses cropCenter directly —
-// because selection-point taps are snapped to pixel centers upstream, cropCenter is
-// already at N + 0.5 for a single-point selection (cropW = 2·(N+0.5) = odd integer),
-// so the middle line covers the selection point's pixel.
-// Second-half lines mirror the first half around cropCenter for pair symmetry.
+/**
+ * Draws grid overlay lines within the crop rectangle. Positioning is keyed on the crop
+ * DIMENSION'S parity, so the grid's visual behavior flips as the cropped size crosses
+ * even ↔ odd:
+ *   • Even cropW/cropH — lines snap to integer image coords (pixel boundaries). A stroke-1
+ *     line at an integer coord straddles a pixel boundary ("between pixels").
+ *   • Odd cropW/cropH — lines snap to pixel centers (N + 0.5). A stroke-1 line at a pixel
+ *     center sits fully on one pixel ("covers pixels").
+ * The middle line (if one exists, i = N/2 for even count) uses cropCenter directly —
+ * because selection-point taps are snapped to pixel centers upstream, cropCenter is
+ * already at N + 0.5 for a single-point selection (cropW = 2·(N+0.5) = odd integer),
+ * so the middle line covers the selection point's pixel.
+ * Second-half lines mirror the first half around cropCenter for pair symmetry.
+ */
 public class GridRenderer
 {
-	// Functional interface for coordinate mapping.
+	/**
+	 * Functional interface for coordinate mapping.
+	 */
 	public interface CoordMapper
 	{
 		float map(float imageCoord);
@@ -44,14 +48,14 @@ public class GridRenderer
 		int cropImgW, int cropImgH, GridConfig config, float pixelsPerImagePixel,
 		CoordMapper imgToScreenX, CoordMapper imgToScreenY)
 	{
-		if (!config.enabled || config.columns <= 0 || config.rows <= 0)
+		if (!config.enabled() || config.columns() <= 0 || config.rows() <= 0)
 		{
 			return;
 		}
 
-		gridPaint.setColor(config.color);
+		gridPaint.setColor(config.color());
 		// Scale line width by image-to-screen ratio so preview matches export
-		gridPaint.setStrokeWidth(Math.max(1, config.lineWidth * pixelsPerImagePixel));
+		gridPaint.setStrokeWidth(Math.max(1, config.lineWidth() * pixelsPerImagePixel));
 		gridPaint.setStyle(Paint.Style.STROKE);
 
 		float screenTop = imgToScreenY.map(cropImgY);
@@ -62,30 +66,32 @@ public class GridRenderer
 		// Vertical lines.
 		boolean widthEven = (cropImgW & 1) == 0;
 		float cropCenterX = cropImgX + cropImgW / 2f;
-		for (int i = 1; i < config.columns; i++)
+		for (int i = 1; i < config.columns(); i++)
 		{
 			float sx = imgToScreenX.map(
-				snap(i, config.columns, cropImgX, cropImgW, cropCenterX, widthEven));
+				snap(i, config.columns(), cropImgX, cropImgW, cropCenterX, widthEven));
 			canvas.drawLine(sx, screenTop, sx, screenBottom, gridPaint);
 		}
 
 		// Horizontal lines.
 		boolean heightEven = (cropImgH & 1) == 0;
 		float cropCenterY = cropImgY + cropImgH / 2f;
-		for (int i = 1; i < config.rows; i++)
+		for (int i = 1; i < config.rows(); i++)
 		{
 			float sy = imgToScreenY.map(
-				snap(i, config.rows, cropImgY, cropImgH, cropCenterY, heightEven));
+				snap(i, config.rows(), cropImgY, cropImgH, cropCenterY, heightEven));
 			canvas.drawLine(screenLeft, sy, screenRight, sy, gridPaint);
 		}
 	}
 
-	// Position line i of a count-N grid along one axis. Middle line uses cropCenter
-	// directly so it passes through the selection point (tap coordinates are snapped to
-	// pixel centers upstream). Non-middle lines snap by crop dimension parity so the whole
-	// grid visibly transitions between "between pixels" (even dim) and "covers pixels"
-	// (odd dim) as cropW/cropH flips. Second-half lines mirror the first half for
-	// symmetry around cropCenter.
+	/**
+	 * Position line i of a count-N grid along one axis. Middle line uses cropCenter
+	 * directly so it passes through the selection point (tap coordinates are snapped to
+	 * pixel centers upstream). Non-middle lines snap by crop dimension parity so the whole
+	 * grid visibly transitions between "between pixels" (even dim) and "covers pixels"
+	 * (odd dim) as cropW/cropH flips. Second-half lines mirror the first half for
+	 * symmetry around cropCenter.
+	 */
 	private static float snap(int i, int count, float cropOrigin, int cropExtent,
 		float cropCenter, boolean dimEven)
 	{
@@ -103,8 +109,10 @@ public class GridRenderer
 		return 2 * cropCenter - alignByDim(mirrorRaw, dimEven);
 	}
 
-	// Snap by crop-dimension parity: even dim → integer coord (line between pixels),
-	// odd dim → pixel center (line covers a pixel).
+	/**
+	 * Snap by crop-dimension parity: even dim → integer coord (line between pixels),
+	 * odd dim → pixel center (line covers a pixel).
+	 */
 	private static float alignByDim(float value, boolean dimEven)
 	{
 		if (dimEven)

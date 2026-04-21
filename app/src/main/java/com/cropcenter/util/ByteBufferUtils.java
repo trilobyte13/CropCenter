@@ -1,10 +1,17 @@
 package com.cropcenter.util;
 
-// Endian-aware read/write helpers for raw byte arrays. Used throughout the metadata pipeline for
-// JPEG/TIFF/MPF parsing. All methods validate bounds and throw IndexOutOfBoundsException on
-// overflow.
+/**
+ * Endian-aware read/write helpers for raw byte arrays. Used throughout the metadata pipeline for
+ * JPEG/TIFF/MPF parsing. All methods validate bounds and throw IndexOutOfBoundsException on
+ * overflow.
+ */
 public final class ByteBufferUtils
 {
+	// Default buffer size for streaming copies (URI → cache file, cache file → byte[], etc.).
+	// 8 KiB is the conventional InputStream.DEFAULT_BUFFER_SIZE and matches what filesystems and
+	// content providers tend to serve per read.
+	public static final int IO_BUFFER = 8192;
+
 	private ByteBufferUtils() {}
 
 	// ── Endian-dispatched ──

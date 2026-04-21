@@ -49,9 +49,11 @@ public final class CropEngine
 		recomputeCrop(state);
 	}
 
-	// Recompute crop size and clamp center.
-	// When cropSizeDirty: computes maximum crop at current AR centered on current center.
-	// Otherwise: just ensures center stays in valid bounds.
+	/**
+	 * Recompute crop size and clamp center.
+	 * When cropSizeDirty: computes maximum crop at current AR centered on current center.
+	 * Otherwise: just ensures center stays in valid bounds.
+	 */
 	public static void recomputeCrop(CropState state)
 	{
 		if (!state.hasCenter() || state.getSourceImage() == null)
@@ -276,9 +278,11 @@ public final class CropEngine
 		}
 	}
 
-	// Axis-aligned bounding-box midpoint of a non-empty selection. A single point is its own
-	// midpoint; with multiple points we average the min/max on each axis (cheaper than a
-	// true centroid and matches how the crop engine frames the selection).
+	/**
+	 * Axis-aligned bounding-box midpoint of a non-empty selection. A single point is its own
+	 * midpoint; with multiple points we average the min/max on each axis (cheaper than a
+	 * true centroid and matches how the crop engine frames the selection).
+	 */
 	public static float[] selectionMidpoint(List<SelectionPoint> points)
 	{
 		float minX = Float.MAX_VALUE;
@@ -298,10 +302,12 @@ public final class CropEngine
 		return new float[] { midX, midY };
 	}
 
-	// Find the max scale factor (0..1) so that a crop of (cropW*s, cropH*s) centered at
-	// (centerX, centerY) fits entirely within an imgW × imgH image rotated by
-	// rotation degrees. Each crop corner, un-rotated around image center, must land inside
-	// [0, imgW] × [0, imgH].
+	/**
+	 * Find the max scale factor (0..1) so that a crop of (cropW*s, cropH*s) centered at
+	 * (centerX, centerY) fits entirely within an imgW × imgH image rotated by
+	 * rotation degrees. Each crop corner, un-rotated around image center, must land inside
+	 * [0, imgW] × [0, imgH].
+	 */
 	private static float maxScaleForRotation(float centerX, float centerY, float cropW, float cropH,
 		int imgW, int imgH, float rotation)
 	{
@@ -357,9 +363,11 @@ public final class CropEngine
 		return minScale;
 	}
 
-	// True when `size` and `center` disagree on parity — an odd size needs a half-integer
-	// center (N + 0.5) so cropImgX = center − size/2 is integer; an even size needs an
-	// integer center.
+	/**
+	 * True when `size` and `center` disagree on parity — an odd size needs a half-integer
+	 * center (N + 0.5) so cropImgX = center − size/2 is integer; an even size needs an
+	 * integer center.
+	 */
 	private static boolean parityMismatch(int size, float center)
 	{
 		boolean centerHalfInt = Math.abs(center - (float) Math.floor(center) - 0.5f) < 0.01f;
@@ -367,12 +375,14 @@ public final class CropEngine
 		return sizeOdd != centerHalfInt;
 	}
 
-	// Round `value` to the nearest integer whose parity matches `center`'s 0.5-grid
-	// parity (half-integer center → odd result, integer center → even result). When
-	// Math.round gives the wrong parity, pick whichever of ±1 neighbours is closer to
-	// `value`; tie breaks toward the smaller (safer — smaller crop never overshoots the
-	// rotation fit). Worst-case overshoot is ~0.5 pixel, within cornersInside's 0.5-pixel
-	// epsilon, so setCenter's binary-search clamp won't trigger.
+	/**
+	 * Round `value` to the nearest integer whose parity matches `center`'s 0.5-grid
+	 * parity (half-integer center → odd result, integer center → even result). When
+	 * Math.round gives the wrong parity, pick whichever of ±1 neighbours is closer to
+	 * `value`; tie breaks toward the smaller (safer — smaller crop never overshoots the
+	 * rotation fit). Worst-case overshoot is ~0.5 pixel, within cornersInside's 0.5-pixel
+	 * epsilon, so setCenter's binary-search clamp won't trigger.
+	 */
 	private static int roundWithParity(float value, float center)
 	{
 		int rounded = Math.round(value);
@@ -385,10 +395,12 @@ public final class CropEngine
 		return ((up - value) < (value - down)) ? up : down;
 	}
 
-	// Snap a center coordinate so its fractional part matches the crop size's parity:
-	// even size → integer (pixel boundary), odd size → half-integer (pixel center). This
-	// guarantees cropImgX = center − size / 2 is an integer, so the crop's rendered bounds
-	// fall on whole-pixel boundaries rather than crossing a pixel mid-column.
+	/**
+	 * Snap a center coordinate so its fractional part matches the crop size's parity:
+	 * even size → integer (pixel boundary), odd size → half-integer (pixel center). This
+	 * guarantees cropImgX = center − size / 2 is an integer, so the crop's rendered bounds
+	 * fall on whole-pixel boundaries rather than crossing a pixel mid-column.
+	 */
 	private static float snapCenterToParity(float center, int size)
 	{
 		if ((size & 1) == 0)

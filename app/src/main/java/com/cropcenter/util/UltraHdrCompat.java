@@ -199,10 +199,12 @@ public final class UltraHdrCompat
 		}
 	}
 
-	// Scan data for the XMP "hdrgm" namespace marker — the signature of an Ultra HDR
-	// gain map. Scans the full byte array (not a prefix window): a maxed-out EXIF thumbnail can
-	// push the XMP segment past any fixed offset. Linear but cheap (~5ms for 20MB on modern
-	// hardware) and runs at most once per export.
+	/**
+	 * Scan data for the XMP "hdrgm" namespace marker — the signature of an Ultra HDR
+	 * gain map. Scans the full byte array (not a prefix window): a maxed-out EXIF thumbnail can
+	 * push the XMP segment past any fixed offset. Linear but cheap (~5ms for 20MB on modern
+	 * hardware) and runs at most once per export.
+	 */
 	public static boolean containsHdrgm(byte[] data)
 	{
 		if (data == null)

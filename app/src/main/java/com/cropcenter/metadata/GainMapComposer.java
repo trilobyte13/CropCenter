@@ -2,7 +2,9 @@ package com.cropcenter.metadata;
 
 import android.util.Log;
 
-// Appends the HDR gain map JPEG after the primary image and updates MPF offsets.
+/**
+ * Appends the HDR gain map JPEG after the primary image and updates MPF offsets.
+ */
 public final class GainMapComposer
 {
 	private static final String TAG = "GainMapComposer";

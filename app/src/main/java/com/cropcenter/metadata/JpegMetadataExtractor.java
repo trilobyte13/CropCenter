@@ -5,8 +5,10 @@ import com.cropcenter.util.ByteBufferUtils;
 import java.util.ArrayList;
 import java.util.List;
 
-// Extracts all APP and COM marker segments from a JPEG file's header. Stops at SOS (FF DA) or EOI
-// (FF D9). Preserves raw segment bytes verbatim.
+/**
+ * Extracts all APP and COM marker segments from a JPEG file's header. Stops at SOS (FF DA) or EOI
+ * (FF D9). Preserves raw segment bytes verbatim.
+ */
 public final class JpegMetadataExtractor
 {
 	private JpegMetadataExtractor() {}

@@ -8,13 +8,15 @@ import android.widget.CheckBox;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
+import com.cropcenter.model.CropState;
 import com.cropcenter.model.ExportConfig;
-import com.cropcenter.model.GridConfig;
 import com.cropcenter.util.ThemeColors;
 
-// Pre-save dialog: output format (JPEG/PNG) and grid-bake toggle. The filename and target
-// directory are chosen by the SAF picker that follows — this dialog is just the format/options
-// step. Matches the Settings dialog visual style (Catppuccin Mocha cards).
+/**
+ * Pre-save dialog: output format (JPEG/PNG) and grid-bake toggle. The filename and target
+ * directory are chosen by the SAF picker that follows — this dialog is just the format/options
+ * step. Matches the Settings dialog visual style (Catppuccin Mocha cards).
+ */
 public class SaveDialog
 {
 	public interface OnSaveListener
@@ -22,7 +24,7 @@ public class SaveDialog
 		void onSave();
 	}
 
-	public static void show(Context ctx, ExportConfig export, GridConfig grid, OnSaveListener onSave)
+	public static void show(Context ctx, CropState state, OnSaveListener onSave)
 	{
 		float density = ctx.getResources().getDisplayMetrics().density;
 		int dp4 = (int) (4 * density);
@@ -41,7 +43,7 @@ public class SaveDialog
 		fmtRow.setOrientation(LinearLayout.HORIZONTAL);
 		final TextView jpegBtn = formatChip(ctx, "JPEG", density);
 		final TextView pngBtn  = formatChip(ctx, "PNG", density);
-		final boolean[] isJpeg = { ExportConfig.FORMAT_JPEG.equals(export.format) };
+		final boolean[] isJpeg = { ExportConfig.FORMAT_JPEG.equals(state.getExportConfig().format()) };
 
 		Runnable updateFormatHighlight = () ->
 		{
@@ -89,7 +91,7 @@ public class SaveDialog
 		chkBake.setText("Export Grid");
 		chkBake.setTextSize(12);
 		chkBake.setTextColor(ThemeColors.TEXT);
-		chkBake.setChecked(grid.includeInExport);
+		chkBake.setChecked(state.getGridConfig().includeInExport());
 		chkBake.setButtonTintList(android.content.res.ColorStateList.valueOf(ThemeColors.MAUVE));
 		optCard.addView(chkBake, topMargin(dp4));
 
@@ -97,8 +99,9 @@ public class SaveDialog
 
 		Runnable applySettings = () ->
 		{
-			export.format = isJpeg[0] ? ExportConfig.FORMAT_JPEG : ExportConfig.FORMAT_PNG;
-			grid.includeInExport = chkBake.isChecked();
+			state.updateExportConfig(c ->
+				c.withFormat(isJpeg[0] ? ExportConfig.FORMAT_JPEG : ExportConfig.FORMAT_PNG));
+			state.updateGridConfig(g -> g.withIncludeInExport(chkBake.isChecked()));
 		};
 
 		new AlertDialog.Builder(ctx)
