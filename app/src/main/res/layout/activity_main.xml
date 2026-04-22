@@ -153,12 +153,40 @@
             android:visibility="gone" />
     </LinearLayout>
 
-    <!-- Row 3: Rotation ruler (scrollable) -->
-    <com.cropcenter.view.RotationRulerView
-        android:id="@+id/rotationRuler"
+    <!-- Row 3: Rotation ruler with zoom buttons. Buttons let the user pick a finer (or
+         coarser) tick resolution without pinch-zooming on the ruler itself. -->
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="36dp"
-        android:background="@color/sidebar_bg" />
+        android:orientation="horizontal"
+        android:background="@color/sidebar_bg">
+
+        <TextView android:id="@+id/btnRotZoomOut"
+            android:layout_width="32dp"
+            android:layout_height="match_parent"
+            android:text="−"
+            android:textSize="20sp"
+            android:textColor="@color/subtext0"
+            android:gravity="center"
+            android:background="@color/surface0"
+            android:contentDescription="Zoom rotation ruler out" />
+
+        <com.cropcenter.view.RotationRulerView
+            android:id="@+id/rotationRuler"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="match_parent" />
+
+        <TextView android:id="@+id/btnRotZoomIn"
+            android:layout_width="32dp"
+            android:layout_height="match_parent"
+            android:text="+"
+            android:textSize="20sp"
+            android:textColor="@color/subtext0"
+            android:gravity="center"
+            android:background="@color/surface0"
+            android:contentDescription="Zoom rotation ruler in" />
+    </LinearLayout>
 
     <!-- Info bar -->
     <LinearLayout

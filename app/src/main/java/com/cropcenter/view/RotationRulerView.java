@@ -5,6 +5,7 @@ import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.Path;
 import android.util.AttributeSet;
+import android.view.Choreographer;
 import android.view.MotionEvent;
 import android.view.ScaleGestureDetector;
 import android.view.VelocityTracker;
@@ -39,6 +40,7 @@ public class RotationRulerView extends View
 	private static final float TAP_SLOP = 8f;                 // pixels — tap vs drag threshold
 	private static final float ZERO_MARKER_MARGIN = 5f;       // px — tighter cull than ticks for the 0° line
 
+	private final Choreographer.FrameCallback flingFrameCallback;
 	private final OverScroller scroller;
 	private final Paint detentTickPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 	private final Paint indicatorPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -51,6 +53,7 @@ public class RotationRulerView extends View
 	private OnRotationChangedListener listener;
 	private VelocityTracker velocityTracker;
 	private boolean enabled = true;
+	private boolean flingActive; // true between scroller.fling start and last frame
 	private boolean isScaling;
 	private boolean scalingOccurred; // true if any scaling happened during current gesture
 	private float basePixelsPerDegree;
@@ -106,7 +109,7 @@ public class RotationRulerView extends View
 			{
 				isScaling = true;
 				scalingOccurred = true;
-				scroller.forceFinished(true);
+				stopFling();
 				return true;
 			}
 
@@ -125,26 +128,52 @@ public class RotationRulerView extends View
 				isScaling = false;
 			}
 		});
-	}
 
-	@Override
-	public void computeScroll()
-	{
-		if (scroller.computeScrollOffset())
+		// Drive the fling from a Choreographer frame callback rather than View.computeScroll.
+		// computeScroll runs inside the view's own draw pass — since the editor view sits above
+		// this ruler in the layout, by the time computeScroll fires and invalidates the editor,
+		// the editor's draw for this frame is already complete. The editor then catches up one
+		// frame later, which at high fling velocity is visible as the crop/grid briefly
+		// appearing at the previous rotation's position.
+		//
+		// A FrameCallback runs in Choreographer's animation phase, BEFORE traversal — so the
+		// state update lands in time for both the ruler and the editor to draw it in the same
+		// frame. No lag, no flicker.
+		flingFrameCallback = new Choreographer.FrameCallback()
 		{
-			float deg = Math.clamp(scroller.getCurrX() / (pixelsPerDegree * SCROLL_SUBPIXEL_SCALE),
-				MIN_DEG, MAX_DEG);
-			if (deg != currentDegrees)
+			@Override
+			public void doFrame(long frameTimeNanos)
 			{
-				currentDegrees = deg;
-				notifyChanged();
+				if (!flingActive)
+				{
+					return;
+				}
+				if (scroller.computeScrollOffset())
+				{
+					float rawDeg = scroller.getCurrX() / (pixelsPerDegree * SCROLL_SUBPIXEL_SCALE);
+					float deg = Math.clamp(rawDeg, MIN_DEG, MAX_DEG);
+					if (deg != currentDegrees)
+					{
+						currentDegrees = deg;
+						notifyChanged();
+					}
+					invalidate();
+					if (scroller.isFinished())
+					{
+						flingActive = false;
+						snapAndNotify();
+					}
+					else
+					{
+						Choreographer.getInstance().postFrameCallback(this);
+					}
+				}
+				else
+				{
+					flingActive = false;
+				}
 			}
-			invalidate();
-			if (scroller.isFinished())
-			{
-				snapAndNotify();
-			}
-		}
+		};
 	}
 
 	public float getDegrees()
@@ -162,7 +191,7 @@ public class RotationRulerView extends View
 			velocityTracker.recycle();
 			velocityTracker = null;
 		}
-		scroller.forceFinished(true);
+		stopFling();
 		listener = null;
 		super.onDetachedFromWindow();
 	}
@@ -187,7 +216,7 @@ public class RotationRulerView extends View
 		{
 			case MotionEvent.ACTION_DOWN ->
 			{
-				scroller.forceFinished(true);
+				stopFling();
 				downX = lastTouchX = event.getX();
 				totalDragDx = 0;
 				scalingOccurred = false;
@@ -243,7 +272,8 @@ public class RotationRulerView extends View
 						int maxX = (int) (MAX_DEG * scaled);
 						scroller.fling(startX, 0, (int) (-velX * SCROLL_SUBPIXEL_SCALE), 0,
 							minX, maxX, 0, 0);
-						postInvalidateOnAnimation();
+						flingActive = true;
+						Choreographer.getInstance().postFrameCallback(flingFrameCallback);
 					}
 					else
 					{
@@ -263,7 +293,7 @@ public class RotationRulerView extends View
 		if (deg != currentDegrees)
 		{
 			currentDegrees = deg;
-			scroller.forceFinished(true);
+			stopFling();
 			invalidate();
 		}
 	}
@@ -277,6 +307,29 @@ public class RotationRulerView extends View
 	{
 		this.enabled = enabled;
 		setAlpha(enabled ? 1f : 0.3f);
+	}
+
+	/**
+	 * Multiply the current ruler zoom by a factor and clamp into the valid range. Use
+	 * scaleFactor > 1 to zoom in (finer ticks, smaller visible degree span); < 1 to zoom out.
+	 * Used by the toolbar's − / + buttons that flank the ruler.
+	 */
+	public void zoomBy(float scaleFactor)
+	{
+		pixelsPerDegree = Math.clamp(pixelsPerDegree * scaleFactor,
+			basePixelsPerDegree * MIN_PPD_FACTOR, basePixelsPerDegree * MAX_PPD_FACTOR);
+		invalidate();
+	}
+
+	/**
+	 * Snap the ruler to its maximum zoom level (finest 0.01° tick precision). Called by the
+	 * auto-rotate flow after horizon detection lands a precise angle, so the user can
+	 * immediately fine-tune around the detected value.
+	 */
+	public void zoomToMax()
+	{
+		pixelsPerDegree = basePixelsPerDegree * MAX_PPD_FACTOR;
+		invalidate();
 	}
 
 	@Override
@@ -363,6 +416,17 @@ public class RotationRulerView extends View
 		{
 			listener.onRotationChanged(currentDegrees);
 		}
+	}
+
+	/**
+	 * Cancel any active fling and unregister the pending frame callback so it doesn't reschedule
+	 * itself. Safe to call when no fling is active — idempotent.
+	 */
+	private void stopFling()
+	{
+		flingActive = false;
+		scroller.forceFinished(true);
+		Choreographer.getInstance().removeFrameCallback(flingFrameCallback);
 	}
 
 	/**

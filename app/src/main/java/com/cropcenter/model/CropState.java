@@ -142,11 +142,10 @@ public class CropState
 	}
 
 	/**
-	 * Crop origin X in image pixels, rounded down from cropCenterX − cropW/2. Integer by the
-	 * pixel-alignment invariant (see HANDOFF.md): cropCenterX's parity is kept matched to
-	 * cropW's parity by CropEngine.recomputeCrop, so the subtraction lands on a whole pixel.
-	 * Returns 0 when no crop has been placed yet. If the invariant is ever violated this logs
-	 * a warning — the returned value then reflects `floor(...)` as a defensive fallback.
+	 * Crop origin X in image pixels — floor(centerX − cropW / 2f). Integer for the exporter,
+	 * which reads source pixels starting at this column. centerX is a continuous float so
+	 * smooth rotation produces smooth crop motion on screen; the floor introduces at most
+	 * one sub-pixel of bias, which the exporter absorbs. Returns 0 when no crop is placed.
 	 */
 	public int getCropImgX()
 	{
@@ -154,14 +153,21 @@ public class CropState
 		{
 			return 0;
 		}
-		float raw = centerX - cropW / 2f;
-		if (raw != Math.floor(raw))
+		return (int) Math.floor(centerX - cropW / 2f);
+	}
+
+	/**
+	 * Continuous-float crop left for the renderer: centerX − cropW / 2f. Sub-pixel precision
+	 * so a smoothly rotating selection midpoint produces smooth crop motion on screen.
+	 * Returns 0 when no crop is placed. Use getCropImgX for the exporter-facing integer.
+	 */
+	public float getCropImgXFloat()
+	{
+		if (!hasCenter)
 		{
-			android.util.Log.w("CropState",
-				"Pixel-alignment invariant violated: cropImgX raw=" + raw
-					+ " (centerX=" + centerX + " cropW=" + cropW + ")");
+			return 0f;
 		}
-		return (int) Math.floor(raw);
+		return centerX - cropW / 2f;
 	}
 
 	/**
@@ -173,14 +179,19 @@ public class CropState
 		{
 			return 0;
 		}
-		float raw = centerY - cropH / 2f;
-		if (raw != Math.floor(raw))
+		return (int) Math.floor(centerY - cropH / 2f);
+	}
+
+	/**
+	 * Continuous-float crop top for the renderer — see getCropImgXFloat.
+	 */
+	public float getCropImgYFloat()
+	{
+		if (!hasCenter)
 		{
-			android.util.Log.w("CropState",
-				"Pixel-alignment invariant violated: cropImgY raw=" + raw
-					+ " (centerY=" + centerY + " cropH=" + cropH + ")");
+			return 0f;
 		}
-		return (int) Math.floor(raw);
+		return centerY - cropH / 2f;
 	}
 
 	public int getCropW()

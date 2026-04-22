@@ -104,9 +104,10 @@ final class EditorRenderer
 		{
 			int cw = state.getCropW();
 			int ch = state.getCropH();
-			// Integer crop origin by the pixel-alignment invariant (getCropImgX/Y validates it).
-			gridImgX = state.getCropImgX();
-			gridImgY = state.getCropImgY();
+			// Use the continuous-float crop origin for rendering so smooth rotation produces
+			// smooth crop motion. The exporter's integer getCropImgX absorbs the sub-pixel.
+			gridImgX = state.getCropImgXFloat();
+			gridImgY = state.getCropImgYFloat();
 			gridW = cw;
 			gridH = ch;
 			drawCropOverlay(canvas, state, gridImgX, gridImgY, cw, ch);
@@ -219,6 +220,20 @@ final class EditorRenderer
 		pointPaint.setColor(selColor);
 		polygonPaint.setColor(selColor);
 
+		// Markers + polygon track image content under rotation by drawing inside a canvas
+		// rotated the same way the bitmap was. This keeps a point placed on the sun visually
+		// on the sun after the user rotates the image. Text labels are drawn afterwards
+		// (axis-aligned) at the rotated position so the digits stay upright.
+		float rotation = state.getRotationDegrees();
+		boolean rotated = Math.abs(rotation) >= BitmapUtils.ROTATION_EPSILON;
+		if (rotated)
+		{
+			float imgScreenCx = viewport.imageToScreenX(state.getImageWidth() / 2f);
+			float imgScreenCy = viewport.imageToScreenY(state.getImageHeight() / 2f);
+			canvas.save();
+			canvas.rotate(rotation, imgScreenCx, imgScreenCy);
+		}
+
 		if (points.size() >= 3)
 		{
 			Path path = new Path();
@@ -241,12 +256,12 @@ final class EditorRenderer
 			canvas.drawPath(path, polygonPaint);
 		}
 
-		// Draw points — fill pixel square when zoomed in, circle when zoomed out
-		int idx = 0;
+		// Draw markers — fill pixel square when zoomed in, circle when zoomed out. Both run
+		// inside the rotated canvas so a pixel-square marker visibly follows the rotated
+		// image-pixel grid (becomes a rotated quadrilateral on screen at non-cardinal angles).
 		float pixelSize = scale; // one image pixel in screen pixels
 		for (SelectionPoint point : points)
 		{
-			idx++;
 			if (pixelSize >= 6f)
 			{
 				int pixelX = (int) Math.floor(point.x());
@@ -256,22 +271,50 @@ final class EditorRenderer
 				float pixelRight = viewport.imageToScreenX(pixelX + 1);
 				float pixelBottom = viewport.imageToScreenY(pixelY + 1);
 				canvas.drawRect(pixelLeft, pixelTop, pixelRight, pixelBottom, pointPaint);
-				infoPaint.setTextAlign(Paint.Align.CENTER);
-				infoPaint.setTextSize(Math.min(pixelSize * 0.6f, 14f * density));
-				infoPaint.setColor(POINT_LABEL_COLOR);
-				float textX = (pixelLeft + pixelRight) / 2;
-				float textY = (pixelTop + pixelBottom) / 2 + infoPaint.getTextSize() * 0.35f;
-				canvas.drawText(String.valueOf(idx), textX, textY, infoPaint);
 			}
 			else
 			{
 				float screenX = viewport.imageToScreenX(point.x());
 				float screenY = viewport.imageToScreenY(point.y());
 				canvas.drawCircle(screenX, screenY, 10, pointPaint);
+			}
+		}
+
+		if (rotated)
+		{
+			canvas.restore();
+		}
+
+		// Text labels — axis-aligned (upright) at the rotated screen position of each point,
+		// so the index digits stay legible regardless of rotation.
+		int idx = 0;
+		for (SelectionPoint point : points)
+		{
+			idx++;
+			float labelX;
+			float labelY;
+			float labelOffset;
+			if (pixelSize >= 6f)
+			{
+				int pixelX = (int) Math.floor(point.x());
+				int pixelY = (int) Math.floor(point.y());
+				float[] center = viewport.imageToScreenRotated(
+					pixelX + 0.5f, pixelY + 0.5f, state);
+				infoPaint.setTextAlign(Paint.Align.CENTER);
+				infoPaint.setTextSize(Math.min(pixelSize * 0.6f, 14f * density));
+				infoPaint.setColor(POINT_LABEL_COLOR);
+				labelX = center[0];
+				labelOffset = infoPaint.getTextSize() * 0.35f;
+				labelY = center[1] + labelOffset;
+				canvas.drawText(String.valueOf(idx), labelX, labelY, infoPaint);
+			}
+			else
+			{
+				float[] center = viewport.imageToScreenRotated(point.x(), point.y(), state);
 				infoPaint.setTextAlign(Paint.Align.CENTER);
 				infoPaint.setTextSize(9f * density);
 				infoPaint.setColor(POINT_LABEL_COLOR);
-				canvas.drawText(String.valueOf(idx), screenX, screenY + 4, infoPaint);
+				canvas.drawText(String.valueOf(idx), center[0], center[1] + 4, infoPaint);
 			}
 		}
 	}

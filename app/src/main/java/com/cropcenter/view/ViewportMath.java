@@ -100,6 +100,37 @@ final class ViewportMath
 	}
 
 	/**
+	 * Convert image (ix, iy) to its rotated screen position — applies the same rotation
+	 * around the image center that the editor's onDraw applies to the bitmap. Use this for
+	 * overlays (selection points, polygon vertices) whose visual position must track image
+	 * content as the user rotates. For overlays defined in image-coord axis-aligned space
+	 * (the crop rectangle, dim regions), use imageToScreenX/Y directly.
+	 */
+	float[] imageToScreenRotated(float ix, float iy, CropState state)
+	{
+		float scrX = imageToScreenX(ix);
+		float scrY = imageToScreenY(iy);
+		float rotation = (state == null) ? 0f : state.getRotationDegrees();
+		if (rotation == 0f)
+		{
+			return new float[] { scrX, scrY };
+		}
+		int imgW = state.getImageWidth();
+		int imgH = state.getImageHeight();
+		float imgScreenCx = imageToScreenX(imgW / 2f);
+		float imgScreenCy = imageToScreenY(imgH / 2f);
+		double rad = Math.toRadians(rotation);
+		double cos = Math.cos(rad);
+		double sin = Math.sin(rad);
+		double dx = scrX - imgScreenCx;
+		double dy = scrY - imgScreenCy;
+		return new float[] {
+			(float) (dx * cos - dy * sin + imgScreenCx),
+			(float) (dx * sin + dy * cos + imgScreenCy)
+		};
+	}
+
+	/**
 	 * Convert image X to screen X given the current viewport + zoom.
 	 */
 	float imageToScreenX(float ix)

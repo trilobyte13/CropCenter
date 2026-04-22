@@ -6,18 +6,11 @@ import android.graphics.Paint;
 import com.cropcenter.model.GridConfig;
 
 /**
- * Draws grid overlay lines within the crop rectangle. Positioning is keyed on the crop
- * DIMENSION'S parity, so the grid's visual behavior flips as the cropped size crosses
- * even ↔ odd:
- *   • Even cropW/cropH — lines snap to integer image coords (pixel boundaries). A stroke-1
- *     line at an integer coord straddles a pixel boundary ("between pixels").
- *   • Odd cropW/cropH — lines snap to pixel centers (N + 0.5). A stroke-1 line at a pixel
- *     center sits fully on one pixel ("covers pixels").
- * The middle line (if one exists, i = N/2 for even count) uses cropCenter directly —
- * because selection-point taps are snapped to pixel centers upstream, cropCenter is
- * already at N + 0.5 for a single-point selection (cropW = 2·(N+0.5) = odd integer),
- * so the middle line covers the selection point's pixel.
- * Second-half lines mirror the first half around cropCenter for pair symmetry.
+ * Draws grid overlay lines within the crop rectangle at continuous float positions
+ * (cropOrigin + cropExtent * i / count), mirrored around cropCenter for pair symmetry.
+ * Positions are NOT snapped to pixel boundaries — a smoothly moving crop (e.g. during
+ * rotation fling) produces smoothly moving grid lines. At rest the lines are
+ * anti-aliased instead of pixel-aligned, a small cosmetic trade for no flicker.
  */
 public class GridRenderer
 {
@@ -64,36 +57,32 @@ public class GridRenderer
 		float screenRight = imgToScreenX.map(cropImgX + cropImgW);
 
 		// Vertical lines.
-		boolean widthEven = (cropImgW & 1) == 0;
 		float cropCenterX = cropImgX + cropImgW / 2f;
 		for (int i = 1; i < config.columns(); i++)
 		{
 			float sx = imgToScreenX.map(
-				snap(i, config.columns(), cropImgX, cropImgW, cropCenterX, widthEven));
+				linePos(i, config.columns(), cropImgX, cropImgW, cropCenterX));
 			canvas.drawLine(sx, screenTop, sx, screenBottom, gridPaint);
 		}
 
 		// Horizontal lines.
-		boolean heightEven = (cropImgH & 1) == 0;
 		float cropCenterY = cropImgY + cropImgH / 2f;
 		for (int i = 1; i < config.rows(); i++)
 		{
 			float sy = imgToScreenY.map(
-				snap(i, config.rows(), cropImgY, cropImgH, cropCenterY, heightEven));
+				linePos(i, config.rows(), cropImgY, cropImgH, cropCenterY));
 			canvas.drawLine(screenLeft, sy, screenRight, sy, gridPaint);
 		}
 	}
 
 	/**
-	 * Position line i of a count-N grid along one axis. Middle line uses cropCenter
-	 * directly so it passes through the selection point (tap coordinates are snapped to
-	 * pixel centers upstream). Non-middle lines snap by crop dimension parity so the whole
-	 * grid visibly transitions between "between pixels" (even dim) and "covers pixels"
-	 * (odd dim) as cropW/cropH flips. Second-half lines mirror the first half for
-	 * symmetry around cropCenter.
+	 * Position line i of a count-N grid along one axis. Middle line (i * 2 == count) sits
+	 * exactly on cropCenter — important for single-point selections where the selection
+	 * marker sits at cropCenter. Second-half lines mirror the first half around cropCenter
+	 * so the grid is visually symmetric even when cropExtent / count isn't integer.
 	 */
-	private static float snap(int i, int count, float cropOrigin, int cropExtent,
-		float cropCenter, boolean dimEven)
+	private static float linePos(int i, int count, float cropOrigin, int cropExtent,
+		float cropCenter)
 	{
 		if (i * 2 == count)
 		{
@@ -101,24 +90,10 @@ public class GridRenderer
 		}
 		if (i * 2 < count)
 		{
-			float raw = cropOrigin + cropExtent * i / (float) count;
-			return alignByDim(raw, dimEven);
+			return cropOrigin + cropExtent * i / (float) count;
 		}
 		int mirrorI = count - i;
 		float mirrorRaw = cropOrigin + cropExtent * mirrorI / (float) count;
-		return 2 * cropCenter - alignByDim(mirrorRaw, dimEven);
-	}
-
-	/**
-	 * Snap by crop-dimension parity: even dim → integer coord (line between pixels),
-	 * odd dim → pixel center (line covers a pixel).
-	 */
-	private static float alignByDim(float value, boolean dimEven)
-	{
-		if (dimEven)
-		{
-			return Math.round(value);
-		}
-		return (float) Math.floor(value) + 0.5f;
+		return 2 * cropCenter - mirrorRaw;
 	}
 }

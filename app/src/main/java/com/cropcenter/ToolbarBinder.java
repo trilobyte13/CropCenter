@@ -164,6 +164,9 @@ final class ToolbarBinder
 			if (!Float.isNaN(metaAngle))
 			{
 				host.getState().setRotationDegrees(metaAngle);
+				// Auto-rotate landed a precise angle — zoom the ruler to its finest tick so
+				// the user can immediately fine-tune within ~0.01° around the detected value.
+				host.getRotationRuler().zoomToMax();
 				Toast.makeText(host.getActivity(), "From metadata: " + TextFormat.degrees(metaAngle),
 					Toast.LENGTH_SHORT).show();
 				return;
@@ -226,6 +229,9 @@ final class ToolbarBinder
 						{
 							float newRot = Math.round(detected * 100f) / 100f;
 							host.getState().setRotationDegrees(newRot);
+							// Painted-horizon detection landed a precise angle — zoom the
+							// ruler so the user can fine-tune within ~0.01° immediately.
+							host.getRotationRuler().zoomToMax();
 							Toast.makeText(host.getActivity(), TextFormat.degrees(newRot),
 								Toast.LENGTH_SHORT).show();
 						}
@@ -355,6 +361,13 @@ final class ToolbarBinder
 
 		host.getRotDegreesTextView().setOnClickListener(view -> showPreciseRotationDialog());
 		host.getRotationRuler().setRulerEnabled(false); // disabled until an image loads
+
+		// Ruler-zoom buttons. 2× per tap matches the pinch-zoom progression and lets the user
+		// step from coarse (10°/major tick) to finest (0.01°/minor tick) in ~7 taps.
+		host.findViewById(R.id.btnRotZoomOut).setOnClickListener(view ->
+			host.getRotationRuler().zoomBy(0.5f));
+		host.findViewById(R.id.btnRotZoomIn).setOnClickListener(view ->
+			host.getRotationRuler().zoomBy(2f));
 	}
 
 	private void setupUndoRedo()

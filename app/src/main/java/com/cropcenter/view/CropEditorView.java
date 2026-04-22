@@ -117,8 +117,12 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
 		{
 			return;
 		}
-		float ix = viewport.screenToImageX(screenX);
-		float iy = viewport.screenToImageY(screenY);
+		// Un-rotate: selection points live in un-rotated image coords but the image is drawn
+		// rotated. A tap must map through the inverse rotation so the nearest-point test
+		// compares like-for-like with what the user visually tapped.
+		float[] ip = viewport.screenToImagePixel(screenX, screenY, state);
+		float ix = ip[0];
+		float iy = ip[1];
 		float threshold = TOUCH_THRESHOLD_PX / (viewport.getBaseScale() * viewport.getZoom());
 
 		SelectionPoint nearest = null;
@@ -248,8 +252,12 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
 		{
 			return;
 		}
-		float ix = viewport.screenToImageX(screenX);
-		float iy = viewport.screenToImageY(screenY);
+		// Un-rotate: same reasoning as onLongPress — selection points are stored in un-rotated
+		// image coords, so the tap location must be converted through the inverse rotation
+		// before comparing to existing points or adding a new one.
+		float[] ip = viewport.screenToImagePixel(screenX, screenY, state);
+		float ix = ip[0];
+		float iy = ip[1];
 
 		EditorMode mode = state.getEditorMode();
 		if (mode == EditorMode.MOVE)

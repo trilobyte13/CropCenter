@@ -63,6 +63,7 @@ public final class CropEngine
 
 		int imgW = state.getImageWidth();
 		int imgH = state.getImageHeight();
+		float rotation = state.getRotationDegrees();
 		// In Select mode with points, re-derive the center from the selection midpoint each
 		// recompute so rotation/AR changes don't drift the center from the actual selection.
 		boolean hasSelection = state.getEditorMode() == EditorMode.SELECT_FEATURE
@@ -72,16 +73,54 @@ public final class CropEngine
 		if (hasSelection)
 		{
 			List<SelectionPoint> points = state.getSelectionPoints();
-			float[] mid = selectionMidpoint(points);
+			// Selection points live in UN-rotated image coords, but the editor draws the image
+			// rotated around its center and the exporter rotates the source bitmap before
+			// cropping. We want cropCenter in the same (rotated) space the exporter crops in.
+			//
+			// Order matters: rotation doesn't commute with axis-aligned-bbox, so rotating each
+			// point FIRST and then taking the AABB midpoint gives a different (correct) result
+			// than rotating the un-rotated AABB midpoint. In V / H / BOTH lock modes the crop
+			// is sized symmetrically about this center, so getting it wrong makes the crop
+			// visibly asymmetric about the selection (e.g. 13 px top, 29 px bottom).
+			float imageMidX = imgW / 2f;
+			float imageMidY = imgH / 2f;
+			double rad = Math.toRadians(rotation);
+			double cosR = Math.cos(rad);
+			double sinR = Math.sin(rad);
+			float minX = Float.MAX_VALUE;
+			float minY = Float.MAX_VALUE;
+			float maxX = -Float.MAX_VALUE;
+			float maxY = -Float.MAX_VALUE;
+			for (SelectionPoint point : points)
+			{
+				float rotX = point.x();
+				float rotY = point.y();
+				if (rotation != 0f)
+				{
+					float deltaX = rotX - imageMidX;
+					float deltaY = rotY - imageMidY;
+					rotX = (float) (deltaX * cosR - deltaY * sinR + imageMidX);
+					rotY = (float) (deltaX * sinR + deltaY * cosR + imageMidY);
+				}
+				minX = Math.min(minX, rotX);
+				minY = Math.min(minY, rotY);
+				maxX = Math.max(maxX, rotX);
+				maxY = Math.max(maxY, rotY);
+			}
 			if (points.size() == 1)
 			{
-				// Snap single-point center to the pixel's center so cropW is odd and the
-				// grid's middle line covers the selection marker's pixel.
-				mid[0] = (float) Math.floor(mid[0]) + 0.5f;
-				mid[1] = (float) Math.floor(mid[1]) + 0.5f;
+				// Snap single-point center to the pixel's 0.5-grid so cropW is odd and the
+				// grid's middle line visually covers the marker. The rotated point isn't on
+				// the half-integer grid at non-zero rotation, so snap to the nearest half —
+				// close enough that the grid still lands over the marker.
+				cx = (float) Math.floor(minX) + 0.5f;
+				cy = (float) Math.floor(minY) + 0.5f;
 			}
-			cx = mid[0];
-			cy = mid[1];
+			else
+			{
+				cx = (minX + maxX) / 2f;
+				cy = (minY + maxY) / 2f;
+			}
 		}
 		else
 		{
@@ -92,19 +131,19 @@ public final class CropEngine
 			cy = state.getAnchorY();
 		}
 
-		// Snap cx/cy to the 0.5-grid so their parity is well-defined (integer or half-int).
-		// cropW/cropH parity below is then matched to cx/cy, guaranteeing cropImgX =
-		// cx − cropW/2 is an integer so the crop's bounds always land on pixel boundaries.
-		cx = Math.round(cx * 2f) / 2f;
-		cy = Math.round(cy * 2f) / 2f;
+		// Keep cx/cy continuous here — snapping to the 0.5-grid plus parity-matching cropW
+		// would make cropW flip even↔odd as the rotated midpoint crosses a 0.25 boundary,
+		// which at any zoom reads as the crop/grid visibly flickering to another position
+		// across consecutive frames. The exporter still gets an integer origin via
+		// getCropImgX's floor() — the small sub-pixel residue (≤ 1 px) in exported bounds
+		// is within spec.
 		cx = Math.clamp(cx, 0, imgW);
 		cy = Math.clamp(cy, 0, imgH);
 
 		if (!state.isCropSizeDirty() && state.getCropW() > 0 && state.getCropH() > 0)
 		{
-			// Size locked — cropW/cropH are fixed, so force cx/cy parity to match.
-			cx = snapCenterToParity(cx, state.getCropW());
-			cy = snapCenterToParity(cy, state.getCropH());
+			// Size locked — keep cropW/cropH, let setCenter clamp cx/cy into the rotated
+			// image bounds. No parity snap: cropImgX comes from getCropImgX's floor().
 			state.setCropSizeSilent(state.getCropW(), state.getCropH());
 			state.setCenter(cx, cy);
 			return;
@@ -175,13 +214,11 @@ public final class CropEngine
 			cy = (cropH < imgH) ? Math.clamp(cy, cropH / 2f, imgH - cropH / 2f) : imgH / 2f;
 		}
 
-		// Free-axis clamp may have shifted cx/cy to a fractional crop-boundary (cropW/2 is
-		// fractional while cropW itself is still fractional here). Re-snap to the 0.5-grid.
-		cx = Math.round(cx * 2f) / 2f;
-		cy = Math.round(cy * 2f) / 2f;
+		// (No 0.5-grid re-snap — see the comment above where we skipped the first snap. The
+		// clamp leaves cx/cy fractional; cropImgX lands on the pixel grid via getCropImgX's
+		// floor(), not via parity matching on the center.)
 
 		// Scale down for rotation — check all 4 corners of the crop
-		float rotation = state.getRotationDegrees();
 		if (rotation != 0f && cropW > 0 && cropH > 0)
 		{
 			float scale = maxScaleForRotation(cx, cy, cropW, cropH, imgW, imgH, rotation);
@@ -195,51 +232,21 @@ public final class CropEngine
 		cropW = Math.max(4, cropW);
 		cropH = Math.max(4, cropH);
 
-		// Round cropW/cropH and enforce cropImgX = cx − cropW/2 integer (bounds on the
-		// pixel grid). Two cases:
-		//
-		//   hasSelection  — the selection midpoint is the "truth" for cx/cy; we must NOT
-		//                   shift it, so cropW/cropH round to the nearest integer whose
-		//                   parity matches cx/cy. The size can't freely flip parity.
-		//
-		//   no selection  — cx/cy came from state (image center, last drag position, …)
-		//                   and isn't anchored to any specific pixel. cropW/cropH round
-		//                   to nearest integer freely; cx/cy shift by up to 0.5 pixel to
-		//                   match the rounded size's parity. This lets the cropped size
-		//                   flip even↔odd as rotation scales the crop.
-		int cwInt;
-		int chInt;
-		if (hasSelection)
-		{
-			cwInt = Math.max(4, roundWithParity(cropW, cx));
-			chInt = Math.max(4, roundWithParity(cropH, cy));
-			// Edge case: Math.max(4, …) may have pushed the size to a parity that
-			// mismatches. Shift cx/cy in that case — 0.5-pixel drift for tiny crops is
-			// unavoidable.
-			if (parityMismatch(cwInt, cx))
-			{
-				cx = snapCenterToParity(cx, cwInt);
-			}
-			if (parityMismatch(chInt, cy))
-			{
-				cy = snapCenterToParity(cy, chInt);
-			}
-		}
-		else
-		{
-			cwInt = Math.max(4, Math.round(cropW));
-			chInt = Math.max(4, Math.round(cropH));
-			cx = snapCenterToParity(cx, cwInt);
-			cy = snapCenterToParity(cy, chInt);
-		}
+		// Round cropW/cropH to the nearest integer. Previously we matched parity to cx/cy so
+		// cropImgX was exactly integer; that caused flicker because a smooth rotation sweeping
+		// the rotated midpoint across parity boundaries made cropW jump even↔odd (and cx jump
+		// by 0.5 px) from one frame to the next. We let cropImgX be computed by
+		// getCropImgX's floor() — the resulting export is at most 1 sub-pixel off from the
+		// fractional ideal, which matches what users perceive as "the crop is on the feature."
+		int cwInt = Math.max(4, Math.round(cropW));
+		int chInt = Math.max(4, Math.round(cropH));
 
 		state.setCropSizeSilent(cwInt, chInt);
 		state.setCropSizeDirty(false);
 		state.setCenter(cx, cy);
 
 		// Second rotation check — re-shrink if the rounded-up size slightly exceeds the
-		// rotation fit. Same parity logic as above: anchor cx/cy (hasSelection) or shift
-		// them to match the size (no selection).
+		// rotation fit.
 		if (rotation != 0f)
 		{
 			float finalCx = state.getCenterX();
@@ -250,28 +257,8 @@ public final class CropEngine
 			{
 				cropW = state.getCropW() * recheck;
 				cropH = state.getCropH() * recheck;
-				int cwInt2;
-				int chInt2;
-				if (hasSelection)
-				{
-					cwInt2 = Math.max(4, roundWithParity(cropW, finalCx));
-					chInt2 = Math.max(4, roundWithParity(cropH, finalCy));
-					if (parityMismatch(cwInt2, finalCx))
-					{
-						finalCx = snapCenterToParity(finalCx, cwInt2);
-					}
-					if (parityMismatch(chInt2, finalCy))
-					{
-						finalCy = snapCenterToParity(finalCy, chInt2);
-					}
-				}
-				else
-				{
-					cwInt2 = Math.max(4, Math.round(cropW));
-					chInt2 = Math.max(4, Math.round(cropH));
-					finalCx = snapCenterToParity(finalCx, cwInt2);
-					finalCy = snapCenterToParity(finalCy, chInt2);
-				}
+				int cwInt2 = Math.max(4, Math.round(cropW));
+				int chInt2 = Math.max(4, Math.round(cropH));
 				state.setCropSizeSilent(cwInt2, chInt2);
 				state.setCenter(finalCx, finalCy);
 			}
@@ -363,50 +350,4 @@ public final class CropEngine
 		return minScale;
 	}
 
-	/**
-	 * True when `size` and `center` disagree on parity — an odd size needs a half-integer
-	 * center (N + 0.5) so cropImgX = center − size/2 is integer; an even size needs an
-	 * integer center.
-	 */
-	private static boolean parityMismatch(int size, float center)
-	{
-		boolean centerHalfInt = Math.abs(center - (float) Math.floor(center) - 0.5f) < 0.01f;
-		boolean sizeOdd = (size & 1) == 1;
-		return sizeOdd != centerHalfInt;
-	}
-
-	/**
-	 * Round `value` to the nearest integer whose parity matches `center`'s 0.5-grid
-	 * parity (half-integer center → odd result, integer center → even result). When
-	 * Math.round gives the wrong parity, pick whichever of ±1 neighbours is closer to
-	 * `value`; tie breaks toward the smaller (safer — smaller crop never overshoots the
-	 * rotation fit). Worst-case overshoot is ~0.5 pixel, within cornersInside's 0.5-pixel
-	 * epsilon, so setCenter's binary-search clamp won't trigger.
-	 */
-	private static int roundWithParity(float value, float center)
-	{
-		int rounded = Math.round(value);
-		if (!parityMismatch(rounded, center))
-		{
-			return rounded;
-		}
-		int up = rounded + 1;
-		int down = rounded - 1;
-		return ((up - value) < (value - down)) ? up : down;
-	}
-
-	/**
-	 * Snap a center coordinate so its fractional part matches the crop size's parity:
-	 * even size → integer (pixel boundary), odd size → half-integer (pixel center). This
-	 * guarantees cropImgX = center − size / 2 is an integer, so the crop's rendered bounds
-	 * fall on whole-pixel boundaries rather than crossing a pixel mid-column.
-	 */
-	private static float snapCenterToParity(float center, int size)
-	{
-		if ((size & 1) == 0)
-		{
-			return Math.round(center);
-		}
-		return (float) Math.floor(center) + 0.5f;
-	}
 }
