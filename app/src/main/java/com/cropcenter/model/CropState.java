@@ -3,6 +3,7 @@ package com.cropcenter.model;
 import android.graphics.Bitmap;
 
 import com.cropcenter.metadata.JpegSegment;
+import com.cropcenter.util.BitmapUtils;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -28,8 +29,11 @@ public class CropState
 	private GridConfig gridConfig = GridConfig.defaults();
 	// Mutated only via addSelectionPoint / removeSelectionPoint* / replaceSelectionPoints /
 	// clearSelectionPoints. Callers never mutate directly — getSelectionPoints() returns an
-	// unmodifiable view.
-	private final List<SelectionPoint> selectionPoints = new ArrayList<>();
+	// unmodifiable view. Volatile + replace-instead-of-clear in reset() so the background-
+	// thread loadImage path can safely null-swap the list while the UI thread iterates it —
+	// an in-place ArrayList.clear() from bg would CME the UI iterator. Non-volatile mutation
+	// via addSelectionPoint / etc. runs only on the UI thread, so those don't need synchronisation.
+	private volatile List<SelectionPoint> selectionPoints = new ArrayList<>();
 
 	private AspectRatio aspectRatio = AspectRatio.R4_5;
 	// Batch mechanism used by the UI listener: notifyChanged during an open batch sets the
@@ -42,7 +46,9 @@ public class CropState
 	private Bitmap sourceImage;
 	private CenterMode centerMode = CenterMode.BOTH;
 	private EditorMode editorMode = EditorMode.SELECT_FEATURE;
-	private List<JpegSegment> jpegMeta = new ArrayList<>();
+	// Volatile for the same reason as selectionPoints — reset() may run on the bg executor
+	// while UI readers iterate getJpegMeta().
+	private volatile List<JpegSegment> jpegMeta = new ArrayList<>();
 	private OnStateChangedListener listener;
 	private String originalFilePath; // absolute path for Samsung Revert
 	private String originalFilename;
@@ -62,6 +68,9 @@ public class CropState
 	private int cropW;
 	private long mediaStoreId = -1; // MediaStore _ID for Samsung Revert
 
+	/**
+	 * Append a selection point. Fires the state listener once.
+	 */
 	public void addSelectionPoint(SelectionPoint point)
 	{
 		selectionPoints.add(point);
@@ -79,6 +88,9 @@ public class CropState
 		batchDepth++;
 	}
 
+	/**
+	 * Remove every selection point. No-op + no listener fire when already empty.
+	 */
 	public void clearSelectionPoints()
 	{
 		if (selectionPoints.isEmpty())
@@ -106,60 +118,68 @@ public class CropState
 		}
 	}
 
+	/**
+	 * Stable rotation / drag anchor X — the user's intended (unclamped) crop center.
+	 * See setAnchor for why this is distinct from centerX.
+	 */
 	public float getAnchorX()
 	{
 		return anchorX;
 	}
 
+	/**
+	 * Stable rotation / drag anchor Y — see getAnchorX.
+	 */
 	public float getAnchorY()
 	{
 		return anchorY;
 	}
 
+	/**
+	 * Current aspect-ratio constraint for the crop box. FREE means no constraint.
+	 */
 	public AspectRatio getAspectRatio()
 	{
 		return aspectRatio;
 	}
 
+	/**
+	 * Which axes of the crop are locked symmetrically about the selection (or LOCKED).
+	 */
 	public CenterMode getCenterMode()
 	{
 		return centerMode;
 	}
 
+	/**
+	 * Crop center X in un-rotated image coords. Continuous float.
+	 */
 	public float getCenterX()
 	{
 		return centerX;
 	}
 
+	/**
+	 * Crop center Y in un-rotated image coords. Continuous float.
+	 */
 	public float getCenterY()
 	{
 		return centerY;
 	}
 
+	/**
+	 * Crop height in integer image pixels.
+	 */
 	public int getCropH()
 	{
 		return cropH;
 	}
 
 	/**
-	 * Crop origin X in image pixels — floor(centerX − cropW / 2f). Integer for the exporter,
-	 * which reads source pixels starting at this column. centerX is a continuous float so
-	 * smooth rotation produces smooth crop motion on screen; the floor introduces at most
-	 * one sub-pixel of bias, which the exporter absorbs. Returns 0 when no crop is placed.
-	 */
-	public int getCropImgX()
-	{
-		if (!hasCenter)
-		{
-			return 0;
-		}
-		return (int) Math.floor(centerX - cropW / 2f);
-	}
-
-	/**
 	 * Continuous-float crop left for the renderer: centerX − cropW / 2f. Sub-pixel precision
 	 * so a smoothly rotating selection midpoint produces smooth crop motion on screen.
-	 * Returns 0 when no crop is placed. Use getCropImgX for the exporter-facing integer.
+	 * Returns 0 when no crop is placed. Callers that need an integer pixel origin cast via
+	 * Math.floor at the call site — the exporter absorbs the sub-pixel bias.
 	 */
 	public float getCropImgXFloat()
 	{
@@ -168,18 +188,6 @@ public class CropState
 			return 0f;
 		}
 		return centerX - cropW / 2f;
-	}
-
-	/**
-	 * Crop origin Y — see getCropImgX.
-	 */
-	public int getCropImgY()
-	{
-		if (!hasCenter)
-		{
-			return 0;
-		}
-		return (int) Math.floor(centerY - cropH / 2f);
 	}
 
 	/**
@@ -194,11 +202,17 @@ public class CropState
 		return centerY - cropH / 2f;
 	}
 
+	/**
+	 * Crop width in integer image pixels.
+	 */
 	public int getCropW()
 	{
 		return cropW;
 	}
 
+	/**
+	 * Current editor interaction mode (Move or Select-Feature).
+	 */
 	public EditorMode getEditorMode()
 	{
 		return editorMode;
@@ -213,6 +227,10 @@ public class CropState
 		return exportConfig;
 	}
 
+	/**
+	 * Raw Ultra HDR gain-map bytes extracted at load time, or null for non-HDR sources.
+	 * The exporter re-composes this onto the cropped primary for HDR-preserving saves.
+	 */
 	public byte[] getGainMap()
 	{
 		return gainMap;
@@ -227,11 +245,17 @@ public class CropState
 		return gridConfig;
 	}
 
+	/**
+	 * Source bitmap height, or 0 before any image loads.
+	 */
 	public int getImageHeight()
 	{
 		return sourceImage != null ? sourceImage.getHeight() : 0;
 	}
 
+	/**
+	 * Source bitmap width, or 0 before any image loads.
+	 */
 	public int getImageWidth()
 	{
 		return sourceImage != null ? sourceImage.getWidth() : 0;
@@ -247,31 +271,55 @@ public class CropState
 		return Collections.unmodifiableList(jpegMeta);
 	}
 
+	/**
+	 * MediaStore _ID of the loaded image, or −1 when the source isn't a MediaStore file.
+	 * Used by ReplaceStrategy to locate the original for Samsung Gallery Revert backup.
+	 */
 	public long getMediaStoreId()
 	{
 		return mediaStoreId;
 	}
 
+	/**
+	 * Original file bytes captured at load. Used by saveOriginalBackup (which reads from
+	 * memory, not disk, so backup is safe to call even after an overwrite has started).
+	 * Null when the source was loaded via SAF stream that wasn't buffered.
+	 */
 	public byte[] getOriginalFileBytes()
 	{
 		return originalFileBytes;
 	}
 
+	/**
+	 * Absolute on-disk path of the loaded image, or null when unknown (SAF-only source).
+	 * Used for Samsung Revert backup path derivation.
+	 */
 	public String getOriginalFilePath()
 	{
 		return originalFilePath;
 	}
 
+	/**
+	 * Display filename of the loaded image — used in Save-As default naming and info bar.
+	 */
 	public String getOriginalFilename()
 	{
 		return originalFilename;
 	}
 
+	/**
+	 * Precise rotation angle applied to the source at draw time. Clamped to [−180, 180].
+	 */
 	public float getRotationDegrees()
 	{
 		return rotationDegrees;
 	}
 
+	/**
+	 * Samsung Extended Format Trailer captured at load, or null for non-Samsung sources.
+	 * Appended to the exported JPEG so Samsung Gallery's Revert feature can find and use
+	 * the backup written by saveOriginalBackup.
+	 */
 	public byte[] getSeftTrailer()
 	{
 		return seftTrailer;
@@ -288,36 +336,64 @@ public class CropState
 		return Collections.unmodifiableList(selectionPoints);
 	}
 
+	/**
+	 * "jpeg" or "png" — the format of the loaded source. Independent of export format.
+	 */
 	public String getSourceFormat()
 	{
 		return sourceFormat;
 	}
 
+	/**
+	 * The loaded bitmap in display orientation (EXIF orientation already applied), or
+	 * null before any image loads. Callers must null-check.
+	 */
 	public Bitmap getSourceImage()
 	{
 		return sourceImage;
 	}
 
+	/**
+	 * True once the crop center has been placed (via tap, drag, or auto-compute).
+	 */
 	public boolean hasCenter()
 	{
 		return hasCenter;
 	}
 
+	/**
+	 * True while Pan mode is active — suppresses auto-recompute so the crop stays put
+	 * while the user drags the viewport.
+	 */
 	public boolean isCenterLocked()
 	{
 		return centerLocked;
 	}
 
+	/**
+	 * True when cropW / cropH need a fresh recompute. Set by setAspectRatio,
+	 * setRotationDegrees, markCropSizeDirty, and CropEngine.autoComputeFromPoints;
+	 * cleared by CropEngine.recomputeCrop on completion.
+	 */
 	public boolean isCropSizeDirty()
 	{
 		return cropSizeDirty;
 	}
 
+	/**
+	 * Flag cropW / cropH for recompute on the next listener cycle. Does not fire the
+	 * listener itself — callers that also want immediate recompute call notifyChanged
+	 * via a setter or invoke recomputeCrop directly.
+	 */
 	public void markCropSizeDirty()
 	{
 		this.cropSizeDirty = true;
 	}
 
+	/**
+	 * Remove a selection point by equality. Returns true if anything was removed. Fires
+	 * the state listener only when something was actually removed.
+	 */
 	public boolean removeSelectionPoint(SelectionPoint point)
 	{
 		boolean removed = selectionPoints.remove(point);
@@ -328,6 +404,10 @@ public class CropState
 		return removed;
 	}
 
+	/**
+	 * Remove the selection point at the given index. Throws IndexOutOfBoundsException
+	 * on an invalid index; always fires the listener when it does return.
+	 */
 	public SelectionPoint removeSelectionPointAt(int index)
 	{
 		SelectionPoint removed = selectionPoints.remove(index);
@@ -367,16 +447,22 @@ public class CropState
 		originalFilename = null;
 		originalFilePath = null;
 		mediaStoreId = -1;
-		selectionPoints.clear();
-		jpegMeta.clear();
+		// Replace rather than clear-in-place. reset() runs on the background loadImage
+		// executor, and an in-place ArrayList.clear() would CME a UI-thread iterator
+		// (onTap / draw / auto-rotate metadata read). Volatile reference swap publishes
+		// the fresh empty list; any iterator already mid-walk keeps working on the old
+		// list (now orphaned, GC'd once the iteration completes).
+		selectionPoints = new ArrayList<>();
+		jpegMeta = new ArrayList<>();
 		gainMap = null;
 		seftTrailer = null;
 	}
 
 	/**
-	 * Stable rotation anchor for the no-selection case — parity-snapping in recomputeCrop
-	 * can shift state.centerX by 0.5 pixel, and reading centerX back on the next rotation
-	 * recompute would accumulate drift. Callers that move the crop (user drag, image load)
+	 * Stable rotation anchor for the no-selection case — setCenter's rotation clamp can
+	 * pull centerX inward to keep the crop inside the rotated image, so reading centerX back
+	 * on the next recompute would accumulate inward drift. The anchor holds the user's
+	 * intended (unclamped) position. Callers that move the crop (user drag, image load)
 	 * also call setAnchor so the next recompute uses a fresh starting position; rotation
 	 * and AR changes leave the anchor alone.
 	 */
@@ -386,6 +472,10 @@ public class CropState
 		this.anchorY = y;
 	}
 
+	/**
+	 * Replace the aspect-ratio constraint. Marks the crop size dirty so the next
+	 * recompute resizes to fit, then fires the listener.
+	 */
 	public void setAspectRatio(AspectRatio ar)
 	{
 		this.aspectRatio = ar;
@@ -393,6 +483,12 @@ public class CropState
 		notifyChanged();
 	}
 
+	/**
+	 * Set the crop center, clamping to keep the crop rectangle fully inside the
+	 * (possibly rotated) image. Under rotation the clamp does an independent per-axis
+	 * binary search to avoid one axis's clamp influencing the other. Fires the listener
+	 * on every call, even if the clamp moves the target.
+	 */
 	public void setCenter(float x, float y)
 	{
 		// Clamp so crop rect stays fully inside the (possibly rotated) image.
@@ -400,87 +496,17 @@ public class CropState
 		{
 			int imgW = sourceImage.getWidth();
 			int imgH = sourceImage.getHeight();
-
-			if (rotationDegrees == 0f)
+			if (Math.abs(rotationDegrees) < BitmapUtils.ROTATION_EPSILON)
 			{
-				if (cropW < imgW)
-				{
-					x = Math.clamp(x, cropW / 2f, imgW - cropW / 2f);
-				}
-				else
-				{
-					x = imgW / 2f;
-				}
-				if (cropH < imgH)
-				{
-					y = Math.clamp(y, cropH / 2f, imgH - cropH / 2f);
-				}
-				else
-				{
-					y = imgH / 2f;
-				}
+				float[] clamped = clampCenterAxisAligned(x, y, imgW, imgH);
+				x = clamped[0];
+				y = clamped[1];
 			}
 			else
 			{
-				// For rotated images: clamp each axis independently via binary search. This
-				// prevents clamping X from affecting Y and vice versa.
-				float imageMidX = imgW / 2f;
-				float imageMidY = imgH / 2f;
-				double rad = Math.toRadians(-rotationDegrees);
-				double cosR = Math.cos(rad);
-				double sinR = Math.sin(rad);
-				float halfWidth = cropW / 2f;
-				float halfHeight = cropH / 2f;
-
-				// First clamp X (keeping Y fixed)
-				if (!cornersInside(x, y, halfWidth, halfHeight,
-					imageMidX, imageMidY, cosR, sinR, imgW, imgH))
-				{
-					float loFraction = 0f;
-					float hiFraction = 1f;
-					float validX = imageMidX;
-					for (int i = 0; i < 25; i++)
-					{
-						float midFraction = (loFraction + hiFraction) / 2f;
-						float testX = imageMidX + (x - imageMidX) * midFraction;
-						if (cornersInside(testX, y, halfWidth, halfHeight,
-							imageMidX, imageMidY, cosR, sinR, imgW, imgH))
-						{
-							validX = testX;
-							loFraction = midFraction;
-						}
-						else
-						{
-							hiFraction = midFraction;
-						}
-					}
-					x = validX;
-				}
-
-				// Then clamp Y (keeping clamped X fixed)
-				if (!cornersInside(x, y, halfWidth, halfHeight,
-					imageMidX, imageMidY, cosR, sinR, imgW, imgH))
-				{
-					float loFraction = 0f;
-					float hiFraction = 1f;
-					float validY = imageMidY;
-					for (int i = 0; i < 25; i++)
-					{
-						float midFraction = (loFraction + hiFraction) / 2f;
-						float testY = imageMidY + (y - imageMidY) * midFraction;
-						if (cornersInside(x, testY, halfWidth, halfHeight,
-							imageMidX, imageMidY, cosR, sinR, imgW, imgH))
-						{
-							validY = testY;
-							loFraction = midFraction;
-						}
-						else
-						{
-							hiFraction = midFraction;
-						}
-					}
-					y = validY;
-				}
+				float[] clamped = clampCenterRotated(x, y, imgW, imgH);
+				x = clamped[0];
+				y = clamped[1];
 			}
 		}
 		this.centerX = x;
@@ -489,11 +515,130 @@ public class CropState
 		notifyChanged();
 	}
 
+	/**
+	 * Axis-aligned clamp — sub-epsilon rotation is rendered as unrotated by the rest
+	 * of the stack, so the cheap axis clamp suffices. Each axis is clamped
+	 * independently; when cropW ≥ imgW (crop exceeds image) snap to the image mid
+	 * rather than letting Math.clamp throw on inverted bounds.
+	 */
+	private float[] clampCenterAxisAligned(float x, float y, int imgW, int imgH)
+	{
+		if (cropW < imgW)
+		{
+			x = Math.clamp(x, cropW / 2f, imgW - cropW / 2f);
+		}
+		else
+		{
+			x = imgW / 2f;
+		}
+		if (cropH < imgH)
+		{
+			y = Math.clamp(y, cropH / 2f, imgH - cropH / 2f);
+		}
+		else
+		{
+			y = imgH / 2f;
+		}
+		return new float[] { x, y };
+	}
+
+	/**
+	 * Rotated-image clamp — binary search along each axis independently so clamping X
+	 * doesn't affect Y and vice versa. Each pass walks from the requested position
+	 * toward image center, picking the farthest-out fraction whose four crop corners
+	 * all land inside the source image bounds when un-rotated. When the crop is
+	 * larger than the image under the current rotation (no valid position exists),
+	 * falls back to image-center so the caller gets a stable, finite result.
+	 */
+	private float[] clampCenterRotated(float x, float y, int imgW, int imgH)
+	{
+		float imageMidX = imgW / 2f;
+		float imageMidY = imgH / 2f;
+		double rad = Math.toRadians(-rotationDegrees);
+		double cosR = Math.cos(rad);
+		double sinR = Math.sin(rad);
+		float halfWidth = cropW / 2f;
+		float halfHeight = cropH / 2f;
+
+		// Fallback: when even image-center can't hold the crop (cropW / cropH exceed the
+		// rotated image's inscribed axis-aligned rectangle), the binary searches below
+		// would converge to image-center with corners still outside bounds. Snap to
+		// image-center directly — the rotation-fit shrink in CropEngine.recomputeCrop's
+		// recheck pass will catch up and size the crop down to fit on the next recompute.
+		if (!cornersInside(imageMidX, imageMidY, halfWidth, halfHeight,
+			imageMidX, imageMidY, cosR, sinR, imgW, imgH))
+		{
+			return new float[] { imageMidX, imageMidY };
+		}
+
+		if (!cornersInside(x, y, halfWidth, halfHeight,
+			imageMidX, imageMidY, cosR, sinR, imgW, imgH))
+		{
+			x = binarySearchAxis(x, y, halfWidth, halfHeight,
+				imageMidX, imageMidY, cosR, sinR, imgW, imgH, true);
+		}
+		if (!cornersInside(x, y, halfWidth, halfHeight,
+			imageMidX, imageMidY, cosR, sinR, imgW, imgH))
+		{
+			y = binarySearchAxis(x, y, halfWidth, halfHeight,
+				imageMidX, imageMidY, cosR, sinR, imgW, imgH, false);
+		}
+		return new float[] { x, y };
+	}
+
+	/**
+	 * 25-iteration binary search for the farthest valid center position along one axis.
+	 * The search range is fixed at both ends — `fraction = 0` gives the image center
+	 * (always valid), `fraction = 1` gives the requested position. Each iteration
+	 * tests the midpoint fraction; valid positions advance `loFraction` and update the
+	 * best-so-far, invalid positions pull `hiFraction` in. Result: the largest valid
+	 * fraction's candidate position. `clampX` true varies X while holding Y fixed;
+	 * false varies Y.
+	 */
+	private static float binarySearchAxis(float x, float y, float halfWidth, float halfHeight,
+		float imageMidX, float imageMidY, double cosR, double sinR, int imgW, int imgH,
+		boolean clampX)
+	{
+		float loFraction = 0f;
+		float hiFraction = 1f;
+		float safeEndpoint = clampX ? imageMidX : imageMidY;
+		float requestedEndpoint = clampX ? x : y;
+		float validPosition = safeEndpoint;
+		for (int i = 0; i < 25; i++)
+		{
+			float midFraction = (loFraction + hiFraction) / 2f;
+			float candidate = safeEndpoint + (requestedEndpoint - safeEndpoint) * midFraction;
+			float testX = clampX ? candidate : x;
+			float testY = clampX ? y : candidate;
+			if (cornersInside(testX, testY, halfWidth, halfHeight,
+				imageMidX, imageMidY, cosR, sinR, imgW, imgH))
+			{
+				validPosition = candidate;
+				loFraction = midFraction;
+			}
+			else
+			{
+				hiFraction = midFraction;
+			}
+		}
+		return validPosition;
+	}
+
+	/**
+	 * Lock / unlock auto-recompute. Used by Pan mode to freeze the crop while the user
+	 * drags the viewport. Does not fire the listener — caller controls redraw cadence.
+	 */
 	public void setCenterLocked(boolean locked)
 	{
 		this.centerLocked = locked;
 	}
 
+	/**
+	 * Replace the lock mode. Does NOT mark the crop size dirty (see comment below) —
+	 * the button handler explicitly calls recomputeForLockChange with the correct
+	 * selection midpoint, avoiding a race between the listener-driven recompute and
+	 * the handler-driven one.
+	 */
 	public void setCenterMode(CenterMode mode)
 	{
 		this.centerMode = mode;
@@ -515,13 +660,10 @@ public class CropState
 		// No notifyChanged — caller will trigger notify via recomputeCrop → setCenter
 	}
 
-	public void setCropSize(int width, int height)
-	{
-		this.cropW = width;
-		this.cropH = height;
-		notifyChanged();
-	}
-
+	/**
+	 * Set the dirty flag explicitly. Primarily used to clear dirty AFTER recompute
+	 * completes; setting dirty=true is usually expressed via markCropSizeDirty.
+	 */
 	public void setCropSizeDirty(boolean dirty)
 	{
 		this.cropSizeDirty = dirty;
@@ -536,6 +678,10 @@ public class CropState
 		this.cropH = height;
 	}
 
+	/**
+	 * Switch between Move and Select-Feature mode. Fires the listener; does not mark
+	 * crop size dirty (mode switches preserve the crop rectangle).
+	 */
 	public void setEditorMode(EditorMode mode)
 	{
 		this.editorMode = mode;
@@ -543,41 +689,71 @@ public class CropState
 		notifyChanged();
 	}
 
+	/**
+	 * Store the raw Ultra HDR gain-map bytes for later export. No listener fire —
+	 * gain map never drives UI changes directly.
+	 */
 	public void setGainMap(byte[] gm)
 	{
 		this.gainMap = gm;
 	}
 
+	/**
+	 * Replace the JPEG segment list en-bloc. No listener fire — the segment list is
+	 * consulted by the exporter, not rendered.
+	 */
 	public void setJpegMeta(List<JpegSegment> meta)
 	{
 		this.jpegMeta = meta;
 	}
 
+	/**
+	 * Register (or clear via null) the single state-change listener. MainActivity wires
+	 * itself as the listener in onCreate and unwires in onDestroy.
+	 */
 	public void setListener(OnStateChangedListener listener)
 	{
 		this.listener = listener;
 	}
 
+	/**
+	 * Record the MediaStore _ID of the loaded image (for Samsung Revert support). No
+	 * listener fire — the ID is plumbing, not user-visible state.
+	 */
 	public void setMediaStoreId(long id)
 	{
 		this.mediaStoreId = id;
 	}
 
+	/**
+	 * Record the original file bytes for in-memory backup use. No listener fire.
+	 */
 	public void setOriginalFileBytes(byte[] bytes)
 	{
 		this.originalFileBytes = bytes;
 	}
 
+	/**
+	 * Record the original file's absolute path (may be null for SAF sources).
+	 */
 	public void setOriginalFilePath(String path)
 	{
 		this.originalFilePath = path;
 	}
 
+	/**
+	 * Record the original file's display name (used in the Save-As default filename).
+	 */
 	public void setOriginalFilename(String name)
 	{
 		this.originalFilename = name;
 	}
 
+	/**
+	 * Replace the rotation angle. Handles NaN / infinite inputs by treating them as 0,
+	 * clamps to [−180, 180], marks the crop size dirty (recompute needed to shrink the
+	 * crop for the new rotation), and fires the listener.
+	 */
 	public void setRotationDegrees(float deg)
 	{
 		if (Float.isNaN(deg) || Float.isInfinite(deg))
@@ -590,16 +766,27 @@ public class CropState
 		notifyChanged();
 	}
 
+	/**
+	 * Store the Samsung Extended Format Trailer for later re-appending to the export.
+	 * No listener fire — trailer data doesn't drive UI.
+	 */
 	public void setSeftTrailer(byte[] seft)
 	{
 		this.seftTrailer = seft;
 	}
 
+	/**
+	 * Record the source format ("jpeg" or "png"). No listener fire.
+	 */
 	public void setSourceFormat(String fmt)
 	{
 		this.sourceFormat = fmt;
 	}
 
+	/**
+	 * Set the source bitmap and fire the listener — triggers applyStateToUi which
+	 * computes the initial crop center and fits the view.
+	 */
 	public void setSourceImage(Bitmap bmp)
 	{
 		this.sourceImage = bmp;

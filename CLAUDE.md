@@ -5,43 +5,41 @@ is intentional — a compile-clean patch that violates these rules still needs
 fixing before merge. New files should match; existing files that drift should
 be corrected as they are touched.
 
-## Language level
+Sections are ordered alphabetically. Subsections inside each section are also
+alphabetical.
 
-- **Java 21** (Android `compileSdk 36`, `minSdk 35`).
-- Use modern language features where they genuinely clarify intent:
-  - **Records** for immutable value types — see "Records" below.
-  - **Switch expressions with arrow syntax** (`case X -> { ... }`) for
-    multi-way dispatch on discrete values with 3+ cases. No fall-through.
-  - **`var`** for local variables whose type is obvious from the right-hand
-    side and adds nothing to read.
-  - **Pattern matching** for `instanceof` checks where it eliminates a cast.
-  - **Diamond operator** (`new ArrayList<>()`) — never re-state type arguments
-    when the compiler can infer them.
-- Switch vs. if/else: use `switch` for 3+ discrete-value dispatch. Use
-  `if`/`else if` for range checks, boolean combinations, or 1–2 cases.
-- **`Math.clamp`** for range clamping. Do not hand-roll
-  `Math.max(lo, Math.min(hi, x))` — `Math.clamp(x, lo, hi)` (Java 21) is
-  clearer and the argument order matches the intent ("value, low, high").
+## Android / Java idioms
 
-### Records
+- **Logging TAG:** each class that logs declares `private static final String
+  TAG = "ClassName";` at the top of the static-field section. Do not re-
+  derive it from `getClass().getSimpleName()`.
+- **String formatting:** pass `Locale.ROOT` to `String.format` when the output
+  is for internal use (log messages, regex, parsing). Use the system locale
+  only for user-facing display.
+- **String equality:** use `.equals()` or `.equalsIgnoreCase()`, never `==`.
+- **try-with-resources** for anything `Closeable` / `AutoCloseable`. Don't
+  hand-roll close-in-finally.
+- **Intentionally empty catch** uses the parameter name `ignored`:
+  ```java
+  catch (NumberFormatException ignored)
+  {
+  }
+  ```
+  If the `Exception` deserves a log line, log it instead of naming it
+  `ignored`.
+- **Toast-from-background-thread helpers** go through a UI-thread-safe path
+  (`runOnUiThread` + `isDestroyed()` guard). The `toastIfAlive` helper in
+  `MainActivity` is the canonical pattern.
+- **`final` on local variables** is required only when a lambda or anonymous
+  class captures them. Don't sprinkle `final` on every local for stylistic
+  reasons.
 
-A class may become a `record` when **every field is effectively immutable** in
-practice — no setters, no internal mutation, no external `.field = x;`
-assignments. `AspectRatio`, `ExportConfig`, `GridConfig`, and `JpegSegment`
-qualify; `SelectionPoint` (whose `active` flag toggles) does not. Mutable
-"config" records should expose `withXxx(value)` transformers alongside their
-accessors so callers can fold a single-field change through
-`CropState.updateExportConfig` / `updateGridConfig` without building a fresh
-instance by hand.
+## Annotations
 
-- Record components become method accessors: `point.x()` not `point.x`. When
-  converting an existing class, grep for `.field` access sites and update them
-  in the same commit.
-- `byte[]` components are fine. Records use `Object.equals` for arrays
-  (reference equality), which matches the pre-record behaviour of a plain
-  class without `equals` overrides — no behavioural change.
-- Instance methods (`isFree()`, `ratio()`) are allowed; records aren't just
-  data bags.
+- `@Override` is **mandatory** on any method that overrides or implements one.
+- Place annotations on the line immediately above the method signature, not
+  inline.
+- `@SuppressWarnings` requires a comment explaining why.
 
 ## Braces and blocks
 
@@ -104,77 +102,89 @@ instance by hand.
   public void onStartTrackingTouch(SeekBar seekBar) {}
   ```
 
-## Annotations
+## Build & verify
 
-- `@Override` is **mandatory** on any method that overrides or implements one.
-- Place annotations on the line immediately above the method signature, not
-  inline.
-- `@SuppressWarnings` requires a comment explaining why.
+Android build (primary gate):
 
-## Indentation and wrapping
+```bash
+./gradlew.bat compileDebugJavaWithJavac
+```
 
-- **Tabs only**, rendered at width 8.
-- **Line length:** wrap at 120 display columns. Count tab as 8.
-- **Continuation indent: exactly one tab deeper than the line that starts the
-  statement.** This includes:
-  - Method call arguments wrapped across lines
-  - Method chains (`.foo().bar().baz()` laid out one-per-line)
-  - Operator continuations (`&&`, `||`, `+`, `?`, `:`) starting a wrapped line
-  - Boolean conditions spanning multiple lines
-- **Never double-indent a wrap.** If a wrap sits two tabs deeper than the
-  statement, that is a bug. Run the audit scripts at the bottom of this file
-  before declaring done.
-- **Don't wrap prematurely.** Only wrap when the rendered line (tab width 8)
-  exceeds 120 columns. If a call fits under the limit as a one-liner, leave
-  it as a one-liner — artificial wraps make diffs noisier and obscure the
-  actual structure. When a wrap is forced, prefer refactoring into a cached
-  local (`MaterialButton btnFoo = findViewById(...);`) over stretching one
-  expression across three lines.
-- **Fluent-chain alignment.** When a chain spans multiple lines, every `.foo()`
-  sits at the same indent (one tab deeper than the receiver that started the
-  chain):
+Must succeed with no errors. The trailing deprecation warning from
+`MainActivity.java` is a known Gradle-9 noise and not a regression signal.
+
+## Comments
+
+- **Javadoc is required on:**
+  - Type declarations (class, interface, enum, record)
+  - Public and protected methods (the external API surface — IDE
+    tooltips and subclass contracts depend on them)
+  - Non-public methods (package-private, private) with non-trivial
+    logic — branching, side effects, error handling, ordering
+    guarantees, memory-visibility concerns, or any invariant a reader
+    would miss by reading the body
+
+- **Javadoc is optional — and should be omitted when it would only
+  restate the signature — on:**
+  - Record component accessors (the record-level Javadoc already names
+    the components)
+  - Trivial getters / setters where the method name matches a field and
+    there is no transformation
+  - `@Override` methods whose contract matches the supertype's
+    documented contract (the IDE surfaces the supertype Javadoc)
+  - Private helpers under ~5 lines with self-documenting names:
+    `isEmpty()`, `reset()`, `toPx(int dp)`
+  - `withXxx(value)` record transformers whose behavior is exhaustively
+    described by the name (`withRows`, `withColor`) — a *non-obvious*
+    transformer (`withFormat` accepting strings outside the FORMAT_*
+    set, `withBounds` that also recomputes derived state) still gets
+    Javadoc
+
+  When in doubt, write the Javadoc. But `/** Returns the width. */` on
+  `int width()` is worse than nothing — it trains readers to skim every
+  Javadoc block and lose the ones that actually say something.
+
+- **When Javadoc IS present, it's a multi-line block.** Inline
+  `/** Foo. */` on one physical line stays out; expand to:
 
   ```java
-  new AlertDialog.Builder(this)
-      .setTitle("Save")
-      .setView(input)
-      .setPositiveButton("OK", (dialog, which) -> save())
-      .setNegativeButton("Cancel", null)
-      .show();
+  /**
+   * Parse the thing. Returns null on error.
+   */
+  public Thing parse(String s)
   ```
 
-  Not `setTitle` at one indent and `setView` at a deeper indent.
-- Array initializers use K&R `= { ... };` placement, with elements indented
-  one tab from the declaration:
+- **In-method comments use `//`.** Always. Even multi-line ones.
+  Don't use `/* ... */` for a one-liner tucked inside a method or branch —
+  `// note` not `/* note */`. `/* ... */` has no place inside a method body.
+- **Field-level comments use `//`**, not Javadoc. Fields tend to carry
+  short annotations about invariants or lifecycle that read more naturally
+  as inline notes than as a doc block.
+- **Section dividers inside a class use `//`**, e.g. `// ── Bounds checks ──`.
+  They group related members rather than document a single declaration.
+- **No HTML or Javadoc inline tags in comments.** Do not write `<p>`, `<br>`,
+  `<cite>`, `<code>`, `{@code ...}`, or `{@link ...}`. This is an Android app
+  — Javadoc is not rendered as HTML for end users, and the tags clutter the
+  source. Use blank Javadoc lines (`*` on its own line) to separate
+  paragraphs. Reference types by their bare name instead of wrapping them in
+  `{@link}`.
+- **Don't state the obvious.** `// increment counter` before `counter++` is
+  noise. This rule applies equally to Javadoc — if the only thing the block
+  would say is what the signature already says, omit it. Write comments
+  that explain *why*, not *what*.
 
-  ```java
-  private static final int[] PRESETS = {
-      VALUE_A, VALUE_B, VALUE_C,
-  };
-  ```
+## Constants
 
-## File layout
-
-Top of file:
-
-1. `package` declaration
-2. Blank line
-3. Imports, grouped: `android.*`, blank, `androidx.*`, blank, `com.*`, blank,
-   `java.*`. Alphabetical within each group.
-4. Blank line
-5. Class-level Javadoc (optional — see Comments)
-6. Class declaration
-
-Inside a class:
-
-1. Nested types (interfaces, enums, records) — first, in declaration order
-2. Blank line
-3. Static fields — see "Field ordering" below
-4. Blank line
-5. Instance fields
-6. Blank line
-7. Constructors
-8. Methods — see "Method ordering" below
+- Extract magic numbers and strings when they are repeated or when the
+  literal itself doesn't tell the reader what it means.
+  - `0xFFCBA6F7` appearing in six files → lives in `ThemeColors.MAUVE`.
+  - `"Busy — try again"` appearing three times → class-private constant.
+  - `8192` buffer size appearing twice → class-private constant.
+- Use `SCREAMING_SNAKE_CASE` for **class-level** constants (`static final`
+  fields). Method-local `final` values follow the ordinary variable-naming
+  rules — camelCase, not SCREAMING — because they're scoped locals, not
+  module-level constants.
+- Add a trailing comment if the value's meaning is non-obvious.
 
 ## Field ordering
 
@@ -207,6 +217,118 @@ float minX = 0;
 float minY = 0;
 ```
 
+## File layout
+
+Top of file:
+
+1. `package` declaration
+2. Blank line
+3. Imports, grouped: `android.*`, blank, `androidx.*`, blank, `com.*`, blank,
+   `java.*`. Alphabetical within each group.
+4. Blank line
+5. Class-level Javadoc (required — see Comments)
+6. Class declaration
+
+Inside a class:
+
+1. Nested types (interfaces, enums, records) — first, in declaration order
+2. Blank line
+3. Static fields — see Field ordering
+4. Blank line
+5. Instance fields
+6. Blank line
+7. Constructors
+8. Methods — see Method ordering
+
+## Imports
+
+- **Never inline a fully-qualified type name.** If you need
+  `android.provider.DocumentsContract`, add
+  `import android.provider.DocumentsContract;` at the top. The *only*
+  exception is a naming collision you can't otherwise resolve.
+- No wildcard imports (`import foo.*;`).
+- Imports are kept alphabetical within each group.
+
+## Indentation and wrapping
+
+- **Tabs only**, rendered at width 8.
+- **Line length:** wrap at 120 display columns. Count tab as 8.
+- **Continuation indent: exactly one tab deeper than the line that starts the
+  statement.** This includes:
+  - Method call arguments wrapped across lines
+  - Method chains (`.foo().bar().baz()` laid out one-per-line)
+  - Operator continuations (`&&`, `||`, `+`, `?`, `:`) starting a wrapped line
+  - Boolean conditions spanning multiple lines
+- **Never double-indent a wrap.** If a wrap sits two tabs deeper than the
+  statement, that is a bug. Run the audit scripts in the Self-audit section
+  before declaring done.
+- **Don't wrap prematurely.** Only wrap when the rendered line (tab width 8)
+  exceeds 120 columns. If a call fits under the limit as a one-liner, leave
+  it as a one-liner — artificial wraps make diffs noisier and obscure the
+  actual structure. When a wrap is forced, prefer refactoring into a cached
+  local (`MaterialButton btnFoo = findViewById(...);`) over stretching one
+  expression across three lines.
+- **Fluent-chain alignment.** When a chain spans multiple lines, every `.foo()`
+  sits at the same indent (one tab deeper than the receiver that started the
+  chain):
+
+  ```java
+  new AlertDialog.Builder(this)
+      .setTitle("Save")
+      .setView(input)
+      .setPositiveButton("OK", (dialog, which) -> save())
+      .setNegativeButton("Cancel", null)
+      .show();
+  ```
+
+  Not `setTitle` at one indent and `setView` at a deeper indent.
+- Array initializers use K&R `= { ... };` placement, with elements indented
+  one tab from the declaration:
+
+  ```java
+  private static final int[] PRESETS = {
+      VALUE_A, VALUE_B, VALUE_C,
+  };
+  ```
+
+## Language level
+
+- **Java 21** (Android `compileSdk 36`, `minSdk 35`).
+- Use modern language features where they genuinely clarify intent:
+  - **Records** for immutable value types — see Records below.
+  - **Switch expressions with arrow syntax** (`case X -> { ... }`) for
+    multi-way dispatch on discrete values with 3+ cases. No fall-through.
+  - **`var`** for local variables whose type is obvious from the right-hand
+    side and adds nothing to read.
+  - **Pattern matching** for `instanceof` checks where it eliminates a cast.
+  - **Diamond operator** (`new ArrayList<>()`) — never re-state type arguments
+    when the compiler can infer them.
+- Switch vs. if/else: use `switch` for 3+ discrete-value dispatch. Use
+  `if`/`else if` for range checks, boolean combinations, or 1–2 cases.
+- **`Math.clamp`** for range clamping. Do not hand-roll
+  `Math.max(lo, Math.min(hi, x))` — `Math.clamp(x, lo, hi)` (Java 21) is
+  clearer and the argument order matches the intent ("value, low, high").
+
+### Records
+
+A class may become a `record` when **every field is effectively immutable** in
+practice — no setters, no internal mutation, no external `.field = x;`
+assignments. `AspectRatio`, `ExportConfig`, `GridConfig`, and `JpegSegment`
+qualify; `SelectionPoint` (whose `active` flag toggles) does not. Mutable
+"config" records should expose `withXxx(value)` transformers alongside their
+accessors so callers can fold a single-field change through
+`CropState.updateExportConfig` / `updateGridConfig` without building a fresh
+instance by hand.
+
+- Record components become method accessors: `point.x()` not `point.x`. When
+  converting an existing class, grep for `.field` access sites and update them
+  in the same commit.
+- `byte[]` components are fine. Records use `Object.equals` for arrays
+  (reference equality), which matches the pre-record behaviour of a plain
+  class without `equals` overrides — no behavioural change.
+- Instance methods (`isFree()`, `ratio()`) are allowed; records aren't just
+  data bags.
+
 ## Method ordering
 
 - Constructors first.
@@ -234,15 +356,6 @@ editorView.setOnZoomChangedListener(() -> this.updateZoomBadge()); // avoid
 Use a lambda when you need to transform arguments, capture extra state, or
 string multiple calls together.
 
-## Imports
-
-- **Never inline a fully-qualified type name.** If you need
-  `android.provider.DocumentsContract`, add
-  `import android.provider.DocumentsContract;` at the top. The *only*
-  exception is a naming collision you can't otherwise resolve.
-- No wildcard imports (`import foo.*;`).
-- Imports are kept alphabetical within each group.
-
 ## Scope minimization
 
 - Fields that could be method-local variables should be. If a value lives
@@ -257,149 +370,6 @@ string multiple calls together.
 - A constant used across multiple files should live in a shared utility class
   (`ThemeColors`, etc.) — but only then.
 - Unused fields and dead code get deleted, not commented out.
-
-## Constants
-
-- Extract magic numbers and strings when they are repeated or when the
-  literal itself doesn't tell the reader what it means.
-  - `0xFFCBA6F7` appearing in six files → lives in `ThemeColors.MAUVE`.
-  - `"Busy — try again"` appearing three times → class-private constant.
-  - `8192` buffer size appearing twice → class-private constant.
-- Use `SCREAMING_SNAKE_CASE` for constants.
-- Add a trailing comment if the value's meaning is non-obvious.
-
-## Comments
-
-- **Class and outside-method documentation uses Javadoc (`/** ... */`).**
-  Always — even for a one-liner. A single-sentence description becomes a
-  three-line block:
-
-  ```java
-  /**
-   * Parse the thing. Returns null on error.
-   */
-  public Thing parse(String s)
-  ```
-
-  This applies to classes, interfaces, enums, records, and every method
-  declaration (public / private / protected / static alike). Inline
-  `/** Foo. */` on one line is still out — expand to the multi-line form.
-- **In-method comments use `//`.** Always. Even multi-line ones.
-  Don't use `/* ... */` for a one-liner tucked inside a method or branch —
-  `// note` not `/* note */`. `/* ... */` has no place inside a method body.
-- **Field-level comments use `//`**, not Javadoc. Fields tend to carry
-  short annotations about invariants or lifecycle that read more naturally
-  as inline notes than as a doc block.
-- **Section dividers inside a class use `//`**, e.g. `// ── Bounds checks ──`.
-  They group related members rather than document a single declaration.
-- **No HTML or Javadoc inline tags in comments.** Do not write `<p>`, `<br>`,
-  `<cite>`, `<code>`, `{@code ...}`, or `{@link ...}`. This is an Android app
-  — Javadoc is not rendered as HTML for end users, and the tags clutter the
-  source. Use blank Javadoc lines (`*` on its own line) to separate
-  paragraphs. Reference types by their bare name instead of wrapping them in
-  `{@link}`.
-- **Don't state the obvious.** `// increment counter` before `counter++` is
-  noise. Write comments that explain *why*, not *what*.
-
-## Variable names
-
-- **Self-documenting names.** `isLittleEndian` beats `le`. `centerX` beats
-  `cx`. `halfWidth` beats `hw`. A short abbreviation "clarified by a comment"
-  is worse than just typing the longer name.
-- **Avoid one-letter and over-abbreviated names**, except for these standard
-  idioms:
-  - `i`, `j`, `k` — loop indices
-  - `e` — caught exception (`catch (Exception e)`)
-  - `n` — count in a read loop (`int n = is.read(buf)`)
-  - `x`, `y` — 2D coordinates (`setCenter(float x, float y)`)
-  - `r`, `g`, `b` — RGB colour channels
-  - `ctx` — `Context` (Android convention)
-- Do not use `l` (easily confused with `1`) or `I`/`O` (confused with `0`).
-- Android-specific short names that are acceptable because of widespread
-  convention: `bmp` (Bitmap), `dp`/`dp4`/`dp8` (density-pixel conversions),
-  `tv` (TextView) *inside tiny helper methods*, `lp` (LayoutParams) *inside
-  tiny helper methods*, `pp` (Paint) *inside tight drawing loops*. Don't use
-  them in long methods where a reader has to remember what they are.
-
-### Collision avoidance
-
-When an outer scope already binds a short name (`left`, `top`, `width`,
-`height`…) and a renamed inner variable would shadow it, pick a qualified
-form instead: `pixelLeft`, `pixelTop`, `cellWidth`, `thumbHeight`. Do **not**
-fall back to one-letter abbreviations (`l`, `t`, `w`, `h`) to resolve the
-collision — that reintroduces exactly the opacity this rule exists to prevent.
-
-### Lambda and listener parameters
-
-Android listener callbacks have real parameter names — use them. Do not
-abbreviate. Concrete conventions used in this codebase:
-
-| Interface                         | Parameters                                            |
-| --------------------------------- | ----------------------------------------------------- |
-| `View.OnClickListener`            | `view` (or descriptive like `button`)                 |
-| `DialogInterface.OnClickListener` | `(dialog, which)`                                     |
-| `DialogInterface.OnCancelListener`| `dialog`                                              |
-| `CompoundButton.OnCheckedChange`  | `(button, isChecked)`                                 |
-| `SeekBar.OnSeekBarChangeListener` | `(seekBar, progress, fromUser)`                       |
-| `TextWatcher.beforeTextChanged`   | `(text, start, count, after)`                         |
-| `TextWatcher.onTextChanged`       | `(text, start, before, count)`                        |
-| `TextWatcher.afterTextChanged`    | `editable`                                            |
-| `OnApplyWindowInsetsListener`     | `(view, insets)` (use `view`, not `v`)                |
-
-Not `(d, w)`, `(b, c)`, `(sb, p, fu)`, `(s, a, b, c)`. The Android source
-uses the long names; match them.
-
-## Theme colors
-
-The Catppuccin Mocha palette is defined in two places:
-
-- **`app/src/main/res/values/colors.xml`** — canonical source. Use
-  `getResources().getColor(R.color.mauve, null)` whenever a `Context` is
-  available.
-- **`com.cropcenter.util.ThemeColors`** — parallel `int` constants for code
-  paths that don't have a `Context` handy (static helpers, `Paint` setup,
-  `Bitmap` color fills, etc.). These mirror the XML values.
-
-Do not inline a hex literal that corresponds to a theme color. If the color
-you want doesn't exist in `ThemeColors`, add it there rather than copying the
-hex.
-
-## Android / Java idioms
-
-- **Logging TAG:** each class that logs declares `private static final String
-  TAG = "ClassName";` at the top of the static-field section. Do not re-
-  derive it from `getClass().getSimpleName()`.
-- **String formatting:** pass `Locale.ROOT` to `String.format` when the output
-  is for internal use (log messages, regex, parsing). Use the system locale
-  only for user-facing display.
-- **String equality:** use `.equals()` or `.equalsIgnoreCase()`, never `==`.
-- **try-with-resources** for anything `Closeable` / `AutoCloseable`. Don't
-  hand-roll close-in-finally.
-- **Intentionally empty catch** uses the parameter name `ignored`:
-  ```java
-  catch (NumberFormatException ignored)
-  {
-  }
-  ```
-  If the `Exception` deserves a log line, log it instead of naming it
-  `ignored`.
-- **Toast-from-background-thread helpers** go through a UI-thread-safe path
-  (`runOnUiThread` + `isDestroyed()` guard). The `toastIfAlive` helper in
-  `MainActivity` is the canonical pattern.
-- **`final` on local variables** is required only when a lambda or anonymous
-  class captures them. Don't sprinkle `final` on every local for stylistic
-  reasons.
-
-## Build & verify
-
-Android build (primary gate):
-
-```bash
-./gradlew.bat compileDebugJavaWithJavac
-```
-
-Must succeed with no errors. The trailing deprecation warning from
-`MainActivity.java` is a known Gradle-9 noise and not a regression signal.
 
 ## Self-audit
 
@@ -471,6 +441,16 @@ awk '
 
 # In-method /* ... */ inline block comments (use // instead):
 grep -rnE '/\*[^*\n/][^\n]*\*/' app/src/main/java
+
+# Identifiers containing a run of ≥ 2 uppercase letters mid-word (likely an
+# acronym that should be camelCase — e.g. scanIFD → scanIfd, spinnerAR →
+# spinnerAr). Catches non-constant identifiers only; SCREAMING_SNAKE and
+# TAG are excluded by requiring a lowercase character before the run.
+# False-positive filter: standard Android API methods (getFD, getXVelocity),
+# single-letter axis suffixes followed by a real word (XFloat, YFloat), and
+# Samsung JSON literal keys (isBrightnessIPE etc. are strings inside "…").
+grep -rnE '\b[a-z][a-zA-Z0-9]*[a-z][A-Z][A-Z]+[a-zA-Z0-9]*\b' app/src/main/java \
+    | grep -vE 'SCREAMING|TAG\s*=|getFD\(|getXVelocity|[XY]Float|[XY]Int|\\\\?"[^"]*[A-Z]{2,}'
 ```
 
 Build must also be clean:
@@ -478,3 +458,112 @@ Build must also be clean:
 ```bash
 ./gradlew.bat compileDebugJavaWithJavac
 ```
+
+## Theme colors
+
+The Catppuccin Mocha palette is defined in two places:
+
+- **`app/src/main/res/values/colors.xml`** — canonical source. Use
+  `getResources().getColor(R.color.mauve, null)` whenever a `Context` is
+  available.
+- **`com.cropcenter.util.ThemeColors`** — parallel `int` constants for code
+  paths that don't have a `Context` handy (static helpers, `Paint` setup,
+  `Bitmap` color fills, etc.). These mirror the XML values.
+
+Do not inline a hex literal that corresponds to a theme color. If the color
+you want doesn't exist in `ThemeColors`, add it there rather than copying the
+hex.
+
+## Variable names
+
+- **Self-documenting names.** `isLittleEndian` beats `le`. `centerX` beats
+  `cx`. `halfWidth` beats `hw`. A short abbreviation "clarified by a comment"
+  is worse than just typing the longer name.
+- **Avoid one-letter and over-abbreviated names**, except for these standard
+  idioms:
+  - `i`, `j`, `k` — loop indices
+  - `e` — **caught exception only** (`catch (Exception e)`). Don't reuse `e`
+    for anything else (entry index, edge, element) — readers see it and
+    assume exception. Pick a descriptive name instead.
+  - `n` — count in a read loop (`int n = is.read(buf)`)
+  - `x`, `y` — 2D coordinates (`setCenter(float x, float y)`)
+  - `r`, `g`, `b` — RGB colour channels
+  - `ctx` — `Context` (Android convention)
+- Do not use `l` (easily confused with `1`) or `I`/`O` (confused with `0`).
+- Android-specific short names that are acceptable because of widespread
+  convention: `bmp` (Bitmap), `dp`/`dp4`/`dp8` (density-pixel conversions),
+  `tv` (TextView) *inside tiny helper methods*, `lp` (LayoutParams) *inside
+  tiny helper methods*, `pp` (Paint) *inside tight drawing loops*. "Tiny"
+  means roughly ≤ 15 lines and a single obvious purpose. A 170-line
+  `show()` method with `colsLP`, `rowsLP`, `seekLP`, `spLP`, `btnLP`
+  doesn't qualify — use `colsLayoutParams` or spell it out as a descriptive
+  `widthRowLp` / `alphaRowLp` / etc.
+- **Don't stack abbreviations.** Compounds of two short tokens compound
+  their opacity: `srcGm`, `gmBmp`, `lblA`, `txtW`, `seekA` force the
+  reader to decode two pieces at once. Spell at least one side out:
+  `sourceGainmap`, `gainmapBitmap`, `alphaLabel`, `widthValueText`,
+  `alphaSeekBar`. This is especially important in files ABOUT that data
+  (a 350-line `CropEngine` with `cx`/`cy`/`cw`/`ch` locals is worse than
+  the same file with `centerX`/`centerY`/`cropW`/`cropH`, because the
+  abbreviations are the main content).
+- **Cross-file consistency.** Pick one name per concept and use it
+  everywhere. The image-axis midpoint is `imageMidX` / `imageMidY`, not
+  `imgMidX` in one file and `imageMidX` in another; the un-rotated
+  coordinate pair is `unrotatedX` / `unrotatedY`, not `unRotX` /
+  `unRotY`; the image's screen-center is `imageScreenCenterX` /
+  `imageScreenCenterY`, not `imgCx` here and `imgScreenCx` there.
+  When you touch a file that uses an older spelling, rename to the
+  canonical form in the same commit.
+
+### Acronyms
+
+Acronyms follow two different rules depending on where they appear:
+
+- **In comments (Javadoc and `//`):** write the acronym in its canonical
+  ALL-CAPS form — `EXIF`, `JPEG`, `PNG`, `HDR`, `UHDR`, `MPF`, `SEFT`,
+  `ICC`, `SAF`, `IFD`, `APP1`, `UI`, `API`, `OS`, `IO`, `AR`, `ID`, `URI`,
+  `URL`, `RGB`, `ARGB`, `YUV`, `DCT`, `MCU`, `ISO`, `GPS`, `HEIC`, `XML`,
+  `JSON`. Mixed-case canonical forms (`sRGB`, `NaN`) keep their official
+  casing. Plural forms use a lowercase trailing `s`: `IDs`, `JPEGs`, `URIs`.
+- **In code identifiers (class, method, variable, field names):** treat the
+  acronym as a regular word in camelCase / PascalCase. Only the first
+  letter is capitalised: `mediaStoreId`, `getExifOrientation`, `JpegSegment`,
+  `UiSync`, `uhdrInfo`, `safFileHelper`, `scanIfd`, `setupArSpinner`,
+  `styleArLabel`, `spinnerAr`. **Never** `mediaStoreID`, `scanIFD`, or
+  `getURL()` — those read as separate letters and break the
+  camelCase word boundary that IDEs and humans parse on.
+- **Constants (`SCREAMING_SNAKE_CASE`):** acronyms stay all-caps because
+  the whole name is — `JPEG_SOI`, `APP1_MAX_SEGMENT_BYTES`, `FORMAT_JPEG`,
+  `COL_ID`, `TIFF_HEADER_OFFSET`.
+- **Protocol / spec literals** in comments keep the casing the spec uses
+  even when it disagrees with this rule: `"Exif\0\0"` (the EXIF header
+  string), `eXIf` (PNG chunk name), `JPEGInterchangeFormat` (EXIF/TIFF
+  tag name). Leave them alone.
+
+### Collision avoidance
+
+When an outer scope already binds a short name (`left`, `top`, `width`,
+`height`…) and a renamed inner variable would shadow it, pick a qualified
+form instead: `pixelLeft`, `pixelTop`, `cellWidth`, `thumbHeight`. Do **not**
+fall back to one-letter abbreviations (`l`, `t`, `w`, `h`) to resolve the
+collision — that reintroduces exactly the opacity this rule exists to prevent.
+
+### Lambda and listener parameters
+
+Android listener callbacks have real parameter names — use them. Do not
+abbreviate. Concrete conventions used in this codebase:
+
+| Interface                         | Parameters                                            |
+| --------------------------------- | ----------------------------------------------------- |
+| `View.OnClickListener`            | `view` (or descriptive like `button`)                 |
+| `DialogInterface.OnClickListener` | `(dialog, which)`                                     |
+| `DialogInterface.OnCancelListener`| `dialog`                                              |
+| `CompoundButton.OnCheckedChange`  | `(button, isChecked)`                                 |
+| `SeekBar.OnSeekBarChangeListener` | `(seekBar, progress, fromUser)`                       |
+| `TextWatcher.beforeTextChanged`   | `(text, start, count, after)`                         |
+| `TextWatcher.onTextChanged`       | `(text, start, before, count)`                        |
+| `TextWatcher.afterTextChanged`    | `editable`                                            |
+| `OnApplyWindowInsetsListener`     | `(view, insets)` (use `view`, not `v`)                |
+
+Not `(d, w)`, `(b, c)`, `(sb, p, fu)`, `(s, a, b, c)`. The Android source
+uses the long names; match them.

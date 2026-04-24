@@ -2,7 +2,10 @@ package com.cropcenter.view;
 
 import android.app.AlertDialog;
 import android.content.Context;
+import android.content.res.ColorStateList;
+import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.CheckBox;
@@ -29,49 +32,143 @@ public class SettingsDialog
 	public static void show(Context ctx, CropState state)
 	{
 		float density = ctx.getResources().getDisplayMetrics().density;
-		int dp2 = (int) (2 * density);
 		int dp4 = (int) (4 * density);
-		int dp6 = (int) (6 * density);
 		int dp8 = (int) (8 * density);
-		int dp12 = (int) (12 * density);
 		int dp16 = (int) (16 * density);
 
 		GridConfig cfg = state.getGridConfig();
 
-		// Outer container with scroll for small screens
 		ScrollView scroll = new ScrollView(ctx);
-
 		LinearLayout root = new LinearLayout(ctx);
 		root.setOrientation(LinearLayout.VERTICAL);
 		root.setPadding(dp16, dp8, dp16, dp8);
 		scroll.addView(root);
 
-		// ─── GRID card ───
-		LinearLayout gridCard = newCard(ctx, density);
-		addCardTitle(gridCard, "Grid");
+		EditText[] dimensionInputs = new EditText[2];
+		root.addView(buildGridCard(ctx, state, cfg, density, dimensionInputs),
+			DialogCards.topMargin(dp4));
+		root.addView(buildPixelGridCard(ctx, state, cfg, density), DialogCards.topMargin(dp8));
+		root.addView(buildSelectionCard(ctx, state, cfg, density), DialogCards.topMargin(dp8));
+		root.addView(buildInfoCard(ctx, density), DialogCards.topMargin(dp8));
 
-		// Cols × Rows
-		LinearLayout crRow = row(ctx);
+		Runnable applyDimensions = () -> applyDimensionInputs(state,
+			dimensionInputs[0], dimensionInputs[1]);
+
+		new AlertDialog.Builder(ctx)
+			.setTitle("Settings")
+			.setView(scroll)
+			.setPositiveButton("Done", (dialog, which) -> applyDimensions.run())
+			.show();
+	}
+
+	/**
+	 * Commit the Columns / Rows EditText values to state, clamping each to [1, 50].
+	 * A blank / non-numeric field is silently ignored — this is called on OK, and
+	 * preset-chip taps already synced the inputs back in.
+	 */
+	private static void applyDimensionInputs(CropState state, EditText editCols, EditText editRows)
+	{
+		try
+		{
+			int newCols = Math.clamp(
+				Integer.parseInt(editCols.getText().toString().trim()), 1, 50);
+			int newRows = Math.clamp(
+				Integer.parseInt(editRows.getText().toString().trim()), 1, 50);
+			state.updateGridConfig(g -> g.withColumns(newCols).withRows(newRows));
+		}
+		catch (NumberFormatException ignored)
+		{
+		}
+	}
+
+	/**
+	 * Build the "Grid" card — column / row dimensions, presets, line color, line
+	 * width. Stores the Cols / Rows EditTexts in dimensionInputs so the OK button
+	 * can commit them.
+	 */
+	private static LinearLayout buildGridCard(Context ctx, CropState state, GridConfig cfg,
+		float density, EditText[] dimensionInputs)
+	{
+		int dp4 = (int) (4 * density);
+		int dp6 = (int) (6 * density);
+		int dp8 = (int) (8 * density);
+		int dp12 = (int) (12 * density);
+
+		LinearLayout card = DialogCards.newCard(ctx, density);
+		DialogCards.addCardTitle(card, "Grid");
+
+		// Cols × Rows input row
+		LinearLayout dimensionsRow = row(ctx);
 		EditText editCols = numInput(ctx, String.valueOf(cfg.columns()), density);
 		EditText editRows = numInput(ctx, String.valueOf(cfg.rows()), density);
-		addLabel(crRow, "Columns");
-		LinearLayout.LayoutParams colsLP = new LinearLayout.LayoutParams(
+		dimensionInputs[0] = editCols;
+		dimensionInputs[1] = editRows;
+
+		addLabel(dimensionsRow, "Columns");
+		LinearLayout.LayoutParams colsLayoutParams = new LinearLayout.LayoutParams(
 			(int) (48 * density), (int) (30 * density));
-		colsLP.leftMargin = dp8;
-		crRow.addView(editCols, colsLP);
+		colsLayoutParams.leftMargin = dp8;
+		dimensionsRow.addView(editCols, colsLayoutParams);
+
 		TextView times = new TextView(ctx);
 		times.setText("  \u00D7  ");
 		times.setTextColor(ThemeColors.SUBTEXT0);
 		times.setTextSize(13);
-		crRow.addView(times);
-		addLabel(crRow, "Rows");
-		LinearLayout.LayoutParams rowsLP = new LinearLayout.LayoutParams(
-			(int) (48 * density), (int) (30 * density));
-		rowsLP.leftMargin = dp8;
-		crRow.addView(editRows, rowsLP);
-		gridCard.addView(crRow, topMargin(dp6));
+		dimensionsRow.addView(times);
 
-		// Presets 2×2 through 8×8 — equal-weight chips that divide available width
+		addLabel(dimensionsRow, "Rows");
+		LinearLayout.LayoutParams rowsLayoutParams = new LinearLayout.LayoutParams(
+			(int) (48 * density), (int) (30 * density));
+		rowsLayoutParams.leftMargin = dp8;
+		dimensionsRow.addView(editRows, rowsLayoutParams);
+		card.addView(dimensionsRow, DialogCards.topMargin(dp6));
+
+		card.addView(buildPresetRow(ctx, state, editCols, editRows, density),
+			DialogCards.topMargin(dp8));
+
+		card.addView(colorRow(ctx, "Line color", cfg.color(), density, color ->
+			state.updateGridConfig(g -> g.withColor(color))), DialogCards.topMargin(dp12));
+
+		card.addView(buildWidthRow(ctx, state, cfg, density), DialogCards.topMargin(dp8));
+		return card;
+	}
+
+	/**
+	 * Build the "Pixel Grid" card — checkbox to toggle the per-pixel overlay + color
+	 * picker for the pixel-grid stroke.
+	 */
+	private static LinearLayout buildPixelGridCard(Context ctx, CropState state, GridConfig cfg,
+		float density)
+	{
+		int dp4 = (int) (4 * density);
+		int dp8 = (int) (8 * density);
+
+		LinearLayout card = DialogCards.newCard(ctx, density);
+		DialogCards.addCardTitle(card, "Pixel Grid");
+
+		CheckBox chkPixel = new CheckBox(ctx);
+		chkPixel.setText("Show at 6\u00D7 zoom or higher");
+		chkPixel.setTextSize(12);
+		chkPixel.setTextColor(ThemeColors.TEXT);
+		chkPixel.setChecked(cfg.showPixelGrid());
+		chkPixel.setButtonTintList(ColorStateList.valueOf(ThemeColors.MAUVE));
+		chkPixel.setOnCheckedChangeListener((button, isChecked) ->
+			state.updateGridConfig(g -> g.withShowPixelGrid(isChecked)));
+		card.addView(chkPixel, DialogCards.topMargin(dp4));
+
+		card.addView(colorRow(ctx, "Color", cfg.pixelGridColor(), density, color ->
+			state.updateGridConfig(g -> g.withPixelGridColor(color))), DialogCards.topMargin(dp8));
+		return card;
+	}
+
+	/**
+	 * Build the 2×2..8×8 equal-weight preset chip row. Tapping a chip syncs both the
+	 * GridConfig and the Cols / Rows EditTexts (so the user sees the new values).
+	 */
+	private static LinearLayout buildPresetRow(Context ctx, CropState state,
+		EditText editCols, EditText editRows, float density)
+	{
+		int dp4 = (int) (4 * density);
 		int[][] presets = { { 2, 2 }, { 3, 3 }, { 4, 4 }, { 5, 5 }, { 6, 6 }, { 7, 7 }, { 8, 8 } };
 		LinearLayout presetRow = new LinearLayout(ctx);
 		presetRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -95,25 +192,76 @@ public class SettingsDialog
 			}
 			presetRow.addView(btn, lp);
 		}
-		gridCard.addView(presetRow, topMargin(dp8));
+		return presetRow;
+	}
 
-		gridCard.addView(colorRow(ctx, "Line color", cfg.color(), density, color ->
-			state.updateGridConfig(g -> g.withColor(color))), topMargin(dp12));
+	/**
+	 * Build the "Selection & Paint" card — shared color for selection markers,
+	 * polygon fill, and horizon paint strokes.
+	 */
+	private static LinearLayout buildSelectionCard(Context ctx, CropState state, GridConfig cfg,
+		float density)
+	{
+		int dp4 = (int) (4 * density);
+		int dp8 = (int) (8 * density);
 
-		LinearLayout wRow = row(ctx);
-		addLabel(wRow, "Width");
-		SeekBar wSeek = new SeekBar(ctx);
-		wSeek.setMax(20);
-		wSeek.setProgress((int) cfg.lineWidth());
-		TextView txtW = valueChip(ctx, String.valueOf((int) cfg.lineWidth()), density);
-		wSeek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener()
+		LinearLayout card = DialogCards.newCard(ctx, density);
+		DialogCards.addCardTitle(card, "Selection & Paint");
+
+		TextView selNote = new TextView(ctx);
+		selNote.setText("Color for selection points, polygon fill, and horizon paint.");
+		selNote.setTextSize(11);
+		selNote.setTextColor(ThemeColors.OVERLAY0);
+		card.addView(selNote, DialogCards.topMargin(dp4));
+
+		card.addView(colorRow(ctx, "Color", cfg.selectionColor(), density,
+			ColorPickerDialog.PALETTE_TRANSLUCENT, color ->
+				state.updateGridConfig(g -> g.withSelectionColor(color))), DialogCards.topMargin(dp8));
+		return card;
+	}
+
+	/**
+	 * Build the "Build" info card — shows the BUILD_TIME constant from BuildConfig so
+	 * testers can verify which build is running without Logcat.
+	 */
+	private static LinearLayout buildInfoCard(Context ctx, float density)
+	{
+		int dp4 = (int) (4 * density);
+		LinearLayout card = DialogCards.newCard(ctx, density);
+		DialogCards.addCardTitle(card, "Build");
+
+		TextView buildTime = new TextView(ctx);
+		buildTime.setText("Version: " + BuildConfig.BUILD_TIME);
+		buildTime.setTextSize(11);
+		buildTime.setTextColor(ThemeColors.SUBTEXT0);
+		buildTime.setTypeface(Typeface.MONOSPACE);
+		card.addView(buildTime, DialogCards.topMargin(dp4));
+		return card;
+	}
+
+	/**
+	 * Build the "Width" seek-bar row — user drags to pick a grid stroke width (1-20
+	 * image pixels). The zero position clamps up to 1 so the grid never invisible.
+	 */
+	private static LinearLayout buildWidthRow(Context ctx, CropState state, GridConfig cfg,
+		float density)
+	{
+		int dp8 = (int) (8 * density);
+		LinearLayout widthRow = row(ctx);
+		addLabel(widthRow, "Width");
+
+		SeekBar widthSeekBar = new SeekBar(ctx);
+		widthSeekBar.setMax(20);
+		widthSeekBar.setProgress((int) cfg.lineWidth());
+		TextView widthValueText = valueChip(ctx, String.valueOf((int) cfg.lineWidth()), density);
+		widthSeekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener()
 		{
 			@Override
 			public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser)
 			{
 				int clamped = Math.max(1, progress);
 				state.updateGridConfig(g -> g.withLineWidth(clamped));
-				txtW.setText(String.valueOf(clamped));
+				widthValueText.setText(String.valueOf(clamped));
 			}
 
 			@Override
@@ -122,97 +270,16 @@ public class SettingsDialog
 			@Override
 			public void onStopTrackingTouch(SeekBar seekBar) {}
 		});
-		LinearLayout.LayoutParams seekLP = new LinearLayout.LayoutParams(
+		LinearLayout.LayoutParams seekBarLayoutParams = new LinearLayout.LayoutParams(
 			0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-		seekLP.leftMargin = dp8;
-		seekLP.rightMargin = dp8;
-		wRow.addView(wSeek, seekLP);
-		wRow.addView(txtW);
-		gridCard.addView(wRow, topMargin(dp8));
-
-		root.addView(gridCard, topMargin(dp4));
-
-		// ─── PIXEL GRID card ───
-		LinearLayout pixelCard = newCard(ctx, density);
-		addCardTitle(pixelCard, "Pixel Grid");
-
-		CheckBox chkPixel = new CheckBox(ctx);
-		chkPixel.setText("Show at 6\u00D7 zoom or higher");
-		chkPixel.setTextSize(12);
-		chkPixel.setTextColor(ThemeColors.TEXT);
-		chkPixel.setChecked(cfg.showPixelGrid());
-		chkPixel.setButtonTintList(android.content.res.ColorStateList.valueOf(ThemeColors.MAUVE));
-		chkPixel.setOnCheckedChangeListener((button, isChecked) ->
-			state.updateGridConfig(g -> g.withShowPixelGrid(isChecked)));
-		pixelCard.addView(chkPixel, topMargin(dp4));
-
-		pixelCard.addView(colorRow(ctx, "Color", cfg.pixelGridColor(), density, color ->
-			state.updateGridConfig(g -> g.withPixelGridColor(color))), topMargin(dp8));
-
-		root.addView(pixelCard, topMargin(dp8));
-
-		// ─── SELECTION / PAINT card ───
-		LinearLayout selCard = newCard(ctx, density);
-		addCardTitle(selCard, "Selection & Paint");
-
-		TextView selNote = new TextView(ctx);
-		selNote.setText("Color for selection points, polygon fill, and horizon paint.");
-		selNote.setTextSize(11);
-		selNote.setTextColor(ThemeColors.OVERLAY0);
-		selCard.addView(selNote, topMargin(dp4));
-
-		selCard.addView(colorRow(ctx, "Color", cfg.selectionColor(), density,
-			ColorPickerDialog.PALETTE_TRANSLUCENT, color ->
-				state.updateGridConfig(g -> g.withSelectionColor(color))), topMargin(dp8));
-
-		root.addView(selCard, topMargin(dp8));
-
-		// ─── BUILD INFO card ───
-		LinearLayout buildCard = newCard(ctx, density);
-		addCardTitle(buildCard, "Build");
-
-		TextView buildTime = new TextView(ctx);
-		buildTime.setText("Version: " + BuildConfig.BUILD_TIME);
-		buildTime.setTextSize(11);
-		buildTime.setTextColor(ThemeColors.SUBTEXT0);
-		buildTime.setTypeface(android.graphics.Typeface.MONOSPACE);
-		buildCard.addView(buildTime, topMargin(dp4));
-
-		root.addView(buildCard, topMargin(dp8));
-
-		Runnable apply = () ->
-		{
-			try
-			{
-				int newCols = Math.clamp(
-					Integer.parseInt(editCols.getText().toString().trim()), 1, 50);
-				int newRows = Math.clamp(
-					Integer.parseInt(editRows.getText().toString().trim()), 1, 50);
-				state.updateGridConfig(g -> g.withColumns(newCols).withRows(newRows));
-			}
-			catch (NumberFormatException ignored)
-			{
-			}
-		};
-
-		new AlertDialog.Builder(ctx)
-			.setTitle("Settings")
-			.setView(scroll)
-			.setPositiveButton("Done", (dialog, which) -> apply.run())
-			.show();
+		seekBarLayoutParams.leftMargin = dp8;
+		seekBarLayoutParams.rightMargin = dp8;
+		widthRow.addView(widthSeekBar, seekBarLayoutParams);
+		widthRow.addView(widthValueText);
+		return widthRow;
 	}
 
 	// ── UI building helpers ──
-
-	private static void addCardTitle(LinearLayout card, String text)
-	{
-		TextView tv = new TextView(card.getContext());
-		tv.setText(text);
-		tv.setTextSize(13);
-		tv.setTextColor(ThemeColors.MAUVE);
-		tv.setTypeface(tv.getTypeface(), android.graphics.Typeface.BOLD);
-		card.addView(tv);
-	}
 
 	private static void addLabel(LinearLayout parent, String text)
 	{
@@ -261,8 +328,8 @@ public class SettingsDialog
 		row.addView(lbl);
 
 		View spacer = new View(ctx);
-		LinearLayout.LayoutParams spLP = new LinearLayout.LayoutParams(0, 1, 1f);
-		row.addView(spacer, spLP);
+		LinearLayout.LayoutParams spacerLayoutParams = new LinearLayout.LayoutParams(0, 1, 1f);
+		row.addView(spacer, spacerLayoutParams);
 
 		// Swatch with rounded corners + subtle border
 		View swatch = new View(ctx);
@@ -281,10 +348,10 @@ public class SettingsDialog
 		btn.setPadding((int) (10 * density), (int) (6 * density),
 			(int) (10 * density), (int) (6 * density));
 		btn.setGravity(Gravity.CENTER);
-		LinearLayout.LayoutParams btnLP = new LinearLayout.LayoutParams(
+		LinearLayout.LayoutParams editBtnLayoutParams = new LinearLayout.LayoutParams(
 			LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-		btnLP.leftMargin = (int) (8 * density);
-		row.addView(btn, btnLP);
+		editBtnLayoutParams.leftMargin = (int) (8 * density);
+		row.addView(btn, editBtnLayoutParams);
 
 		View.OnClickListener openPicker = view ->
 				ColorPickerDialog.show(ctx, tracked[0], palette, color ->
@@ -299,22 +366,6 @@ public class SettingsDialog
 		return row;
 	}
 
-	/**
-	 * Card container with rounded background.
-	 */
-	private static LinearLayout newCard(Context ctx, float density)
-	{
-		LinearLayout card = new LinearLayout(ctx);
-		card.setOrientation(LinearLayout.VERTICAL);
-		GradientDrawable bg = new GradientDrawable();
-		bg.setColor(ThemeColors.SURFACE0);
-		bg.setCornerRadius(8 * density);
-		card.setBackground(bg);
-		int pad = (int) (12 * density);
-		card.setPadding(pad, (int) (10 * density), pad, (int) (10 * density));
-		return card;
-	}
-
 	private static EditText numInput(Context ctx, String val, float density)
 	{
 		EditText edit = new EditText(ctx);
@@ -322,7 +373,7 @@ public class SettingsDialog
 		edit.setTextSize(13);
 		edit.setGravity(Gravity.CENTER);
 		edit.setSingleLine(true);
-		edit.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+		edit.setInputType(InputType.TYPE_CLASS_NUMBER);
 		edit.setTextColor(ThemeColors.TEXT);
 		GradientDrawable bg = new GradientDrawable();
 		bg.setColor(ThemeColors.SURFACE1);
@@ -339,14 +390,6 @@ public class SettingsDialog
 		row.setOrientation(LinearLayout.HORIZONTAL);
 		row.setGravity(Gravity.CENTER_VERTICAL);
 		return row;
-	}
-
-	private static LinearLayout.LayoutParams topMargin(int margin)
-	{
-		LinearLayout.LayoutParams layoutParams = new LinearLayout.LayoutParams(
-			LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-		layoutParams.topMargin = margin;
-		return layoutParams;
 	}
 
 	/**

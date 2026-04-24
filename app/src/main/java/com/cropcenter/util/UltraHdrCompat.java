@@ -7,11 +7,13 @@ import android.graphics.ColorSpace;
 import android.graphics.Gainmap;
 import android.graphics.Matrix;
 import android.graphics.Paint;
+import android.os.Process;
 import android.util.Log;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.IOException;
 
 /**
  * Ultra HDR support using Android 14+ Gainmap API.
@@ -39,130 +41,41 @@ public final class UltraHdrCompat
 		float userRotation, int exifOrientation)
 	{
 		Bitmap current = null;
-		File tmp = null;
+		Bitmap output = null;
+		Bitmap gainmapOutput = null;
 		try
 		{
-			tmp = new File(cacheDir, "hdr_src.jpg");
-			try (FileOutputStream fos = new FileOutputStream(tmp))
-			{
-				fos.write(originalBytes);
-			}
-			BitmapFactory.Options opts = new BitmapFactory.Options();
-			opts.inPreferredColorSpace = ColorSpace.get(ColorSpace.Named.DISPLAY_P3);
-			current = BitmapFactory.decodeFile(tmp.getAbsolutePath(), opts);
-			tmp.delete();
-			tmp = null;
-
+			current = decodeHdrBitmap(originalBytes, cacheDir);
 			if (current == null || !current.hasGainmap())
 			{
 				Log.d(TAG, "No gainmap in source");
 				return null;
 			}
-
 			Log.d(TAG, "Decoded: " + current.getWidth() + "x" + current.getHeight()
 				+ " hasGm=" + current.hasGainmap()
 				+ " expected=" + imgW + "x" + imgH
 				+ " exif=" + exifOrientation);
 
-			// BitmapFactory.decodeFile does not auto-apply EXIF orientation. For orientations
-			// that swap dimensions (5/6/7/8) the previous heuristic "autoRotated = decoded W/H
-			// matches display W/H" worked incidentally. But for orientations 2/3/4 — mirror,
-			// 180°, vertical flip — the decoded dimensions equal the display dimensions even
-			// though the pixels still need the EXIF matrix, so the heuristic silently
-			// skipped the transform and the exported HDR primary was rendered un-mirrored /
-			// un-flipped. Always apply the matrix when orientation > 1. Use filter=false:
-			// EXIF transforms are pure mirror / 90° / 180° operations — lossless integer
-			// pixel remaps — and bilinear would only add softening.
-			if (exifOrientation > 1)
-			{
-				Matrix matrix = BitmapUtils.orientationMatrix(exifOrientation);
-				Bitmap rotated = Bitmap.createBitmap(current, 0, 0,
-					current.getWidth(), current.getHeight(), matrix, false);
-				if (rotated != current)
-				{
-					current.recycle();
-					current = rotated;
-				}
-				Log.d(TAG, "EXIF applied: " + current.getWidth() + "x" + current.getHeight()
-					+ " hasGm=" + current.hasGainmap());
-			}
+			current = applyExifOrientation(current, exifOrientation);
 
 			// Capture gainmap before the rendering step may drop it.
-			Gainmap srcGm = current.hasGainmap() ? current.getGainmap() : null;
-			Bitmap gmBmp = srcGm != null ? srcGm.getGainmapContents() : null;
+			Gainmap sourceGainmap = current.hasGainmap() ? current.getGainmap() : null;
+			Bitmap gainmapBitmap = sourceGainmap != null ? sourceGainmap.getGainmapContents() : null;
 
 			// Crop origin — matches CropExporter.export() exactly.
 			float srcX = centerX - cropW / 2f;
 			float srcY = centerY - cropH / 2f;
 
-			// Render primary via shared BitmapUtils.drawCropped — identical to CropExporter.
-			Bitmap output = Bitmap.createBitmap(cropW, cropH, Bitmap.Config.ARGB_8888, true,
-				ColorSpace.get(ColorSpace.Named.DISPLAY_P3));
-			Canvas canvas = new Canvas(output);
-			Paint paint = new Paint(Paint.FILTER_BITMAP_FLAG);
-			BitmapUtils.drawCropped(canvas, current, srcX, srcY, userRotation, paint);
+			output = renderPrimary(current, srcX, srcY, cropW, cropH, userRotation);
 
-			// Apply the same transform to the gain map so primary + gainmap stay aligned.
-			if (srcGm != null && gmBmp != null)
+			if (sourceGainmap != null && gainmapBitmap != null)
 			{
-				float gmScaleX = (float) gmBmp.getWidth() / current.getWidth();
-				float gmScaleY = (float) gmBmp.getHeight() / current.getHeight();
-				int gmOutW = Math.max(1, Math.round(cropW * gmScaleX));
-				int gmOutH = Math.max(1, Math.round(cropH * gmScaleY));
-
-				Bitmap.Config gmConfig = gmBmp.getConfig() != null
-					? gmBmp.getConfig()
-					: Bitmap.Config.ARGB_8888;
-				Bitmap gmOutput = Bitmap.createBitmap(gmOutW, gmOutH, gmConfig);
-				Canvas gmCanvas = new Canvas(gmOutput);
-				Paint gmPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
-
-				float gmDrawX = -srcX * gmScaleX;
-				float gmDrawY = -srcY * gmScaleY;
-
-				if (Math.abs(userRotation) >= BitmapUtils.ROTATION_EPSILON)
-				{
-					gmCanvas.save();
-					gmCanvas.rotate(userRotation,
-						gmDrawX + gmBmp.getWidth() / 2f,
-						gmDrawY + gmBmp.getHeight() / 2f);
-					// Cardinal rotations: disable bilinear so nearest-neighbor reads
-					// pixels verbatim — matches the primary path and keeps the gain
-					// map aligned pixel-for-pixel with the primary.
-					if (BitmapUtils.isCardinalRotation(userRotation))
-					{
-						Paint gmNearest = new Paint(gmPaint);
-						gmNearest.setFilterBitmap(false);
-						gmCanvas.drawBitmap(gmBmp, gmDrawX, gmDrawY, gmNearest);
-					}
-					else
-					{
-						gmCanvas.drawBitmap(gmBmp, gmDrawX, gmDrawY, gmPaint);
-					}
-					gmCanvas.restore();
-				}
-				else
-				{
-					gmCanvas.drawBitmap(gmBmp, gmDrawX, gmDrawY, gmPaint);
-				}
-
-				Gainmap newGm = new Gainmap(gmOutput);
-				float[] ratioMin = srcGm.getRatioMin();
-				float[] ratioMax = srcGm.getRatioMax();
-				float[] gamma = srcGm.getGamma();
-				float[] epsilonSdr = srcGm.getEpsilonSdr();
-				float[] epsilonHdr = srcGm.getEpsilonHdr();
-				newGm.setRatioMin(ratioMin[0], ratioMin[1], ratioMin[2]);
-				newGm.setRatioMax(ratioMax[0], ratioMax[1], ratioMax[2]);
-				newGm.setGamma(gamma[0], gamma[1], gamma[2]);
-				newGm.setEpsilonSdr(epsilonSdr[0], epsilonSdr[1], epsilonSdr[2]);
-				newGm.setEpsilonHdr(epsilonHdr[0], epsilonHdr[1], epsilonHdr[2]);
-				newGm.setDisplayRatioForFullHdr(srcGm.getDisplayRatioForFullHdr());
-				newGm.setMinDisplayRatioForHdrTransition(srcGm.getMinDisplayRatioForHdrTransition());
-
-				output.setGainmap(newGm);
-				Log.d(TAG, "Gainmap rendered: " + gmOutW + "x" + gmOutH
-					+ " (scale " + gmScaleX + "x" + gmScaleY + ")");
+				gainmapOutput = renderGainmap(sourceGainmap, gainmapBitmap,
+					current.getWidth(), current.getHeight(),
+					srcX, srcY, cropW, cropH, userRotation);
+				Gainmap newGainmap = new Gainmap(gainmapOutput);
+				copyGainmapMetadata(sourceGainmap, newGainmap);
+				output.setGainmap(newGainmap);
 			}
 
 			current.recycle();
@@ -171,8 +84,6 @@ public final class UltraHdrCompat
 			ByteArrayOutputStream bos = new ByteArrayOutputStream();
 			output.compress(Bitmap.CompressFormat.JPEG, quality, bos);
 			byte[] result = bos.toByteArray();
-			output.recycle();
-
 			if (containsHdrgm(result))
 			{
 				Log.d(TAG, "Ultra HDR: " + result.length + " bytes");
@@ -188,15 +99,187 @@ public final class UltraHdrCompat
 		}
 		finally
 		{
+			// Recycle every intermediate bitmap on every exit — the success path needs output
+			// recycled after compress, the exception path needs ALL of them to avoid native
+			// leaks. Null checks guard against partial initialization.
 			if (current != null)
 			{
 				current.recycle();
 			}
-			if (tmp != null)
+			if (gainmapOutput != null)
 			{
-				tmp.delete();
+				gainmapOutput.recycle();
+			}
+			if (output != null)
+			{
+				output.recycle();
 			}
 		}
+	}
+
+	/**
+	 * Decode the source JPEG into a Bitmap that preserves its gainmap. BitmapFactory
+	 * reads HDR gainmaps from files (not ByteArrays), so we write the bytes to a
+	 * cache file first. The cache file is deleted as soon as decodeFile returns,
+	 * whether it produced a bitmap or not — no "leaked cache file on decode failure"
+	 * path.
+	 */
+	private static Bitmap decodeHdrBitmap(byte[] originalBytes, File cacheDir) throws IOException
+	{
+		// Unique filename so concurrent exports never collide on the cache path. Single-
+		// threaded today; suffix is cheap insurance against future parallelism.
+		File hdrSourceCache = new File(cacheDir,
+			"hdr_src_" + Process.myPid() + "_" + System.nanoTime() + ".jpg");
+		try
+		{
+			try (FileOutputStream fos = new FileOutputStream(hdrSourceCache))
+			{
+				fos.write(originalBytes);
+			}
+			BitmapFactory.Options opts = new BitmapFactory.Options();
+			opts.inPreferredColorSpace = ColorSpace.get(ColorSpace.Named.DISPLAY_P3);
+			return BitmapFactory.decodeFile(hdrSourceCache.getAbsolutePath(), opts);
+		}
+		finally
+		{
+			hdrSourceCache.delete();
+		}
+	}
+
+	/**
+	 * Apply EXIF orientation to the decoded bitmap. BitmapFactory.decodeFile does NOT
+	 * auto-apply EXIF orientation, and the previous heuristic "autoRotated = decoded
+	 * dimensions match display dimensions" silently skipped orientations 2/3/4 (mirror,
+	 * 180°, vertical flip) because those don't swap W/H even though they still need
+	 * the matrix. Always apply when orientation > 1. Uses filter=false: EXIF
+	 * transforms are pure mirror / 90° / 180° integer-pixel remaps — lossless, and
+	 * bilinear would only add softening. Returns the new bitmap (may be the same
+	 * reference when the matrix is identity); recycles the old one if it differs.
+	 */
+	private static Bitmap applyExifOrientation(Bitmap current, int exifOrientation)
+	{
+		if (exifOrientation <= 1)
+		{
+			return current;
+		}
+		Matrix matrix = BitmapUtils.orientationMatrix(exifOrientation);
+		Bitmap rotated = Bitmap.createBitmap(current, 0, 0,
+			current.getWidth(), current.getHeight(), matrix, false);
+		if (rotated != current)
+		{
+			current.recycle();
+		}
+		Log.d(TAG, "EXIF applied: " + rotated.getWidth() + "x" + rotated.getHeight()
+			+ " hasGm=" + rotated.hasGainmap());
+		return rotated;
+	}
+
+	/**
+	 * Render the primary output bitmap via BitmapUtils.drawCropped so the result is
+	 * byte-identical to what CropExporter produces — crucial because the primary
+	 * bytes shipped to the user come from CropExporter, while the gainmap alignment
+	 * depends on UltraHdrCompat's primary matching.
+	 */
+	private static Bitmap renderPrimary(Bitmap current, float srcX, float srcY,
+		int cropW, int cropH, float userRotation)
+	{
+		Bitmap output = Bitmap.createBitmap(cropW, cropH, Bitmap.Config.ARGB_8888, true,
+			ColorSpace.get(ColorSpace.Named.DISPLAY_P3));
+		Canvas canvas = new Canvas(output);
+		Paint paint = new Paint(Paint.FILTER_BITMAP_FLAG);
+		BitmapUtils.drawCropped(canvas, current, srcX, srcY, userRotation, paint);
+		return output;
+	}
+
+	/**
+	 * Render the cropped + rotated gain-map bitmap, spatially aligned with the
+	 * primary render. Scales the draw offset by gainmap/primary ratio so the gainmap
+	 * subregion lines up pixel-for-pixel with the primary crop (at the gainmap's
+	 * native resolution, which is typically lower than the primary's).
+	 */
+	private static Bitmap renderGainmap(Gainmap sourceGainmap, Bitmap gainmapBitmap,
+		int primaryW, int primaryH, float srcX, float srcY, int cropW, int cropH,
+		float userRotation)
+	{
+		float gainmapScaleX = (float) gainmapBitmap.getWidth() / primaryW;
+		float gainmapScaleY = (float) gainmapBitmap.getHeight() / primaryH;
+		int gainmapOutputW = Math.max(1, Math.round(cropW * gainmapScaleX));
+		int gainmapOutputH = Math.max(1, Math.round(cropH * gainmapScaleY));
+
+		Bitmap.Config gainmapConfig = gainmapBitmap.getConfig() != null
+			? gainmapBitmap.getConfig()
+			: Bitmap.Config.ARGB_8888;
+		Bitmap gainmapOutput = Bitmap.createBitmap(
+			gainmapOutputW, gainmapOutputH, gainmapConfig);
+		Canvas gainmapCanvas = new Canvas(gainmapOutput);
+		Paint gainmapPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
+
+		float gainmapDrawX = -srcX * gainmapScaleX;
+		float gainmapDrawY = -srcY * gainmapScaleY;
+
+		if (Math.abs(userRotation) >= BitmapUtils.ROTATION_EPSILON)
+		{
+			drawGainmapRotated(gainmapCanvas, gainmapBitmap, gainmapDrawX, gainmapDrawY,
+				userRotation, gainmapPaint);
+		}
+		else
+		{
+			gainmapCanvas.drawBitmap(gainmapBitmap, gainmapDrawX, gainmapDrawY, gainmapPaint);
+		}
+
+		Log.d(TAG, "Gainmap rendered: " + gainmapOutputW + "x" + gainmapOutputH
+			+ " (scale " + gainmapScaleX + "x" + gainmapScaleY + ")");
+		return gainmapOutput;
+	}
+
+	/**
+	 * Rotated gain-map draw. Cardinal rotations at integer-aligned draw offsets are
+	 * lossless integer-pixel remaps — disable bilinear so nearest-neighbor reads
+	 * source pixels verbatim. Fractional draw offsets need bilinear to match the
+	 * primary path (which bilinear-samples at sub-pixel offsets).
+	 */
+	private static void drawGainmapRotated(Canvas gainmapCanvas, Bitmap gainmapBitmap,
+		float gainmapDrawX, float gainmapDrawY, float userRotation, Paint gainmapPaint)
+	{
+		gainmapCanvas.save();
+		gainmapCanvas.rotate(userRotation,
+			gainmapDrawX + gainmapBitmap.getWidth() / 2f,
+			gainmapDrawY + gainmapBitmap.getHeight() / 2f);
+		boolean integerAligned = gainmapDrawX == Math.floor(gainmapDrawX)
+			&& gainmapDrawY == Math.floor(gainmapDrawY);
+		if (BitmapUtils.isCardinalRotation(userRotation) && integerAligned)
+		{
+			Paint nearestPaint = new Paint(gainmapPaint);
+			nearestPaint.setFilterBitmap(false);
+			gainmapCanvas.drawBitmap(gainmapBitmap, gainmapDrawX, gainmapDrawY, nearestPaint);
+		}
+		else
+		{
+			gainmapCanvas.drawBitmap(gainmapBitmap, gainmapDrawX, gainmapDrawY, gainmapPaint);
+		}
+		gainmapCanvas.restore();
+	}
+
+	/**
+	 * Copy the HDR tone-mapping parameters (ratios, gamma, epsilon, display-ratio
+	 * thresholds) from source to target Gainmap. Preserving these verbatim is what
+	 * keeps the cropped HDR looking identical to the source at the kept pixels.
+	 */
+	private static void copyGainmapMetadata(Gainmap sourceGainmap, Gainmap newGainmap)
+	{
+		float[] ratioMin = sourceGainmap.getRatioMin();
+		float[] ratioMax = sourceGainmap.getRatioMax();
+		float[] gamma = sourceGainmap.getGamma();
+		float[] epsilonSdr = sourceGainmap.getEpsilonSdr();
+		float[] epsilonHdr = sourceGainmap.getEpsilonHdr();
+		newGainmap.setRatioMin(ratioMin[0], ratioMin[1], ratioMin[2]);
+		newGainmap.setRatioMax(ratioMax[0], ratioMax[1], ratioMax[2]);
+		newGainmap.setGamma(gamma[0], gamma[1], gamma[2]);
+		newGainmap.setEpsilonSdr(epsilonSdr[0], epsilonSdr[1], epsilonSdr[2]);
+		newGainmap.setEpsilonHdr(epsilonHdr[0], epsilonHdr[1], epsilonHdr[2]);
+		newGainmap.setDisplayRatioForFullHdr(sourceGainmap.getDisplayRatioForFullHdr());
+		newGainmap.setMinDisplayRatioForHdrTransition(
+			sourceGainmap.getMinDisplayRatioForHdrTransition());
 	}
 
 	/**

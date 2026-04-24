@@ -46,19 +46,19 @@ public final class BitmapUtils
 	 * around the image center. Used by both CropExporter and UltraHdrCompat to ensure identical
 	 * rendering.
 	 *
-	 * The zero-rotation fast path reduces srcX/srcY to integer pixel coordinates via Math.floor
-	 * and uses an integer-rect blit. That is lossless under the pixel-alignment invariant
-	 * documented in HANDOFF.md — cropCenter's parity is always matched to cropW/cropH so
-	 * srcX = centerX − cropW/2 is already a whole-pixel value on entry. Callers that supply a
-	 * half-integer srcX therefore violate the invariant upstream; the floor is defensive, not
-	 * lossy in normal operation.
+	 * srcX / srcY are continuous-float image coordinates (= centerX − cropW/2f etc.). When
+	 * they are integer-exact, the zero-rotation path takes an integer Rect-to-Rect blit that
+	 * bypasses any filter-bitmap softening. When they are fractional (rotated selection, fine
+	 * rotation drag) the zero-rotation path falls back to a float-offset drawBitmap which
+	 * bilinear-samples sub-pixel positions — matching what the rotated path does. The rotated
+	 * path always uses the float offset, so it handles fractional input natively.
 	 *
 	 * @param canvas   output canvas (cropW x cropH)
 	 * @param src      source bitmap in display orientation
-	 * @param srcX     crop origin X = centerX - cropW/2 (integer per parity invariant)
-	 * @param srcY     crop origin Y = centerY - cropH/2 (integer per parity invariant)
+	 * @param srcX     crop origin X = centerX − cropW/2f (may be fractional)
+	 * @param srcY     crop origin Y = centerY − cropH/2f (may be fractional)
 	 * @param rotation rotation in degrees (0 = no rotation)
-	 * @param paint    paint for bitmap drawing
+	 * @param paint    paint for bitmap drawing (FILTER_BITMAP_FLAG controls sub-pixel sampling)
 	 */
 	public static void drawCropped(Canvas canvas, Bitmap src, float srcX, float srcY,
 		float rotation, Paint paint)
@@ -72,13 +72,15 @@ public final class BitmapUtils
 				drawX + src.getWidth() / 2f,
 				drawY + src.getHeight() / 2f);
 
-			// Cardinal rotations (±90°, 180°, ±270°) are pure integer-pixel remaps
-			// at the integer / half-integer pivots the parity invariant produces.
-			// Disable bilinear filtering so nearest-neighbor sampling inherits
-			// source pixels verbatim rather than cross-blending adjacent ones.
-			// Non-cardinal rotations require bilinear — interpolation is inherent
-			// to the geometry.
-			if (isCardinalRotation(rotation))
+			// Cardinal rotations (±90°, 180°, ±270°) are pure integer-pixel remaps ONLY when
+			// srcX / srcY are also integer-aligned — in that case, disable bilinear filtering
+			// so nearest-neighbor sampling inherits source pixels verbatim. Fractional srcX /
+			// srcY mean dst pixels end up at sub-pixel positions relative to the canvas grid,
+			// so we need bilinear to match the preview (which draws at the same fractional
+			// offset). Non-cardinal rotations always bilinear-sample — interpolation is
+			// inherent to the geometry.
+			boolean integerAligned = srcX == Math.floor(srcX) && srcY == Math.floor(srcY);
+			if (isCardinalRotation(rotation) && integerAligned)
 			{
 				Paint nearestPaint = new Paint(paint);
 				nearestPaint.setFilterBitmap(false);
@@ -90,12 +92,15 @@ public final class BitmapUtils
 			}
 			canvas.restore();
 		}
-		else
+		else if (srcX == Math.floor(srcX) && srcY == Math.floor(srcY))
 		{
+			// Integer-aligned: Rect-to-Rect blit produces a lossless pixel copy regardless of
+			// the paint's filter flag. Used when the crop has snapped to pixel boundaries
+			// (fit-to-view, rotation = 0 on a cardinal-placed selection, etc.).
 			int cropW = canvas.getWidth();
 			int cropH = canvas.getHeight();
-			int intSrcX = (int) Math.floor(srcX);
-			int intSrcY = (int) Math.floor(srcY);
+			int intSrcX = (int) srcX;
+			int intSrcY = (int) srcY;
 			int visibleLeft   = Math.max(0, intSrcX);
 			int visibleTop    = Math.max(0, intSrcY);
 			int visibleRight  = Math.min(src.getWidth(), intSrcX + cropW);
@@ -107,6 +112,14 @@ public final class BitmapUtils
 					visibleRight - intSrcX, visibleBottom - intSrcY);
 				canvas.drawBitmap(src, srcRect, dstRect, paint);
 			}
+		}
+		else
+		{
+			// Fractional srcX / srcY (continuous-float crop origin during rotation or
+			// rotated-selection placement). Draw at the float offset so Android's renderer
+			// bilinear-samples at sub-pixel positions — matches the rotated path above and
+			// matches what the editor preview renders via the same crop origin.
+			canvas.drawBitmap(src, drawX, drawY, paint);
 		}
 	}
 

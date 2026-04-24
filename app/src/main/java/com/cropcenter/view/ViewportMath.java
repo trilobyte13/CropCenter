@@ -3,10 +3,12 @@ package com.cropcenter.view;
 import android.view.View;
 
 import com.cropcenter.model.CropState;
+import com.cropcenter.util.BitmapUtils;
+import com.cropcenter.util.RotationMath;
 
 /**
  * Viewport coordinate transforms + zoom/pan state for CropEditorView. Owns the baseScale,
- * viewport origin (vpX / vpY), and zoom factor. All conversions assume the image is centered
+ * viewport origin (viewportX / viewportY), and zoom factor. All conversions assume the image is centered
  * in the view at the viewport origin; screenToImagePixel additionally un-rotates for
  * CropState's rotation so callers can tap-select inside a rotated image.
  *
@@ -21,8 +23,8 @@ final class ViewportMath
 	private final View view;
 
 	private float baseScale = 1f;
-	private float vpX = 0; // viewport origin in image space (X)
-	private float vpY = 0; // viewport origin in image space (Y)
+	private float viewportX = 0; // viewport origin in image space (X)
+	private float viewportY = 0; // viewport origin in image space (Y)
 	private float zoom = 1f;
 
 	ViewportMath(View view)
@@ -31,7 +33,7 @@ final class ViewportMath
 	}
 
 	/**
-	 * Clamp vpX / vpY so the viewport stays inside the image bounds. If the image is smaller
+	 * Clamp viewportX / viewportY so the viewport stays inside the image bounds. If the image is smaller
 	 * than the visible window on an axis, that axis is centered.
 	 */
 	void clampViewport(CropState state)
@@ -48,20 +50,20 @@ final class ViewportMath
 
 		if (visibleW >= imgW)
 		{
-			vpX = imgW / 2f;
+			viewportX = imgW / 2f;
 		}
 		else
 		{
-			vpX = Math.clamp(vpX, visibleW / 2f, imgW - visibleW / 2f);
+			viewportX = Math.clamp(viewportX, visibleW / 2f, imgW - visibleW / 2f);
 		}
 
 		if (visibleH >= imgH)
 		{
-			vpY = imgH / 2f;
+			viewportY = imgH / 2f;
 		}
 		else
 		{
-			vpY = Math.clamp(vpY, visibleH / 2f, imgH - visibleH / 2f);
+			viewportY = Math.clamp(viewportY, visibleH / 2f, imgH - visibleH / 2f);
 		}
 	}
 
@@ -79,8 +81,8 @@ final class ViewportMath
 		int imgH = state.getImageHeight();
 		baseScale = Math.min((float) view.getWidth() / imgW, (float) view.getHeight() / imgH);
 		zoom = 1f;
-		vpX = imgW / 2f;
-		vpY = imgH / 2f;
+		viewportX = imgW / 2f;
+		viewportY = imgH / 2f;
 	}
 
 	/**
@@ -111,23 +113,16 @@ final class ViewportMath
 		float scrX = imageToScreenX(ix);
 		float scrY = imageToScreenY(iy);
 		float rotation = (state == null) ? 0f : state.getRotationDegrees();
-		if (rotation == 0f)
+		// Collapse sub-epsilon rotations to the identity branch so tap mapping and
+		// rendering agree about whether the image is "really" rotated.
+		if (Math.abs(rotation) < BitmapUtils.ROTATION_EPSILON)
 		{
 			return new float[] { scrX, scrY };
 		}
-		int imgW = state.getImageWidth();
-		int imgH = state.getImageHeight();
-		float imgScreenCx = imageToScreenX(imgW / 2f);
-		float imgScreenCy = imageToScreenY(imgH / 2f);
-		double rad = Math.toRadians(rotation);
-		double cos = Math.cos(rad);
-		double sin = Math.sin(rad);
-		double dx = scrX - imgScreenCx;
-		double dy = scrY - imgScreenCy;
-		return new float[] {
-			(float) (dx * cos - dy * sin + imgScreenCx),
-			(float) (dx * sin + dy * cos + imgScreenCy)
-		};
+		float imageScreenCenterX = imageToScreenX(state.getImageWidth() / 2f);
+		float imageScreenCenterY = imageToScreenY(state.getImageHeight() / 2f);
+		return RotationMath.rotate(scrX, scrY,
+			imageScreenCenterX, imageScreenCenterY, rotation, new float[2]);
 	}
 
 	/**
@@ -136,7 +131,7 @@ final class ViewportMath
 	float imageToScreenX(float ix)
 	{
 		float scale = baseScale * zoom;
-		return view.getWidth() / 2f + (ix - vpX) * scale;
+		return view.getWidth() / 2f + (ix - viewportX) * scale;
 	}
 
 	/**
@@ -145,7 +140,7 @@ final class ViewportMath
 	float imageToScreenY(float iy)
 	{
 		float scale = baseScale * zoom;
-		return view.getHeight() / 2f + (iy - vpY) * scale;
+		return view.getHeight() / 2f + (iy - viewportY) * scale;
 	}
 
 	/**
@@ -155,8 +150,8 @@ final class ViewportMath
 	void panViewport(float dx, float dy, CropState state)
 	{
 		float scale = baseScale * zoom;
-		vpX -= dx / scale;
-		vpY -= dy / scale;
+		viewportX -= dx / scale;
+		viewportY -= dy / scale;
 		clampViewport(state);
 	}
 
@@ -168,22 +163,21 @@ final class ViewportMath
 	float[] screenToImagePixel(float screenX, float screenY, CropState state)
 	{
 		float rotation = (state == null) ? 0f : state.getRotationDegrees();
-		if (rotation == 0f)
+		// Collapse sub-epsilon rotations to the identity branch. The renderer treats
+		// abs(rotation) < ROTATION_EPSILON as unrotated; input mapping must agree or a
+		// tiny residual angle skews tap hit-testing, long-press removal, horizon paint
+		// mapping, and isInsideRotatedImage while the image is being drawn straight.
+		if (Math.abs(rotation) < BitmapUtils.ROTATION_EPSILON)
 		{
 			return new float[] { screenToImageX(screenX), screenToImageY(screenY) };
 		}
-		int imgW = state.getImageWidth();
-		int imgH = state.getImageHeight();
-		float scrCx = imageToScreenX(imgW / 2f);
-		float scrCy = imageToScreenY(imgH / 2f);
-		double rad = Math.toRadians(-rotation);
-		double dx = screenX - scrCx;
-		double dy = screenY - scrCy;
-		double unRotX = dx * Math.cos(rad) - dy * Math.sin(rad) + scrCx;
-		double unRotY = dx * Math.sin(rad) + dy * Math.cos(rad) + scrCy;
+		float screenCenterX = imageToScreenX(state.getImageWidth() / 2f);
+		float screenCenterY = imageToScreenY(state.getImageHeight() / 2f);
+		float[] unrotated = RotationMath.inverse(screenX, screenY,
+			screenCenterX, screenCenterY, rotation, new float[2]);
 		return new float[] {
-				screenToImageX((float) unRotX),
-				screenToImageY((float) unRotY)
+			screenToImageX(unrotated[0]),
+			screenToImageY(unrotated[1])
 		};
 	}
 
@@ -194,7 +188,7 @@ final class ViewportMath
 	float screenToImageX(float sx)
 	{
 		float scale = baseScale * zoom;
-		return vpX + (sx - view.getWidth() / 2f) / scale;
+		return viewportX + (sx - view.getWidth() / 2f) / scale;
 	}
 
 	/**
@@ -203,7 +197,7 @@ final class ViewportMath
 	float screenToImageY(float sy)
 	{
 		float scale = baseScale * zoom;
-		return vpY + (sy - view.getHeight() / 2f) / scale;
+		return viewportY + (sy - view.getHeight() / 2f) / scale;
 	}
 
 	/**
@@ -217,8 +211,8 @@ final class ViewportMath
 		zoom = Math.clamp(zoom * scaleFactor, MIN_ZOOM, MAX_ZOOM);
 		float newImgFocusX = screenToImageX(focusX);
 		float newImgFocusY = screenToImageY(focusY);
-		vpX += imgFocusX - newImgFocusX;
-		vpY += imgFocusY - newImgFocusY;
+		viewportX += imgFocusX - newImgFocusX;
+		viewportY += imgFocusY - newImgFocusY;
 		clampViewport(state);
 	}
 }

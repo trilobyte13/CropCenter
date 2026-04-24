@@ -75,6 +75,7 @@ public class MainActivity extends AppCompatActivity implements SaveHost, UiHost,
 	private TextView txtSidebarCropSize;
 	private TextView txtTransformArrow;
 	private TextView txtZoomBadge;
+	private boolean applyingStateToUi;
 	private boolean rulerUpdating;
 
 	@Override
@@ -110,18 +111,7 @@ public class MainActivity extends AppCompatActivity implements SaveHost, UiHost,
 		{
 			if (uri != null)
 			{
-				// Take persistable permission. Non-fatal if it fails — we just lose the ability
-				// to re-open this URI across app restarts.
-				try
-				{
-					int flags = Intent.FLAG_GRANT_READ_URI_PERMISSION
-						| Intent.FLAG_GRANT_WRITE_URI_PERMISSION;
-					getContentResolver().takePersistableUriPermission(uri, flags);
-				}
-				catch (Exception e)
-				{
-					Log.w(TAG, "takePersistableUriPermission failed for " + uri, e);
-				}
+				tryTakePersistable(uri, "(open)", true);
 				loadImage(uri);
 			}
 		});
@@ -146,21 +136,12 @@ public class MainActivity extends AppCompatActivity implements SaveHost, UiHost,
 				// either way so the Save button re-enables.
 				if (uri != null)
 				{
-					// Take persistable permission so Replace's SAF fallbacks can reopen the same
-					// document later (e.g. to re-read it or re-rename). SAF grants write access
-					// on creation, but without this the grant expires at process death. Failure
-					// is non-fatal — file-I/O fallback still works when MANAGE_EXTERNAL_STORAGE
-					// is granted.
-					try
-					{
-						int flags = Intent.FLAG_GRANT_READ_URI_PERMISSION
-							| Intent.FLAG_GRANT_WRITE_URI_PERMISSION;
-						getContentResolver().takePersistableUriPermission(uri, flags);
-					}
-					catch (Exception e)
-					{
-						Log.w(TAG, "takePersistableUriPermission (save) failed for " + uri, e);
-					}
+					// Persistable permission lets Replace's SAF fallbacks reopen the same
+					// document later (re-read, re-rename). SAF grants write on creation but
+					// the grant expires at process death without this; file-I/O fallback
+					// still works when MANAGE_EXTERNAL_STORAGE is held, so failure is
+					// non-fatal but worth warning about.
+					tryTakePersistable(uri, "(save)", true);
 					saveController.handleSaveAsResult(uri);
 				}
 				else
@@ -222,11 +203,11 @@ public class MainActivity extends AppCompatActivity implements SaveHost, UiHost,
 	{
 		if (!state.hasCenter() && state.getSourceImage() != null)
 		{
-			float imgMidX = state.getImageWidth() / 2f;
-			float imgMidY = state.getImageHeight() / 2f;
+			float imageMidX = state.getImageWidth() / 2f;
+			float imageMidY = state.getImageHeight() / 2f;
 			state.markCropSizeDirty();
-			state.setCenter(imgMidX, imgMidY);
-			state.setAnchor(imgMidX, imgMidY);
+			state.setCenter(imageMidX, imageMidY);
+			state.setAnchor(imageMidX, imageMidY);
 		}
 	}
 
@@ -334,7 +315,12 @@ public class MainActivity extends AppCompatActivity implements SaveHost, UiHost,
 	}
 
 	/**
-	 * Recenter the crop on selection points without resizing (for Move mode axis switch).
+	 * Recenter the crop on selection points without resizing (for Move mode axis
+	 * switch). Uses CropEngine.rotatedSelectionMidpoint so the center matches exactly
+	 * what Select mode's recompute would produce — on a rotated image the un-rotated
+	 * AABB midpoint and the rotated AABB midpoint are different points, and this
+	 * method has to match Select mode's framing to keep the crop's visual position
+	 * stable across mode switches.
 	 */
 	@Override
 	public void recenterOnSelection()
@@ -344,7 +330,8 @@ public class MainActivity extends AppCompatActivity implements SaveHost, UiHost,
 		{
 			return;
 		}
-		float[] mid = CropEngine.selectionMidpoint(points);
+		float[] mid = CropEngine.rotatedSelectionMidpoint(
+			points, state.getImageWidth(), state.getImageHeight(), state.getRotationDegrees());
 		state.setCropSizeDirty(false);
 		state.setCenter(mid[0], mid[1]);
 		// Move mode: user just moved the crop to the selection midpoint. Update the
@@ -427,9 +414,6 @@ public class MainActivity extends AppCompatActivity implements SaveHost, UiHost,
 		Toast.makeText(this, "Busy — try again", Toast.LENGTH_SHORT).show();
 	}
 
-	/**
-	 * Show the full-screen progress overlay with the given message.
-	 */
 	@Override
 	public void showProgress(String message)
 	{
@@ -461,34 +445,32 @@ public class MainActivity extends AppCompatActivity implements SaveHost, UiHost,
 	 * State-listener body. Reads CropState and fans out to the UI sync calls, optionally
 	 * running CropEngine.recomputeCrop first when the crop size is marked dirty.
 	 *
-	 * Wrapped in state.beginBatch / endBatch so the setters called by recomputeCrop (which
-	 * would otherwise refire this listener recursively) have their notifyChanged buffered
-	 * and coalesced into at most one follow-up listener invocation. The follow-up invocation
-	 * sees isCropSizeDirty=false (recompute cleared it), skips recompute, and just re-runs
-	 * the idempotent UI updates — no infinite loop, no explicit reentrancy guard needed.
+	 * Wrapped in state.beginBatch / endBatch so setters called by recomputeCrop have their
+	 * notifyChanged buffered into a single post-batch fire. That post-batch fire otherwise
+	 * triggers a recursive applyStateToUi run whose only work is re-running the idempotent
+	 * UI updates this call already did — pure waste at high fling velocity. The
+	 * applyingStateToUi flag short-circuits that recursive entry: any setter-driven
+	 * notifyChanged that happens while the first call is still on the stack is absorbed
+	 * (cropSizeDirty is already false by the time the re-entry would fire, so nothing is
+	 * actually skipped).
 	 */
 	private void applyStateToUi()
 	{
 		// Listener may fire after onDestroy (background-thread setter + runOnUiThread posted
 		// before destroy but dispatched after); drop it then.
-		if (isDestroyed())
+		if (isDestroyed() || applyingStateToUi)
 		{
 			return;
 		}
+		applyingStateToUi = true;
 		state.beginBatch();
 		try
 		{
 			if (state.isCropSizeDirty())
 			{
-				if (!state.hasCenter() && state.getSourceImage() != null)
-				{
-					float initialCx = state.getImageWidth() / 2f;
-					float initialCy = state.getImageHeight() / 2f;
-					state.setCenter(initialCx, initialCy);
-					// Seed the rotation anchor so the no-selection recompute has a stable
-					// starting position (image center) to re-read each rotation tick.
-					state.setAnchor(initialCx, initialCy);
-				}
+				// Seeds center + rotation anchor to image midpoint on first ever recompute;
+				// subsequent recomputes are no-op for that seed and just fall through.
+				ensureCropCenter();
 				if (state.hasCenter())
 				{
 					CropEngine.recomputeCrop(state);
@@ -498,12 +480,23 @@ public class MainActivity extends AppCompatActivity implements SaveHost, UiHost,
 			ui.updateZoomBadge();
 			ui.updatePointButtonStates();
 			ui.updateAutoRotateVisibility();
-			ui.syncRotationUI();
+			ui.syncRotationUi();
 			editorView.invalidate();
 		}
 		finally
 		{
-			state.endBatch();
+			// Hold the guard through endBatch: the endBatch fire (the post-batch listener
+			// invocation that triggers the recursive entry we want to suppress) happens
+			// inside endBatch itself. Releasing the flag before endBatch would let the
+			// recursion through exactly when we're trying to stop it.
+			try
+			{
+				state.endBatch();
+			}
+			finally
+			{
+				applyingStateToUi = false;
+			}
 		}
 	}
 
@@ -527,16 +520,9 @@ public class MainActivity extends AppCompatActivity implements SaveHost, UiHost,
 		{
 			return;
 		}
-		// Share/View intents often don't carry persistable permission — failure here is expected.
-		try
-		{
-			getContentResolver().takePersistableUriPermission(uri,
-				Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
-		}
-		catch (Exception e)
-		{
-			Log.d(TAG, "No persistable permission for shared URI: " + e.getMessage());
-		}
+		// Share/View intents routinely don't carry persistable permission — log at debug,
+		// not warn, since this is expected for external intents.
+		tryTakePersistable(uri, "(share)", false);
 		loadImage(uri);
 	}
 
@@ -573,6 +559,15 @@ public class MainActivity extends AppCompatActivity implements SaveHost, UiHost,
 				String origName = safFiles.getDisplayName(uri);
 				String[] pathAndId = safFiles.getFilePathAndId(uri);
 
+				// Mutations below run on the background executor. They become visible to the
+				// posted UI-thread runnable via Handler.post's happens-before, so the
+				// runnable's body (setSourceImage + setState + setText) sees a fully
+				// populated state. Concurrent UI-thread reads that beat the post — an
+				// onDraw or gesture fired before setSourceImage is dispatched — see the
+				// field they read either unchanged (state.reset clears, no tearing) or
+				// not yet written; EditorRenderer / tap paths null-check getSourceImage
+				// so a null-during-load snapshot is handled as "no image loaded". No
+				// tearing, no volatile needed, no visibility gap.
 				state.reset();
 				state.setOriginalFileBytes(fileBytes);
 				state.setOriginalFilename(origName);
@@ -614,6 +609,37 @@ public class MainActivity extends AppCompatActivity implements SaveHost, UiHost,
 				runOnUiThread(() -> setBusyUi(false));
 			}
 		});
+	}
+
+	/**
+	 * Take read+write persistable permission on the URI. Logging level follows context:
+	 * Open and Save As log at WARN because failure means we'll lose access on next launch
+	 * (actionable for the user); Share intents log at DEBUG because external intents
+	 * routinely don't grant persistable permission and the failure is expected, not a
+	 * regression. The method swallows the exception in all cases — persistable permission
+	 * is a nice-to-have, never required for the current session to succeed.
+	 */
+	private void tryTakePersistable(Uri uri, String contextTag, boolean warnOnFailure)
+	{
+		try
+		{
+			int flags = Intent.FLAG_GRANT_READ_URI_PERMISSION
+				| Intent.FLAG_GRANT_WRITE_URI_PERMISSION;
+			getContentResolver().takePersistableUriPermission(uri, flags);
+		}
+		catch (Exception e)
+		{
+			if (warnOnFailure)
+			{
+				Log.w(TAG, "takePersistableUriPermission " + contextTag
+					+ " failed for " + uri, e);
+			}
+			else
+			{
+				Log.d(TAG, "takePersistableUriPermission " + contextTag
+					+ " declined: " + e.getMessage());
+			}
+		}
 	}
 
 	/**

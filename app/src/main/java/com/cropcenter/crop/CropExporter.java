@@ -52,13 +52,16 @@ public final class CropExporter
 	private static final String TAG = "CropExporter";
 	private static final int CANVAS_BG = 0xFF0D0E14; // opaque very-dark-navy — visible at rotation corners
 	private static final int MAX_THUMBNAIL_BUDGET = 60_000; // JPEG thumbnail cap (leaves room under APP1 limit)
-	private static final int THUMBNAIL_DEFAULT_BUDGET = 60_000; // when no EXIF to measure against
+	private static final int THUMBNAIL_DEFAULT_BUDGET = MAX_THUMBNAIL_BUDGET; // used when no EXIF is present
+		// to measure against — defaults to the same cap, separate name so the two can
+		// diverge later without a literal hunt.
 	private static final int THUMBNAIL_MAX_DIM = 1024;
 	private static final int THUMBNAIL_MARGIN_BYTES = 200; // margin for IFD changes beyond measured size
 
 	private CropExporter() {}
 
-	public static ExportResult export(CropState state, File cacheDir) throws IOException
+	public static ExportResult export(CropState state, File cacheDir, boolean includeBackupInSeft)
+		throws IOException
 	{
 		Bitmap src = state.getSourceImage();
 		if (src == null)
@@ -68,23 +71,26 @@ public final class CropExporter
 
 		int cropW;
 		int cropH;
-		int srcX;
-		int srcY;
+		float srcX;
+		float srcY;
 		if (state.hasCenter())
 		{
 			cropW = state.getCropW();
 			cropH = state.getCropH();
-			// getCropImgX/Y return the invariant-guaranteed integer origin — centerX/cropW parity
-			// is kept matched by CropEngine so the subtraction lands on a whole pixel.
-			srcX = state.getCropImgX();
-			srcY = state.getCropImgY();
+			// Use the continuous-float origin so the exported primary samples the source at
+			// exactly the position the editor is showing. BitmapUtils.drawCropped handles
+			// fractional srcX / srcY (falls back to bilinear when non-integer, integer blit
+			// otherwise). UltraHdrCompat uses the same origin for its primary + gain-map
+			// render, so the two stay pixel-aligned with each other.
+			srcX = state.getCropImgXFloat();
+			srcY = state.getCropImgYFloat();
 		}
 		else
 		{
 			cropW = src.getWidth();
 			cropH = src.getHeight();
-			srcX = 0;
-			srcY = 0;
+			srcX = 0f;
+			srcY = 0f;
 		}
 
 		// Create output bitmap. Use Display P3 ONLY for JPEG when the source carries a gain map
@@ -120,7 +126,8 @@ public final class CropExporter
 
 		return switch (state.getExportConfig().format())
 		{
-			case ExportConfig.FORMAT_JPEG -> exportJpeg(state, outBmp, cropW, cropH, cacheDir);
+			case ExportConfig.FORMAT_JPEG -> exportJpeg(state, outBmp, cropW, cropH, cacheDir,
+				includeBackupInSeft);
 			default -> exportPng(state, outBmp, cropW, cropH);
 		};
 	}
@@ -128,11 +135,18 @@ public final class CropExporter
 	/**
 	 * Save the original file to shared storage for Samsung Gallery Revert.
 	 * Uses /storage/emulated/0/.cropcenter/ which is readable by Gallery.
-	 * Must be called before overwriting the original file.
+	 *
+	 * Reads `state.getOriginalFileBytes()` — the in-memory byte array captured at load —
+	 * not the on-disk file. The Replace flow calls this from ExportPipeline's pre-encode
+	 * hook, BEFORE the encoder emits the SEFT trailer, so the exporter can decide
+	 * whether to include a backup path claim based on whether this write actually
+	 * succeeded. (Earlier builds wrote the backup AFTER the placeholder write, which
+	 * meant the SEFT could claim a backup that then failed to materialise.)
 	 *
 	 * @return a BackupStatus so the caller can surface FAILED cases (missing storage
 	 *         permission, quota, etc.) to the user instead of silently overwriting without a
-	 *         revertable backup.
+	 *         revertable backup. WRITTEN / ALREADY_EXISTS are both "backup on disk";
+	 *         NOT_APPLICABLE / FAILED must NOT lead to SEFT claiming a backup.
 	 */
 	public static BackupStatus saveOriginalBackup(CropState state)
 	{
@@ -219,8 +233,19 @@ public final class CropExporter
 
 	/**
 	 * Compute SEFT params from state and delegate to appendSeft.
+	 *
+	 * `includeBackupInSeft` gates fresh backupPath generation: Samsung Gallery reads the
+	 * SEFT `PhotoEditor_Re_Edit_Data`'s backup path and offers Revert if the file exists.
+	 * The caller (ExportPipeline's pre-encode hook for the Replace flow) must only set
+	 * this true AFTER actually writing the `.cropcenter` backup — plain Save As / Keep
+	 * never produce a backup, and Replace with a failed backup write also gets false. A
+	 * SEFT that claims a backup which doesn't exist points Gallery at a missing file,
+	 * surfacing Revert on a non-revertable copy. When the source already carried an
+	 * existing SEFT, appendSeft preserves it verbatim regardless (that one's backupPath
+	 * points at the ORIGINAL on-disk image, which is still there post-save-as).
 	 */
-	private static byte[] appendSeftForState(byte[] jpeg, CropState state, int cropW, int cropH)
+	private static byte[] appendSeftForState(byte[] jpeg, CropState state, int cropW, int cropH,
+		boolean includeBackupInSeft)
 	{
 		int imgW = state.getImageWidth();
 		int imgH = state.getImageHeight();
@@ -246,9 +271,11 @@ public final class CropExporter
 			normCropH = 1f;
 		}
 
-		// Generate backup path if we have the original file path
+		// Only claim a backup path when one is actually being written (Replace flow).
 		String backupPath = null;
-		if (state.getOriginalFilePath() != null && state.getMediaStoreId() >= 0)
+		if (includeBackupInSeft
+			&& state.getOriginalFilePath() != null
+			&& state.getMediaStoreId() >= 0)
 		{
 			backupPath = SeftBuilder.generateBackupPath(
 				state.getOriginalFilePath(), state.getMediaStoreId());
@@ -268,7 +295,9 @@ public final class CropExporter
 	/**
 	 * Draw grid lines by directly setting pixels on the bitmap. Bypasses Canvas rasterization
 	 * entirely — guaranteed to produce exact line widths regardless of bitmap color space or
-	 * Canvas rendering quirks.
+	 * Canvas rendering quirks. Line positions are computed as continuous float offsets from
+	 * the crop's top-left and then rounded to the nearest output pixel, matching what
+	 * GridRenderer.linePos produces on the preview canvas.
 	 */
 	private static void drawGridPixels(Bitmap bmp, int width, int height, GridConfig grid)
 	{
@@ -276,10 +305,7 @@ public final class CropExporter
 		int halfLineWidth = lineWidth / 2;
 		int color = grid.color();
 
-		// Vertical lines: write a (lineWidth × height) column of pixels for each. Position
-		// matches GridRenderer's crop-dimension-parity snap — even dim → line between
-		// pixels (preview drawX integer → rasterises to a specific pixel index); odd dim →
-		// line covers pixel (preview drawX half-int → covers pixel floor(drawX)).
+		// Vertical lines
 		int[] vertColumn = new int[lineWidth * height];
 		Arrays.fill(vertColumn, color);
 		for (int i = 1; i < grid.columns(); i++)
@@ -298,7 +324,7 @@ public final class CropExporter
 			bmp.setPixels(band, 0, actualWidth, left, 0, actualWidth, height);
 		}
 
-		// Horizontal lines: same rule.
+		// Horizontal lines
 		int[] horizBand = new int[width * lineWidth];
 		Arrays.fill(horizBand, color);
 		for (int i = 1; i < grid.rows(); i++)
@@ -326,131 +352,172 @@ public final class CropExporter
 	}
 
 	/**
-	 * Pixel index for grid line i of a count-N grid along one axis. Matches GridRenderer's
-	 * cropDim-parity snap:
-	 *   • Even dim → preview drawX = round(raw) (integer, pixel boundary). Exporter picks
-	 *     that same pixel index.
-	 *   • Odd dim → preview drawX = floor(raw) + 0.5 (pixel center). Exporter covers
-	 *     pixel floor(raw).
-	 * The middle line (i = count / 2) uses dim / 2 which is floor(cropCenter) — pixel
-	 * index for a line at the crop's geometric middle. Second-half lines mirror the first
-	 * half around the bitmap center so (i, count − i) pairs stay symmetric.
+	 * Pixel index for grid line i of a count-N grid along one axis of the exported crop.
+	 * Matches the continuous-float positions GridRenderer.linePos emits for the preview,
+	 * rounded to the nearest output pixel. Second-half lines mirror the first half around
+	 * dim / 2 so (i, count − i) pairs stay symmetric — Java's Math.round rounds half-up,
+	 * which would break symmetry at half-integer positions (e.g. count=4, dim=10 produces
+	 * raw values 2.5 and 7.5; rounding both half-up gives 3 and 8 instead of the
+	 * symmetric 3 and 7).
+	 *
+	 * Known half-pixel divergence from the preview: for odd `dim` with `i * 2 == count`
+	 * (the middle line), the preview draws at the fractional coord `dim / 2f` and
+	 * anti-aliases across the two adjacent pixels. This exporter must pick one integer
+	 * pixel index, so the middle line in the baked export sits on `ceil(dim / 2f)` while
+	 * the preview's visual centre of mass is 0.5 px to its left. Acceptable because the
+	 * preview is anti-aliased and the eye reads its centre, not its origin.
 	 */
 	private static int gridLinePixel(int i, int count, int dim)
 	{
-		if (i * 2 == count)
+		if (i * 2 > count)
 		{
-			return dim / 2;
+			int mirror = (int) Math.round((double) dim * (count - i) / count);
+			return dim - mirror;
 		}
-		boolean dimEven = (dim & 1) == 0;
-		if (i * 2 < count)
-		{
-			double raw = (double) dim * i / count;
-			return dimEven ? (int) Math.round(raw) : (int) Math.floor(raw);
-		}
-		int mirrorI = count - i;
-		double mirrorRaw = (double) dim * mirrorI / count;
-		int mirrorX = dimEven ? (int) Math.round(mirrorRaw) : (int) Math.floor(mirrorRaw);
-		return dimEven ? dim - mirrorX : dim - mirrorX - 1;
+		return (int) Math.round((double) dim * i / count);
 	}
 
 	private static ExportResult exportJpeg(CropState state, Bitmap bmp, int cropW, int cropH,
-		File cacheDir) throws IOException
+		File cacheDir, boolean includeBackupInSeft) throws IOException
 	{
 		int quality = 100;
+		byte[] thumbnail = buildEmbeddedThumbnail(state, bmp);
+		byte[] croppedGainMap = buildCroppedGainMap(state, cropW, cropH, cacheDir, quality);
 
-		// Generate thumbnail sized to fit the available EXIF space. Use the full remaining APP1
-		// budget (EXIF segments cap at 65535 bytes, minus IFD overhead) so the thumbnail matches
-		// camera-native resolution instead of being artificially shrunk to 20KB. 1024px matches
-		// the size Samsung/Galaxy cameras typically embed.
+		// Recycle the primary bitmap on every exit, including when bmp.compress throws
+		// a native OOM / format error partway through — the non-finally version would
+		// orphan the native pixel buffer for the GC finalizer to clean up later.
+		byte[] jpegBytes;
+		try
+		{
+			ByteArrayOutputStream bos = new ByteArrayOutputStream();
+			bmp.compress(Bitmap.CompressFormat.JPEG, quality, bos);
+			jpegBytes = bos.toByteArray();
+		}
+		finally
+		{
+			bmp.recycle();
+		}
+
+		jpegBytes = injectExifMetadata(jpegBytes, state, cropW, cropH, thumbnail);
+		jpegBytes = composeGainMap(jpegBytes, state, croppedGainMap);
+		jpegBytes = appendSeftForState(jpegBytes, state, cropW, cropH, includeBackupInSeft);
+
+		return new ExportResult(jpegBytes, "jpg");
+	}
+
+	/**
+	 * Generate the embedded EXIF thumbnail sized to fit the available APP1 budget.
+	 * Using the full remaining APP1 budget (minus IFD overhead) gives a thumbnail that
+	 * matches camera-native resolution instead of being artificially shrunk. Returns
+	 * null when the budget is too small for a meaningful thumbnail — replaceThumbnail
+	 * preserves the existing one in that case.
+	 */
+	private static byte[] buildEmbeddedThumbnail(CropState state, Bitmap bmp)
+	{
 		List<JpegSegment> metaForThumb = state.getJpegMeta();
 		int thumbBudget = (metaForThumb != null && !metaForThumb.isEmpty())
 			? ExifPatcher.maxThumbnailBytes(metaForThumb) - THUMBNAIL_MARGIN_BYTES
 			: THUMBNAIL_DEFAULT_BUDGET;
-		// No MIN clamp: if the EXIF payload has so little headroom that a meaningful thumbnail
-		// won't fit, let generateThumbnail return null and preserve the existing thumbnail
-		// rather than generating one that replaceThumbnail will silently reject for overflow.
 		thumbBudget = Math.clamp(thumbBudget, 0, MAX_THUMBNAIL_BUDGET);
-		byte[] thumbnail = generateThumbnail(bmp, THUMBNAIL_MAX_DIM, thumbBudget);
+		return generateThumbnail(bmp, THUMBNAIL_MAX_DIM, thumbBudget);
+	}
 
-		// HDR path: generate a cropped Ultra HDR JPEG to extract the gain map from. The primary
-		// image always comes from the canvas rendering above (matches preview exactly, including
-		// rotation around image center). The gain map is extracted from the HDR path and
-		// composed with the canvas primary.
+	/**
+	 * For HDR sources, render a cropped Ultra HDR JPEG via UltraHdrCompat and extract
+	 * the gain-map bytes from its tail. The primary-image bytes still come from the
+	 * canvas rendering above; this only harvests the gain map, which must be spatially
+	 * aligned to the same crop / rotation as the primary. Returns null when the source
+	 * isn't HDR or when UltraHdrCompat couldn't produce a valid output.
+	 */
+	private static byte[] buildCroppedGainMap(CropState state, int cropW, int cropH,
+		File cacheDir, int quality)
+	{
 		byte[] originalBytes = state.getOriginalFileBytes();
-		// UltraHdrCompat requires the Android 14+ Gainmap API; minSdk 35 guarantees availability,
-		// so no runtime check is needed.
 		boolean hasHdr = state.getGainMap() != null && originalBytes != null;
-
-		byte[] croppedGainMap = null;
-		if (hasHdr)
+		if (!hasHdr)
 		{
-			float centerX = state.hasCenter() ? state.getCenterX() : state.getImageWidth() / 2f;
-			float centerY = state.hasCenter() ? state.getCenterY() : state.getImageHeight() / 2f;
-			int exifOrient = BitmapUtils.readExifOrientation(originalBytes);
-			byte[] hdrResult = UltraHdrCompat.compressWithGainmap(
-				originalBytes, quality, cacheDir,
-				state.getImageWidth(), state.getImageHeight(),
-				centerX, centerY, cropW, cropH,
-				state.getRotationDegrees(), exifOrient);
-
-			if (hdrResult != null)
-			{
-				int pe = findPrimaryEnd(hdrResult);
-				if (pe > 0 && pe < hdrResult.length)
-				{
-					croppedGainMap = new byte[hdrResult.length - pe];
-					System.arraycopy(hdrResult, pe, croppedGainMap, 0, croppedGainMap.length);
-					Log.d(TAG, "Extracted gain map: " + croppedGainMap.length + " bytes");
-				}
-			}
-			else
-			{
-				Log.d(TAG, "HDR generation failed, falling back to non-HDR");
-			}
+			return null;
 		}
 
-		// Non-HDR pipeline (also used for grid+HDR with extracted gain map)
-		ByteArrayOutputStream bos = new ByteArrayOutputStream();
-		bmp.compress(Bitmap.CompressFormat.JPEG, quality, bos);
-		byte[] jpegBytes = bos.toByteArray();
-		bmp.recycle();
+		float centerX = state.hasCenter() ? state.getCenterX() : state.getImageWidth() / 2f;
+		float centerY = state.hasCenter() ? state.getCenterY() : state.getImageHeight() / 2f;
+		int exifOrient = BitmapUtils.readExifOrientation(originalBytes);
+		byte[] hdrResult = UltraHdrCompat.compressWithGainmap(
+			originalBytes, quality, cacheDir,
+			state.getImageWidth(), state.getImageHeight(),
+			centerX, centerY, cropW, cropH,
+			state.getRotationDegrees(), exifOrient);
+		if (hdrResult == null)
+		{
+			Log.d(TAG, "HDR generation failed, falling back to non-HDR");
+			return null;
+		}
 
+		int pe = findPrimaryEnd(hdrResult);
+		if (pe <= 0 || pe >= hdrResult.length)
+		{
+			return null;
+		}
+		byte[] gainMap = new byte[hdrResult.length - pe];
+		System.arraycopy(hdrResult, pe, gainMap, 0, gainMap.length);
+		Log.d(TAG, "Extracted gain map: " + gainMap.length + " bytes");
+		return gainMap;
+	}
+
+	/**
+	 * Patch the JPEG's EXIF metadata with new crop dimensions and the freshly-generated
+	 * thumbnail, re-injecting the patched segments into the output bytes. No-op when the
+	 * source carried no JPEG segment list.
+	 */
+	private static byte[] injectExifMetadata(byte[] jpegBytes, CropState state,
+		int cropW, int cropH, byte[] thumbnail) throws IOException
+	{
 		List<JpegSegment> meta = state.getJpegMeta();
-		if (meta != null && !meta.isEmpty())
+		if (meta == null || meta.isEmpty())
 		{
-			List<JpegSegment> patched = ExifPatcher.patch(meta, cropW, cropH, thumbnail);
-			jpegBytes = JpegMetadataInjector.inject(jpegBytes, patched);
+			return jpegBytes;
 		}
+		List<JpegSegment> patched = ExifPatcher.patch(meta, cropW, cropH, thumbnail);
+		return JpegMetadataInjector.inject(jpegBytes, patched);
+	}
 
-		// Append gain map ONLY if the HDR pipeline produced a spatially-aligned cropped map.
-		// The original state.getGainMap() is aligned to the UNCROPPED, UNROTATED source — pasting
-		// it onto a cropped or rotated primary produces visibly wrong HDR (gain blobs appear off
-		// features they were meant to highlight). Better to drop HDR than to ship a broken file;
-		// doExport's toast already reports "[HDR dropped]" in this case.
+	/**
+	 * Append the cropped gain map to the primary JPEG when HDR extraction succeeded.
+	 * The original state.getGainMap() is aligned to the UNCROPPED / UNROTATED source,
+	 * so we refuse to ship it onto a cropped / rotated primary — that would put
+	 * gain-map blobs off the features they were meant to highlight. Better to drop HDR
+	 * than ship a broken file; doExport's toast reports "[HDR dropped]" in that case.
+	 */
+	private static byte[] composeGainMap(byte[] jpegBytes, CropState state, byte[] croppedGainMap)
+	{
 		if (croppedGainMap != null && croppedGainMap.length > 0)
 		{
 			Log.d(TAG, "Appending cropped gain map: " + croppedGainMap.length + " bytes");
-			jpegBytes = GainMapComposer.compose(jpegBytes, croppedGainMap);
+			return GainMapComposer.compose(jpegBytes, croppedGainMap);
 		}
-		else if (state.getGainMap() != null && state.getGainMap().length > 0)
+		if (state.getGainMap() != null && state.getGainMap().length > 0)
 		{
 			Log.d(TAG, "compressWithGainmap failed — dropping HDR to avoid misalignment");
 		}
-
-		jpegBytes = appendSeftForState(jpegBytes, state, cropW, cropH);
-
-		return new ExportResult(jpegBytes, "jpg");
+		return jpegBytes;
 	}
 
 	private static ExportResult exportPng(CropState state, Bitmap bmp, int cropW, int cropH)
 	{
 		// bmp is guaranteed sRGB for PNG exports (see export()); grid was rasterized on it with
 		// exact pixel-width rectangles. Straight compress → PNG bytes.
-		ByteArrayOutputStream bos = new ByteArrayOutputStream();
-		bmp.compress(Bitmap.CompressFormat.PNG, 100, bos);
-		bmp.recycle();
-		byte[] pngBytes = bos.toByteArray();
+		byte[] pngBytes;
+		try
+		{
+			ByteArrayOutputStream bos = new ByteArrayOutputStream();
+			bmp.compress(Bitmap.CompressFormat.PNG, 100, bos);
+			pngBytes = bos.toByteArray();
+		}
+		finally
+		{
+			bmp.recycle();
+		}
 
 		// Inject EXIF metadata via PNG eXIf chunk (PNG 1.6 spec)
 		List<JpegSegment> meta = state.getJpegMeta();

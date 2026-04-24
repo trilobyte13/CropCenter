@@ -57,101 +57,121 @@ public final class SeftBuilder
 			ByteArrayOutputStream blocks = new ByteArrayOutputStream();
 			List<int[]> directory = new ArrayList<>(); // [type, negOffset, blockSize]
 
-			// Add basic Samsung metadata entries. (Preservation of an existing trailer's
+			// Add basic Samsung metadata entries. Preservation of an existing trailer's
 			// non-edit entries happens at the caller level — it appends the original trailer
-			// verbatim when one is present, so this builder only runs for the fresh-trailer case.)
+			// verbatim when one is present, so this builder only runs for the fresh-trailer
+			// case.
 			if (utcTimestamp > 0)
 			{
 				addBlock(blocks, directory, 0x0a01, "Image_UTC_Data",
 					String.valueOf(utcTimestamp).getBytes(StandardCharsets.UTF_8));
 			}
 
-			// Build re-edit JSON with Samsung's exact formatting (escaped slashes)
-			String escapedPath = originalBackupPath.replace("/", "\\/");
-
-			int mCropState = isCropped ? 131079 : 131076;
-			// Samsung uses escaped JSON strings within JSON
-			String clipInfo = "{\\\"mCenterX\\\":" + cropCenterX
-				+ ",\\\"mCenterY\\\":" + cropCenterY
-				+ ",\\\"mWidth\\\":" + cropWidth
-				+ ",\\\"mHeight\\\":" + cropHeight
-				+ ",\\\"mRotation\\\":0,\\\"mRotate\\\":0"
-				+ ",\\\"mHFlip\\\":0,\\\"mVFlip\\\":0"
-				+ ",\\\"mRotationEffect\\\":0,\\\"mRotateEffect\\\":0"
-				+ ",\\\"mHFlipEffect\\\":0,\\\"mVFlipEffect\\\":0"
-				+ ",\\\"mHozPerspective\\\":0,\\\"mVerPerspective\\\":0}";
-
-			String toneValue = "{\\\"brightness\\\":100,\\\"exposure\\\":100,\\\"contrast\\\":100"
-				+ ",\\\"saturation\\\":100,\\\"hue\\\":100,\\\"wbMode\\\":-1"
-				+ ",\\\"wbTemperature\\\":100,\\\"tint\\\":100,\\\"shadow\\\":100"
-				+ ",\\\"highlight\\\":100,\\\"lightbalance\\\":100,\\\"sharpness\\\":100"
-				+ ",\\\"definition\\\":100,\\\"isBrightnessIPE\\\":false"
-				+ ",\\\"isExposureIPE\\\":false,\\\"isContrastIPE\\\":false"
-				+ ",\\\"isSaturationIPE\\\":false}";
-
-			String effectValue = "{\\\"filterIndication\\\":4097,\\\"alphaValue\\\":100"
-				+ ",\\\"filterType\\\":0}";
-
-			String portraitValue = "{\\\"effectId\\\":-1,\\\"effectLevel\\\":-1"
-				+ ",\\\"exifRotation\\\":" + exifRotation
-				+ ",\\\"lightLevel\\\":0,\\\"touchX\\\":0,\\\"touchY\\\":0"
-				+ ",\\\"refocusX\\\":-1,\\\"refocusY\\\":-1"
-				+ ",\\\"effectIdOriginal\\\":-1,\\\"effectLevelOriginal\\\":-1"
-				+ ",\\\"lightLevelOriginal\\\":-1,\\\"touchXOriginal\\\":0,\\\"touchYOriginal\\\":0"
-				+ ",\\\"refocusXOriginal\\\":-1,\\\"refocusYOriginal\\\":-1"
-				+ ",\\\"waterMarkRemoved\\\":false,\\\"waterMarkRemovedOriginal\\\":false}";
-
-			String adjustmentValue = "{\\\"mCropState\\\":" + mCropState + "}";
-
-			String reEditJson = "{\"originalPath\":\"" + escapedPath + "\""
-				+ ",\"representativeFrameLoc\":-1"
-				+ ",\"startMotionVideo\":-1"
-				+ ",\"endMotionVideo\":-1"
-				+ ",\"isMotionVideoMute\":false"
-				+ ",\"isTrimMotionVideo\":false"
-				+ ",\"clipInfoValue\":\"" + clipInfo + "\""
-				+ ",\"toneValue\":\"" + toneValue + "\""
-				+ ",\"effectValue\":\"" + effectValue + "\""
-				+ ",\"portraitEffectValue\":\"" + portraitValue + "\""
-				+ ",\"isBlending\":true"
-				+ ",\"isNotReEdit\":false"
-				+ ",\"sepVersion\":\"170000\""
-				+ ",\"ndeVersion\":1"
-				+ ",\"reSize\":4"
-				+ ",\"isScaleAI\":false"
-				+ ",\"rotation\":1"
-				+ ",\"adjustmentValue\":\"" + adjustmentValue + "\""
-				+ ",\"isApplyShapeCorrection\":false"
-				+ ",\"isNewReEditOnly\":false"
-				+ ",\"isDecoReEditOnly\":false"
-				+ ",\"isAIFilterReEditOnly\":false}";
-
+			String reEditJson = buildReEditJson(originalBackupPath, cropCenterX, cropCenterY,
+				cropWidth, cropHeight, isCropped, exifRotation);
 			addBlock(blocks, directory, 0x0ba1, "PhotoEditor_Re_Edit_Data",
 				reEditJson.getBytes(StandardCharsets.UTF_8));
 
-			// Original_Path_Hash_Key = SHA-256(originalBackupPath) + "/" + mediaId
-			String pathHash = sha256(originalBackupPath);
-			// Extract mediaId from the path (after last _ before .jpg)
-			String mediaId = "0";
-			int underscorePos = originalBackupPath.lastIndexOf('_');
-			int dotPos = originalBackupPath.lastIndexOf('.');
-			if (underscorePos > 0 && dotPos > underscorePos)
-			{
-				mediaId = originalBackupPath.substring(underscorePos + 1, dotPos);
-			}
-			String hashKey = pathHash + "/" + mediaId;
-
+			String hashKey = buildOriginalPathHashKey(originalBackupPath);
 			addBlock(blocks, directory, 0x0ba1, "Original_Path_Hash_Key",
 				hashKey.getBytes(StandardCharsets.UTF_8));
 
-			byte[] blockData = blocks.toByteArray();
-			return buildTrailer(blockData, directory);
+			return buildTrailer(blocks.toByteArray(), directory);
 		}
 		catch (Exception e)
 		{
 			Log.e(TAG, "SEFT build failed", e);
 			return null;
 		}
+	}
+
+	/**
+	 * Build Samsung's PhotoEditor_Re_Edit_Data JSON blob — the on-disk format that
+	 * Gallery's Revert feature consumes. Samsung nests escaped JSON strings inside the
+	 * outer JSON, so the inner clipInfo / tone / effect / portrait / adjustment values
+	 * are themselves JSON-encoded-with-backslashes within the outer envelope. Matching
+	 * Samsung's exact formatting (including forward-slash escaping in paths) is
+	 * necessary for Gallery to parse and trust the entry.
+	 */
+	private static String buildReEditJson(String originalBackupPath,
+		float cropCenterX, float cropCenterY, float cropWidth, float cropHeight,
+		boolean isCropped, int exifRotation)
+	{
+		String escapedPath = originalBackupPath.replace("/", "\\/");
+		int mCropState = isCropped ? 131079 : 131076;
+
+		String clipInfo = "{\\\"mCenterX\\\":" + cropCenterX
+			+ ",\\\"mCenterY\\\":" + cropCenterY
+			+ ",\\\"mWidth\\\":" + cropWidth
+			+ ",\\\"mHeight\\\":" + cropHeight
+			+ ",\\\"mRotation\\\":0,\\\"mRotate\\\":0"
+			+ ",\\\"mHFlip\\\":0,\\\"mVFlip\\\":0"
+			+ ",\\\"mRotationEffect\\\":0,\\\"mRotateEffect\\\":0"
+			+ ",\\\"mHFlipEffect\\\":0,\\\"mVFlipEffect\\\":0"
+			+ ",\\\"mHozPerspective\\\":0,\\\"mVerPerspective\\\":0}";
+
+		String toneValue = "{\\\"brightness\\\":100,\\\"exposure\\\":100,\\\"contrast\\\":100"
+			+ ",\\\"saturation\\\":100,\\\"hue\\\":100,\\\"wbMode\\\":-1"
+			+ ",\\\"wbTemperature\\\":100,\\\"tint\\\":100,\\\"shadow\\\":100"
+			+ ",\\\"highlight\\\":100,\\\"lightbalance\\\":100,\\\"sharpness\\\":100"
+			+ ",\\\"definition\\\":100,\\\"isBrightnessIPE\\\":false"
+			+ ",\\\"isExposureIPE\\\":false,\\\"isContrastIPE\\\":false"
+			+ ",\\\"isSaturationIPE\\\":false}";
+
+		String effectValue = "{\\\"filterIndication\\\":4097,\\\"alphaValue\\\":100"
+			+ ",\\\"filterType\\\":0}";
+
+		String portraitValue = "{\\\"effectId\\\":-1,\\\"effectLevel\\\":-1"
+			+ ",\\\"exifRotation\\\":" + exifRotation
+			+ ",\\\"lightLevel\\\":0,\\\"touchX\\\":0,\\\"touchY\\\":0"
+			+ ",\\\"refocusX\\\":-1,\\\"refocusY\\\":-1"
+			+ ",\\\"effectIdOriginal\\\":-1,\\\"effectLevelOriginal\\\":-1"
+			+ ",\\\"lightLevelOriginal\\\":-1,\\\"touchXOriginal\\\":0,\\\"touchYOriginal\\\":0"
+			+ ",\\\"refocusXOriginal\\\":-1,\\\"refocusYOriginal\\\":-1"
+			+ ",\\\"waterMarkRemoved\\\":false,\\\"waterMarkRemovedOriginal\\\":false}";
+
+		String adjustmentValue = "{\\\"mCropState\\\":" + mCropState + "}";
+
+		return "{\"originalPath\":\"" + escapedPath + "\""
+			+ ",\"representativeFrameLoc\":-1"
+			+ ",\"startMotionVideo\":-1"
+			+ ",\"endMotionVideo\":-1"
+			+ ",\"isMotionVideoMute\":false"
+			+ ",\"isTrimMotionVideo\":false"
+			+ ",\"clipInfoValue\":\"" + clipInfo + "\""
+			+ ",\"toneValue\":\"" + toneValue + "\""
+			+ ",\"effectValue\":\"" + effectValue + "\""
+			+ ",\"portraitEffectValue\":\"" + portraitValue + "\""
+			+ ",\"isBlending\":true"
+			+ ",\"isNotReEdit\":false"
+			+ ",\"sepVersion\":\"170000\""
+			+ ",\"ndeVersion\":1"
+			+ ",\"reSize\":4"
+			+ ",\"isScaleAI\":false"
+			+ ",\"rotation\":1"
+			+ ",\"adjustmentValue\":\"" + adjustmentValue + "\""
+			+ ",\"isApplyShapeCorrection\":false"
+			+ ",\"isNewReEditOnly\":false"
+			+ ",\"isDecoReEditOnly\":false"
+			+ ",\"isAIFilterReEditOnly\":false}";
+	}
+
+	/**
+	 * Build the Original_Path_Hash_Key payload: SHA-256(backup path) + "/" + mediaId.
+	 * The mediaId is extracted from the path using the `_{mediaId}.jpg` convention
+	 * generateBackupPath uses.
+	 */
+	private static String buildOriginalPathHashKey(String originalBackupPath)
+	{
+		String pathHash = sha256(originalBackupPath);
+		String mediaId = "0";
+		int underscorePos = originalBackupPath.lastIndexOf('_');
+		int dotPos = originalBackupPath.lastIndexOf('.');
+		if (underscorePos > 0 && dotPos > underscorePos)
+		{
+			mediaId = originalBackupPath.substring(underscorePos + 1, dotPos);
+		}
+		return pathHash + "/" + mediaId;
 	}
 
 	/**

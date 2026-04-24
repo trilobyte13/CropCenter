@@ -25,6 +25,7 @@ import com.cropcenter.util.HorizonDetector;
 import com.cropcenter.util.TextFormat;
 import com.cropcenter.util.ThemeColors;
 
+import java.util.List;
 import java.util.Locale;
 
 /**
@@ -60,7 +61,7 @@ final class ToolbarBinder
 	 */
 	void bindAll()
 	{
-		setupARSpinner();
+		setupArSpinner();
 		setupModeButtons();
 		setupCenterModeButtons();
 		setupUndoRedo();
@@ -69,9 +70,9 @@ final class ToolbarBinder
 		setupAutoRotate();
 	}
 
-	private void setupARSpinner()
+	private void setupArSpinner()
 	{
-		Spinner spinner = host.findViewById(R.id.spinnerAR);
+		Spinner spinner = host.findViewById(R.id.spinnerAr);
 		float density = host.getActivity().getResources().getDisplayMetrics().density;
 		int padH = (int) (6 * density);
 		int padV = (int) (4 * density);
@@ -83,14 +84,14 @@ final class ToolbarBinder
 			@Override
 			public View getView(int position, View convertView, ViewGroup parent)
 			{
-				return styleARLabel((TextView) super.getView(position, convertView, parent),
+				return styleArLabel((TextView) super.getView(position, convertView, parent),
 					12, padH, padV);
 			}
 
 			@Override
 			public View getDropDownView(int position, View convertView, ViewGroup parent)
 			{
-				return styleARLabel((TextView) super.getDropDownView(position, convertView, parent),
+				return styleArLabel((TextView) super.getDropDownView(position, convertView, parent),
 					13, padH * 2, padV * 2);
 			}
 		};
@@ -98,12 +99,12 @@ final class ToolbarBinder
 		spinner.setSelection(0);
 
 		// Size the spinner to exactly fit the widest label + arrow.
-		Paint tp = new Paint();
-		tp.setTextSize(12 * host.getActivity().getResources().getDisplayMetrics().scaledDensity);
+		Paint textPaint = new Paint();
+		textPaint.setTextSize(12 * host.getActivity().getResources().getDisplayMetrics().scaledDensity);
 		float maxTextPx = 0;
 		for (String label : AR_LABELS)
 		{
-			maxTextPx = Math.max(maxTextPx, tp.measureText(label));
+			maxTextPx = Math.max(maxTextPx, textPaint.measureText(label));
 		}
 		int totalPx = (int) maxTextPx + padH * 2 + (int) (24 * density);
 		spinner.setMinimumWidth(totalPx);
@@ -132,7 +133,7 @@ final class ToolbarBinder
 				}
 				else
 				{
-					showCustomARDialog();
+					showCustomArDialog();
 				}
 			}
 
@@ -144,101 +145,133 @@ final class ToolbarBinder
 	private void setupAutoRotate()
 	{
 		TextView btn = host.findViewById(R.id.btnAutoRotate);
-		btn.setOnClickListener(view ->
+		btn.setOnClickListener(view -> handleAutoRotateTap(btn));
+	}
+
+	/**
+	 * Auto-rotate click handler. Three paths, in order: cancel paint mode if active;
+	 * apply XMP-embedded horizon angle if present; else enter paint mode to let the
+	 * user outline the horizon for background detection.
+	 */
+	private void handleAutoRotateTap(TextView btn)
+	{
+		if (host.getState().getSourceImage() == null)
 		{
-			if (host.getState().getSourceImage() == null)
-			{
-				return;
-			}
+			return;
+		}
+		if (host.getEditorView().isHorizonMode())
+		{
+			host.getEditorView().setHorizonMode(false, null);
+			resetAutoRotateButton(btn);
+			return;
+		}
 
-			if (host.getEditorView().isHorizonMode())
-			{
-				host.getEditorView().setHorizonMode(false, null);
-				btn.setText("Auto");
-				btn.setTextColor(host.getActivity().getResources().getColor(R.color.subtext0, null));
-				return;
-			}
+		float metaAngle = HorizonDetector.detectFromMetadata(host.getState().getJpegMeta());
+		if (!Float.isNaN(metaAngle))
+		{
+			applyDetectedRotation(metaAngle, "From metadata: " + TextFormat.degrees(metaAngle));
+			return;
+		}
 
-			// Try XMP metadata first (instant)
-			float metaAngle = HorizonDetector.detectFromMetadata(host.getState().getJpegMeta());
-			if (!Float.isNaN(metaAngle))
-			{
-				host.getState().setRotationDegrees(metaAngle);
-				// Auto-rotate landed a precise angle — zoom the ruler to its finest tick so
-				// the user can immediately fine-tune within ~0.01° around the detected value.
-				host.getRotationRuler().zoomToMax();
-				Toast.makeText(host.getActivity(), "From metadata: " + TextFormat.degrees(metaAngle),
-					Toast.LENGTH_SHORT).show();
-				return;
-			}
+		btn.setText("Cancel");
+		btn.setTextColor(host.getActivity().getResources().getColor(R.color.red, null));
+		host.getEditorView().setHorizonMode(true, () -> onHorizonPaintComplete(btn));
+	}
 
-			// Enter horizon paint mode — user paints over the horizon area
-			btn.setText("Cancel");
-			btn.setTextColor(host.getActivity().getResources().getColor(R.color.red, null));
-			host.getEditorView().setHorizonMode(true, () ->
-			{
-				btn.setText("Auto");
-				btn.setTextColor(host.getActivity().getResources().getColor(R.color.subtext0, null));
+	/**
+	 * Horizon-paint callback: reset the button, grab the painted points, and dispatch
+	 * the detection pipeline on the background executor. Empty / too-short paints
+	 * surface a toast and return immediately.
+	 */
+	private void onHorizonPaintComplete(TextView btn)
+	{
+		resetAutoRotateButton(btn);
+		var points = host.getEditorView().getHorizonPoints();
+		float brushRadius = host.getEditorView().getHorizonBrushRadius();
+		Bitmap src = host.getState().getSourceImage();
 
-				var points = host.getEditorView().getHorizonPoints();
-				float brushR = host.getEditorView().getHorizonBrushRadius();
-				Bitmap src = host.getState().getSourceImage();
+		if (points.size() < 2 || src == null)
+		{
+			Toast.makeText(host.getActivity(), "Paint was too short",
+				Toast.LENGTH_SHORT).show();
+			return;
+		}
 
-				if (points.size() < 2 || src == null)
-				{
-					Toast.makeText(host.getActivity(), "Paint was too short",
-						Toast.LENGTH_SHORT).show();
-					return;
-				}
+		host.showProgress("Detecting horizon\u2026");
+		host.runInBackground(() -> runHorizonDetectionInBackground(src, points, brushRadius));
+	}
 
-				// Run detection on background thread using only the painted region. Guard with
-				// try/finally so a throw inside HorizonDetector can't leave the progress overlay
-				// stuck visible — ExecutorService swallows uncaught Runnables into an unconsumed
-				// Future, so without this the UI would freeze behind the overlay.
-				host.showProgress("Detecting horizon\u2026");
-				host.runInBackground(() ->
-				{
-					float angle;
-					try
-					{
-						angle = HorizonDetector.detectFromPaintedRegion(src, points, brushR);
-					}
-					catch (Exception e)
-					{
-						Log.w(TAG, "horizon detection failed", e);
-						host.hideProgress();
-						host.runOnUiThread(() -> host.toastIfAlive(
-							"Horizon detection failed", Toast.LENGTH_SHORT));
-						return;
-					}
-					final float detected = angle;
-					host.runOnUiThread(() ->
-					{
-						if (host.isDestroyed())
-						{
-							return;
-						}
-						host.hideProgress();
-						if (Float.isNaN(detected))
-						{
-							Toast.makeText(host.getActivity(),
-								"No line detected in painted area",
-								Toast.LENGTH_SHORT).show();
-						}
-						else
-						{
-							float newRot = Math.round(detected * 100f) / 100f;
-							host.getState().setRotationDegrees(newRot);
-							// Painted-horizon detection landed a precise angle — zoom the
-							// ruler so the user can fine-tune within ~0.01° immediately.
-							host.getRotationRuler().zoomToMax();
-							Toast.makeText(host.getActivity(), TextFormat.degrees(newRot),
-								Toast.LENGTH_SHORT).show();
-						}
-					});
-				});
-			});
-		});
+	/**
+	 * Background detection job. Runs on the single-thread executor; posts all UI
+	 * mutation (toast, hideProgress, rotation update) back through runOnUiThread.
+	 * Wrapped so a throw inside HorizonDetector can't leave the progress overlay stuck.
+	 */
+	private void runHorizonDetectionInBackground(Bitmap src, List<float[]> points,
+		float brushRadius)
+	{
+		float angle;
+		try
+		{
+			angle = HorizonDetector.detectFromPaintedRegion(src, points, brushRadius);
+		}
+		catch (Exception | StackOverflowError t)
+		{
+			// Narrow catch: Exception + StackOverflowError specifically. A degenerate
+			// Hough search can blow the stack; that's the one Error subclass worth
+			// recovering from here. Catching Throwable (OutOfMemoryError, LinkageError,
+			// ThreadDeath) would let the recovery handler itself fail or worsen the
+			// situation. HorizonDetector already catches OutOfMemoryError internally.
+			Log.w(TAG, "horizon detection failed", t);
+			host.hideProgress();
+			host.runOnUiThread(() -> host.toastIfAlive(
+				"Horizon detection failed", Toast.LENGTH_SHORT));
+			return;
+		}
+		final float detected = angle;
+		host.runOnUiThread(() -> onHorizonDetectionResult(detected));
+	}
+
+	/**
+	 * UI-thread handler for the detection result. Rounds to 0.01° precision, applies,
+	 * and toasts the result — or toasts a "no line detected" message when the
+	 * detector returns NaN.
+	 */
+	private void onHorizonDetectionResult(float detected)
+	{
+		if (host.isDestroyed())
+		{
+			return;
+		}
+		host.hideProgress();
+		if (Float.isNaN(detected))
+		{
+			Toast.makeText(host.getActivity(), "No line detected in painted area",
+				Toast.LENGTH_SHORT).show();
+			return;
+		}
+		float newRot = Math.round(detected * 100f) / 100f;
+		applyDetectedRotation(newRot, TextFormat.degrees(newRot));
+	}
+
+	/**
+	 * Apply a detected rotation and zoom the ruler so the user can fine-tune within
+	 * ~0.01° immediately. Shared between the metadata-fast path and the painted-horizon
+	 * background path.
+	 */
+	private void applyDetectedRotation(float degrees, String toastText)
+	{
+		host.getState().setRotationDegrees(degrees);
+		host.getRotationRuler().zoomToMax();
+		Toast.makeText(host.getActivity(), toastText, Toast.LENGTH_SHORT).show();
+	}
+
+	/**
+	 * Restore the Auto-rotate button to its resting "Auto" label + subtext0 color.
+	 */
+	private void resetAutoRotateButton(TextView btn)
+	{
+		btn.setText("Auto");
+		btn.setTextColor(host.getActivity().getResources().getColor(R.color.subtext0, null));
 	}
 
 	private void setupCenterModeButtons()
@@ -376,7 +409,7 @@ final class ToolbarBinder
 		host.findViewById(R.id.btnRedo).setOnClickListener(view -> host.getEditorView().redo());
 	}
 
-	private void showCustomARDialog()
+	private void showCustomArDialog()
 	{
 		int dp = (int) host.getActivity().getResources().getDisplayMetrics().density;
 
@@ -389,10 +422,10 @@ final class ToolbarBinder
 		layout.addView(editW,
 			new LinearLayout.LayoutParams(60 * dp, LinearLayout.LayoutParams.WRAP_CONTENT));
 
-		TextView sep = new TextView(host.getActivity());
-		sep.setText("  :  ");
-		sep.setTextSize(16);
-		layout.addView(sep);
+		TextView separator = new TextView(host.getActivity());
+		separator.setText("  :  ");
+		separator.setTextSize(16);
+		layout.addView(separator);
 
 		EditText editH = numberInput("9");
 		layout.addView(editH,
@@ -405,7 +438,7 @@ final class ToolbarBinder
 			{
 				int ratioW = Math.max(1, parseIntOr(editW.getText().toString(), 16));
 				int ratioH = Math.max(1, parseIntOr(editH.getText().toString(), 9));
-				host.getState().setAspectRatio(new AspectRatio(ratioW + ":" + ratioH, ratioW, ratioH));
+				host.getState().setAspectRatio(new AspectRatio(ratioW, ratioH));
 				if (!host.getState().getSelectionPoints().isEmpty())
 				{
 					CropEngine.autoComputeFromPoints(host.getState());
@@ -482,7 +515,7 @@ final class ToolbarBinder
 		}
 	}
 
-	private static TextView styleARLabel(TextView tv, int textSize, int padH, int padV)
+	private static TextView styleArLabel(TextView tv, int textSize, int padH, int padV)
 	{
 		tv.setTextSize(textSize);
 		tv.setTextColor(ThemeColors.TEXT);

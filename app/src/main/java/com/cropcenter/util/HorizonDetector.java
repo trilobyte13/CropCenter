@@ -199,11 +199,40 @@ public final class HorizonDetector
 	{
 		int width = src.getWidth();
 		int height = src.getHeight();
-
-		// ── Build mask from paint stroke ──
-		// For efficiency, rasterize the stroke into a boolean grid at 1/4 resolution
 		int maskWidth = width / 4;
 		int maskHeight = height / 4;
+
+		boolean[] mask = rasterizePaintMask(paintPoints, maskWidth, maskHeight, brushRadius);
+		float[] edges = buildEdgeMap(src, width, height);
+
+		int[][] edgeCoords = gatherMaskedEdges(edges, mask, width, height, maskWidth, maskHeight);
+		// Release the large intermediates before the coarse+fine Hough pass — on a large
+		// source `edges` alone can be 100 MB of floats. Holding them alive through the
+		// Hough loops was a memory regression introduced when this method was
+		// decomposed; keeping the scope tight avoids a mid-detection OOM on mid-range
+		// devices that would not have fired before the refactor.
+		edges = null;
+		mask = null;
+		if (edgeCoords == null)
+		{
+			return Float.NaN;
+		}
+		int[] edgeX = edgeCoords[0];
+		int[] edgeY = edgeCoords[1];
+		int edgeCount = edgeX.length;
+		Log.d(TAG, "Masked edge pixels: " + edgeCount);
+
+		return runHoughAndConvertToRotation(edgeX, edgeY, edgeCount, width, height);
+	}
+
+	/**
+	 * Stroke-to-mask rasterization. The paint stroke is rasterized at 1/4 source
+	 * resolution into a boolean grid — enough precision to localize which source
+	 * pixels belong to the horizon region, 16× cheaper in memory than a full-res mask.
+	 */
+	private static boolean[] rasterizePaintMask(List<float[]> paintPoints,
+		int maskWidth, int maskHeight, float brushRadius)
+	{
 		float maskScale = 4f;
 		boolean[] mask = new boolean[maskWidth * maskHeight];
 		float maskRadius = brushRadius / maskScale;
@@ -235,8 +264,18 @@ public final class HorizonDetector
 				}
 			}
 		}
+		return mask;
+	}
 
-		// ── Edge detection ──
+	/**
+	 * Canny-style edge pipeline: luminance → Gaussian blur → Sobel magnitude + direction
+	 * → non-max suppression → direction filter (keep only edges within 35° of
+	 * horizontal). Returns the edge strength at each pixel in row-major order.
+	 * Intermediate arrays are nulled as soon as they're consumed to let GC reclaim
+	 * the ~4 MB working sets early on mid-range devices.
+	 */
+	private static float[] buildEdgeMap(Bitmap src, int width, int height)
+	{
 		int[] pixels = new int[width * height];
 		src.getPixels(pixels, 0, width, 0, 0, width, height);
 		float[] luminance = new float[width * height];
@@ -259,7 +298,7 @@ public final class HorizonDetector
 
 		float[] edges = nonMaxSuppression(gradientMag, gradientDir, width, height);
 
-		// Direction filter: keep only near-horizontal edges
+		// Direction filter: keep only near-horizontal edges (±35° from horizontal).
 		for (int i = 0; i < width * height; i++)
 		{
 			if (edges[i] > 0)
@@ -272,38 +311,37 @@ public final class HorizonDetector
 				}
 			}
 		}
-		gradientDir = null;
-		gradientMag = null;
+		return edges;
+	}
 
-		// ── Collect edge pixels WITHIN the painted mask ──
+	/**
+	 * Collect the coordinates of edge pixels that survive the strength threshold AND
+	 * lie within the painted mask. Returns {edgeX[], edgeY[]} packed as a 2-element
+	 * array, or null when fewer than 30 pixels qualify (not enough signal for the
+	 * Hough pass to produce a trustworthy angle).
+	 */
+	private static int[][] gatherMaskedEdges(float[] edges, boolean[] mask,
+		int width, int height, int maskWidth, int maskHeight)
+	{
 		float threshold = computeThreshold(edges, 0.15f);
 		int edgeCount = 0;
 		for (int y = 0; y < height; y++)
 		{
-			int maskY = y / 4;
-			if (maskY >= maskHeight)
-			{
-				maskY = maskHeight - 1;
-			}
+			int maskY = Math.min(y / 4, maskHeight - 1);
 			int rowOffset = y * width;
 			for (int x = 0; x < width; x++)
 			{
-				int maskX = x / 4;
-				if (maskX >= maskWidth)
-				{
-					maskX = maskWidth - 1;
-				}
+				int maskX = Math.min(x / 4, maskWidth - 1);
 				if (edges[rowOffset + x] >= threshold && mask[maskY * maskWidth + maskX])
 				{
 					edgeCount++;
 				}
 			}
 		}
-
 		if (edgeCount < 30)
 		{
 			Log.d(TAG, "Too few masked edge pixels: " + edgeCount);
-			return Float.NaN;
+			return null;
 		}
 
 		int[] edgeX = new int[edgeCount];
@@ -311,19 +349,11 @@ public final class HorizonDetector
 		int edgeIndex = 0;
 		for (int y = 0; y < height; y++)
 		{
-			int maskY = y / 4;
-			if (maskY >= maskHeight)
-			{
-				maskY = maskHeight - 1;
-			}
+			int maskY = Math.min(y / 4, maskHeight - 1);
 			int rowOffset = y * width;
 			for (int x = 0; x < width; x++)
 			{
-				int maskX = x / 4;
-				if (maskX >= maskWidth)
-				{
-					maskX = maskWidth - 1;
-				}
+				int maskX = Math.min(x / 4, maskWidth - 1);
 				if (edges[rowOffset + x] >= threshold && mask[maskY * maskWidth + maskX])
 				{
 					edgeX[edgeIndex] = x;
@@ -332,11 +362,19 @@ public final class HorizonDetector
 				}
 			}
 		}
-		edges = null;
-		mask = null;
-		Log.d(TAG, "Masked edge pixels: " + edgeCount);
+		return new int[][] { edgeX, edgeY };
+	}
 
-		// ── Hough: coarse then fine ──
+	/**
+	 * Two-pass Hough transform on the masked edge pixels (coarse 80–100° at 0.1°
+	 * steps, then fine ±2° around the coarse peak at 0.01° steps), converted to a
+	 * rotation angle the editor can apply directly. Returns NaN when the tilt is
+	 * beyond ±30° (the detector is too unreliable at larger angles), 0 when the tilt
+	 * is effectively zero, or the rounded-to-0.01° rotation otherwise.
+	 */
+	private static float runHoughAndConvertToRotation(int[] edgeX, int[] edgeY,
+		int edgeCount, int width, int height)
+	{
 		float coarseAngle = houghPass(edgeX, edgeY, edgeCount, width, height, 80f, 100f, 0.1f);
 		if (Float.isNaN(coarseAngle))
 		{

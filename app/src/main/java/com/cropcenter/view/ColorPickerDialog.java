@@ -68,87 +68,146 @@ public class ColorPickerDialog
 		float density = context.getResources().getDisplayMetrics().density;
 		int dp = (int) density;
 
+		final int[] selected = { currentColor };
+		final boolean[] suppressHexWatcher = { false };
+
 		LinearLayout root = new LinearLayout(context);
 		root.setOrientation(LinearLayout.VERTICAL);
 		root.setPadding(12 * dp, 8 * dp, 12 * dp, 4 * dp);
 
-		final int[] selected = { currentColor };
-
-		// Color grid
 		int cellSize = (int) (36 * density);
 		ColorGridView grid = new ColorGridView(context, palette, COLS, ROWS, cellSize, currentColor);
-		LinearLayout.LayoutParams gridLP = new LinearLayout.LayoutParams(
-			LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-		root.addView(grid, gridLP);
+		root.addView(grid, new LinearLayout.LayoutParams(
+			LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
 
-		// Alpha slider row
+		AlphaRow alphaRow = buildAlphaRow(context, root, currentColor, dp);
+		EditText hexInput = buildHexInput(context, root, dp);
+
+		Runnable syncHexToSelection = () -> syncHexDisplay(hexInput, selected[0], density,
+			suppressHexWatcher);
+		syncHexToSelection.run();
+
+		wireGridTap(grid, selected, alphaRow.slider(), syncHexToSelection);
+		wireAlphaSlider(alphaRow.slider(), selected, alphaRow.valueText(), syncHexToSelection);
+		wireHexInput(hexInput, selected, alphaRow.slider(), density, suppressHexWatcher);
+
+		new AlertDialog.Builder(context)
+			.setTitle("Pick Color")
+			.setView(root)
+			.setPositiveButton("OK", (dialog, which) -> listener.onColorSelected(selected[0]))
+			.setNegativeButton("Cancel", null)
+			.show();
+	}
+
+	/**
+	 * Build and attach the "Opacity" slider row. Returns the SeekBar + value TextView
+	 * together so wiring can address both without reaching into the row's children by
+	 * index — that was fragile against future additions to the row.
+	 */
+	private static AlphaRow buildAlphaRow(Context context, LinearLayout root,
+		int currentColor, int dp)
+	{
 		LinearLayout alphaRow = new LinearLayout(context);
 		alphaRow.setOrientation(LinearLayout.HORIZONTAL);
 		alphaRow.setGravity(Gravity.CENTER_VERTICAL);
-		TextView lblA = new TextView(context);
-		lblA.setText("Opacity ");
-		lblA.setTextSize(12);
-		lblA.setTextColor(ThemeColors.SUBTEXT0);
-		alphaRow.addView(lblA);
-		SeekBar seekA = new SeekBar(context);
-		seekA.setMax(255);
-		seekA.setProgress(Color.alpha(currentColor));
-		alphaRow.addView(seekA, new LinearLayout.LayoutParams(
-			0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
-		TextView txtA = new TextView(context);
-		txtA.setText(String.valueOf(Color.alpha(currentColor)));
-		txtA.setTextSize(11);
-		txtA.setTextColor(ThemeColors.MAUVE);
-		txtA.setMinWidth(28 * dp);
-		txtA.setGravity(Gravity.END);
-		alphaRow.addView(txtA);
-		LinearLayout.LayoutParams aLP = new LinearLayout.LayoutParams(
-			LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-		aLP.topMargin = 6 * dp;
-		root.addView(alphaRow, aLP);
 
-		// Hex input — its background acts as the live preview
+		TextView alphaLabel = new TextView(context);
+		alphaLabel.setText("Opacity ");
+		alphaLabel.setTextSize(12);
+		alphaLabel.setTextColor(ThemeColors.SUBTEXT0);
+		alphaRow.addView(alphaLabel);
+
+		SeekBar alphaSeekBar = new SeekBar(context);
+		alphaSeekBar.setMax(255);
+		alphaSeekBar.setProgress(Color.alpha(currentColor));
+		alphaRow.addView(alphaSeekBar, new LinearLayout.LayoutParams(
+			0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+
+		TextView alphaValueText = new TextView(context);
+		alphaValueText.setText(String.valueOf(Color.alpha(currentColor)));
+		alphaValueText.setTextSize(11);
+		alphaValueText.setTextColor(ThemeColors.MAUVE);
+		alphaValueText.setMinWidth(28 * dp);
+		alphaValueText.setGravity(Gravity.END);
+		alphaRow.addView(alphaValueText);
+
+		LinearLayout.LayoutParams alphaRowLayoutParams = new LinearLayout.LayoutParams(
+			LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+		alphaRowLayoutParams.topMargin = 6 * dp;
+		root.addView(alphaRow, alphaRowLayoutParams);
+		return new AlphaRow(alphaSeekBar, alphaValueText);
+	}
+
+	/**
+	 * Container for the two widgets built by buildAlphaRow that the show() method
+	 * wires up independently — the SeekBar drives the alpha channel, the TextView
+	 * mirrors the current value.
+	 */
+	private record AlphaRow(SeekBar slider, TextView valueText)
+	{
+	}
+
+	/**
+	 * Build and attach the hex-code EditText. Background acts as the live swatch preview.
+	 */
+	private static EditText buildHexInput(Context context, LinearLayout root, int dp)
+	{
 		EditText hexInput = new EditText(context);
 		hexInput.setTextSize(14);
 		hexInput.setSingleLine(true);
 		hexInput.setGravity(Gravity.CENTER);
 		hexInput.setHint("#AARRGGBB");
 		hexInput.setPadding(12 * dp, 10 * dp, 12 * dp, 10 * dp);
-		LinearLayout.LayoutParams hLP = new LinearLayout.LayoutParams(
+		LinearLayout.LayoutParams hexInputLayoutParams = new LinearLayout.LayoutParams(
 			LinearLayout.LayoutParams.MATCH_PARENT, 44 * dp);
-		hLP.topMargin = 8 * dp;
-		root.addView(hexInput, hLP);
+		hexInputLayoutParams.topMargin = 8 * dp;
+		root.addView(hexInput, hexInputLayoutParams);
+		return hexInput;
+	}
 
-		// Helper: update the hex text and background to reflect selected[0].
-		// The "suppress" flag prevents the TextWatcher from re-entering when WE change the text.
-		final boolean[] suppressHexWatcher = { false };
-		Runnable syncHexToSelection = () ->
-		{
-			suppressHexWatcher[0] = true;
-			hexInput.setText(String.format(Locale.ROOT, "#%08X", selected[0]));
-			suppressHexWatcher[0] = false;
-			applySwatchPreview(hexInput, selected[0], density);
-		};
-		syncHexToSelection.run();
+	/**
+	 * Push the current selection into the hex EditText + swatch background without
+	 * re-entering the TextWatcher (the suppress flag shields afterTextChanged).
+	 */
+	private static void syncHexDisplay(EditText hexInput, int color, float density,
+		boolean[] suppressHexWatcher)
+	{
+		suppressHexWatcher[0] = true;
+		hexInput.setText(String.format(Locale.ROOT, "#%08X", color));
+		suppressHexWatcher[0] = false;
+		applySwatchPreview(hexInput, color, density);
+	}
 
-		// Grid tap → update selection, alpha slider, hex
+	/**
+	 * Grid tap → update selection, alpha slider, hex. The alpha listener updates its
+	 * own value label; the explicit syncHex call here covers the case where the tapped
+	 * color's alpha matches the current slider position so the listener wouldn't fire.
+	 */
+	private static void wireGridTap(ColorGridView grid, int[] selected, SeekBar alphaSeekBar,
+		Runnable syncHexToSelection)
+	{
 		grid.setOnColorTapListener(color ->
 		{
 			selected[0] = color;
-			seekA.setProgress(Color.alpha(color));
-			// alpha listener updates txtA; sync hex here since slider may not fire if alpha
-			// unchanged
+			alphaSeekBar.setProgress(Color.alpha(color));
 			syncHexToSelection.run();
 		});
+	}
 
-		// Alpha slider → update alpha channel + hex
-		seekA.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener()
+	/**
+	 * Alpha slider → update alpha channel + hex. Split from onStart/onStop which stay
+	 * empty — SeekBar's interface requires all three.
+	 */
+	private static void wireAlphaSlider(SeekBar alphaSeekBar, int[] selected,
+		TextView alphaValueText, Runnable syncHexToSelection)
+	{
+		alphaSeekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener()
 		{
 			@Override
 			public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser)
 			{
 				selected[0] = (selected[0] & 0x00FFFFFF) | (progress << 24);
-				txtA.setText(String.valueOf(progress));
+				alphaValueText.setText(String.valueOf(progress));
 				syncHexToSelection.run();
 			}
 
@@ -158,9 +217,15 @@ public class ColorPickerDialog
 			@Override
 			public void onStopTrackingTouch(SeekBar seekBar) {}
 		});
+	}
 
-		// Hex edit → parse and update selection + alpha slider (suppressed during programmatic
-		// updates)
+	/**
+	 * Hex EditText → parse and update selection + alpha slider. The suppress flag
+	 * prevents programmatic setText from re-entering this watcher.
+	 */
+	private static void wireHexInput(EditText hexInput, int[] selected, SeekBar alphaSeekBar,
+		float density, boolean[] suppressHexWatcher)
+	{
 		hexInput.addTextChangedListener(new TextWatcher()
 		{
 			@Override
@@ -191,13 +256,12 @@ public class ColorPickerDialog
 					{
 						int parsed = (int) Long.parseLong(hex, 16);
 						selected[0] = parsed;
-						// Update alpha slider WITHOUT re-triggering syncHexToSelection
 						int alpha = Color.alpha(parsed);
-						if (seekA.getProgress() != alpha)
+						if (alphaSeekBar.getProgress() != alpha)
 						{
-							seekA.setProgress(alpha);
+							alphaSeekBar.setProgress(alpha);
 						}
-						// Update preview background (don't overwrite text the user is typing)
+						// Preview-only update — don't overwrite what the user is typing.
 						applySwatchPreview(hexInput, parsed, density);
 					}
 				}
@@ -206,13 +270,6 @@ public class ColorPickerDialog
 				}
 			}
 		});
-
-		new AlertDialog.Builder(context)
-			.setTitle("Pick Color")
-			.setView(root)
-			.setPositiveButton("OK", (dialog, which) -> listener.onColorSelected(selected[0]))
-			.setNegativeButton("Cancel", null)
-			.show();
 	}
 
 	/**
@@ -243,13 +300,15 @@ public class ColorPickerDialog
 			void onTap(int color);
 		}
 
+		// CLAUDE.md field order: `final` tier (alphabetical by type, uppercase types first,
+		// then alphabetical by name within a type) then regular (non-final) tier.
 		private final Paint borderPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+		private final Paint paint = new Paint();
+		private final int[] colors;
 		private final int cellSize;
 		private final int cols;
-		private final int[] colors;
-		private OnColorTapListener listener;
-		private final Paint paint = new Paint();
 		private final int rows;
+		private OnColorTapListener listener;
 		private int selectedColor;
 
 		ColorGridView(Context ctx, int[] colors, int cols, int rows, int cellSize, int selectedColor)

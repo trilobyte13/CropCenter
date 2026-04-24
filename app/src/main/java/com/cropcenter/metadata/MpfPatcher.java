@@ -68,21 +68,22 @@ public final class MpfPatcher
 				{
 					return false;
 				}
-				int cnt = ByteBufferUtils.readU16(jpeg, ifdOff, isLittleEndian);
+				int entryCount = ByteBufferUtils.readU16(jpeg, ifdOff, isLittleEndian);
 
-				for (int i = 0; i < cnt; i++)
+				for (int i = 0; i < entryCount; i++)
 				{
-					int e = ifdOff + 2 + i * 12;
-					if (e + 12 > jpeg.length)
+					int entryOffset = ifdOff + 2 + i * 12;
+					if (entryOffset + 12 > jpeg.length)
 					{
 						break;
 					}
-					int tag = ByteBufferUtils.readU16(jpeg, e, isLittleEndian);
+					int tag = ByteBufferUtils.readU16(jpeg, entryOffset, isLittleEndian);
 
 					// Tag 0xB002 = MP Entry
 					if (tag == 0xB002)
 					{
-						return patchMpEntry(jpeg, primarySize, mpfStart, e, isLittleEndian);
+						return patchMpEntry(jpeg, primarySize, mpfStart,
+							entryOffset, isLittleEndian);
 					}
 				}
 				return false; // MPF found but no MP Entry tag
@@ -96,6 +97,14 @@ public final class MpfPatcher
 		int entryTagOff, boolean isLittleEndian)
 	{
 		long byteCount = ByteBufferUtils.readU32(jpeg, entryTagOff + 4, isLittleEndian);
+		// Guard against a malformed table claiming thousands of entries. A sane MPF carries
+		// a handful of images (primary + gain map + optional burst/portrait layers); anything
+		// past 64 is almost certainly corrupt and would also make the int cast below suspect.
+		if (byteCount < 0 || byteCount > 64L * 16L)
+		{
+			Log.w(TAG, "MPF byteCount out of range: " + byteCount);
+			return false;
+		}
 		int numImages = (int) (byteCount / 16);
 		long entryOffRel = ByteBufferUtils.readU32(jpeg, entryTagOff + 8, isLittleEndian);
 		int entryOff = (int) (mpfStart + entryOffRel);
@@ -125,9 +134,9 @@ public final class MpfPatcher
 			int base = entryOff + img * 16;
 			long attr = ByteBufferUtils.readU32(jpeg, base, isLittleEndian);
 			long size = ByteBufferUtils.readU32(jpeg, base + 4, isLittleEndian);
-			long dataOff = ByteBufferUtils.readU32(jpeg, base + 8, isLittleEndian);
+			long dataOffset = ByteBufferUtils.readU32(jpeg, base + 8, isLittleEndian);
 			Log.d(TAG, "BEFORE [" + img + "] attr=0x" + Long.toHexString(attr)
-				+ " size=" + size + " offset=" + dataOff);
+				+ " size=" + size + " offset=" + dataOffset);
 		}
 
 		// Update entry[0] (primary): update size
@@ -156,9 +165,9 @@ public final class MpfPatcher
 			}
 			long attr = ByteBufferUtils.readU32(jpeg, base, isLittleEndian);
 			long size = ByteBufferUtils.readU32(jpeg, base + 4, isLittleEndian);
-			long dataOff = ByteBufferUtils.readU32(jpeg, base + 8, isLittleEndian);
+			long dataOffset = ByteBufferUtils.readU32(jpeg, base + 8, isLittleEndian);
 			Log.d(TAG, "AFTER [" + img + "] attr=0x" + Long.toHexString(attr)
-				+ " size=" + size + " offset=" + dataOff);
+				+ " size=" + size + " offset=" + dataOffset);
 		}
 
 		return true;

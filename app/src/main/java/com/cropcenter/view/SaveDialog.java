@@ -2,6 +2,8 @@ package com.cropcenter.view;
 
 import android.app.AlertDialog;
 import android.content.Context;
+import android.content.res.ColorStateList;
+import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.view.Gravity;
 import android.widget.CheckBox;
@@ -35,30 +37,40 @@ public class SaveDialog
 		root.setOrientation(LinearLayout.VERTICAL);
 		root.setPadding(dp16, dp8, dp16, dp8);
 
-		// ─── FORMAT card ───
-		LinearLayout fmtCard = newCard(ctx, density);
-		addCardTitle(fmtCard, "Format");
+		final boolean[] isJpeg = { ExportConfig.FORMAT_JPEG.equals(state.getExportConfig().format()) };
+		root.addView(buildFormatCard(ctx, density, isJpeg), DialogCards.topMargin(dp4));
+
+		CheckBox chkBake = new CheckBox(ctx);
+		root.addView(buildOptionsCard(ctx, state, density, chkBake), DialogCards.topMargin(dp8));
+
+		new AlertDialog.Builder(ctx)
+			.setTitle("Save Image")
+			.setView(root)
+			.setPositiveButton("Continue", (dialog, which) ->
+			{
+				applySettings(state, isJpeg[0], chkBake.isChecked());
+				onSave.onSave();
+			})
+			.setNegativeButton("Cancel", null)
+			.show();
+	}
+
+	/**
+	 * Build the "Format" card — two equal-weight toggle chips for JPEG / PNG. Writes
+	 * to `isJpeg[0]` as the user taps; the caller reads that on OK.
+	 */
+	private static LinearLayout buildFormatCard(Context ctx, float density, boolean[] isJpeg)
+	{
+		int dp8 = (int) (8 * density);
+		LinearLayout card = DialogCards.newCard(ctx, density);
+		DialogCards.addCardTitle(card, "Format");
 
 		LinearLayout fmtRow = new LinearLayout(ctx);
 		fmtRow.setOrientation(LinearLayout.HORIZONTAL);
 		final TextView jpegBtn = formatChip(ctx, "JPEG", density);
-		final TextView pngBtn  = formatChip(ctx, "PNG", density);
-		final boolean[] isJpeg = { ExportConfig.FORMAT_JPEG.equals(state.getExportConfig().format()) };
+		final TextView pngBtn = formatChip(ctx, "PNG", density);
 
-		Runnable updateFormatHighlight = () ->
-		{
-			GradientDrawable jbg = new GradientDrawable();
-			jbg.setColor(isJpeg[0] ? ThemeColors.MAUVE : ThemeColors.SURFACE1);
-			jbg.setCornerRadius(4 * density);
-			jpegBtn.setBackground(jbg);
-			jpegBtn.setTextColor(isJpeg[0] ? ThemeColors.CRUST : ThemeColors.TEXT);
-
-			GradientDrawable pbg = new GradientDrawable();
-			pbg.setColor(!isJpeg[0] ? ThemeColors.MAUVE : ThemeColors.SURFACE1);
-			pbg.setCornerRadius(4 * density);
-			pngBtn.setBackground(pbg);
-			pngBtn.setTextColor(!isJpeg[0] ? ThemeColors.CRUST : ThemeColors.TEXT);
-		};
+		Runnable updateFormatHighlight = () -> applyFormatChipStyle(jpegBtn, pngBtn, isJpeg[0], density);
 		updateFormatHighlight.run();
 
 		jpegBtn.setOnClickListener(view ->
@@ -72,61 +84,71 @@ public class SaveDialog
 			updateFormatHighlight.run();
 		});
 
-		LinearLayout.LayoutParams jLP = new LinearLayout.LayoutParams(
+		LinearLayout.LayoutParams jpegBtnLayoutParams = new LinearLayout.LayoutParams(
 			0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-		LinearLayout.LayoutParams pLP = new LinearLayout.LayoutParams(
+		LinearLayout.LayoutParams pngBtnLayoutParams = new LinearLayout.LayoutParams(
 			0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-		pLP.leftMargin = dp8;
-		fmtRow.addView(jpegBtn, jLP);
-		fmtRow.addView(pngBtn, pLP);
-		fmtCard.addView(fmtRow, topMargin(dp8));
+		pngBtnLayoutParams.leftMargin = dp8;
+		fmtRow.addView(jpegBtn, jpegBtnLayoutParams);
+		fmtRow.addView(pngBtn, pngBtnLayoutParams);
+		card.addView(fmtRow, DialogCards.topMargin(dp8));
+		return card;
+	}
 
-		root.addView(fmtCard, topMargin(dp4));
+	/**
+	 * Build the "Options" card — single checkbox for baking the grid into the export.
+	 * The passed-in CheckBox is configured in place and added to the card; caller
+	 * reads its checked state on OK.
+	 */
+	private static LinearLayout buildOptionsCard(Context ctx, CropState state, float density,
+		CheckBox chkBake)
+	{
+		int dp4 = (int) (4 * density);
+		LinearLayout card = DialogCards.newCard(ctx, density);
+		DialogCards.addCardTitle(card, "Options");
 
-		// ─── OPTIONS card ───
-		LinearLayout optCard = newCard(ctx, density);
-		addCardTitle(optCard, "Options");
-
-		CheckBox chkBake = new CheckBox(ctx);
 		chkBake.setText("Export Grid");
 		chkBake.setTextSize(12);
 		chkBake.setTextColor(ThemeColors.TEXT);
 		chkBake.setChecked(state.getGridConfig().includeInExport());
-		chkBake.setButtonTintList(android.content.res.ColorStateList.valueOf(ThemeColors.MAUVE));
-		optCard.addView(chkBake, topMargin(dp4));
-
-		root.addView(optCard, topMargin(dp8));
-
-		Runnable applySettings = () ->
-		{
-			state.updateExportConfig(c ->
-				c.withFormat(isJpeg[0] ? ExportConfig.FORMAT_JPEG : ExportConfig.FORMAT_PNG));
-			state.updateGridConfig(g -> g.withIncludeInExport(chkBake.isChecked()));
-		};
-
-		new AlertDialog.Builder(ctx)
-			.setTitle("Save Image")
-			.setView(root)
-			.setPositiveButton("Continue", (dialog, which) ->
-			{
-				applySettings.run();
-				onSave.onSave();
-			})
-			.setNegativeButton("Cancel", null)
-			.show();
+		chkBake.setButtonTintList(ColorStateList.valueOf(ThemeColors.MAUVE));
+		card.addView(chkBake, DialogCards.topMargin(dp4));
+		return card;
 	}
 
-	// ── UI helpers (shared visual language with SettingsDialog) ──
-
-	private static void addCardTitle(LinearLayout card, String text)
+	/**
+	 * Apply highlight styling to the two format chips based on which is selected.
+	 * Selected chip gets mauve background + crust text; unselected gets surface1 bg +
+	 * default text.
+	 */
+	private static void applyFormatChipStyle(TextView jpegBtn, TextView pngBtn,
+		boolean jpegSelected, float density)
 	{
-		TextView tv = new TextView(card.getContext());
-		tv.setText(text);
-		tv.setTextSize(13);
-		tv.setTextColor(ThemeColors.MAUVE);
-		tv.setTypeface(tv.getTypeface(), android.graphics.Typeface.BOLD);
-		card.addView(tv);
+		GradientDrawable jpegBg = new GradientDrawable();
+		jpegBg.setColor(jpegSelected ? ThemeColors.MAUVE : ThemeColors.SURFACE1);
+		jpegBg.setCornerRadius(4 * density);
+		jpegBtn.setBackground(jpegBg);
+		jpegBtn.setTextColor(jpegSelected ? ThemeColors.CRUST : ThemeColors.TEXT);
+
+		GradientDrawable pngBg = new GradientDrawable();
+		pngBg.setColor(!jpegSelected ? ThemeColors.MAUVE : ThemeColors.SURFACE1);
+		pngBg.setCornerRadius(4 * density);
+		pngBtn.setBackground(pngBg);
+		pngBtn.setTextColor(!jpegSelected ? ThemeColors.CRUST : ThemeColors.TEXT);
 	}
+
+	/**
+	 * Commit the dialog's selections to CropState — one updateExportConfig for format,
+	 * one updateGridConfig for the export-grid toggle.
+	 */
+	private static void applySettings(CropState state, boolean isJpeg, boolean bakeGrid)
+	{
+		state.updateExportConfig(c ->
+			c.withFormat(isJpeg ? ExportConfig.FORMAT_JPEG : ExportConfig.FORMAT_PNG));
+		state.updateGridConfig(g -> g.withIncludeInExport(bakeGrid));
+	}
+
+	// ── UI helpers (shared visual language with SettingsDialog lives in DialogCards) ──
 
 	private static TextView formatChip(Context ctx, String text, float density)
 	{
@@ -134,30 +156,9 @@ public class SaveDialog
 		btn.setText(text);
 		btn.setTextSize(13);
 		btn.setGravity(Gravity.CENTER);
-		btn.setTypeface(btn.getTypeface(), android.graphics.Typeface.BOLD);
+		btn.setTypeface(btn.getTypeface(), Typeface.BOLD);
 		btn.setPadding(0, (int) (8 * density), 0, (int) (8 * density));
 		btn.setSingleLine(true);
 		return btn;
-	}
-
-	private static LinearLayout newCard(Context ctx, float density)
-	{
-		LinearLayout card = new LinearLayout(ctx);
-		card.setOrientation(LinearLayout.VERTICAL);
-		GradientDrawable bg = new GradientDrawable();
-		bg.setColor(ThemeColors.SURFACE0);
-		bg.setCornerRadius(8 * density);
-		card.setBackground(bg);
-		int pad = (int) (12 * density);
-		card.setPadding(pad, (int) (10 * density), pad, (int) (10 * density));
-		return card;
-	}
-
-	private static LinearLayout.LayoutParams topMargin(int margin)
-	{
-		LinearLayout.LayoutParams layoutParams = new LinearLayout.LayoutParams(
-			LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-		layoutParams.topMargin = margin;
-		return layoutParams;
 	}
 }

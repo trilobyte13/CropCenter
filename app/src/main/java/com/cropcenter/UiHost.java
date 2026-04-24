@@ -63,7 +63,7 @@ interface UiHost extends EditorHost
 	TextView getZoomBadgeTextView();
 
 	/**
-	 * True while UiSync.syncRotationUI is mid-update of the rotation ruler, gating the
+	 * True while UiSync.syncRotationUi is mid-update of the rotation ruler, gating the
 	 * ruler's own change listener from re-entering CropState.setRotationDegrees.
 	 */
 	boolean isRulerUpdating();

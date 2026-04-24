@@ -25,6 +25,11 @@ public record GridConfig(
 	int rows,
 	int selectionColor)
 {
+	/**
+	 * Default configuration applied to every freshly-loaded image: grid visible at 4×4,
+	 * pixel grid visible when zoomed past 6×, grid NOT baked into exports, 50%-transparent
+	 * blue selection overlay.
+	 */
 	public static GridConfig defaults()
 	{
 		return new GridConfig(
@@ -45,6 +50,10 @@ public record GridConfig(
 			color, columns, pixelGridColor, rows, selectionColor);
 	}
 
+	/**
+	 * Replace the column count. Clamped by CropState's update path — this method itself
+	 * does not validate.
+	 */
 	public GridConfig withColumns(int columns)
 	{
 		return new GridConfig(enabled, includeInExport, showPixelGrid, lineWidth,
@@ -81,12 +90,19 @@ public record GridConfig(
 			color, columns, pixelGridColor, rows, selectionColor);
 	}
 
+	/**
+	 * Replace the shared selection color (ARGB) — used by selection points, polygon
+	 * fill, and horizon paint together for visual consistency.
+	 */
 	public GridConfig withSelectionColor(int selectionColor)
 	{
 		return new GridConfig(enabled, includeInExport, showPixelGrid, lineWidth,
 			color, columns, pixelGridColor, rows, selectionColor);
 	}
 
+	/**
+	 * Toggle the per-pixel grid overlay that appears at high zoom levels.
+	 */
 	public GridConfig withShowPixelGrid(boolean showPixelGrid)
 	{
 		return new GridConfig(enabled, includeInExport, showPixelGrid, lineWidth,

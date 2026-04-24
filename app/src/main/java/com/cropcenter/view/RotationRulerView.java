@@ -48,6 +48,8 @@ public class RotationRulerView extends View
 	private final Paint majorTickPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 	private final Paint minorTickPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 	private final Paint zeroPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+	// Cached indicator-triangle scratch — rewound per draw so onDraw allocates nothing.
+	private final Path indicatorTriangle = new Path();
 	private final ScaleGestureDetector scaleDetector;
 
 	private OnRotationChangedListener listener;
@@ -163,7 +165,12 @@ public class RotationRulerView extends View
 						flingActive = false;
 						snapAndNotify();
 					}
-					else
+					// Re-check flingActive before reposting: notifyChanged above ultimately
+					// calls back into setDegrees via the state listener, and a future caller
+					// invoking setDegrees outside the isRulerUpdating guard could flip
+					// flingActive=false via stopFling. Reposting unconditionally would
+					// resurrect the fling. Cheap defence against that class of bug.
+					else if (flingActive)
 					{
 						Choreographer.getInstance().postFrameCallback(this);
 					}
@@ -214,77 +221,106 @@ public class RotationRulerView extends View
 
 		switch (event.getActionMasked())
 		{
-			case MotionEvent.ACTION_DOWN ->
-			{
-				stopFling();
-				downX = lastTouchX = event.getX();
-				totalDragDx = 0;
-				scalingOccurred = false;
-				// getParent() is null between detach and re-attach (config change mid-gesture);
-				// skip the request rather than NPE.
-				ViewParent parent = getParent();
-				if (parent != null)
-				{
-					parent.requestDisallowInterceptTouchEvent(true);
-				}
-			}
-			case MotionEvent.ACTION_MOVE ->
-			{
-				if (!isScaling && event.getPointerCount() == 1)
-				{
-					float dx = event.getX() - lastTouchX;
-					lastTouchX = event.getX();
-					totalDragDx += Math.abs(dx);
-					float rawDeg = currentDegrees - dx / pixelsPerDegree;
-					float newDeg = Math.clamp(rawDeg, MIN_DEG, MAX_DEG);
-					if (newDeg != currentDegrees)
-					{
-						currentDegrees = newDeg;
-						notifyChanged();
-						invalidate();
-					}
-				}
-				lastTouchX = event.getX();
-			}
-			case MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL ->
-			{
-				if (!isScaling)
-				{
-					// Tap vs drag: total movement <= TAP_SLOP AND no scaling happened
-					if (!scalingOccurred && totalDragDx <= TAP_SLOP
-						&& event.getActionMasked() == MotionEvent.ACTION_UP)
-					{
-						float centerX = getWidth() / 2f;
-						float tappedDeg = currentDegrees + (downX - centerX) / pixelsPerDegree;
-						currentDegrees = Math.clamp(tappedDeg, MIN_DEG, MAX_DEG);
-						snapAndNotify();
-						velocityTracker.recycle();
-						velocityTracker = null;
-						return true;
-					}
-					velocityTracker.computeCurrentVelocity((int) SCROLL_SUBPIXEL_SCALE);
-					float velX = velocityTracker.getXVelocity();
-					if (Math.abs(velX) > FLING_VELOCITY_THRESHOLD)
-					{
-						float scaled = pixelsPerDegree * SCROLL_SUBPIXEL_SCALE;
-						int startX = (int) (currentDegrees * scaled);
-						int minX = (int) (MIN_DEG * scaled);
-						int maxX = (int) (MAX_DEG * scaled);
-						scroller.fling(startX, 0, (int) (-velX * SCROLL_SUBPIXEL_SCALE), 0,
-							minX, maxX, 0, 0);
-						flingActive = true;
-						Choreographer.getInstance().postFrameCallback(flingFrameCallback);
-					}
-					else
-					{
-						snapAndNotify();
-					}
-				}
-				velocityTracker.recycle();
-				velocityTracker = null;
-			}
+			case MotionEvent.ACTION_DOWN -> handleTouchDown(event);
+			case MotionEvent.ACTION_MOVE -> handleTouchMove(event);
+			case MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> handleTouchRelease(event);
 		}
 		return true;
+	}
+
+	/**
+	 * ACTION_DOWN: stop any in-flight fling, reset per-gesture accumulators, and ask
+	 * the parent not to intercept subsequent moves (the rotation dial owns horizontal
+	 * drag inside its bounds). getParent() is null between detach and re-attach during
+	 * config changes — skip the request rather than NPE.
+	 */
+	private void handleTouchDown(MotionEvent event)
+	{
+		stopFling();
+		downX = lastTouchX = event.getX();
+		totalDragDx = 0;
+		scalingOccurred = false;
+		ViewParent parent = getParent();
+		if (parent != null)
+		{
+			parent.requestDisallowInterceptTouchEvent(true);
+		}
+	}
+
+	/**
+	 * ACTION_MOVE: single-finger horizontal drag advances currentDegrees; pinch drags
+	 * are handled by scaleDetector and suppressed here (isScaling / pointerCount > 1).
+	 */
+	private void handleTouchMove(MotionEvent event)
+	{
+		if (!isScaling && event.getPointerCount() == 1)
+		{
+			float dx = event.getX() - lastTouchX;
+			totalDragDx += Math.abs(dx);
+			float rawDeg = currentDegrees - dx / pixelsPerDegree;
+			float newDeg = Math.clamp(rawDeg, MIN_DEG, MAX_DEG);
+			if (newDeg != currentDegrees)
+			{
+				currentDegrees = newDeg;
+				notifyChanged();
+				invalidate();
+			}
+		}
+		lastTouchX = event.getX();
+	}
+
+	/**
+	 * ACTION_UP / ACTION_CANCEL: classify the gesture as tap / drag-release-slow /
+	 * drag-release-fast and dispatch accordingly. Recycles the velocity tracker on
+	 * every exit so the next gesture starts fresh.
+	 */
+	private void handleTouchRelease(MotionEvent event)
+	{
+		if (!isScaling)
+		{
+			// Tap: total movement below the slop AND no scaling happened this gesture.
+			if (!scalingOccurred && totalDragDx <= TAP_SLOP
+				&& event.getActionMasked() == MotionEvent.ACTION_UP)
+			{
+				float centerX = getWidth() / 2f;
+				float tappedDeg = currentDegrees + (downX - centerX) / pixelsPerDegree;
+				currentDegrees = Math.clamp(tappedDeg, MIN_DEG, MAX_DEG);
+				snapAndNotify();
+				velocityTracker.recycle();
+				velocityTracker = null;
+				return;
+			}
+
+			velocityTracker.computeCurrentVelocity((int) SCROLL_SUBPIXEL_SCALE);
+			float xVelocity = velocityTracker.getXVelocity();
+			if (Math.abs(xVelocity) > FLING_VELOCITY_THRESHOLD)
+			{
+				startFling(xVelocity);
+			}
+			else
+			{
+				snapAndNotify();
+			}
+		}
+		velocityTracker.recycle();
+		velocityTracker = null;
+	}
+
+	/**
+	 * Fire the OverScroller + register the Choreographer frame callback for fling.
+	 * Separated from handleTouchRelease so the high-velocity branch reads as a single
+	 * named action rather than eight lines of scroller-setup arithmetic.
+	 */
+	private void startFling(float xVelocity)
+	{
+		float scaled = pixelsPerDegree * SCROLL_SUBPIXEL_SCALE;
+		int startX = (int) (currentDegrees * scaled);
+		int minX = (int) (MIN_DEG * scaled);
+		int maxX = (int) (MAX_DEG * scaled);
+		scroller.fling(startX, 0, (int) (-xVelocity * SCROLL_SUBPIXEL_SCALE), 0,
+			minX, maxX, 0, 0);
+		flingActive = true;
+		Choreographer.getInstance().postFrameCallback(flingFrameCallback);
 	}
 
 	public void setDegrees(float deg)
@@ -343,20 +379,21 @@ public class RotationRulerView extends View
 		float tickBot = height - labelPaint.getTextSize() - 3;
 
 		float degreesVisible = width / pixelsPerDegree;
-		TickConfig tc = chooseTickConfig(degreesVisible);
+		TickConfig tickConfig = chooseTickConfig(degreesVisible);
 
 		// Use integer tick indices to avoid float accumulation errors.
-		// tickIndex * tc.minor = degree value.
-		int iStart = (int) Math.floor((currentDegrees - degreesVisible / 2f - tc.major) / tc.minor);
-		int iEnd = (int) Math.ceil((currentDegrees + degreesVisible / 2f + tc.major) / tc.minor);
+		// tickIndex * tickConfig.minor = degree value.
+		float halfVisible = degreesVisible / 2f;
+		int iStart = (int) Math.floor((currentDegrees - halfVisible - tickConfig.major) / tickConfig.minor);
+		int iEnd = (int) Math.ceil((currentDegrees + halfVisible + tickConfig.major) / tickConfig.minor);
 
 		// Multiplier to convert minor intervals to major check (integer comparison)
-		int majorEvery = Math.round(tc.major / tc.minor);
-		int detentEvery = Math.round(45f / tc.minor);
+		int majorEvery = Math.round(tickConfig.major / tickConfig.minor);
+		int detentEvery = Math.round(45f / tickConfig.minor);
 
 		for (int i = iStart; i <= iEnd; i++)
 		{
-			float deg = i * tc.minor;
+			float deg = i * tickConfig.minor;
 			if (deg < MIN_DEG || deg > MAX_DEG)
 			{
 				continue;
@@ -398,16 +435,16 @@ public class RotationRulerView extends View
 			canvas.drawLine(zeroX, tickTop, zeroX, tickBot, zeroPaint);
 		}
 
-		float triH = 4 * getResources().getDisplayMetrics().density;
+		float triangleHeight = 4 * getResources().getDisplayMetrics().density;
 		indicatorPaint.setStyle(Paint.Style.FILL);
-		Path tri = new Path();
-		tri.moveTo(centerX, tickTop);
-		tri.lineTo(centerX - triH, tickTop + triH);
-		tri.lineTo(centerX + triH, tickTop + triH);
-		tri.close();
-		canvas.drawPath(tri, indicatorPaint);
+		indicatorTriangle.rewind();
+		indicatorTriangle.moveTo(centerX, tickTop);
+		indicatorTriangle.lineTo(centerX - triangleHeight, tickTop + triangleHeight);
+		indicatorTriangle.lineTo(centerX + triangleHeight, tickTop + triangleHeight);
+		indicatorTriangle.close();
+		canvas.drawPath(indicatorTriangle, indicatorPaint);
 		indicatorPaint.setStyle(Paint.Style.STROKE);
-		canvas.drawLine(centerX, tickTop + triH, centerX, tickBot, indicatorPaint);
+		canvas.drawLine(centerX, tickTop + triangleHeight, centerX, tickBot, indicatorPaint);
 	}
 
 	private void notifyChanged()
@@ -429,9 +466,6 @@ public class RotationRulerView extends View
 		Choreographer.getInstance().removeFrameCallback(flingFrameCallback);
 	}
 
-	/**
-	 * Snap currentDegrees to the nearest minor tick and notify.
-	 */
 	private void snapAndNotify()
 	{
 		float snapped = Math.clamp(snapToTick(currentDegrees), MIN_DEG, MAX_DEG);
@@ -449,44 +483,43 @@ public class RotationRulerView extends View
 	private float snapToTick(float deg)
 	{
 		float degreesVisible = getWidth() > 0 ? getWidth() / pixelsPerDegree : 30f;
-		TickConfig tc = chooseTickConfig(degreesVisible);
-		return snapTo(deg, tc.minor);
+		TickConfig tickConfig = chooseTickConfig(degreesVisible);
+		return snapTo(deg, tickConfig.minor);
 	}
 
+	// Pre-built tick configurations for each zoom level. Indexed parallel to TICK_THRESHOLDS:
+	// the first config whose threshold is strictly below degreesVisible wins. Cached as
+	// static finals because chooseTickConfig is called on every onDraw and every snapToTick
+	// during a fling — otherwise we'd allocate 60+ TickConfig records per second.
+	private static final TickConfig[] TICK_CONFIGS = {
+		new TickConfig(10f,   45f),
+		new TickConfig(5f,    45f),
+		new TickConfig(1f,    10f),
+		new TickConfig(1f,    5f),
+		new TickConfig(0.5f,  1f),
+		new TickConfig(0.1f,  0.5f),
+		new TickConfig(0.05f, 0.1f),
+		new TickConfig(0.01f, 0.1f),
+	};
+	private static final float[] TICK_THRESHOLDS = {
+		270f, 90f, 30f, 10f, 3f, 1f, 0.3f, 0f,
+	};
+
 	/**
-	 * Choose tick intervals based on how many degrees are visible on screen.
+	 * Choose tick intervals based on how many degrees are visible on screen. Walks
+	 * TICK_THRESHOLDS in order; the first threshold strictly below degreesVisible picks
+	 * that index's TickConfig. The last threshold is 0 so the loop always terminates.
 	 */
 	private static TickConfig chooseTickConfig(float degreesVisible)
 	{
-		if (degreesVisible > 270)
+		for (int i = 0; i < TICK_THRESHOLDS.length; i++)
 		{
-			return new TickConfig(10f, 45f);
+			if (degreesVisible > TICK_THRESHOLDS[i])
+			{
+				return TICK_CONFIGS[i];
+			}
 		}
-		if (degreesVisible > 90)
-		{
-			return new TickConfig(5f, 45f);
-		}
-		if (degreesVisible > 30)
-		{
-			return new TickConfig(1f, 10f);
-		}
-		if (degreesVisible > 10)
-		{
-			return new TickConfig(1f, 5f);
-		}
-		if (degreesVisible > 3)
-		{
-			return new TickConfig(0.5f, 1f);
-		}
-		if (degreesVisible > 1)
-		{
-			return new TickConfig(0.1f, 0.5f);
-		}
-		if (degreesVisible > 0.3)
-		{
-			return new TickConfig(0.05f, 0.1f);
-		}
-		return new TickConfig(0.01f, 0.1f);
+		return TICK_CONFIGS[TICK_CONFIGS.length - 1];
 	}
 
 	private static float snapTo(float val, float step)

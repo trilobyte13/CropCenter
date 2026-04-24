@@ -25,7 +25,8 @@ public class GridRenderer
 	private final Paint gridPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 
 	/**
-	 * Draw grid lines snapped to pixel boundaries.
+	 * Draw the grid's lines at continuous-float positions inside the crop rectangle (see
+	 * the class Javadoc). Line positions are NOT snapped to pixel boundaries.
 	 *
 	 * @param canvas              the canvas to draw on (screen coordinates)
 	 * @param cropImgX            crop left in image pixels
