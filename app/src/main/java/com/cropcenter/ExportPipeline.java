@@ -1,10 +1,12 @@
 package com.cropcenter;
 
+import android.graphics.Bitmap;
 import android.net.Uri;
 import android.util.Log;
 import android.widget.Toast;
 
 import com.cropcenter.crop.CropExporter;
+import com.cropcenter.model.CropState;
 import com.cropcenter.model.ExportConfig;
 import com.cropcenter.util.SafFileHelper;
 import com.cropcenter.util.UltraHdrCompat;
@@ -255,11 +257,27 @@ final class ExportPipeline
 	 * flow needs it (ReplaceStrategy.replaceColliding) — plain Save As / Keep paths
 	 * no longer pay the backup I/O for a save that isn't actually overwriting the
 	 * original.
+	 *
+	 * Bypass: when the user has applied no transformations (no crop, no rotation, no
+	 * grid bake-in, JPEG-to-JPEG round-trip), write `state.originalFileBytes` verbatim
+	 * instead of canvas-encoding. This preserves byte-perfect fidelity for re-saves AND
+	 * for the graft flow's "apply external edit then save without further editing" path.
+	 * The canvas re-encode + ExifPatcher pipeline (especially the IFD1 thumbnail
+	 * regeneration) appears to break Samsung Gallery's Revert action when the source's
+	 * SEFT trailer references a backup with different pixel content — bypassing them
+	 * keeps the saved file structurally identical to what Gallery's Revert chain
+	 * already accepts.
 	 */
 	private byte[] encodePhase(boolean isPng, boolean srcHadHdr, boolean includeBackupInSeft)
 	{
 		try
 		{
+			if (canBypassEncode(host.getState(), isPng))
+			{
+				byte[] data = host.getState().getOriginalFileBytes();
+				Log.d(TAG, "Bypassed encode (no transforms applied) — " + data.length + " bytes");
+				return data;
+			}
 			byte[] data = CropExporter.export(
 				host.getState(), host.getActivity().getCacheDir(), includeBackupInSeft).data();
 			Log.d(TAG, "Encoded " + data.length + " bytes (srcHdr=" + srcHadHdr
@@ -273,6 +291,73 @@ final class ExportPipeline
 			host.runOnUiThread(() -> host.toastIfAlive(emsg, Toast.LENGTH_SHORT));
 			return null;
 		}
+	}
+
+	/**
+	 * Decide whether the current save is a no-op transformation that lets us write
+	 * `state.originalFileBytes` verbatim instead of canvas-encoding. Conditions:
+	 *   - Output format is JPEG (PNG has its own encode path; can't bypass).
+	 *   - Source format is JPEG (can't bypass-encode a PNG source as JPEG).
+	 *   - The image is NOT a graft. Graft saves carry the edit's foreign ICC profile in
+	 *     `originalFileBytes`; bypassing skips the canvas-managed Display P3 conversion
+	 *     that the cropped graft path runs through CropExporter and produces a slightly
+	 *     different output structure than save-after-crop. Forcing graft saves through
+	 *     the full encode keeps save-without-crop and save-after-crop byte-similar.
+	 *   - No rotation applied.
+	 *   - No grid bake-in.
+	 *   - Source bytes available.
+	 *   - Crop is either uninitialised (state.hasCenter() == false) OR is the trivial
+	 *     full-image crop (cropW/cropH match the source bitmap dimensions). The full-
+	 *     image case matters because applying a graft auto-initialises a centered crop
+	 *     during applyStateToUi → ensureCropCenter, even though the user has applied no
+	 *     real edit. Without the full-image carve-out, every graft save would fall into
+	 *     the canvas-encode path even when the user never touched the crop tool.
+	 *     (Now defensive — the graft-applied check above already excludes that case.)
+	 *
+	 * If all hold, the canvas-encoded primary would be a re-encoded near-copy of
+	 * state.originalFileBytes — close to byte-identical but with different DCT/Huffman
+	 * tables and a regenerated EXIF thumbnail. Writing the source bytes verbatim
+	 * preserves structure exactly.
+	 */
+	private static boolean canBypassEncode(CropState state, boolean isPng)
+	{
+		if (isPng)
+		{
+			return false;
+		}
+		if (!ExportConfig.FORMAT_JPEG.equals(state.getSourceFormat()))
+		{
+			return false;
+		}
+		if (state.isGraftApplied())
+		{
+			return false;
+		}
+		if (state.getRotationDegrees() != 0f)
+		{
+			return false;
+		}
+		if (state.getGridConfig().includeInExport())
+		{
+			return false;
+		}
+		if (state.getOriginalFileBytes() == null)
+		{
+			return false;
+		}
+		if (state.hasCenter())
+		{
+			Bitmap src = state.getSourceImage();
+			if (src == null)
+			{
+				return false;
+			}
+			if (state.getCropW() != src.getWidth() || state.getCropH() != src.getHeight())
+			{
+				return false;
+			}
+		}
+		return true;
 	}
 
 	/**

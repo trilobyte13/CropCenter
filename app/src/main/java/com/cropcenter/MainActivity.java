@@ -25,6 +25,7 @@ import com.cropcenter.metadata.GainMapExtractor;
 import com.cropcenter.metadata.JpegMetadataExtractor;
 import com.cropcenter.metadata.JpegSegment;
 import com.cropcenter.metadata.SeftExtractor;
+import com.cropcenter.model.AspectRatio;
 import com.cropcenter.model.CenterMode;
 import com.cropcenter.model.CropState;
 import com.cropcenter.model.EditorMode;
@@ -59,9 +60,12 @@ public class MainActivity extends AppCompatActivity implements SaveHost, UiHost,
 	private final SafFileHelper safFiles = new SafFileHelper(this);
 	private final StoragePermissionHelper permissions = new StoragePermissionHelper(this);
 	private final SaveController saveController = new SaveController(this, safFiles, permissions);
+	private final GraftController graftController = new GraftController(this, safFiles,
+		this::applyGraftedBytes);
 	private final UiSync ui = new UiSync(this);
 	private final ToolbarBinder toolbar = new ToolbarBinder(this, ui);
 
+	private ActivityResultLauncher<String[]> graftPickerLauncher;
 	private ActivityResultLauncher<String[]> openLauncher;
 	private ActivityResultLauncher<String> saveAsLauncher;
 	private CenterMode moveLockPref = CenterMode.VERTICAL;
@@ -150,8 +154,23 @@ public class MainActivity extends AppCompatActivity implements SaveHost, UiHost,
 				}
 			});
 
-		findViewById(R.id.btnOpen).setOnClickListener(view ->
+		graftPickerLauncher = registerForActivityResult(new ActivityResultContracts.OpenDocument(),
+			uri ->
+			{
+				if (uri != null)
+				{
+					graftController.onEditPicked(uri);
+				}
+				else
+				{
+					graftController.onEditPickerCancelled();
+				}
+			});
+
+		View btnOpen = findViewById(R.id.btnOpen);
+		btnOpen.setOnClickListener(view ->
 			openLauncher.launch(new String[] { ExportConfig.JPEG_MIME, ExportConfig.PNG_MIME }));
+		btnOpen.setOnLongClickListener(view -> graftController.start(graftPickerLauncher));
 		findViewById(R.id.btnSave).setOnClickListener(view -> saveController.showSaveDialog());
 		setBusyUi(false); // Save stays disabled until an image is loaded
 		findViewById(R.id.btnSettings).setOnClickListener(view -> SettingsDialog.show(this, state));
@@ -442,6 +461,141 @@ public class MainActivity extends AppCompatActivity implements SaveHost, UiHost,
 	}
 
 	/**
+	 * Replace the in-memory image with pre-baked bytes — used by the graft flow once
+	 * GraftController has produced the spliced output. The bytes carry the full file
+	 * (original's identity metadata + edit's pixel content + edit's HDR package + original's
+	 * SEFT trailer); applyImageBytes treats them like any other freshly-loaded JPEG so the
+	 * existing crop / save pipeline operates on them unchanged. Invoked on the UI thread
+	 * via the BiConsumer that GraftController fires from runOnUiThread.
+	 *
+	 * pathAndId is null — the grafted file isn't on disk anywhere; future Save uses
+	 * ACTION_CREATE_DOCUMENT with the suggested name as default.
+	 *
+	 * After applyImageBytes, the AR is forced to FREE so the UI thread's auto-recompute
+	 * (ensureCropCenter + recomputeCrop, triggered by cropSizeDirty=true after reset)
+	 * lands on a full-image crop rather than a sub-region. Without this, the user's
+	 * preserved AR preference (typically 4:5) carves the freshly-applied graft into a
+	 * non-trivial crop, which then prevents ExportPipeline's no-edit bypass from firing
+	 * on the immediate "graft → save" path — the canvas-encode pipeline runs and the
+	 * splice's byte-perfect primary scan gets lost to Bitmap.compress's re-encode. The
+	 * user's intent in a graft is "write this splice as-is"; FREE matches that.
+	 */
+	private void applyGraftedBytes(byte[] graftedBytes, String displayName)
+	{
+		if (!busy.compareAndSet(false, true))
+		{
+			showBusyToast();
+			return;
+		}
+		setBusyUi(true);
+
+		runInBackground(() ->
+		{
+			try
+			{
+				applyImageBytes(graftedBytes, displayName, null);
+				state.setAspectRatio(AspectRatio.FREE);
+				// Tell ExportPipeline this image is a graft, not a clean Samsung load —
+				// the verbatim-write bypass would skip the canvas-managed P3 conversion that
+				// the cropped graft path runs through CropExporter, producing a slightly
+				// different output structure than save-after-crop produces. Forcing the full
+				// encode path makes save-without-crop and save-after-crop yield byte-similar
+				// output (both go through Bitmap.compress on a Display P3 canvas + EXIF
+				// re-injection + fresh thumbnail). Has to happen AFTER applyImageBytes since
+				// applyImageBytes calls state.reset() which clears this flag.
+				state.setGraftApplied(true);
+			}
+			catch (Exception e)
+			{
+				Log.e(TAG, "Apply graft failed", e);
+				runOnUiThread(() ->
+					toastIfAlive("Apply failed: " + e.getMessage(), Toast.LENGTH_SHORT));
+			}
+			finally
+			{
+				busy.set(false);
+				runOnUiThread(() -> setBusyUi(false));
+			}
+		});
+	}
+
+	/**
+	 * Shared bg-thread body for installing a fresh image into the editor — used by both the
+	 * SAF load flow and the in-memory graft apply flow. Decodes, applies EXIF orientation,
+	 * resets crop session state, populates metadata-side state via extractMetadata, posts UI
+	 * refresh. The caller has already acquired busy and is responsible for releasing it in a
+	 * finally block.
+	 *
+	 * pathAndId is the MediaStore (path, id) pair for files loaded via SAF; null for in-
+	 * memory grafts (no on-disk source — the grafted bytes only exist in memory until the
+	 * user saves).
+	 */
+	private void applyImageBytes(byte[] fileBytes, String origName, String[] pathAndId)
+	{
+		Bitmap raw = BitmapFactory.decodeByteArray(fileBytes, 0, fileBytes.length);
+		if (raw == null || raw.getWidth() <= 0 || raw.getHeight() <= 0)
+		{
+			runOnUiThread(() -> toastIfAlive("Failed to decode", Toast.LENGTH_SHORT));
+			return;
+		}
+		int orientation = BitmapUtils.readExifOrientation(fileBytes);
+		Bitmap bmp = BitmapUtils.applyOrientation(raw, orientation);
+
+		// Mutations below run on the background executor. They become visible to the
+		// posted UI-thread runnable via Handler.post's happens-before, so the
+		// runnable's body (setSourceImage + setState + setText) sees a fully
+		// populated state. Concurrent UI-thread reads that beat the post — an
+		// onDraw or gesture fired before setSourceImage is dispatched — see the
+		// field they read either unchanged (state.reset clears, no tearing) or
+		// not yet written; EditorRenderer / tap paths null-check getSourceImage
+		// so a null-during-load snapshot is handled as "no image loaded". No
+		// tearing, no volatile needed, no visibility gap.
+		state.reset();
+		state.setOriginalFileBytes(fileBytes);
+		state.setOriginalFilename(origName);
+		if (pathAndId != null)
+		{
+			state.setOriginalFilePath(pathAndId[0]);
+			try
+			{
+				state.setMediaStoreId(Long.parseLong(pathAndId[1]));
+			}
+			catch (NumberFormatException ignored)
+			{
+			}
+		}
+
+		final String metaInfo = extractMetadata(state, fileBytes);
+
+		final int width = bmp.getWidth();
+		final int height = bmp.getHeight();
+
+		final String sizeInfo = width + "\u00D7" + height;
+
+		runOnUiThread(() ->
+		{
+			// CropState.reset() restored editorMode and centerMode to defaults
+			// (Select + Both) and cleared centerLocked, but the Pan / Lock
+			// toolbar checkboxes are UI-driven state that doesn't auto-sync.
+			// Uncheck them here so the visual state matches CropState, then
+			// call applyLockMode() to propagate the unchecked Pan into
+			// centerMode (no-op since reset already set BOTH, but keeps the
+			// invariant that state.centerMode follows chkPan + lock-axis pref).
+			((CheckBox) findViewById(R.id.chkPan)).setChecked(false);
+			((CheckBox) findViewById(R.id.chkLockCenter)).setChecked(false);
+			applyLockMode();
+			ui.updateModeHighlight();
+			ui.updateLockHighlight();
+
+			state.setSourceImage(bmp);
+			editorView.setState(state);
+			editorView.clearUndoHistory();
+			txtImageInfo.setText(sizeInfo);
+			txtImageFormats.setText(metaInfo);
+		});
+	}
+
+	/**
 	 * State-listener body. Reads CropState and fans out to the UI sync calls, optionally
 	 * running CropEngine.recomputeCrop first when the crop size is marked dirty.
 	 *
@@ -546,70 +700,8 @@ public class MainActivity extends AppCompatActivity implements SaveHost, UiHost,
 			{
 				byte[] fileBytes = safFiles.readUriBytes(uri);
 				Log.d(TAG, "Loaded " + fileBytes.length + " raw bytes (via cache)");
-
-				Bitmap raw = BitmapFactory.decodeByteArray(fileBytes, 0, fileBytes.length);
-				if (raw == null || raw.getWidth() <= 0 || raw.getHeight() <= 0)
-				{
-					runOnUiThread(() -> toastIfAlive("Failed to decode", Toast.LENGTH_SHORT));
-					return;
-				}
-				int orientation = BitmapUtils.readExifOrientation(fileBytes);
-				Bitmap bmp = BitmapUtils.applyOrientation(raw, orientation);
-
-				String origName = safFiles.getDisplayName(uri);
-				String[] pathAndId = safFiles.getFilePathAndId(uri);
-
-				// Mutations below run on the background executor. They become visible to the
-				// posted UI-thread runnable via Handler.post's happens-before, so the
-				// runnable's body (setSourceImage + setState + setText) sees a fully
-				// populated state. Concurrent UI-thread reads that beat the post — an
-				// onDraw or gesture fired before setSourceImage is dispatched — see the
-				// field they read either unchanged (state.reset clears, no tearing) or
-				// not yet written; EditorRenderer / tap paths null-check getSourceImage
-				// so a null-during-load snapshot is handled as "no image loaded". No
-				// tearing, no volatile needed, no visibility gap.
-				state.reset();
-				state.setOriginalFileBytes(fileBytes);
-				state.setOriginalFilename(origName);
-				if (pathAndId != null)
-				{
-					state.setOriginalFilePath(pathAndId[0]);
-					try
-					{
-						state.setMediaStoreId(Long.parseLong(pathAndId[1]));
-					}
-					catch (NumberFormatException ignored)
-					{
-					}
-				}
-
-				final String metaInfo = extractMetadata(state, fileBytes);
-
-				final int width = bmp.getWidth();
-				final int height = bmp.getHeight();
-				final String sizeInfo = width + "\u00D7" + height;
-
-				runOnUiThread(() ->
-				{
-					// CropState.reset() restored editorMode and centerMode to defaults
-					// (Select + Both) and cleared centerLocked, but the Pan / Lock
-					// toolbar checkboxes are UI-driven state that doesn't auto-sync.
-					// Uncheck them here so the visual state matches CropState, then
-					// call applyLockMode() to propagate the unchecked Pan into
-					// centerMode (no-op since reset already set BOTH, but keeps the
-					// invariant that state.centerMode follows chkPan + lock-axis pref).
-					((CheckBox) findViewById(R.id.chkPan)).setChecked(false);
-					((CheckBox) findViewById(R.id.chkLockCenter)).setChecked(false);
-					applyLockMode();
-					ui.updateModeHighlight();
-					ui.updateLockHighlight();
-
-					state.setSourceImage(bmp);
-					editorView.setState(state);
-					editorView.clearUndoHistory();
-					txtImageInfo.setText(sizeInfo);
-					txtImageFormats.setText(metaInfo);
-				});
+				applyImageBytes(fileBytes, safFiles.getDisplayName(uri),
+					safFiles.getFilePathAndId(uri));
 			}
 			catch (Exception e)
 			{

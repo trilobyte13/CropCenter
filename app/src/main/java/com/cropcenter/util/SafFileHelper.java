@@ -262,6 +262,30 @@ public final class SafFileHelper
 					}
 				}
 			}
+			// External Storage SAF provider: docId format is "<volumeId>:<relPath>", e.g.
+			// "primary:DCIM/Camera/IMG.jpg". The "primary" volume maps to
+			// /storage/emulated/0; non-primary UUIDs map to /storage/<UUID>. With
+			// MANAGE_EXTERNAL_STORAGE we can read those paths directly via FileInputStream,
+			// bypassing the ContentProvider's EXIF-mangling openInputStream stream — which is
+			// the entire reason this resolver exists. MediaStore _id is unavailable on this
+			// path (the provider doesn't expose it), so we return path-only with id=null;
+			// callers that need the MediaStore id (Samsung Revert backup pre-encode) treat a
+			// null id as "no MediaStore mapping available" and skip the backup write.
+			if ("com.android.externalstorage.documents".equals(uri.getAuthority()))
+			{
+				String docId = DocumentsContract.getDocumentId(uri);
+				int colon = docId == null ? -1 : docId.indexOf(':');
+				if (colon > 0)
+				{
+					String volumeId = docId.substring(0, colon);
+					String relPath = docId.substring(colon + 1);
+					String volumeRoot = "primary".equalsIgnoreCase(volumeId)
+						? "/storage/emulated/0"
+						: "/storage/" + volumeId;
+					String absPath = volumeRoot + "/" + relPath;
+					return new String[] { absPath, null };
+				}
+			}
 		}
 		catch (SecurityException ignored)
 		{
@@ -420,6 +444,21 @@ public final class SafFileHelper
 	 */
 	public byte[] readUriBytes(Uri uri) throws IOException
 	{
+		// Try the on-disk path first. Samsung's MediaStore ContentProvider mutates EXIF as it
+		// streams JPEG bytes through openInputStream — repacks IFD0 in HashMap iteration order
+		// (not sorted), strips GPS coordinates and LensModel, shrinks the EXIF segment by ~440
+		// bytes. Diagnosed via logcat trace: the bytes that arrive at applyImageBytes already
+		// have scrambled tag order before any of our code touches them. Direct file read from
+		// the resolved DATA column bypasses the ContentProvider entirely, returning pristine
+		// on-disk bytes. Requires MANAGE_EXTERNAL_STORAGE for paths under /storage/emulated; we
+		// already hold that permission for Samsung Revert backup writes. Falls back to the SAF
+		// stream copy below when no path is resolvable (cloud / SAF-only URIs).
+		byte[] direct = tryReadDirectlyFromPath(uri);
+		if (direct != null)
+		{
+			return direct;
+		}
+
 		// Unique per call — a shared fixed path ("input_raw") would let two overlapping reads
 		// corrupt each other's cache file if a second load entry point ever bypassed the
 		// Activity's busy gate. createTempFile gives each call its own path by construction;
@@ -518,5 +557,86 @@ public final class SafFileHelper
 		{
 		}
 		return false;
+	}
+
+	/**
+	 * Attempt to read the URI's bytes directly from the underlying filesystem path,
+	 * bypassing the ContentProvider stream entirely. Diagnosed via logcat traces:
+	 * Samsung's MediaStore openInputStream rewrites the EXIF segment as it streams
+	 * (HashMap-style IFD0 reordering, GPS / LensModel stripped, segment shrunk by
+	 * ~440 bytes — likely a privacy-driven sanitisation pass). Direct read via
+	 * FileInputStream gives the pristine on-disk bytes.
+	 *
+	 * Returns null when the URI doesn't resolve to an accessible filesystem path
+	 * (cloud / SAF-only providers, opaque-ID URIs without a DATA column, paths under
+	 * scoped storage we don't have read access to). Caller falls back to the SAF
+	 * stream copy in that case — accepting the EXIF mangling for non-MediaStore
+	 * sources where the alternative is not loading the file at all.
+	 *
+	 * Validates `pathAndId[0]` against `MAX_READ_BYTES` and JPEG signature before
+	 * returning so a corrupt MediaStore row pointing at a missing / different file
+	 * doesn't poison the load.
+	 */
+	private byte[] tryReadDirectlyFromPath(Uri uri)
+	{
+		Log.d(TAG, "tryReadDirectlyFromPath uri=" + uri);
+		String[] pathAndId;
+		try
+		{
+			pathAndId = getFilePathAndId(uri);
+		}
+		catch (Exception e)
+		{
+			Log.d(TAG, "tryReadDirectlyFromPath: getFilePathAndId threw: " + e.getMessage());
+			return null;
+		}
+		if (pathAndId == null || pathAndId[0] == null || pathAndId[0].isEmpty())
+		{
+			Log.d(TAG, "tryReadDirectlyFromPath: getFilePathAndId returned no path for " + uri);
+			return null;
+		}
+		File file = new File(pathAndId[0]);
+		if (!file.isFile() || !file.canRead())
+		{
+			Log.d(TAG, "tryReadDirectlyFromPath: " + pathAndId[0]
+				+ " not readable directly (isFile=" + file.isFile()
+				+ " canRead=" + file.canRead() + ")");
+			return null;
+		}
+		long len = file.length();
+		if (len <= 0 || len > MAX_READ_BYTES)
+		{
+			Log.d(TAG, "tryReadDirectlyFromPath: " + pathAndId[0]
+				+ " size out of range: " + len);
+			return null;
+		}
+		try (FileInputStream fis = new FileInputStream(file))
+		{
+			byte[] bytes = new byte[(int) len];
+			int read = 0;
+			while (read < bytes.length)
+			{
+				int n = fis.read(bytes, read, bytes.length - read);
+				if (n < 0)
+				{
+					break;
+				}
+				read += n;
+			}
+			if (read != bytes.length)
+			{
+				Log.w(TAG, "tryReadDirectlyFromPath: short read " + read + "/" + bytes.length
+					+ " on " + pathAndId[0]);
+				return null;
+			}
+			Log.d(TAG, "Loaded " + pathAndId[0] + " directly (" + bytes.length
+				+ " bytes), bypassing ContentProvider EXIF mangling");
+			return bytes;
+		}
+		catch (IOException e)
+		{
+			Log.w(TAG, "tryReadDirectlyFromPath: read failed for " + pathAndId[0], e);
+			return null;
+		}
 	}
 }

@@ -55,6 +55,13 @@ public class CropState
 	private String sourceFormat; // "jpeg" or "png"
 	private boolean centerLocked = false; // when true, auto-recompute from points is suppressed
 	private boolean cropSizeDirty = true;
+	// True when the in-memory image came from the Apply External Edit graft flow rather than
+	// a direct file load. Set by MainActivity after applyImageBytes installs the spliced
+	// bytes. Read by ExportPipeline.canBypassEncode to refuse the verbatim-write bypass for
+	// graft saves — the splice carries the edit's ICC profile, and bypassing skips the
+	// canvas-managed P3 conversion that the cropped graft path runs and that produces the
+	// cleanest output (matches the cropped graft byte-structure regardless of crop state).
+	private boolean graftApplied;
 	private boolean hasCenter;
 	private byte[] gainMap;
 	private byte[] originalFileBytes;
@@ -381,6 +388,19 @@ public class CropState
 	}
 
 	/**
+	 * True when the in-memory image is the result of an Apply External Edit graft.
+	 * ExportPipeline reads this to disable the verbatim-write bypass, so graft saves
+	 * always go through CropExporter.export — that's the path that runs canvas-based
+	 * P3 colour management (the bypass would write the splice's foreign-ICC bytes
+	 * verbatim and produce a slightly different output structure than the cropped
+	 * graft path). Cleared by reset() when a fresh image loads.
+	 */
+	public boolean isGraftApplied()
+	{
+		return graftApplied;
+	}
+
+	/**
 	 * Flag cropW / cropH for recompute on the next listener cycle. Does not fire the
 	 * listener itself — callers that also want immediate recompute call notifyChanged
 	 * via a setter or invoke recomputeCrop directly.
@@ -443,6 +463,7 @@ public class CropState
 		cropSizeDirty = true;
 		rotationDegrees = 0f;
 		centerLocked = false;
+		graftApplied = false;
 		// Restore the documented defaults (Select mode, Both lock-axis). Without this,
 		// a new image inherits the previous session's editor/lock state — e.g. loading
 		// a photo into a still-active Move + Pan combo jumps straight to viewport-pan
@@ -717,6 +738,18 @@ public class CropState
 	public void setGainMap(byte[] gm)
 	{
 		this.gainMap = gm;
+	}
+
+	/**
+	 * Mark the in-memory image as a graft result. MainActivity calls this in
+	 * applyGraftedBytes after applyImageBytes installs the spliced bytes — which is
+	 * the only call site, since this flag exists solely to gate ExportPipeline's
+	 * bypass. No listener fire — the bypass decision is read at save time, not
+	 * rendered. Cleared by reset() on the next image load.
+	 */
+	public void setGraftApplied(boolean grafted)
+	{
+		this.graftApplied = grafted;
 	}
 
 	/**

@@ -221,7 +221,9 @@ Viewport clamped to prevent panning image off screen. Bitmap filtering disabled 
 
 **Save flow**: Always `ACTION_CREATE_DOCUMENT` with format-aware MIME type (image/jpeg or image/png). Collisions inside the user's chosen directory route through `ReplaceStrategy`'s crash-safe write-then-swap (Strategy A: File-I/O atomic move; B: SAF direct overwrite with byte-for-byte verify; C: SAF rename-with-fallback). Same-name results from `ACTION_CREATE_DOCUMENT` (provider-confirmed overwrites) get a sibling placeholder via `DocumentsContract.createDocument` and route through the same Replace flow; opaque-ID providers fall back to `exportOverwriteWithBackup` (direct write + Samsung Revert backup + preserve-on-failure).
 
-**JPEG quality**: 100 (hardcoded, always maximum)
+**No-edit bypass**: when the user has applied no transformations (no crop, no rotation, no grid bake-in, JPEG-to-JPEG round-trip) AND the in-memory image is not a graft (`!state.isGraftApplied()`), `ExportPipeline` writes `state.originalFileBytes` verbatim instead of canvas-encoding. Preserves byte-perfect fidelity for re-saves of unmodified Samsung originals. Cropped / rotated / grid-baked saves AND any graft save go through the canvas-encode + ExifPatcher pipeline. Graft saves are explicitly excluded from the bypass because the splice's `originalFileBytes` carries the edit's foreign ICC profile; bypassing skips the canvas-managed Display P3 conversion that the cropped graft path runs and would produce a slightly different output structure than save-after-crop.
+
+**JPEG quality**: 100 (hardcoded, always maximum) when canvas-encoding; verbatim when bypassing.
 
 **HDR Export Pipeline** (all cases use canvas rendering for primary):
 ```
@@ -252,11 +254,12 @@ Canvas-rendered bitmap -> Bitmap.compress(PNG) -> inject EXIF via eXIf chunk
 ### 10. Metadata Preservation
 
 #### EXIF
-- All original APP/COM segments preserved verbatim (camera model, GPS, MakerNotes, ICC, XMP)
+- All original APP/COM segments preserved verbatim (camera model, GPS coordinates, MakerNotes, ICC, XMP, Software, DateTimeOriginal, lens info)
 - Orientation tag set to 1 (output is always in display orientation)
 - Dimensions updated to crop size
 - Thumbnail regenerated from cropped bitmap (max 1024px long edge, quality reduced to fit a ~60KB budget within the 65535-byte APP1 segment limit; budget is computed from the source's existing EXIF size with a sanity clamp on out-of-range `oldThumbLen`)
 - ExifPatcher creates IFD1 if original has no thumbnail
+- **Direct file-path read bypasses Samsung MediaStore mangling** (`SafFileHelper.tryReadDirectlyFromPath`). Samsung's MediaStore ContentProvider rewrites the EXIF segment as it streams JPEG bytes through `openInputStream` — zeros out GPS sub-IFD value blocks and reorders IFD0 entries — likely a privacy-driven sanitisation pass on Samsung firmware. `readUriBytes` resolves the URI to a filesystem path (handles both `com.android.providers.media.documents` and `com.android.externalstorage.documents` SAF authorities, requires `MANAGE_EXTERNAL_STORAGE`) and reads via `FileInputStream` when possible, returning the on-disk bytes that still carry GPS. Falls back to the SAF stream copy for cloud or SAF-only sources where no filesystem path is resolvable.
 
 #### Samsung SEFT Trailer
 - Extracted on load, re-appended on save (preserves Galaxy Gallery Revert chain)
@@ -279,6 +282,77 @@ Canvas-rendered bitmap -> Bitmap.compress(PNG) -> inject EXIF via eXIf chunk
 
 Settings dialog (opened via the gear icon in the toolbar) shows:
 - **Version** — the build's compile timestamp injected as `BuildConfig.BUILD_TIME` by `app/build.gradle` and displayed by `SettingsDialog`. Used to verify which APK is installed on the device.
+
+### 12. Apply External Edit (In-Memory Pixel Graft)
+
+**Purpose**: Apply a small external pixel edit (typically Photoshop Generative Fill / Generative Remove) to a Samsung Ultra HDR original while preserving Samsung Gallery's Revert button, the original's gain map, and identity metadata (Make, Model, GPS, MakerNote, DateTimeOriginal, lens info, SEFT trailer). The user picks an externally-edited copy of the loaded photo; CropCenter splices the edit's pixel content into the original's metadata container, applies the result as the in-memory image, and saves through the canvas-encoded pipeline so the output is colour-managed (Display P3) and viewer-compatible.
+
+**Recommended editor: Photoshop, opened in pixel space (Camera Raw → File Handling → JPEGs → Disabled).** Photoshop preserves the source pixels everywhere except the AI-edited region, with only ICC-encoding-level differences from the original (mean per-pixel diff vs Samsung original ≈ 1 level after canvas P3 conversion; Lightroom's HDR-tone-mapped output produces ≈ 13 levels and a visible tonal seam at the fill boundary). Other editors work if they meet the same constraint — pixel-space editing, no global tone-curve shift.
+
+**Why Revert works**: Samsung Gallery reads the `originalPath` value from the SEFT trailer's `PhotoEditor_Re_Edit_Data` block and serves whatever JPEG it finds at that path. The graft preserves original's SEFT verbatim, plus original's MPF segment shape (substituting Adobe's MPF reliably breaks Gallery's Revert pre-flight), so any backup chain the user already had stays intact.
+
+**Entry point**: Long-press the toolbar **Open** button. Available only when (a) an image is loaded, (b) the loaded image is JPEG. (Long-press chosen over a new toolbar icon to avoid clutter; Open and Apply-External-Edit are semantically related — both load external files — so the gesture pairing is intuitive.)
+
+**Flow**:
+1. User loads the original Samsung HDR JPEG (the metadata source) into CropCenter normally.
+2. User long-presses Open.
+3. SAF `ACTION_OPEN_DOCUMENT` (image/jpeg) → user picks the external edit (the pixel donor).
+4. Validation:
+   - Picked file is a JPEG (SOI = `FFD8`).
+   - Stored W × H from `BitmapFactory` bounds-only decode equal between loaded and picked. Mismatch → toast "Edit dimensions don't match: original WxH, edit WxH" and abort.
+   - EXIF orientation tags match. Mismatch → toast "Edit EXIF orientation differs from original (X vs Y). Re-export with same orientation." and abort.
+5. `GraftWriter` splices the bytes in memory per the substitution rule below.
+6. `MainActivity.applyGraftedBytes` calls `applyImageBytes(grafted)` which installs the splice as the new in-memory image, then sets `state.setGraftApplied(true)` and `state.setAspectRatio(AspectRatio.FREE)`. The graft-applied flag gates the verbatim-write bypass (see below); the AR reset prevents the user's preserved AR from carving the freshly-applied graft into a sub-region.
+7. Toast "External edit applied" confirms success. Default save name = `<original-stem>-graft.jpg`.
+8. User saves through the existing Save button. The save runs through `CropExporter.export` (the bypass is disabled for grafts), which canvas-renders the source onto a Display P3 bitmap, re-encodes via `Bitmap.compress(JPEG, 100)`, generates a fresh thumbnail, re-injects original's EXIF / XMP / MPF / SEFT, and appends the gain map.
+
+**Substitution rule** (per-segment provenance — see `GraftWriter.SWAP_*` constants):
+
+| Segment | From | Why |
+|---|---|---|
+| SOI | universal | always `FF D8` |
+| APP0/JFIF | original | identity (density, version) |
+| APP1/EXIF | **original** | identity: Make, Model, Software, MakerNote, GPS coordinates, DateTimeOriginal, lens info |
+| APP1/XMP | **original** | preserves Samsung's HDR `hdrgm` metadata (matches original's gain map) |
+| APP2/ICC | **edit** | matches the edit's pixels' colour space; the canvas-encode pass converts to Display P3 anyway, so this is a fallback when the canvas path is skipped |
+| APP2/MPF | original (offset-patched) | Samsung-shape MPF is what Gallery's Revert pre-flight recognises; edit's MPF (Adobe-flavoured `MPType` for the gain-map entry) breaks Revert |
+| vendor APPs (APP3-APP15), COM | original | Samsung sensor hints, scene labels |
+| DQT, DHT, SOF, SOS+scan, EOI | **edit** | the AI-edited pixels — byte-verbatim from edit's primary |
+| gain map JPEG | **original** | preserves Samsung's HDR rendering for the unedited area; mismatch in the AI-fill region is acceptable for low-frequency Generative Remove fills |
+| SEFT trailer | original | the sole reason Gallery still surfaces and successfully services Revert |
+
+**Saved output**: the canvas-encoded pipeline runs for **every** graft save (no-crop and cropped alike — `state.isGraftApplied()` disables the bypass). Output structure:
+- Primary JPEG: re-encoded from the canvas-rendered bitmap at quality 100, in Display P3 colour space
+- EXIF / XMP / MPF / SEFT: re-injected from `state.jpegMeta` (= original's segments, with dimensions / orientation patched and a fresh IFD1 thumbnail)
+- Gain map: original's gain map appended (cropped via `UltraHdrCompat.compressWithGainmap` if a crop is applied)
+
+The Display P3 conversion during canvas rendering brings the edit's pixels (which carry the editor's ICC profile) into Samsung's reference colour space, masking the editor's encoding-level colour shift outside the AI-fill region. The fill region's pixels remain as the editor produced them (the colour shift is dwarfed by the AI fill's own pixel changes).
+
+**Why each substitution choice** (validated by visual inspection of saved + cropped outputs and Samsung Gallery Revert testing):
+
+- **EXIF (`SWAP_EXIF=false`)**: preserves Samsung MakerNote (lens info, sensor settings, scene metadata), GPS coordinates, DateTimeOriginal. Substituting edit's EXIF would lose all of these.
+- **XMP (`SWAP_XMP=false`)**: preserves Samsung's HDR metadata (`hdrgm` namespace) which describes original's gain map. Edit's XMP describes the editor's gain map — incoherent with the kept original gain map.
+- **ICC (`SWAP_ICC=true`)**: matches the edit's pixels' encoding when the bypass-write fallback fires. The canvas-encode pass converts to Display P3 anyway, so this swap is a defensive fallback for paths that skip canvas rendering.
+- **MPF (`SWAP_HDR_MPF=false`)**: confirmed via bisection — substituting edit's MPF segment alone reliably hangs Samsung Gallery's Revert. Original's MPF stays Samsung-shape; only its offset/size fields are patched after the gain-map splice.
+- **Gain map (`SWAP_HDR_GAINMAP=false`)**: preserves Samsung's HDR rendering across the unedited area (≈ 99.99% of the frame for typical Generative Remove fills). The fill region inherits original's gain map (calibrated for the original content, not the AI fill), but for low-frequency fills (sky, grass, wall) the gain-map mismatch is below visual threshold.
+- **Vendor APPs (`STRIP_VENDOR_APPS=false`)**: confirmed no rendering effect; Samsung sensor / scene identity data preserved.
+
+**`ExportPipeline.canBypassEncode`**: returns `true` only when output is JPEG, source is JPEG, **no graft applied**, no rotation, no grid bake-in, source bytes available, AND (no crop OR full-image crop). The graft-applied check is what forces graft saves through `CropExporter.export`. Without it, the verbatim-write bypass would emit the splice's edit-ICC-tagged bytes, which display correctly in ICC-aware viewers but produce a slightly different output structure than save-after-crop — the canvas-encode path always converts to Display P3, giving consistent output regardless of crop state.
+
+**`MainActivity.applyGraftedBytes`**: after `applyImageBytes`, sets `state.setAspectRatio(AspectRatio.FREE)` (so the user's preserved AR doesn't carve the graft into a sub-region) and `state.setGraftApplied(true)` (so `canBypassEncode` returns false for this image). The flag is cleared by `CropState.reset()` on the next image load.
+
+**Validation that the splice is decoder-coherent**: both inputs must share SOF0 dimensions AND EXIF orientation. Caller (`GraftController`) checks via `BitmapFactory.decodeByteArray(inJustDecodeBounds=true)` for stored dims and `BitmapUtils.readExifOrientation` for orientation; mismatch aborts before invoking `GraftWriter`.
+
+**Failure modes**:
+- Picked file isn't JPEG → toast "Picked image isn't a JPEG."
+- Dimensions don't match → toast with both dimensions, abort.
+- EXIF orientation differs → toast with both values, abort.
+- Loaded image isn't JPEG → toast "Apply External Edit only works on JPEG sources."
+- Decode of grafted bytes fails → toast "Failed to decode" / "Apply failed: <reason>", in-memory image unchanged.
+
+**Verification**: save the grafted file, open in Samsung Gallery, confirm the Revert button appears and successfully restores the original. Inspect the saved file's EXIF in any external tool (exiftool, ImageMagick `identify -verbose`) to confirm GPS coordinates, MakerNote, and other camera tags are preserved.
+
+**Out of scope**: PNG inputs (SEFT is JPEG-specific). HEIC inputs (different metadata system). Differing-dimension edits (would need re-encode; refused with toast). Per-region gain-map regeneration (would need a way to derive HDR data for AI-fill content; the current "use original's gain map verbatim" works for low-frequency fills). Mask-based selective composite (preserve source bytes outside the AI region — useful for editors that produce larger tonal shifts than Photoshop, currently not needed because Photoshop is the recommended editor and produces minimal tonal shift).
 
 ---
 
