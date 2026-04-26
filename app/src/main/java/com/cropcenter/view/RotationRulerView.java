@@ -276,10 +276,15 @@ public class RotationRulerView extends View
 	 */
 	private void handleTouchRelease(MotionEvent event)
 	{
-		if (!isScaling)
+		// If a pinch-zoom occurred during this gesture, skip the angle fling / snap
+		// entirely. onScaleEnd fires before ACTION_UP so isScaling is already false
+		// here — but scalingOccurred stays true for the full gesture lifetime, and
+		// without this check the VelocityTracker's x-velocity (populated by the pinch
+		// focus-point motion) would trigger a spurious rotation change on release.
+		if (!isScaling && !scalingOccurred)
 		{
-			// Tap: total movement below the slop AND no scaling happened this gesture.
-			if (!scalingOccurred && totalDragDx <= TAP_SLOP
+			// Tap: total movement below the slop.
+			if (totalDragDx <= TAP_SLOP
 				&& event.getActionMasked() == MotionEvent.ACTION_UP)
 			{
 				float centerX = getWidth() / 2f;

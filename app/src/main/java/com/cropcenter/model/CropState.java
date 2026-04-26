@@ -443,7 +443,28 @@ public class CropState
 		cropSizeDirty = true;
 		rotationDegrees = 0f;
 		centerLocked = false;
-		// aspectRatio preserved — it's a user preference, not image data
+		// Restore the documented defaults (Select mode, Both lock-axis). Without this,
+		// a new image inherits the previous session's editor/lock state — e.g. loading
+		// a photo into a still-active Move + Pan combo jumps straight to viewport-pan
+		// gestures when the spec says new loads start in Select mode centered on the
+		// image. MainActivity's loadImage UI runnable resyncs the toolbar widgets to
+		// match these reset values.
+		editorMode = EditorMode.SELECT_FEATURE;
+		centerMode = CenterMode.BOTH;
+		// aspectRatio preserved — it's a user preference, not image data.
+		// exportConfig reset to defaults (JPEG) — the prior image's save-time format
+		// choice was transient. The load-time extractMetadata path overrides this to
+		// match the source's actual format; starting from JPEG matches the common case.
+		exportConfig = ExportConfig.defaults();
+		// gridConfig: preserve user preferences (colors, cols/rows, line width, pixel
+		// grid) but clear includeInExport. Baking the grid into output is a per-save
+		// choice; having it bleed into the next image is a footgun (user saved image A
+		// with grid baked in, loads image B, saves B — and B silently gets a grid baked
+		// in too unless they remembered to untick). Prefer the safe default.
+		if (gridConfig.includeInExport())
+		{
+			gridConfig = gridConfig.withIncludeInExport(false);
+		}
 		originalFilename = null;
 		originalFilePath = null;
 		mediaStoreId = -1;

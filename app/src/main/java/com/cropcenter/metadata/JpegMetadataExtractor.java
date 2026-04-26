@@ -44,6 +44,14 @@ public final class JpegMetadataExtractor
 			}
 
 			int segLen = ByteBufferUtils.readU16BE(jpeg, off + 2);
+			if (segLen < 2)
+			{
+				// Segment length MUST include the 2 length bytes themselves (JPEG spec).
+				// Zero or one means the file is corrupt / malicious — bail rather than
+				// add a bogus 2-byte segment that downstream injector / renderers will
+				// mis-parse, shifting every following segment by that amount.
+				break;
+			}
 			int totalLen = 2 + segLen; // FF xx + segment length (includes the 2 length bytes)
 
 			// Keep APPn (E0-EF) and COM (FE)

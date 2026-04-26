@@ -23,11 +23,9 @@ import java.io.OutputStream;
  */
 public final class SafFileHelper
 {
-	/**
-	 * Upper bound on readUriBytes input size. Modern HDR + gain-map JPEGs land well under
-	 * 64 MiB; this cap catches pathological inputs before they OOM the heap or overflow the
-	 * int cast in the size-to-length conversion.
-	 */
+	// Upper bound on readUriBytes input size. Modern HDR + gain-map JPEGs land well under
+	// 64 MiB; this cap catches pathological inputs before they OOM the heap or overflow the
+	// int cast in the size-to-length conversion.
 	public static final long MAX_READ_BYTES = 128L * 1024 * 1024;
 
 	private static final String TAG = "SafFileHelper";
@@ -66,6 +64,46 @@ public final class SafFileHelper
 		{
 			Log.w(TAG, "copyUriContents " + src + " -> " + dst + " failed: " + e.getMessage());
 			return false;
+		}
+	}
+
+	/**
+	 * Programmatically create a new SAF document in the same directory as `docUri`, with
+	 * `placeholderName` and `mimeType`. Used by the Save flow to turn a provider-confirmed
+	 * overwrite (SAF ACTION_CREATE_DOCUMENT that returned an existing document rather than
+	 * auto-renaming) into the crash-safe Replace pattern: write+verify the placeholder,
+	 * then swap onto the target.
+	 *
+	 * Derives the parent document URI from `docUri`'s document ID by stripping the last
+	 * `/`-delimited segment — works for path-addressed providers (ExternalStorageProvider's
+	 * "primary:Pictures/foo.jpg"). Returns null when `docUri` has no document ID, an opaque
+	 * ID without slashes, or when the provider rejects createDocument (doesn't support
+	 * FLAG_DIR_SUPPORTS_CREATE). The caller must have a fallback plan for null.
+	 */
+	public Uri createSiblingPlaceholder(Uri docUri, String mimeType, String placeholderName)
+	{
+		try
+		{
+			String docId = DocumentsContract.getDocumentId(docUri);
+			if (docId == null)
+			{
+				return null;
+			}
+			int slash = docId.lastIndexOf('/');
+			if (slash <= 0)
+			{
+				return null;
+			}
+			String parentDocId = docId.substring(0, slash);
+			Uri parentUri = DocumentsContract.buildDocumentUri(
+				docUri.getAuthority(), parentDocId);
+			return DocumentsContract.createDocument(
+				ctx.getContentResolver(), parentUri, mimeType, placeholderName);
+		}
+		catch (Exception e)
+		{
+			Log.w(TAG, "createSiblingPlaceholder " + placeholderName + " failed: " + e.getMessage());
+			return null;
 		}
 	}
 
@@ -238,6 +276,139 @@ public final class SafFileHelper
 	}
 
 	/**
+	 * Stream probe: opens `uri` for reading and returns true when we can read at least one
+	 * byte. Used as a fallback signal for providers that don't expose OpenableColumns.SIZE
+	 * (querySafFileSize returns -1): for a fresh-created document, the stream yields EOF
+	 * immediately; for an existing non-empty document, we get at least one byte back. Can't
+	 * disambiguate empty-fresh from empty-existing — both return false — which matches the
+	 * inherent SAF ambiguity at that point. Exceptions (provider refuses open, security
+	 * check) surface as false; callers treat false as "can't prove there's content" and
+	 * decide their own fallback posture.
+	 */
+	public boolean hasExistingContent(Uri uri)
+	{
+		try (InputStream in = ctx.getContentResolver().openInputStream(uri))
+		{
+			return in != null && in.read() != -1;
+		}
+		catch (Exception e)
+		{
+			Log.w(TAG, "hasExistingContent probe failed: " + e.getMessage());
+			return false;
+		}
+	}
+
+	/**
+	 * Query the SAF document size via OpenableColumns.SIZE. Much cheaper than a full content
+	 * readback — a single metadata query against the provider. Returns the reported size, or
+	 * -1 when the provider doesn't expose SIZE (some MediaStore paths omit it, some third-party
+	 * providers return a cursor with no rows). Callers treat -1 as "size unknown" — up to them
+	 * whether that means trust the write or fall through to full verification.
+	 */
+	public long querySafFileSize(Uri uri)
+	{
+		try (Cursor cursor = ctx.getContentResolver().query(uri,
+			new String[] { OpenableColumns.SIZE }, null, null, null))
+		{
+			if (cursor != null && cursor.moveToFirst())
+			{
+				int sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE);
+				if (sizeIdx >= 0 && !cursor.isNull(sizeIdx))
+				{
+					return cursor.getLong(sizeIdx);
+				}
+			}
+		}
+		catch (Exception e)
+		{
+			Log.w(TAG, "querySafFileSize " + uri + " failed: " + e.getMessage());
+		}
+		return -1;
+	}
+
+	/**
+	 * Byte-for-byte verify the file at `uri` matches `expected`. Ground-truth content
+	 * verification — used when a write path threw a harmless EPIPE/IOException on close
+	 * yet persisted the full payload, or when a cheap size-only check isn't enough to
+	 * prove the bytes on disk are really the ones we intended to write.
+	 *
+	 * Returns:
+	 *   full bytes verified equal  → expected.length (save ok)
+	 *   any mismatch or short file → number of bytes read before divergence/EOF (save failed)
+	 *   trailing bytes (provider didn't truncate) → expected.length + trailing (save failed)
+	 *   provider can't serve file, or EOF check threw before confirming no trailing bytes → -1
+	 * Callers MUST use strict equality against expected.length — any other result means
+	 * the save is unverified, regardless of whether the numeric value is higher or lower.
+	 */
+	public long readbackByteCount(Uri uri, byte[] expected)
+	{
+		long total = 0;
+		try (InputStream is = ctx.getContentResolver().openInputStream(uri))
+		{
+			if (is == null)
+			{
+				return -1;
+			}
+			byte[] buf = new byte[ByteBufferUtils.IO_BUFFER];
+			int n;
+			while ((n = is.read(buf)) != -1)
+			{
+				if (total + n > expected.length)
+				{
+					// Trailing bytes beyond what we wrote — treat as corruption.
+					Log.w(TAG, "readback: provider returned more bytes than written");
+					return total;
+				}
+				for (int i = 0; i < n; i++)
+				{
+					if (buf[i] != expected[(int) total + i])
+					{
+						Log.w(TAG, "readback: byte mismatch at offset " + (total + i));
+						return total + i;
+					}
+				}
+				total += n;
+				if (total == expected.length)
+				{
+					// All bytes matched. Confirm EOF — trailing bytes would mean a stale
+					// longer payload wasn't truncated. Wrap the EOF-check read in its OWN
+					// try so a throw here doesn't fall through to the outer catch, which
+					// returns `total` (== expected.length) and would falsely claim the
+					// save is verified despite never confirming EOF.
+					int trailing;
+					try
+					{
+						trailing = is.read(buf);
+					}
+					catch (Exception eofException)
+					{
+						Log.w(TAG, "readback: EOF-check threw, treating as unverified: "
+							+ eofException.getMessage());
+						return -1;
+					}
+					if (trailing > 0)
+					{
+						// Provider served MORE than we wrote — stale trailing bytes that
+						// never got truncated. MUST NOT return `total` here because
+						// callers check `verifiedBytes == expected.length` and would
+						// mistake this for a clean save. Return a value > expected.length
+						// so equality fails; verifyPhase then reports the save as lost.
+						Log.w(TAG, "readback: unexpected trailing " + trailing + " bytes");
+						return total + trailing;
+					}
+					return total;
+				}
+			}
+			return total;
+		}
+		catch (Exception e)
+		{
+			Log.w(TAG, "readbackByteCount: " + e.getMessage());
+			return total > 0 ? total : -1;
+		}
+	}
+
+	/**
 	 * Copy the URI to a cache file, then slurp raw bytes. The two-step routing (stream → cache file
 	 * → in-memory byte[]) is deliberate: some ContentProviders (notably Samsung MediaStore) strip
 	 * post-EOI bytes from JPEGs when streaming, which would lose the HDR gain map. Materialising
@@ -249,7 +420,11 @@ public final class SafFileHelper
 	 */
 	public byte[] readUriBytes(Uri uri) throws IOException
 	{
-		File cacheFile = new File(ctx.getCacheDir(), "input_raw");
+		// Unique per call — a shared fixed path ("input_raw") would let two overlapping reads
+		// corrupt each other's cache file if a second load entry point ever bypassed the
+		// Activity's busy gate. createTempFile gives each call its own path by construction;
+		// the finally block below deletes it regardless of outcome.
+		File cacheFile = File.createTempFile("input_raw_", ".bin", ctx.getCacheDir());
 		try
 		{
 			long written = 0;
@@ -312,18 +487,23 @@ public final class SafFileHelper
 	}
 
 	/**
-	 * Best-effort delete of a SAF document URI. Silently ignores failures — used for
-	 * placeholder cleanup after a cancelled or failed save, so swallowing exceptions matches
-	 * the "try both paths, give up quietly" contract.
+	 * Best-effort delete of a SAF document URI. Returns true when a provider explicitly
+	 * confirmed the deletion (DocumentsContract.deleteDocument returned true, or the
+	 * ContentResolver delete reported > 0 rows affected); false when both paths failed OR
+	 * silently reported ambiguous results. Callers that NEED the document gone before
+	 * proceeding (e.g. Replace flow's placeholder cleanup after a direct SAF overwrite)
+	 * must check the return value — a false here means the file may still be on disk,
+	 * and short-circuiting the follow-up verifier would claim success while leaving a
+	 * duplicate. Callers that only want best-effort cleanup (e.g. post-failure placeholder
+	 * sweep) can ignore the result.
 	 */
-	public void tryDeleteSafDocument(Uri uri)
+	public boolean tryDeleteSafDocument(Uri uri)
 	{
 		try
 		{
 			if (DocumentsContract.isDocumentUri(ctx, uri))
 			{
-				DocumentsContract.deleteDocument(ctx.getContentResolver(), uri);
-				return;
+				return DocumentsContract.deleteDocument(ctx.getContentResolver(), uri);
 			}
 		}
 		catch (Exception ignored)
@@ -331,10 +511,12 @@ public final class SafFileHelper
 		}
 		try
 		{
-			ctx.getContentResolver().delete(uri, null, null);
+			int rows = ctx.getContentResolver().delete(uri, null, null);
+			return rows > 0;
 		}
 		catch (Exception ignored)
 		{
 		}
+		return false;
 	}
 }

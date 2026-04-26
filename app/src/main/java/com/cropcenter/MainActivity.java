@@ -591,6 +591,19 @@ public class MainActivity extends AppCompatActivity implements SaveHost, UiHost,
 
 				runOnUiThread(() ->
 				{
+					// CropState.reset() restored editorMode and centerMode to defaults
+					// (Select + Both) and cleared centerLocked, but the Pan / Lock
+					// toolbar checkboxes are UI-driven state that doesn't auto-sync.
+					// Uncheck them here so the visual state matches CropState, then
+					// call applyLockMode() to propagate the unchecked Pan into
+					// centerMode (no-op since reset already set BOTH, but keeps the
+					// invariant that state.centerMode follows chkPan + lock-axis pref).
+					((CheckBox) findViewById(R.id.chkPan)).setChecked(false);
+					((CheckBox) findViewById(R.id.chkLockCenter)).setChecked(false);
+					applyLockMode();
+					ui.updateModeHighlight();
+					ui.updateLockHighlight();
+
 					state.setSourceImage(bmp);
 					editorView.setState(state);
 					editorView.clearUndoHistory();

@@ -19,14 +19,23 @@ public class TouchGestureHandler
 		void onDoubleTap();
 		void onLongPress(float screenX, float screenY);
 		void onPan(float dx, float dy);
+		/**
+		 * Fires once on ACTION_UP / ACTION_CANCEL after at least one onPan call during
+		 * the same gesture. Lets the editor apply a one-shot post-drag cleanup (e.g.
+		 * parity-snap the crop center to pixel alignment) without the continuous-snap
+		 * flicker that would happen mid-drag. Does NOT fire for tap-only gestures.
+		 */
+		void onPanRelease();
 		void onTap(float screenX, float screenY);
 		void onZoom(float scaleFactor, float focusX, float focusY);
 	}
 
 	private final Callback callback;
 	private final GestureDetector gestureDetector;
-	private boolean isScaling = false;
 	private final ScaleGestureDetector scaleDetector;
+
+	private boolean isPanning = false; // onScroll fired at least once this gesture
+	private boolean isScaling = false;
 
 	public TouchGestureHandler(Context context, Callback callback)
 	{
@@ -39,6 +48,11 @@ public class TouchGestureHandler
 			public boolean onScaleBegin(ScaleGestureDetector detector)
 			{
 				isScaling = true;
+				// Clear isPanning so ACTION_UP at the end of a pan→pinch transition
+				// doesn't fire onPanRelease. Without this, a single-finger drag that
+				// transitions into a two-finger pinch would still snap the crop on
+				// release — a pinch gesture shouldn't trigger a drag-specific snap.
+				isPanning = false;
 				return true;
 			}
 
@@ -72,6 +86,7 @@ public class TouchGestureHandler
 				{
 					return false;
 				}
+				isPanning = true;
 				callback.onPan(-distanceX, -distanceY);
 				return true;
 			}
@@ -102,6 +117,13 @@ public class TouchGestureHandler
 	{
 		boolean handled = scaleDetector.onTouchEvent(event);
 		handled |= gestureDetector.onTouchEvent(event);
+		int action = event.getActionMasked();
+		if ((action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL)
+			&& isPanning)
+		{
+			isPanning = false;
+			callback.onPanRelease();
+		}
 		return handled;
 	}
 }

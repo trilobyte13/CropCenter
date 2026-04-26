@@ -88,8 +88,8 @@ public class ColorPickerDialog
 		syncHexToSelection.run();
 
 		wireGridTap(grid, selected, alphaRow.slider(), syncHexToSelection);
-		wireAlphaSlider(alphaRow.slider(), selected, alphaRow.valueText(), syncHexToSelection);
-		wireHexInput(hexInput, selected, alphaRow.slider(), density, suppressHexWatcher);
+		wireAlphaSlider(alphaRow.slider(), grid, selected, alphaRow.valueText(), syncHexToSelection);
+		wireHexInput(hexInput, grid, selected, alphaRow.slider(), density, suppressHexWatcher);
 
 		new AlertDialog.Builder(context)
 			.setTitle("Pick Color")
@@ -198,7 +198,7 @@ public class ColorPickerDialog
 	 * Alpha slider → update alpha channel + hex. Split from onStart/onStop which stay
 	 * empty — SeekBar's interface requires all three.
 	 */
-	private static void wireAlphaSlider(SeekBar alphaSeekBar, int[] selected,
+	private static void wireAlphaSlider(SeekBar alphaSeekBar, ColorGridView grid, int[] selected,
 		TextView alphaValueText, Runnable syncHexToSelection)
 	{
 		alphaSeekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener()
@@ -209,6 +209,9 @@ public class ColorPickerDialog
 				selected[0] = (selected[0] & 0x00FFFFFF) | (progress << 24);
 				alphaValueText.setText(String.valueOf(progress));
 				syncHexToSelection.run();
+				// Alpha change produces a new ARGB value that may or may not still match
+				// a palette entry. Keep the grid's highlighted swatch honest.
+				grid.setSelectedColor(selected[0]);
 			}
 
 			@Override
@@ -223,8 +226,8 @@ public class ColorPickerDialog
 	 * Hex EditText → parse and update selection + alpha slider. The suppress flag
 	 * prevents programmatic setText from re-entering this watcher.
 	 */
-	private static void wireHexInput(EditText hexInput, int[] selected, SeekBar alphaSeekBar,
-		float density, boolean[] suppressHexWatcher)
+	private static void wireHexInput(EditText hexInput, ColorGridView grid, int[] selected,
+		SeekBar alphaSeekBar, float density, boolean[] suppressHexWatcher)
 	{
 		hexInput.addTextChangedListener(new TextWatcher()
 		{
@@ -263,6 +266,11 @@ public class ColorPickerDialog
 						}
 						// Preview-only update — don't overwrite what the user is typing.
 						applySwatchPreview(hexInput, parsed, density);
+						// Keep the grid's highlighted swatch in sync with the typed
+						// color. Without this, the mauve ring stays on the last-tapped
+						// palette entry even after the user types a different color —
+						// the grid visually lies about which color is active.
+						grid.setSelectedColor(parsed);
 					}
 				}
 				catch (NumberFormatException ignored)
@@ -349,6 +357,23 @@ public class ColorPickerDialog
 		void setOnColorTapListener(OnColorTapListener listener)
 		{
 			this.listener = listener;
+		}
+
+		/**
+		 * Update the highlighted swatch when the color was changed from outside the grid
+		 * (hex input or alpha slider). Re-invalidates so the mauve ring moves off the
+		 * previously-tapped swatch and onto whichever palette entry matches the new
+		 * color, or off the grid entirely when no swatch matches. Without this, the
+		 * grid's ring goes stale and the user sees a UI that lies about which color is
+		 * active.
+		 */
+		void setSelectedColor(int color)
+		{
+			if (this.selectedColor != color)
+			{
+				this.selectedColor = color;
+				invalidate();
+			}
 		}
 
 		@Override

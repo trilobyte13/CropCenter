@@ -20,17 +20,11 @@ final class SelectionHistory
 	private final List<List<SelectionPoint>> redoStack = new ArrayList<>();
 	private final List<List<SelectionPoint>> undoStack = new ArrayList<>();
 
-	/**
-	 * True when at least one redo frame is available.
-	 */
 	boolean canRedo()
 	{
 		return !redoStack.isEmpty();
 	}
 
-	/**
-	 * True when at least one undo frame is available.
-	 */
 	boolean canUndo()
 	{
 		return !undoStack.isEmpty();
