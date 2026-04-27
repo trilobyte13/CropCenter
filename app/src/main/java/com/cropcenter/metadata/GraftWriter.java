@@ -10,16 +10,11 @@ import java.util.Collections;
 import java.util.List;
 
 /**
- * Build a "minimal pixel graft" — a JPEG identical to the original in every byte EXCEPT
- * the primary entropy-coded scan, which is replaced by the external edit's. Used by the
- * "Apply External Edit" feature to recover Samsung Gallery's Revert button for photos
- * round-tripped through Lightroom or similar editors that strip the SEFT trailer.
- *
- * Default output structure: original's complete byte stream with only the primary scan
- * substituted. See SWAP_* constants below to selectively substitute additional segments
- * from the edit; each swap is a bisection toggle to identify which segment substitutions
- * Samsung Gallery's Revert action tolerates. Default (all false) is the only known-good
- * production configuration.
+ * Build a "minimal pixel graft" — a JPEG that takes the external edit's primary
+ * entropy-coded scan but keeps the original's identity metadata (EXIF, XMP, MPF) and HDR
+ * trailer (gain map + SEFT). Used by the "Apply External Edit" feature to round-trip a
+ * Photoshop Generative Fill / Generative Remove edit through CropCenter while preserving
+ * Samsung Gallery's Revert button.
  *
  * Both inputs must be JPEGs and must share the same SOF0 dimensions and EXIF orientation —
  * otherwise the output's metadata (from original) describes different pixels than the SOF
@@ -27,45 +22,42 @@ import java.util.List;
  * before invoking; GraftWriter itself trusts the caller and throws IOException only on
  * structural malformation (missing SOI, missing primary EOI, etc.).
  *
- * The minimal "modify only pixel content" approach replaces an earlier "split rule" design
- * that took XMP / ICC / MPF / gain map from the edit; that approach broke Samsung Gallery's
- * Revert action (endless hang on tap). The bisection toggles below let us add individual
- * swaps back one at a time to learn which one Gallery doesn't tolerate.
+ * Per-segment provenance (see SWAP_* constants):
+ *   - APP1/EXIF, APP1/XMP, APP2/ICC, APP2/MPF, gain map, SEFT trailer: from original —
+ *     identity, color-space coherence with the kept gain map, and Samsung Revert pre-
+ *     flight all need them.
+ *   - DQT, DHT, SOF, SOS+scan, EOI: from edit — the AI-edited pixels themselves.
+ *
+ * Why ICC stays original-side: the recommended editor (Photoshop with Camera Raw
+ * disabled — see GraftController.start) preserves the source's pixel values verbatim
+ * outside the AI fill, so the edit's pixels are P3-numerical even though Photoshop
+ * doesn't write any ICC tag. When GraftController.reorientEdit re-encodes the edit
+ * through Bitmap.compress to fix a stored-layout mismatch, Skia injects its own
+ * synthetic 456-byte sRGB profile — that ICC describes Skia's container, not the
+ * actual pixel encoding. Trusting it would tag the spliced output as sRGB while the
+ * pixels remain P3-numerical and the gain map is calibrated for P3, producing washed-
+ * out HDR composition (sRGB-tagged pixels read as smaller-gamut, gain map boost
+ * misaligned). Keeping the source's ICC keeps the encoding triplet (pixels, ICC, gain
+ * map) self-consistent.
+ *
+ * Substituting the edit's MPF segment alone has been observed to hang Samsung Gallery's
+ * Revert pre-flight (Adobe writes a different MPType for the gain-map entry); same for
+ * substituting the edit's gain map. Both stay original-shape; only MPF entry offsets get
+ * patched for the new primary scan size.
  */
 public final class GraftWriter
 {
 	private static final String TAG = "GraftWriter";
 
-	// ── Bisection toggles ────────────────────────────────────────────────────────────
-	// Confirmed test results (cumulative — once a swap is confirmed safe, it stays true
-	// while the next swap is tested):
-	//   SWAP_ICC          = true → SAFE. Edit's APP2/ICC profile substituted.
-	//   SWAP_XMP          = true → SAFE (with SWAP_ICC also true). Edit's APP1/XMP packet
-	//                              substituted; carries Lightroom's hdrgm coefficients,
-	//                              edit history, and any custom namespaces.
-	//   SWAP_HDR_GAINMAP + SWAP_HDR_MPF (paired, both true together) →
-	//                              BREAKS Samsung Gallery's Revert (endless hang on tap).
-	//                              Bisecting which half is the actual culprit.
-	//   SWAP_HDR_GAINMAP  = true → untested in isolation. Substitutes ONLY edit's gain
-	//                              map JPEG; MPF stays original's (its attribute /
-	//                              dependent-images fields preserved, only size/offset
-	//                              patched for the new layout). Tests whether the gain
-	//                              map JPEG content (size, dimensions, channels, internal
-	//                              APP segments) is the problem.
-	//   SWAP_HDR_MPF      = true → untested in isolation. Substitutes ONLY edit's MPF
-	//                              segment; gain map stays original's. Tests whether MPF
-	//                              entry attributes / count / endianness is the problem.
-	//
-	// To bisect: flip ONE constant to true, build, test on device, restore to false if
-	// Revert breaks.
+	// Per-segment substitution toggles. Current production configuration is locked in
+	// — see the class Javadoc for rationale per segment. Toggles remain as named
+	// constants rather than baked-in branches so a future Samsung firmware change can
+	// be tested by flipping one flag without restructuring the splice loop.
 	private static final boolean SWAP_EXIF = false;
 	private static final boolean SWAP_HDR_GAINMAP = false;
 	private static final boolean SWAP_HDR_MPF = false;
-	private static final boolean SWAP_ICC = true;
+	private static final boolean SWAP_ICC = false;
 	private static final boolean SWAP_XMP = false;
-	// Keep Samsung's vendor APP3-APP15 segments from original — confirmed no rendering
-	// effect, and they carry Samsung-specific identity data (sensor hints, scene labels)
-	// the user wants preserved.
 	private static final boolean STRIP_VENDOR_APPS = false;
 
 	private GraftWriter() {}
@@ -203,13 +195,24 @@ public final class GraftWriter
 		// fields (attribute, dependent images) are preserved — that's where the edit's
 		// MPF differs from original's when SWAP_HDR_MPF is on.
 		boolean haveMpfInOutput = (editMpfSeg != null) || hasMpf(origSegments);
-		if (gainMapToWrite != null && haveMpfInOutput)
+		if (gainMapToWrite != null && !haveMpfInOutput)
 		{
-			boolean patched = MpfPatcher.patch(preSeftBytes, primarySize);
-			if (!patched)
-			{
-				Log.w(TAG, "MPF patch failed; gain-map offset may be incorrect");
-			}
+			// Degenerate config: gain map written but no MPF segment to anchor it.
+			// Strict-MPF decoders (Samsung Gallery, Photos) won't find the gain map and
+			// may render the file as plain SDR; lenient decoders that scan for the
+			// hdrgm signature will still find it. Cannot trigger under current toggles
+			// (SWAP_HDR_GAINMAP=false → gainMapToWrite is original's gain map, which
+			// implies original has MPF in any well-formed Ultra HDR JPEG); the warning
+			// is a future-proofing tripwire if someone flips SWAP_HDR_GAINMAP=true on
+			// a non-Ultra-HDR original.
+			Log.w(TAG, "Gain map written but no MPF segment to anchor it; HDR may "
+				+ "degrade in strict-MPF decoders");
+		}
+		else if (gainMapToWrite != null && !MpfPatcher.patch(preSeftBytes, primarySize))
+		{
+			throw new IOException("MPF patch failed: cannot anchor "
+				+ gainMapToWrite.length + "-byte gain map at primary offset " + primarySize
+				+ " (MPF segment present but malformed?)");
 		}
 
 		byte[] result;

@@ -463,22 +463,29 @@ public class MainActivity extends AppCompatActivity implements SaveHost, UiHost,
 	/**
 	 * Replace the in-memory image with pre-baked bytes — used by the graft flow once
 	 * GraftController has produced the spliced output. The bytes carry the full file
-	 * (original's identity metadata + edit's pixel content + edit's HDR package + original's
-	 * SEFT trailer); applyImageBytes treats them like any other freshly-loaded JPEG so the
+	 * (original's identity metadata + edit's pixel content + original's HDR package + SEFT
+	 * trailer); applyImageBytes treats them like any other freshly-loaded JPEG so the
 	 * existing crop / save pipeline operates on them unchanged. Invoked on the UI thread
 	 * via the BiConsumer that GraftController fires from runOnUiThread.
 	 *
 	 * pathAndId is null — the grafted file isn't on disk anywhere; future Save uses
 	 * ACTION_CREATE_DOCUMENT with the suggested name as default.
 	 *
-	 * After applyImageBytes, the AR is forced to FREE so the UI thread's auto-recompute
-	 * (ensureCropCenter + recomputeCrop, triggered by cropSizeDirty=true after reset)
-	 * lands on a full-image crop rather than a sub-region. Without this, the user's
-	 * preserved AR preference (typically 4:5) carves the freshly-applied graft into a
-	 * non-trivial crop, which then prevents ExportPipeline's no-edit bypass from firing
-	 * on the immediate "graft → save" path — the canvas-encode pipeline runs and the
-	 * splice's byte-perfect primary scan gets lost to Bitmap.compress's re-encode. The
-	 * user's intent in a graft is "write this splice as-is"; FREE matches that.
+	 * Two follow-ups after applyImageBytes returns:
+	 *   - AspectRatio.FREE so the UI's auto-recompute (ensureCropCenter +
+	 *     recomputeCrop, triggered by cropSizeDirty=true after reset) lands on a
+	 *     full-image crop. Without this, the user's preserved AR preference
+	 *     (typically 4:5) would carve the freshly-applied graft into a sub-region —
+	 *     not what the user wants from "apply this edit".
+	 *   - graftApplied=true so ExportPipeline routes the next save through
+	 *     CropExporter.export instead of the verbatim-write bypass. The canvas
+	 *     pipeline regenerates the gain map (UltraHdrCompat.compressWithGainmap) so
+	 *     the HDR boost stays spatially aligned with the edit's primary pixels — the
+	 *     bypass would ship the source's gain map over the spliced primary verbatim,
+	 *     and any user crop would shift the boost off the features it's meant for.
+	 *     The canvas P3 conversion is near-identity here (graftedBytes carries
+	 *     source's DCI-P3 ICC; Bitmap canvas is DISPLAY_P3 — same chromaticities and
+	 *     white point), so the path adds no color drift, only re-encodes consistently.
 	 */
 	private void applyGraftedBytes(byte[] graftedBytes, String displayName)
 	{

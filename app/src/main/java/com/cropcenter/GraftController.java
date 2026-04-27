@@ -1,5 +1,6 @@
 package com.cropcenter;
 
+import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.net.Uri;
 import android.util.Log;
@@ -12,6 +13,7 @@ import com.cropcenter.model.ExportConfig;
 import com.cropcenter.util.BitmapUtils;
 import com.cropcenter.util.SafFileHelper;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.util.function.BiConsumer;
 
@@ -47,7 +49,12 @@ final class GraftController
 	private final SaveHost host;
 	private final SafFileHelper safFiles;
 
-	private boolean graftPending;
+	// Read on the UI thread (start, onEditPicked entry, onEditPickerCancelled) and written
+	// from both the UI thread and the background graft executor (after each terminal step
+	// in onEditPicked's bg lambda). Volatile guarantees the UI thread sees the bg-side
+	// transition to false promptly, so a fresh long-press isn't spuriously rejected with
+	// the busy toast after the bg work has finished.
+	private volatile boolean graftPending;
 
 	GraftController(SaveHost host, SafFileHelper safFiles,
 		BiConsumer<byte[], String> onGraftReady)
@@ -90,13 +97,14 @@ final class GraftController
 					return;
 				}
 
-				if (!validateMatchingDimsAndOrientation(originalBytes, editBytes))
+				byte[] alignedEditBytes = alignEditToOriginalLayout(originalBytes, editBytes);
+				if (alignedEditBytes == null)
 				{
 					graftPending = false;
 					return; // toast already fired by validator
 				}
 
-				byte[] grafted = GraftWriter.graft(originalBytes, editBytes);
+				byte[] grafted = GraftWriter.graft(originalBytes, alignedEditBytes);
 				String suggested = suggestedFilename();
 				graftPending = false;
 				host.runOnUiThread(() ->
@@ -139,6 +147,13 @@ final class GraftController
 	 * true when the long-press is consumed (regardless of whether the graft session actually
 	 * started — busy-rejected attempts also consume the gesture so the user gets feedback),
 	 * false when no image is loaded so the gesture can fall through.
+	 *
+	 * The recommended source editor is Photoshop with Camera Raw set to NOT auto-open JPEGs
+	 * (Edit → Preferences → Camera Raw → File Handling → JPEG → Disabled). Photoshop in
+	 * pixel-space mode preserves source pixel values everywhere except the AI-edited
+	 * region, leaving only ICC-encoding-level differences after canvas P3 conversion.
+	 * Lightroom HDR exports apply a global tone curve that produces a visible seam at the
+	 * fill boundary; not recommended.
 	 */
 	boolean start(ActivityResultLauncher<String[]> graftPickerLauncher)
 	{
@@ -154,8 +169,7 @@ final class GraftController
 		byte[] originalBytes = host.getState().getOriginalFileBytes();
 		if (originalBytes == null)
 		{
-			host.toastIfAlive("Original bytes unavailable — reload the image",
-				Toast.LENGTH_SHORT);
+			toast("Original bytes unavailable — reload the image");
 			return true;
 		}
 		if (originalBytes.length < 4
@@ -164,8 +178,7 @@ final class GraftController
 			// Loaded image is PNG (or some non-JPEG) — graft path requires JPEG identity
 			// metadata. Refuse upfront so the user doesn't navigate the picker for a
 			// graft that would fail validation later.
-			host.toastIfAlive("Apply External Edit only works on JPEG sources",
-				Toast.LENGTH_SHORT);
+			toast("Apply External Edit only works on JPEG sources");
 			return true;
 		}
 		graftPending = true;
@@ -201,7 +214,9 @@ final class GraftController
 	}
 
 	/**
-	 * Post a short toast on the UI thread.
+	 * Post a short toast. Safe to call from any thread — Activity.runOnUiThread runs the
+	 * runnable inline when already on the UI thread, so the indirection is a no-op cost
+	 * and we don't need separate UI-thread / bg-thread variants.
 	 */
 	private void toast(String msg)
 	{
@@ -209,42 +224,140 @@ final class GraftController
 	}
 
 	/**
-	 * Validate that the edit's stored dimensions (SOF0) and EXIF orientation match the
-	 * original's. Both checks together guarantee the splice is decoder-coherent: the
-	 * output's SOF (from edit) and APP1/EXIF (from original) describe the same pixel grid.
+	 * Validate that the edit and original describe the same DISPLAY image, and produce
+	 * an edit byte stream whose stored layout matches the original's so the splice is
+	 * decoder-coherent. Returns the (possibly re-encoded) edit bytes on success, null
+	 * on irreconcilable mismatch (fires a descriptive toast in that case).
 	 *
-	 * Returns true on match. On mismatch, fires a descriptive toast and returns false.
+	 * Why display dims, not stored dims: Photoshop's "Save As JPEG" applies the EXIF
+	 * orientation tag to the pixels and writes the result with orientation=1. So a
+	 * Samsung-rotated photo (stored 4000×3000, orient=6, displays 3000×4000) round-
+	 * tripped through Photoshop becomes (stored 3000×4000, orient=1, displays the same
+	 * 3000×4000). The two files describe the same visible image but their stored dims
+	 * differ — the user reasonably expects them to match. Comparing display dims gives
+	 * the user-visible answer.
 	 *
-	 * Reads stored dims via BitmapFactory.decodeByteArray with inJustDecodeBounds=true
-	 * (cheap — no pixel data allocated). Reads EXIF orientation via BitmapUtils.
+	 * When stored layouts differ but display dims match, decode + re-rotate the edit
+	 * back to original's stored layout so GraftWriter's splice (= edit's primary scan +
+	 * original's metadata, including the EXIF orientation tag) decodes coherently. The
+	 * re-rotation runs Bitmap.compress at quality 100, which adds ~1 level of channel
+	 * noise to the edit pixels — same noise floor the save-time canvas pass would add,
+	 * so the net cost is bounded.
 	 */
-	private boolean validateMatchingDimsAndOrientation(byte[] originalBytes, byte[] editBytes)
+	private byte[] alignEditToOriginalLayout(byte[] originalBytes, byte[] editBytes)
 	{
 		int[] origStored = decodeStoredDims(originalBytes);
 		int[] editStored = decodeStoredDims(editBytes);
 		if (origStored == null || editStored == null)
 		{
 			toast("Couldn't read JPEG dimensions");
-			return false;
+			return null;
 		}
 		int origOrient = BitmapUtils.readExifOrientation(originalBytes);
 		int editOrient = BitmapUtils.readExifOrientation(editBytes);
 
-		if (origStored[0] != editStored[0] || origStored[1] != editStored[1])
+		int[] origDisplay = displayDims(origStored, origOrient);
+		int[] editDisplay = displayDims(editStored, editOrient);
+		if (origDisplay[0] != editDisplay[0] || origDisplay[1] != editDisplay[1])
 		{
 			toast("Edit dimensions don't match: original "
-				+ origStored[0] + "x" + origStored[1]
-				+ ", edit " + editStored[0] + "x" + editStored[1]);
-			return false;
+				+ origDisplay[0] + "x" + origDisplay[1]
+				+ ", edit " + editDisplay[0] + "x" + editDisplay[1]);
+			return null;
 		}
-		if (origOrient != editOrient)
+
+		boolean perfectMatch = origOrient == editOrient
+			&& origStored[0] == editStored[0]
+			&& origStored[1] == editStored[1];
+		if (perfectMatch)
 		{
-			toast("Edit EXIF orientation differs from original ("
-				+ origOrient + " vs " + editOrient
-				+ "). Re-export with same orientation.");
-			return false;
+			return editBytes;
 		}
-		return true;
+		byte[] reoriented = reorientEdit(editBytes, editOrient, origOrient);
+		if (reoriented == null)
+		{
+			toast("Couldn't reorient edit to match original");
+			return null;
+		}
+		Log.d(TAG, "Reoriented edit (origOrient=" + origOrient + " editOrient=" + editOrient
+			+ ") from " + editStored[0] + "x" + editStored[1]
+			+ " to original's stored layout (" + origStored[0] + "x" + origStored[1] + ")");
+		return reoriented;
+	}
+
+	/**
+	 * Apply EXIF orientation to stored dims to get display dims. EXIF tags 5/6/7/8
+	 * swap the axes (90° rotations + transpose / transverse); 1/2/3/4 leave them
+	 * alone. Returns a fresh int[2] so callers can mutate without aliasing.
+	 */
+	private static int[] displayDims(int[] stored, int orient)
+	{
+		boolean swap = orient == 5 || orient == 6 || orient == 7 || orient == 8;
+		return swap ? new int[] { stored[1], stored[0] } : new int[] { stored[0], stored[1] };
+	}
+
+	/**
+	 * Re-encode the edit so its stored pixel layout matches the original's. Pipeline:
+	 * decode raw (BitmapFactory does not apply orientation) → apply edit's orientation
+	 * to land in display orientation → apply the inverse of original's orientation to
+	 * land in original's stored orientation → JPEG-compress at quality 100. The output
+	 * has no EXIF (Bitmap.compress doesn't write APP1/EXIF segments); GraftWriter only
+	 * uses the primary scan from this file, so the missing EXIF is fine.
+	 *
+	 * Returns null when the decode fails (corrupt edit) — caller surfaces a toast.
+	 */
+	private static byte[] reorientEdit(byte[] editBytes, int editOrient, int origOrient)
+	{
+		Bitmap raw = BitmapFactory.decodeByteArray(editBytes, 0, editBytes.length);
+		if (raw == null)
+		{
+			return null;
+		}
+		Bitmap inDisplay = null;
+		Bitmap inOrigStored = null;
+		try
+		{
+			inDisplay = BitmapUtils.applyOrientation(raw, editOrient);
+			raw = null; // applyOrientation may have recycled raw
+			inOrigStored = BitmapUtils.applyOrientation(inDisplay, inverseOrientation(origOrient));
+			inDisplay = null;
+			ByteArrayOutputStream bos = new ByteArrayOutputStream();
+			inOrigStored.compress(Bitmap.CompressFormat.JPEG, 100, bos);
+			return bos.toByteArray();
+		}
+		finally
+		{
+			if (raw != null && !raw.isRecycled())
+			{
+				raw.recycle();
+			}
+			if (inDisplay != null && !inDisplay.isRecycled())
+			{
+				inDisplay.recycle();
+			}
+			if (inOrigStored != null && !inOrigStored.isRecycled())
+			{
+				inOrigStored.recycle();
+			}
+		}
+	}
+
+	/**
+	 * Inverse of an EXIF orientation transform — applying orient then inverseOrientation
+	 * gives the identity. Most orientations (1, 2, 3, 4, 5, 7) are involutions and map
+	 * to themselves; only the 90° rotations (6 ↔ 8) form an inverse pair.
+	 */
+	private static int inverseOrientation(int orient)
+	{
+		if (orient == 6)
+		{
+			return 8;
+		}
+		if (orient == 8)
+		{
+			return 6;
+		}
+		return orient;
 	}
 
 	/**

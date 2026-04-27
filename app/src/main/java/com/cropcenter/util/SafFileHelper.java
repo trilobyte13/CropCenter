@@ -279,6 +279,16 @@ public final class SafFileHelper
 				{
 					String volumeId = docId.substring(0, colon);
 					String relPath = docId.substring(colon + 1);
+					// Defensive: reject paths that try to escape the volume root via ".."
+					// or that pretend to be absolute. The SAF picker doesn't produce such
+					// docIds for legitimate user picks, but a malicious app could pass one
+					// via a Share intent. Fall through to null → caller takes the SAF
+					// stream path which uses the URI verbatim through the ContentResolver
+					// (whose own access checks gate the read).
+					if (relPath.contains("..") || relPath.startsWith("/"))
+					{
+						return null;
+					}
 					String volumeRoot = "primary".equalsIgnoreCase(volumeId)
 						? "/storage/emulated/0"
 						: "/storage/" + volumeId;
@@ -561,11 +571,11 @@ public final class SafFileHelper
 
 	/**
 	 * Attempt to read the URI's bytes directly from the underlying filesystem path,
-	 * bypassing the ContentProvider stream entirely. Diagnosed via logcat traces:
-	 * Samsung's MediaStore openInputStream rewrites the EXIF segment as it streams
-	 * (HashMap-style IFD0 reordering, GPS / LensModel stripped, segment shrunk by
-	 * ~440 bytes — likely a privacy-driven sanitisation pass). Direct read via
-	 * FileInputStream gives the pristine on-disk bytes.
+	 * bypassing the ContentProvider stream entirely. Samsung's MediaStore
+	 * openInputStream rewrites the EXIF segment as it streams (zeros out the GPS
+	 * sub-IFD's value blocks, reorders IFD0 entries, shrinks the segment by ~440
+	 * bytes — likely a privacy-driven sanitisation pass). Direct read via
+	 * FileInputStream gives the pristine on-disk bytes that still carry GPS.
 	 *
 	 * Returns null when the URI doesn't resolve to an accessible filesystem path
 	 * (cloud / SAF-only providers, opaque-ID URIs without a DATA column, paths under
@@ -573,13 +583,12 @@ public final class SafFileHelper
 	 * stream copy in that case — accepting the EXIF mangling for non-MediaStore
 	 * sources where the alternative is not loading the file at all.
 	 *
-	 * Validates `pathAndId[0]` against `MAX_READ_BYTES` and JPEG signature before
-	 * returning so a corrupt MediaStore row pointing at a missing / different file
+	 * Validates the resolved path against existence / readability / size before
+	 * returning so a stale MediaStore row pointing at a missing or oversized file
 	 * doesn't poison the load.
 	 */
 	private byte[] tryReadDirectlyFromPath(Uri uri)
 	{
-		Log.d(TAG, "tryReadDirectlyFromPath uri=" + uri);
 		String[] pathAndId;
 		try
 		{
@@ -587,27 +596,28 @@ public final class SafFileHelper
 		}
 		catch (Exception e)
 		{
-			Log.d(TAG, "tryReadDirectlyFromPath: getFilePathAndId threw: " + e.getMessage());
+			Log.d(TAG, "direct-read: getFilePathAndId threw for " + uri + ": " + e.getMessage());
 			return null;
 		}
 		if (pathAndId == null || pathAndId[0] == null || pathAndId[0].isEmpty())
 		{
-			Log.d(TAG, "tryReadDirectlyFromPath: getFilePathAndId returned no path for " + uri);
+			// Common case for cloud / SAF-only URIs without a DATA column. Caller falls
+			// back to the SAF stream copy. No log here — would fire on every load from
+			// such sources, which is noisy and not actionable.
 			return null;
 		}
 		File file = new File(pathAndId[0]);
 		if (!file.isFile() || !file.canRead())
 		{
-			Log.d(TAG, "tryReadDirectlyFromPath: " + pathAndId[0]
-				+ " not readable directly (isFile=" + file.isFile()
+			Log.d(TAG, "direct-read: " + pathAndId[0]
+				+ " not readable (isFile=" + file.isFile()
 				+ " canRead=" + file.canRead() + ")");
 			return null;
 		}
 		long len = file.length();
 		if (len <= 0 || len > MAX_READ_BYTES)
 		{
-			Log.d(TAG, "tryReadDirectlyFromPath: " + pathAndId[0]
-				+ " size out of range: " + len);
+			Log.d(TAG, "direct-read: " + pathAndId[0] + " size out of range: " + len);
 			return null;
 		}
 		try (FileInputStream fis = new FileInputStream(file))
@@ -625,18 +635,49 @@ public final class SafFileHelper
 			}
 			if (read != bytes.length)
 			{
-				Log.w(TAG, "tryReadDirectlyFromPath: short read " + read + "/" + bytes.length
+				Log.w(TAG, "direct-read: short read " + read + "/" + bytes.length
 					+ " on " + pathAndId[0]);
 				return null;
 			}
-			Log.d(TAG, "Loaded " + pathAndId[0] + " directly (" + bytes.length
-				+ " bytes), bypassing ContentProvider EXIF mangling");
+			if (!hasImageSignature(bytes))
+			{
+				// MediaStore _data row may be stale (file deleted then replaced with
+				// non-image content) — fall back to the SAF stream which would also
+				// fail downstream but at least matches what the picker thought it
+				// granted. Prevents loading garbage bytes that BitmapFactory would
+				// silently reject with a useless "Failed to decode" toast.
+				Log.w(TAG, "direct-read: " + pathAndId[0]
+					+ " has no JPEG/PNG signature; falling back to SAF stream");
+				return null;
+			}
+			Log.d(TAG, "direct-read: " + pathAndId[0] + " (" + bytes.length + " bytes)");
 			return bytes;
 		}
 		catch (IOException e)
 		{
-			Log.w(TAG, "tryReadDirectlyFromPath: read failed for " + pathAndId[0], e);
+			Log.w(TAG, "direct-read: read failed for " + pathAndId[0], e);
 			return null;
 		}
+	}
+
+	/**
+	 * True when bytes start with a recognised JPEG (FF D8) or PNG (89 50 4E 47) magic
+	 * sequence. Cheap upfront filter for tryReadDirectlyFromPath so a stale MediaStore
+	 * row pointing at a non-image file can fall back to SAF rather than poison the
+	 * load with garbage bytes.
+	 */
+	private static boolean hasImageSignature(byte[] bytes)
+	{
+		if (bytes.length < 4)
+		{
+			return false;
+		}
+		// JPEG SOI
+		if ((bytes[0] & 0xFF) == 0xFF && (bytes[1] & 0xFF) == 0xD8)
+		{
+			return true;
+		}
+		// PNG signature start (89 50 4E 47)
+		return (bytes[0] & 0xFF) == 0x89 && bytes[1] == 'P' && bytes[2] == 'N' && bytes[3] == 'G';
 	}
 }
