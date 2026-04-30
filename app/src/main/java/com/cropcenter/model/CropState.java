@@ -3,6 +3,7 @@ package com.cropcenter.model;
 import android.graphics.Bitmap;
 
 import com.cropcenter.metadata.JpegSegment;
+import com.cropcenter.util.AiRegionDetector.AiMask;
 import com.cropcenter.util.BitmapUtils;
 
 import java.util.ArrayList;
@@ -22,45 +23,51 @@ public class CropState
 		void onStateChanged();
 	}
 
-	// Mutated only via updateExportConfig / updateGridConfig — the record types themselves are
-	// immutable, so state observers see a consistent snapshot and notifyChanged fires exactly
-	// once per logical transition.
-	private ExportConfig exportConfig = ExportConfig.defaults();
-	private GridConfig gridConfig = GridConfig.defaults();
-	// Mutated only via addSelectionPoint / removeSelectionPoint* / replaceSelectionPoints /
-	// clearSelectionPoints. Callers never mutate directly — getSelectionPoints() returns an
-	// unmodifiable view. Volatile + replace-instead-of-clear in reset() so the background-
-	// thread loadImage path can safely null-swap the list while the UI thread iterates it —
-	// an in-place ArrayList.clear() from bg would CME the UI iterator. Non-volatile mutation
-	// via addSelectionPoint / etc. runs only on the UI thread, so those don't need synchronisation.
-	private volatile List<SelectionPoint> selectionPoints = new ArrayList<>();
-
+	// Set by GraftController.onEditPicked when an Apply External Edit produces an AI
+	// region; cleared by reset() on the next image load. Read by UltraHdrCompat at HDR
+	// re-encode time so the gain map's HDR boost in the AI region can be inpainted from
+	// surrounding values (matches the visual intent of Generative Remove without the
+	// stale "boost the features that used to be there" artifact).
+	private AiMask aiMask;
 	private AspectRatio aspectRatio = AspectRatio.R4_5;
-	// Batch mechanism used by the UI listener: notifyChanged during an open batch sets the
-	// dirty flag instead of firing. endBatch then fires the listener at most once per batch,
-	// and only if at least one setter actually called notifyChanged. This lets the listener
-	// body freely call CropEngine.recomputeCrop (whose setter calls would otherwise recurse)
-	// without needing a reentrancy guard.
-	private int batchDepth;
-	private boolean batchDirty;
 	private Bitmap sourceImage;
 	private CenterMode centerMode = CenterMode.BOTH;
 	private EditorMode editorMode = EditorMode.SELECT_FEATURE;
-	// Volatile for the same reason as selectionPoints — reset() may run on the bg executor
-	// while UI readers iterate getJpegMeta().
+	// Mutated only via updateExportConfig / updateGridConfig — the record types themselves
+	// are immutable, so state observers see a consistent snapshot and notifyChanged fires
+	// exactly once per logical transition. (Same applies to gridConfig below.)
+	private ExportConfig exportConfig = ExportConfig.defaults();
+	private GridConfig gridConfig = GridConfig.defaults();
+	// Volatile + replace-instead-of-clear in reset() so the background-thread loadImage
+	// path can safely null-swap the list while the UI thread iterates it — an in-place
+	// ArrayList.clear() from bg would CME the UI iterator. Same applies to selectionPoints
+	// below.
 	private volatile List<JpegSegment> jpegMeta = new ArrayList<>();
+	// Mutated only via addSelectionPoint / removeSelectionPoint* / replaceSelectionPoints /
+	// clearSelectionPoints. Callers never mutate directly — getSelectionPoints() returns an
+	// unmodifiable view. Volatile rationale matches jpegMeta above. Non-volatile mutation
+	// via addSelectionPoint / etc. runs only on the UI thread, so those don't need
+	// synchronisation.
+	private volatile List<SelectionPoint> selectionPoints = new ArrayList<>();
 	private OnStateChangedListener listener;
 	private String originalFilePath; // absolute path for Samsung Revert
 	private String originalFilename;
 	private String sourceFormat; // "jpeg" or "png"
+	// Batch mechanism used by the UI listener: notifyChanged during an open batch sets the
+	// dirty flag (batchDirty) instead of firing. endBatch then fires the listener at most
+	// once per batch, and only if at least one setter actually called notifyChanged. This
+	// lets the listener body freely call CropEngine.recomputeCrop (whose setter calls would
+	// otherwise recurse) without needing a reentrancy guard. batchDepth tracks nesting; see
+	// batchDepth below.
+	private boolean batchDirty;
 	private boolean centerLocked = false; // when true, auto-recompute from points is suppressed
 	private boolean cropSizeDirty = true;
 	// True when the in-memory image came from the Apply External Edit graft flow rather than
 	// a direct file load. Set by MainActivity after applyImageBytes installs the spliced
 	// bytes. Read by ExportPipeline.canBypassEncode to refuse the verbatim-write bypass for
-	// graft saves — the splice carries the edit's ICC profile, and bypassing skips the
-	// canvas-managed P3 conversion that the cropped graft path runs and that produces the
-	// cleanest output (matches the cropped graft byte-structure regardless of crop state).
+	// graft saves — bypassing would ship source's gain map verbatim over the spliced primary,
+	// so any user crop afterwards shifts the gain map's HDR boost off the features it's
+	// meant for. The full encode regenerates the gain map from the spliced primary.
 	private boolean graftApplied;
 	private boolean hasCenter;
 	private byte[] gainMap;
@@ -71,6 +78,7 @@ public class CropState
 	private float centerX;
 	private float centerY;
 	private float rotationDegrees = 0f; // precise rotation applied to source image
+	private int batchDepth; // beginBatch / endBatch nesting counter — see batchDirty comment
 	private int cropH;
 	private int cropW;
 	private long mediaStoreId = -1; // MediaStore _ID for Samsung Revert
@@ -123,6 +131,18 @@ public class CropState
 			batchDirty = false;
 			fireListener();
 		}
+	}
+
+	/**
+	 * Mask of AI-modified pixels from the most recent Apply External Edit graft, or
+	 * null when no graft is active. UltraHdrCompat reads this at HDR re-encode time
+	 * to inpaint the gain map's boost values inside the AI region (matching
+	 * Generative Remove's intent of "this region looks like its neighbors" without
+	 * the gain map's stale boost-the-removed-features artifact).
+	 */
+	public AiMask getAiMask()
+	{
+		return aiMask;
 	}
 
 	/**
@@ -188,7 +208,7 @@ public class CropState
 	 * Returns 0 when no crop is placed. Callers that need an integer pixel origin cast via
 	 * Math.floor at the call site — the exporter absorbs the sub-pixel bias.
 	 */
-	public float getCropImgXFloat()
+	public float getCropImageXFloat()
 	{
 		if (!hasCenter)
 		{
@@ -198,9 +218,9 @@ public class CropState
 	}
 
 	/**
-	 * Continuous-float crop top for the renderer — see getCropImgXFloat.
+	 * Continuous-float crop top for the renderer — see getCropImageXFloat.
 	 */
-	public float getCropImgYFloat()
+	public float getCropImageYFloat()
 	{
 		if (!hasCenter)
 		{
@@ -498,6 +518,18 @@ public class CropState
 		jpegMeta = new ArrayList<>();
 		gainMap = null;
 		seftTrailer = null;
+		aiMask = null;
+	}
+
+	/**
+	 * Stash an AI-region mask produced by the graft pipeline. The save-time HDR
+	 * re-encode path (UltraHdrCompat) reads it via getAiMask and applies the
+	 * gain-map inpaint inside the masked region. Cleared by reset() on the next
+	 * image load.
+	 */
+	public void setAiMask(AiMask mask)
+	{
+		this.aiMask = mask;
 	}
 
 	/**
@@ -555,115 +587,6 @@ public class CropState
 		this.centerY = y;
 		this.hasCenter = true;
 		notifyChanged();
-	}
-
-	/**
-	 * Axis-aligned clamp — sub-epsilon rotation is rendered as unrotated by the rest
-	 * of the stack, so the cheap axis clamp suffices. Each axis is clamped
-	 * independently; when cropW ≥ imgW (crop exceeds image) snap to the image mid
-	 * rather than letting Math.clamp throw on inverted bounds.
-	 */
-	private float[] clampCenterAxisAligned(float x, float y, int imgW, int imgH)
-	{
-		if (cropW < imgW)
-		{
-			x = Math.clamp(x, cropW / 2f, imgW - cropW / 2f);
-		}
-		else
-		{
-			x = imgW / 2f;
-		}
-		if (cropH < imgH)
-		{
-			y = Math.clamp(y, cropH / 2f, imgH - cropH / 2f);
-		}
-		else
-		{
-			y = imgH / 2f;
-		}
-		return new float[] { x, y };
-	}
-
-	/**
-	 * Rotated-image clamp — binary search along each axis independently so clamping X
-	 * doesn't affect Y and vice versa. Each pass walks from the requested position
-	 * toward image center, picking the farthest-out fraction whose four crop corners
-	 * all land inside the source image bounds when un-rotated. When the crop is
-	 * larger than the image under the current rotation (no valid position exists),
-	 * falls back to image-center so the caller gets a stable, finite result.
-	 */
-	private float[] clampCenterRotated(float x, float y, int imgW, int imgH)
-	{
-		float imageMidX = imgW / 2f;
-		float imageMidY = imgH / 2f;
-		double rad = Math.toRadians(-rotationDegrees);
-		double cosR = Math.cos(rad);
-		double sinR = Math.sin(rad);
-		float halfWidth = cropW / 2f;
-		float halfHeight = cropH / 2f;
-
-		// Fallback: when even image-center can't hold the crop (cropW / cropH exceed the
-		// rotated image's inscribed axis-aligned rectangle), the binary searches below
-		// would converge to image-center with corners still outside bounds. Snap to
-		// image-center directly — the rotation-fit shrink in CropEngine.recomputeCrop's
-		// recheck pass will catch up and size the crop down to fit on the next recompute.
-		if (!cornersInside(imageMidX, imageMidY, halfWidth, halfHeight,
-			imageMidX, imageMidY, cosR, sinR, imgW, imgH))
-		{
-			return new float[] { imageMidX, imageMidY };
-		}
-
-		if (!cornersInside(x, y, halfWidth, halfHeight,
-			imageMidX, imageMidY, cosR, sinR, imgW, imgH))
-		{
-			x = binarySearchAxis(x, y, halfWidth, halfHeight,
-				imageMidX, imageMidY, cosR, sinR, imgW, imgH, true);
-		}
-		if (!cornersInside(x, y, halfWidth, halfHeight,
-			imageMidX, imageMidY, cosR, sinR, imgW, imgH))
-		{
-			y = binarySearchAxis(x, y, halfWidth, halfHeight,
-				imageMidX, imageMidY, cosR, sinR, imgW, imgH, false);
-		}
-		return new float[] { x, y };
-	}
-
-	/**
-	 * 25-iteration binary search for the farthest valid center position along one axis.
-	 * The search range is fixed at both ends — `fraction = 0` gives the image center
-	 * (always valid), `fraction = 1` gives the requested position. Each iteration
-	 * tests the midpoint fraction; valid positions advance `loFraction` and update the
-	 * best-so-far, invalid positions pull `hiFraction` in. Result: the largest valid
-	 * fraction's candidate position. `clampX` true varies X while holding Y fixed;
-	 * false varies Y.
-	 */
-	private static float binarySearchAxis(float x, float y, float halfWidth, float halfHeight,
-		float imageMidX, float imageMidY, double cosR, double sinR, int imgW, int imgH,
-		boolean clampX)
-	{
-		float loFraction = 0f;
-		float hiFraction = 1f;
-		float safeEndpoint = clampX ? imageMidX : imageMidY;
-		float requestedEndpoint = clampX ? x : y;
-		float validPosition = safeEndpoint;
-		for (int i = 0; i < 25; i++)
-		{
-			float midFraction = (loFraction + hiFraction) / 2f;
-			float candidate = safeEndpoint + (requestedEndpoint - safeEndpoint) * midFraction;
-			float testX = clampX ? candidate : x;
-			float testY = clampX ? y : candidate;
-			if (cornersInside(testX, testY, halfWidth, halfHeight,
-				imageMidX, imageMidY, cosR, sinR, imgW, imgH))
-			{
-				validPosition = candidate;
-				loFraction = midFraction;
-			}
-			else
-			{
-				hiFraction = midFraction;
-			}
-		}
-		return validPosition;
 	}
 
 	/**
@@ -805,8 +728,16 @@ public class CropState
 
 	/**
 	 * Replace the rotation angle. Handles NaN / infinite inputs by treating them as 0,
-	 * clamps to [−180, 180], marks the crop size dirty (recompute needed to shrink the
-	 * crop for the new rotation), and fires the listener.
+	 * clamps to [−180, 180], snaps sub-epsilon magnitudes to exactly 0, marks the crop
+	 * size dirty (recompute needed to shrink the crop for the new rotation), and fires
+	 * the listener.
+	 *
+	 * The sub-epsilon snap is the single chokepoint that keeps every rotation entry point
+	 * — ruler, precise-rotation dialog, horizon detector, programmatic — aligned with what
+	 * UiSync, CropEngine, ViewportMath, BitmapUtils.drawCropped, and ExportPipeline actually
+	 * render. Without it, those callers can store 0.01°-0.04° values that the renderer
+	 * collapses to zero, producing a hidden readout, no visible rotation, and (until
+	 * ExportPipeline's epsilon check was added) a needless re-encode of an unchanged image.
 	 */
 	public void setRotationDegrees(float deg)
 	{
@@ -815,6 +746,10 @@ public class CropState
 			deg = 0f;
 		}
 		deg = Math.clamp(deg, -180f, 180f);
+		if (Math.abs(deg) < BitmapUtils.ROTATION_EPSILON)
+		{
+			deg = 0f;
+		}
 		this.rotationDegrees = deg;
 		this.cropSizeDirty = true;
 		notifyChanged();
@@ -830,11 +765,20 @@ public class CropState
 	}
 
 	/**
-	 * Record the source format ("jpeg" or "png"). No listener fire.
+	 * Record the source format ("jpeg" or "png") and seed exportConfig to match — load a
+	 * PNG and the SaveDialog's format toggle and default filename should arrive on PNG, not
+	 * silently default back to JPEG and drop alpha on the next save. Callers can still
+	 * override the format afterwards via updateExportConfig (e.g., the user explicitly
+	 * picks JPEG in the SaveDialog). No listener fire — listeners observe the resulting
+	 * setSourceImage call that always follows in the load path.
 	 */
 	public void setSourceFormat(String fmt)
 	{
 		this.sourceFormat = fmt;
+		if (ExportConfig.FORMAT_PNG.equals(fmt) || ExportConfig.FORMAT_JPEG.equals(fmt))
+		{
+			this.exportConfig = exportConfig.withFormat(fmt);
+		}
 	}
 
 	/**
@@ -868,6 +812,82 @@ public class CropState
 		notifyChanged();
 	}
 
+	/**
+	 * Axis-aligned clamp — sub-epsilon rotation is rendered as unrotated by the rest
+	 * of the stack, so the cheap axis clamp suffices. Each axis is clamped
+	 * independently; when cropW ≥ imgW (crop exceeds image) snap to the image mid
+	 * rather than letting Math.clamp throw on inverted bounds.
+	 */
+	private float[] clampCenterAxisAligned(float x, float y, int imgW, int imgH)
+	{
+		if (cropW < imgW)
+		{
+			x = Math.clamp(x, cropW / 2f, imgW - cropW / 2f);
+		}
+		else
+		{
+			x = imgW / 2f;
+		}
+		if (cropH < imgH)
+		{
+			y = Math.clamp(y, cropH / 2f, imgH - cropH / 2f);
+		}
+		else
+		{
+			y = imgH / 2f;
+		}
+		return new float[] { x, y };
+	}
+
+	/**
+	 * Rotated-image clamp — binary search along each axis independently so clamping X
+	 * doesn't affect Y and vice versa. Each pass walks from the requested position
+	 * toward image center, picking the farthest-out fraction whose four crop corners
+	 * all land inside the source image bounds when un-rotated. When the crop is
+	 * larger than the image under the current rotation (no valid position exists),
+	 * falls back to image-center so the caller gets a stable, finite result.
+	 */
+	private float[] clampCenterRotated(float x, float y, int imgW, int imgH)
+	{
+		float imageMidX = imgW / 2f;
+		float imageMidY = imgH / 2f;
+		double rad = Math.toRadians(-rotationDegrees);
+		double cosR = Math.cos(rad);
+		double sinR = Math.sin(rad);
+		float halfWidth = cropW / 2f;
+		float halfHeight = cropH / 2f;
+
+		// Fallback: when even image-center can't hold the crop (cropW / cropH exceed the
+		// rotated image's inscribed axis-aligned rectangle), the binary searches below
+		// would converge to image-center with corners still outside bounds. Snap to
+		// image-center directly — the rotation-fit shrink in CropEngine.recomputeCrop's
+		// recheck pass will catch up and size the crop down to fit on the next recompute.
+		if (!cornersInside(imageMidX, imageMidY, halfWidth, halfHeight,
+			imageMidX, imageMidY, cosR, sinR, imgW, imgH))
+		{
+			return new float[] { imageMidX, imageMidY };
+		}
+
+		if (!cornersInside(x, y, halfWidth, halfHeight,
+			imageMidX, imageMidY, cosR, sinR, imgW, imgH))
+		{
+			x = binarySearchAxis(x, y, halfWidth, halfHeight,
+				imageMidX, imageMidY, cosR, sinR, imgW, imgH, true);
+		}
+		if (!cornersInside(x, y, halfWidth, halfHeight,
+			imageMidX, imageMidY, cosR, sinR, imgW, imgH))
+		{
+			y = binarySearchAxis(x, y, halfWidth, halfHeight,
+				imageMidX, imageMidY, cosR, sinR, imgW, imgH, false);
+		}
+		return new float[] { x, y };
+	}
+
+	/**
+	 * Invoke the registered listener if one is set. No-op when no listener has been
+	 * attached (e.g. between Activity onDestroy clearing the listener and the bg thread
+	 * finishing its in-flight task).
+	 */
 	private void fireListener()
 	{
 		if (listener != null)
@@ -876,6 +896,12 @@ public class CropState
 		}
 	}
 
+	/**
+	 * Listener dispatch with batch suppression. Inside an open batch (batchDepth > 0)
+	 * sets the dirty flag and returns; endBatch will fire once on close. Outside a batch
+	 * fires immediately. Setters route through here so a single user action that touches
+	 * multiple fields produces one listener call instead of N.
+	 */
 	private void notifyChanged()
 	{
 		if (batchDepth > 0)
@@ -884,6 +910,44 @@ public class CropState
 			return;
 		}
 		fireListener();
+	}
+
+	/**
+	 * 25-iteration binary search for the farthest valid center position along one axis.
+	 * The search range is fixed at both ends — `fraction = 0` gives the image center
+	 * (always valid), `fraction = 1` gives the requested position. Each iteration
+	 * tests the midpoint fraction; valid positions advance `loFraction` and update the
+	 * best-so-far, invalid positions pull `hiFraction` in. Result: the largest valid
+	 * fraction's candidate position. `clampX` true varies X while holding Y fixed;
+	 * false varies Y.
+	 */
+	private static float binarySearchAxis(float x, float y, float halfWidth, float halfHeight,
+		float imageMidX, float imageMidY, double cosR, double sinR, int imgW, int imgH,
+		boolean clampX)
+	{
+		float loFraction = 0f;
+		float hiFraction = 1f;
+		float safeEndpoint = clampX ? imageMidX : imageMidY;
+		float requestedEndpoint = clampX ? x : y;
+		float validPosition = safeEndpoint;
+		for (int i = 0; i < 25; i++)
+		{
+			float midFraction = (loFraction + hiFraction) / 2f;
+			float candidate = safeEndpoint + (requestedEndpoint - safeEndpoint) * midFraction;
+			float testX = clampX ? candidate : x;
+			float testY = clampX ? y : candidate;
+			if (cornersInside(testX, testY, halfWidth, halfHeight,
+				imageMidX, imageMidY, cosR, sinR, imgW, imgH))
+			{
+				validPosition = candidate;
+				loFraction = midFraction;
+			}
+			else
+			{
+				hiFraction = midFraction;
+			}
+		}
+		return validPosition;
 	}
 
 	/**

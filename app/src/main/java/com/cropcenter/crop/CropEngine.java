@@ -10,6 +10,15 @@ import com.cropcenter.util.RotationMath;
 
 import java.util.List;
 
+/**
+ * Computes the crop rectangle from CropState — given the user's selection points,
+ * aspect ratio, lock mode (Both / H / V), rotation, and image bounds, derives a
+ * center point and width/height that respect all of those constraints. The two
+ * public entry points are autoComputeFromPoints (selection-driven) and
+ * recomputeCrop (general "given the current state, fit the crop to it"). Pure
+ * math: no Bitmap reads, no rendering, no listener firing — callers handle
+ * notifyChanged through the CropState setter pattern.
+ */
 public final class CropEngine
 {
 	private CropEngine() {}
@@ -81,7 +90,7 @@ public final class CropEngine
 		if (!state.isCropSizeDirty() && state.getCropW() > 0 && state.getCropH() > 0)
 		{
 			// Size locked — keep cropW / cropH, let setCenter clamp centerX / centerY into the
-			// rotated image bounds. No parity snap: cropImgX comes from getCropImgX's floor().
+			// rotated image bounds. No parity snap: cropImageX comes from getCropImageX's floor().
 			state.setCropSizeSilent(state.getCropW(), state.getCropH());
 			state.setCenter(centerX, centerY);
 			return;
@@ -126,85 +135,6 @@ public final class CropEngine
 		state.setCenter(centerX, centerY);
 
 		recheckRotationFit(state, imgW, imgH, rotation);
-	}
-
-	/**
-	 * Compute the maximum crop size on each axis, subject to lock mode and aspect ratio.
-	 * Locked axes are symmetric about the center (so a selection stays framed); free
-	 * axes get the full image extent and will be clamped / shifted later by
-	 * clampFreeAxes.
-	 */
-	private static float[] computeMaxCropSize(AspectRatio ar, float centerX, float centerY,
-		int imgW, int imgH, boolean lockedX, boolean lockedY)
-	{
-		float maxCropW = lockedX ? 2 * Math.min(centerX, imgW - centerX) : imgW;
-		float maxCropH = lockedY ? 2 * Math.min(centerY, imgH - centerY) : imgH;
-
-		if (ar.isFree())
-		{
-			return new float[] { maxCropW, maxCropH };
-		}
-
-		float ratio = ar.ratio();
-		float cropW;
-		float cropH;
-		if (maxCropH == 0 || maxCropW / maxCropH <= ratio)
-		{
-			cropW = maxCropW;
-			cropH = cropW / ratio;
-			if (cropH > maxCropH)
-			{
-				cropH = maxCropH;
-				cropW = cropH * ratio;
-			}
-		}
-		else
-		{
-			cropH = maxCropH;
-			cropW = cropH * ratio;
-			if (cropW > maxCropW)
-			{
-				cropW = maxCropW;
-				cropH = cropW / ratio;
-			}
-		}
-		return new float[] { cropW, cropH };
-	}
-
-	/**
-	 * Shift free-axis centers so the crop rectangle stays inside the image. Guards
-	 * against images smaller than the minimum crop: when cropW ≥ imgW the upper bound
-	 * falls below the lower bound and Math.clamp would throw — fall back to centering.
-	 */
-	private static float[] clampFreeAxes(float centerX, float centerY,
-		float cropW, float cropH, int imgW, int imgH, boolean lockedX, boolean lockedY)
-	{
-		if (!lockedX)
-		{
-			centerX = (cropW < imgW) ? Math.clamp(centerX, cropW / 2f, imgW - cropW / 2f) : imgW / 2f;
-		}
-		if (!lockedY)
-		{
-			centerY = (cropH < imgH) ? Math.clamp(centerY, cropH / 2f, imgH - cropH / 2f) : imgH / 2f;
-		}
-		return new float[] { centerX, centerY };
-	}
-
-	/**
-	 * Derive the crop center for this recompute pass. In Select mode with points,
-	 * returns the AABB midpoint of the selection points IN ROTATED IMAGE SPACE via
-	 * rotatedSelectionMidpoint. In all other cases returns the stable rotation anchor
-	 * (the user's intended, un-clamped center).
-	 */
-	private static float[] findCropCenter(CropState state, int imgW, int imgH, float rotation)
-	{
-		boolean hasSelection = state.getEditorMode() == EditorMode.SELECT_FEATURE
-			&& !state.getSelectionPoints().isEmpty();
-		if (!hasSelection)
-		{
-			return new float[] { state.getAnchorX(), state.getAnchorY() };
-		}
-		return rotatedSelectionMidpoint(state.getSelectionPoints(), imgW, imgH, rotation);
 	}
 
 	/**
@@ -254,35 +184,6 @@ public final class CropEngine
 	}
 
 	/**
-	 * Second rotation-fit pass: integer rounding of cropW / cropH above may push the
-	 * corners just outside the rotated image bounds. If maxScaleForRotation reports the
-	 * post-rounding crop is meaningfully too big (recheck < 0.99), shrink + re-round +
-	 * re-commit. Uses the state's current (post-setCenter) values because setCenter's
-	 * own rotation clamp may have nudged the center.
-	 */
-	private static void recheckRotationFit(CropState state, int imgW, int imgH, float rotation)
-	{
-		if (Math.abs(rotation) < BitmapUtils.ROTATION_EPSILON)
-		{
-			return;
-		}
-		float finalCenterX = state.getCenterX();
-		float finalCenterY = state.getCenterY();
-		float recheck = maxScaleForRotation(finalCenterX, finalCenterY,
-			state.getCropW(), state.getCropH(), imgW, imgH, rotation);
-		if (recheck >= 0.99f)
-		{
-			return;
-		}
-		float cropW = state.getCropW() * recheck;
-		float cropH = state.getCropH() * recheck;
-		int refinedCropW = Math.max(4, Math.round(cropW));
-		int refinedCropH = Math.max(4, Math.round(cropH));
-		state.setCropSizeSilent(refinedCropW, refinedCropH);
-		state.setCenter(finalCenterX, finalCenterY);
-	}
-
-	/**
 	 * Axis-aligned bounding-box midpoint of a non-empty selection. A single point is its own
 	 * midpoint; with multiple points we average the min/max on each axis (cheaper than a
 	 * true centroid and matches how the crop engine frames the selection).
@@ -304,6 +205,85 @@ public final class CropEngine
 		float midX = (count == 1) ? minX : (minX + maxX) / 2f;
 		float midY = (count == 1) ? minY : (minY + maxY) / 2f;
 		return new float[] { midX, midY };
+	}
+
+	/**
+	 * Shift free-axis centers so the crop rectangle stays inside the image. Guards
+	 * against images smaller than the minimum crop: when cropW ≥ imgW the upper bound
+	 * falls below the lower bound and Math.clamp would throw — fall back to centering.
+	 */
+	private static float[] clampFreeAxes(float centerX, float centerY,
+		float cropW, float cropH, int imgW, int imgH, boolean lockedX, boolean lockedY)
+	{
+		if (!lockedX)
+		{
+			centerX = (cropW < imgW) ? Math.clamp(centerX, cropW / 2f, imgW - cropW / 2f) : imgW / 2f;
+		}
+		if (!lockedY)
+		{
+			centerY = (cropH < imgH) ? Math.clamp(centerY, cropH / 2f, imgH - cropH / 2f) : imgH / 2f;
+		}
+		return new float[] { centerX, centerY };
+	}
+
+	/**
+	 * Compute the maximum crop size on each axis, subject to lock mode and aspect ratio.
+	 * Locked axes are symmetric about the center (so a selection stays framed); free
+	 * axes get the full image extent and will be clamped / shifted later by
+	 * clampFreeAxes.
+	 */
+	private static float[] computeMaxCropSize(AspectRatio ar, float centerX, float centerY,
+		int imgW, int imgH, boolean lockedX, boolean lockedY)
+	{
+		float maxCropW = lockedX ? 2 * Math.min(centerX, imgW - centerX) : imgW;
+		float maxCropH = lockedY ? 2 * Math.min(centerY, imgH - centerY) : imgH;
+
+		if (ar.isFree())
+		{
+			return new float[] { maxCropW, maxCropH };
+		}
+
+		float ratio = ar.ratio();
+		float cropW;
+		float cropH;
+		if (maxCropH == 0 || maxCropW / maxCropH <= ratio)
+		{
+			cropW = maxCropW;
+			cropH = cropW / ratio;
+			if (cropH > maxCropH)
+			{
+				cropH = maxCropH;
+				cropW = cropH * ratio;
+			}
+		}
+		else
+		{
+			cropH = maxCropH;
+			cropW = cropH * ratio;
+			if (cropW > maxCropW)
+			{
+				cropW = maxCropW;
+				cropH = cropW / ratio;
+			}
+		}
+		return new float[] { cropW, cropH };
+	}
+
+	/**
+	 * Derive the crop center for this recompute pass. In Select mode with points,
+	 * returns the AABB midpoint of the selection points IN ROTATED IMAGE SPACE via
+	 * rotatedSelectionMidpoint. In all other cases returns the stable rotation anchor
+	 * (the user's intended, un-clamped center).
+	 */
+	private static float[] findCropCenter(CropState state, int imgW, int imgH, float rotation)
+	{
+		boolean hasSelection = state.getEditorMode() == EditorMode.SELECT_FEATURE
+			&& !state.getSelectionPoints().isEmpty();
+		if (!hasSelection)
+		{
+			return new float[] { state.getAnchorX(), state.getAnchorY() };
+		}
+		return rotatedSelectionMidpoint(state.getSelectionPoints(), imgW, imgH, rotation);
 	}
 
 	/**
@@ -360,4 +340,32 @@ public final class CropEngine
 		return minScale;
 	}
 
+	/**
+	 * Second rotation-fit pass: integer rounding of cropW / cropH above may push the
+	 * corners just outside the rotated image bounds. If maxScaleForRotation reports the
+	 * post-rounding crop is meaningfully too big (recheck < 0.99), shrink + re-round +
+	 * re-commit. Uses the state's current (post-setCenter) values because setCenter's
+	 * own rotation clamp may have nudged the center.
+	 */
+	private static void recheckRotationFit(CropState state, int imgW, int imgH, float rotation)
+	{
+		if (Math.abs(rotation) < BitmapUtils.ROTATION_EPSILON)
+		{
+			return;
+		}
+		float finalCenterX = state.getCenterX();
+		float finalCenterY = state.getCenterY();
+		float recheck = maxScaleForRotation(finalCenterX, finalCenterY,
+			state.getCropW(), state.getCropH(), imgW, imgH, rotation);
+		if (recheck >= 0.99f)
+		{
+			return;
+		}
+		float cropW = state.getCropW() * recheck;
+		float cropH = state.getCropH() * recheck;
+		int refinedCropW = Math.max(4, Math.round(cropW));
+		int refinedCropH = Math.max(4, Math.round(cropH));
+		state.setCropSizeSilent(refinedCropW, refinedCropH);
+		state.setCenter(finalCenterX, finalCenterY);
+	}
 }

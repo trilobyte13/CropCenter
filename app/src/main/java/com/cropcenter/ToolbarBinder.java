@@ -232,9 +232,11 @@ final class ToolbarBinder
 	}
 
 	/**
-	 * UI-thread handler for the detection result. Rounds to 0.01° precision, applies,
-	 * and toasts the result — or toasts a "no line detected" message when the
-	 * detector returns NaN.
+	 * UI-thread handler for the detection result. Rounds to 0.01° precision for display
+	 * smoothness, then hands off to setRotationDegrees which snaps sub-epsilon magnitudes
+	 * to exactly 0 (so a horizon detected at e.g. 0.03° stores as 0 rather than as a
+	 * value the rest of the pipeline silently treats as zero). Toasts the rounded result
+	 * — or a "no line detected" message when the detector returns NaN.
 	 */
 	private void onHorizonDetectionResult(float detected)
 	{
@@ -411,16 +413,16 @@ final class ToolbarBinder
 
 	private void showCustomArDialog()
 	{
-		int dp = (int) host.getActivity().getResources().getDisplayMetrics().density;
+		float density = host.getActivity().getResources().getDisplayMetrics().density;
 
 		LinearLayout layout = new LinearLayout(host.getActivity());
 		layout.setOrientation(LinearLayout.HORIZONTAL);
 		layout.setGravity(Gravity.CENTER);
-		layout.setPadding(20 * dp, 16 * dp, 20 * dp, 8 * dp);
+		layout.setPadding(toPx(20, density), toPx(16, density), toPx(20, density), toPx(8, density));
 
 		EditText editW = numberInput("16");
 		layout.addView(editW,
-			new LinearLayout.LayoutParams(60 * dp, LinearLayout.LayoutParams.WRAP_CONTENT));
+			new LinearLayout.LayoutParams(toPx(60, density), LinearLayout.LayoutParams.WRAP_CONTENT));
 
 		TextView separator = new TextView(host.getActivity());
 		separator.setText("  :  ");
@@ -429,7 +431,7 @@ final class ToolbarBinder
 
 		EditText editH = numberInput("9");
 		layout.addView(editH,
-			new LinearLayout.LayoutParams(60 * dp, LinearLayout.LayoutParams.WRAP_CONTENT));
+			new LinearLayout.LayoutParams(toPx(60, density), LinearLayout.LayoutParams.WRAP_CONTENT));
 
 		new AlertDialog.Builder(host.getActivity())
 			.setTitle("Custom Aspect Ratio")
@@ -461,7 +463,7 @@ final class ToolbarBinder
 		{
 			return;
 		}
-		int dp = (int) host.getActivity().getResources().getDisplayMetrics().density;
+		float density = host.getActivity().getResources().getDisplayMetrics().density;
 
 		EditText input = new EditText(host.getActivity());
 		input.setText(String.format(Locale.ROOT, "%.2f", host.getState().getRotationDegrees()));
@@ -473,7 +475,7 @@ final class ToolbarBinder
 			| InputType.TYPE_NUMBER_FLAG_DECIMAL
 			| InputType.TYPE_NUMBER_FLAG_SIGNED);
 		input.setSingleLine(true);
-		input.setPadding(12 * dp, 10 * dp, 12 * dp, 10 * dp);
+		input.setPadding(toPx(12, density), toPx(10, density), toPx(12, density), toPx(10, density));
 
 		new AlertDialog.Builder(host.getActivity())
 			.setTitle("Enter Rotation (\u00B0)")
@@ -521,5 +523,16 @@ final class ToolbarBinder
 		tv.setTextColor(ThemeColors.TEXT);
 		tv.setPadding(padH, padV, padH, padV);
 		return tv;
+	}
+
+	/**
+	 * Convert dp to px using the supplied display density. Math.round (not int truncation)
+	 * so non-integer densities don't collapse small dp values to zero — the previous
+	 * `int dp = (int) density` pattern reduced density 1.5 to a multiplier of 1 and
+	 * density 0.75 to 0, shrinking dialog padding visibly on those screens.
+	 */
+	private static int toPx(int dp, float density)
+	{
+		return Math.round(dp * density);
 	}
 }

@@ -4,6 +4,7 @@ import android.view.View;
 
 import com.cropcenter.model.CenterMode;
 import com.cropcenter.model.EditorMode;
+import com.cropcenter.util.BitmapUtils;
 import com.cropcenter.util.TextFormat;
 import com.google.android.material.button.MaterialButton;
 
@@ -36,9 +37,13 @@ final class UiSync
 		host.setRulerUpdating(false);
 		host.getRotationRuler().setRulerEnabled(hasImage);
 
-		// Clear the readout when there's nothing to rotate so the info bar doesn't display a
-		// stale "0°" against no image.
-		host.getRotDegreesTextView().setText(hasImage ? TextFormat.degrees(deg) : "");
+		// Show the readout only when there's an image AND a non-zero rotation. Per spec
+		// (REQUIREMENTS.md §4 "Rotation"), the degree readout is visible only when
+		// rotation != 0 — a stale "0°" against an unrotated image is noise. Sub-epsilon
+		// rotations are drawn / exported as zero by the rest of the pipeline, so use the
+		// same threshold here for consistent behaviour with what the user sees.
+		boolean shouldShowDegrees = hasImage && Math.abs(deg) >= BitmapUtils.ROTATION_EPSILON;
+		host.getRotDegreesTextView().setText(shouldShowDegrees ? TextFormat.degrees(deg) : "");
 	}
 
 	/**

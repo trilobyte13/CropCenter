@@ -64,7 +64,9 @@ public final class GraftWriter
 
 	/**
 	 * Splice the edit's pixel content into the original's container. Returns the
-	 * assembled JPEG bytes.
+	 * assembled JPEG bytes. Ships source's gain map verbatim — the AI-region gain-
+	 * map inpaint runs later in the save pipeline (UltraHdrCompat) where the gain
+	 * map is decoded into a Bitmap that preserves source's single-channel format.
 	 *
 	 * @throws IOException when either input fails structural validation (not a JPEG,
 	 *                     missing primary EOI, malformed segments).

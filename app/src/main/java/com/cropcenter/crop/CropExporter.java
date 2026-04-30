@@ -55,8 +55,8 @@ public final class CropExporter
 	private static final int THUMBNAIL_DEFAULT_BUDGET = MAX_THUMBNAIL_BUDGET; // used when no EXIF is present
 		// to measure against — defaults to the same cap, separate name so the two can
 		// diverge later without a literal hunt.
-	private static final int THUMBNAIL_MAX_DIM = 1024;
 	private static final int THUMBNAIL_MARGIN_BYTES = 200; // margin for IFD changes beyond measured size
+	private static final int THUMBNAIL_MAX_DIM = 1024;
 
 	private CropExporter() {}
 
@@ -82,8 +82,8 @@ public final class CropExporter
 			// fractional srcX / srcY (falls back to bilinear when non-integer, integer blit
 			// otherwise). UltraHdrCompat uses the same origin for its primary + gain-map
 			// render, so the two stay pixel-aligned with each other.
-			srcX = state.getCropImgXFloat();
-			srcY = state.getCropImgYFloat();
+			srcX = state.getCropImageXFloat();
+			srcY = state.getCropImageYFloat();
 		}
 		else
 		{
@@ -113,7 +113,14 @@ public final class CropExporter
 
 		Canvas canvas = new Canvas(outBmp);
 		Paint paint = new Paint(Paint.FILTER_BITMAP_FLAG | Paint.ANTI_ALIAS_FLAG);
-		canvas.drawColor(CANVAS_BG);
+		// JPEG can't represent alpha — fill with the editor's canvas color so rotation
+		// corners and any transparent source pixels read as the same dark navy the user saw
+		// in the preview. PNG keeps the bitmap's default transparent state so alpha sources
+		// round-trip and rotation corners stay see-through.
+		if (isJpeg)
+		{
+			canvas.drawColor(CANVAS_BG);
+		}
 
 		BitmapUtils.drawCropped(canvas, src, srcX, srcY, state.getRotationDegrees(), paint);
 
@@ -447,7 +454,7 @@ public final class CropExporter
 			originalBytes, quality, cacheDir,
 			state.getImageWidth(), state.getImageHeight(),
 			centerX, centerY, cropW, cropH,
-			state.getRotationDegrees(), exifOrient);
+			state.getRotationDegrees(), exifOrient, state.getAiMask());
 		if (hdrResult == null)
 		{
 			Log.d(TAG, "HDR generation failed, falling back to non-HDR");

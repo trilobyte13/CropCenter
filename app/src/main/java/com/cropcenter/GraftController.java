@@ -10,12 +10,13 @@ import androidx.activity.result.ActivityResultLauncher;
 
 import com.cropcenter.metadata.GraftWriter;
 import com.cropcenter.model.ExportConfig;
+import com.cropcenter.util.AiRegionDetector;
+import com.cropcenter.util.AiRegionDetector.AiMask;
 import com.cropcenter.util.BitmapUtils;
 import com.cropcenter.util.SafFileHelper;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.util.function.BiConsumer;
 
 /**
  * Orchestrates the "Apply External Edit" feature: long-press Open → user picks an external
@@ -39,13 +40,25 @@ import java.util.function.BiConsumer;
  */
 final class GraftController
 {
+	/**
+	 * Callback for delivering a successfully spliced graft to MainActivity. Carries
+	 * the assembled JPEG bytes, suggested display name, and the AI-region mask
+	 * (null when no AI fill was detected). MainActivity must apply these atomically
+	 * in its bg apply task — setting state.aiMask AFTER applyImageBytes since
+	 * applyImageBytes runs state.reset() which clears aiMask.
+	 */
+	@FunctionalInterface
+	interface GraftReadyHandler
+	{
+		void onReady(byte[] graftedBytes, String displayName, AiMask aiMask);
+	}
+
 	private static final String TAG = "GraftController";
 
-	// Receives the (graftedBytes, suggestedDisplayName) pair after a successful splice.
-	// MainActivity wires this to applyGraftedBytes, which decodes the bytes and replaces
-	// the in-memory image. Listener is invoked on the UI thread so the receiver doesn't
-	// have to dispatch internally.
-	private final BiConsumer<byte[], String> onGraftReady;
+	// Receives the graft result. MainActivity wires this to applyGraftedBytes, which
+	// decodes the bytes and replaces the in-memory image. Invoked on the UI thread so
+	// the receiver doesn't have to dispatch internally.
+	private final GraftReadyHandler onGraftReady;
 	private final SaveHost host;
 	private final SafFileHelper safFiles;
 
@@ -56,8 +69,7 @@ final class GraftController
 	// the busy toast after the bg work has finished.
 	private volatile boolean graftPending;
 
-	GraftController(SaveHost host, SafFileHelper safFiles,
-		BiConsumer<byte[], String> onGraftReady)
+	GraftController(SaveHost host, SafFileHelper safFiles, GraftReadyHandler onGraftReady)
 	{
 		this.host = host;
 		this.safFiles = safFiles;
@@ -65,10 +77,16 @@ final class GraftController
 	}
 
 	/**
-	 * Edit-picker callback. Reads the picked edit on a bg thread, validates dimensions and
-	 * EXIF orientation against the loaded original, computes the graft, and dispatches the
-	 * result to onGraftReady on the UI thread. All failure paths clear graftPending so a
-	 * fresh long-press can start over.
+	 * Edit-picker callback. Claims busy on the UI thread BEFORE dispatching the bg work
+	 * so a Save / Open tap during the read/align/detect/graft window can't preempt and
+	 * cause applyGraftedBytes to silently drop the prepared graft. On any failure path
+	 * busy is released here; on success the held busy is handed off to applyGraftedBytes
+	 * which releases it after the apply completes.
+	 *
+	 * Reads the picked edit on a bg thread, validates dimensions and EXIF orientation
+	 * against the loaded original, computes the graft, and dispatches the result to
+	 * onGraftReady on the UI thread. All failure paths clear graftPending so a fresh
+	 * long-press can start over.
 	 */
 	void onEditPicked(Uri editUri)
 	{
@@ -77,8 +95,22 @@ final class GraftController
 			// Spurious result (no active graft session) — ignore to avoid double-handling.
 			return;
 		}
+		// Claim busy on the UI thread (this callback runs there) so concurrent Save / Open
+		// taps see the busy state before we even start reading the edit. Without this,
+		// a save tapped during the bg work below claims busy first, and when our bg work
+		// finishes its onGraftReady handoff, applyGraftedBytes finds busy held by the
+		// save and drops the graft on the floor with a "Busy — try again" toast.
+		if (!host.getBusy().compareAndSet(false, true))
+		{
+			graftPending = false;
+			host.showBusyToast();
+			return;
+		}
+		host.setBusyUi(true);
+
 		host.runInBackground(() ->
 		{
+			boolean handedOff = false;
 			try
 			{
 				byte[] editBytes = safFiles.readUriBytes(editUri);
@@ -104,17 +136,40 @@ final class GraftController
 					return; // toast already fired by validator
 				}
 
+				// Detect the AI-modified pixel region now (we have both source and
+				// aligned-edit bytes here). The mask travels through state into
+				// UltraHdrCompat at HDR re-encode time, where it patches the gain
+				// map's boost values inside the AI fill. Doing the inpaint here on
+				// the raw gain-map JPEG forces a Bitmap.compress round-trip that
+				// converts source's single-channel grayscale gain map into 3-channel
+				// YCbCr, which Android's UHDR decoder then doesn't recognise → HDR
+				// is silently dropped at save time. UltraHdrCompat operates on the
+				// gain-map Bitmap in source's native single-channel format.
+				//
+				// Skip detection entirely for SDR sources: the only consumer is
+				// UltraHdrCompat.compressWithGainmap, which CropExporter only invokes
+				// when state.gainMap != null. Running detection on a non-HDR source
+				// burns memory + CPU for a mask that never gets applied.
+				byte[] sourceGainMap = host.getState().getGainMap();
+				AiMask aiMask = (sourceGainMap != null && sourceGainMap.length > 0)
+					? AiRegionDetector.detect(originalBytes, alignedEditBytes)
+					: null;
+
 				byte[] grafted = GraftWriter.graft(originalBytes, alignedEditBytes);
 				String suggested = suggestedFilename();
 				graftPending = false;
+				handedOff = true;
 				host.runOnUiThread(() ->
 				{
 					// Hand off the raw splice without injecting a thumbnail. The splice goes
 					// into state.originalFileBytes via applyImageBytes and the save pipeline
 					// will canvas-encode through CropExporter (forced via state.graftApplied),
 					// which generates a fresh thumbnail in the saved output. Pre-injecting one
-					// here would just be discarded by the encode pass.
-					onGraftReady.accept(grafted, suggested);
+					// here would just be discarded by the encode pass. The aiMask travels
+					// with the bytes so MainActivity can stash it on state AFTER its own
+					// applyImageBytes call clears state via state.reset(). applyGraftedBytes
+					// inherits the held busy flag and releases it when the apply completes.
+					onGraftReady.onReady(grafted, suggested, aiMask);
 					host.toastIfAlive("External edit applied", Toast.LENGTH_SHORT);
 				});
 			}
@@ -129,6 +184,16 @@ final class GraftController
 				Log.e(TAG, "Unexpected graft error", e);
 				toast("Graft failed: " + e.getMessage());
 				graftPending = false;
+			}
+			finally
+			{
+				// Release busy on every failure path. The success path leaves it held
+				// because applyGraftedBytes is about to claim it transitively.
+				if (!handedOff)
+				{
+					host.getBusy().set(false);
+					host.runOnUiThread(() -> host.setBusyUi(false));
+				}
 			}
 		});
 	}
@@ -196,34 +261,6 @@ final class GraftController
 	}
 
 	/**
-	 * Build the suggested filename used when the user later saves the grafted image. Suffix
-	 * the original's stem with "-graft" so the user can tell at a glance that the file is
-	 * post-graft. Falls back to "graft.jpg" when the original has no display name (rare —
-	 * usually only for content URIs without OpenableColumns).
-	 */
-	private String suggestedFilename()
-	{
-		String orig = host.getState().getOriginalFilename();
-		if (orig == null || orig.isEmpty())
-		{
-			return "graft.jpg";
-		}
-		int dot = orig.lastIndexOf('.');
-		String stem = dot > 0 ? orig.substring(0, dot) : orig;
-		return stem + "-graft.jpg";
-	}
-
-	/**
-	 * Post a short toast. Safe to call from any thread — Activity.runOnUiThread runs the
-	 * runnable inline when already on the UI thread, so the indirection is a no-op cost
-	 * and we don't need separate UI-thread / bg-thread variants.
-	 */
-	private void toast(String msg)
-	{
-		host.runOnUiThread(() -> host.toastIfAlive(msg, Toast.LENGTH_SHORT));
-	}
-
-	/**
 	 * Validate that the edit and original describe the same DISPLAY image, and produce
 	 * an edit byte stream whose stored layout matches the original's so the splice is
 	 * decoder-coherent. Returns the (possibly re-encoded) edit bytes on success, null
@@ -286,6 +323,50 @@ final class GraftController
 	}
 
 	/**
+	 * Build the suggested filename used when the user later saves the grafted image. Suffix
+	 * the original's stem with "-graft" so the user can tell at a glance that the file is
+	 * post-graft. Falls back to "graft.jpg" when the original has no display name (rare —
+	 * usually only for content URIs without OpenableColumns).
+	 */
+	private String suggestedFilename()
+	{
+		String orig = host.getState().getOriginalFilename();
+		if (orig == null || orig.isEmpty())
+		{
+			return "graft.jpg";
+		}
+		int dot = orig.lastIndexOf('.');
+		String stem = dot > 0 ? orig.substring(0, dot) : orig;
+		return stem + "-graft.jpg";
+	}
+
+	/**
+	 * Post a short toast. Safe to call from any thread — Activity.runOnUiThread runs the
+	 * runnable inline when already on the UI thread, so the indirection is a no-op cost
+	 * and we don't need separate UI-thread / bg-thread variants.
+	 */
+	private void toast(String msg)
+	{
+		host.runOnUiThread(() -> host.toastIfAlive(msg, Toast.LENGTH_SHORT));
+	}
+
+	/**
+	 * Decode-cheap dimension probe: returns the JPEG's stored width and height without
+	 * allocating pixel data. Returns null when BitmapFactory rejects the byte array.
+	 */
+	private static int[] decodeStoredDims(byte[] bytes)
+	{
+		BitmapFactory.Options opts = new BitmapFactory.Options();
+		opts.inJustDecodeBounds = true;
+		BitmapFactory.decodeByteArray(bytes, 0, bytes.length, opts);
+		if (opts.outWidth <= 0 || opts.outHeight <= 0)
+		{
+			return null;
+		}
+		return new int[] { opts.outWidth, opts.outHeight };
+	}
+
+	/**
 	 * Apply EXIF orientation to stored dims to get display dims. EXIF tags 5/6/7/8
 	 * swap the axes (90° rotations + transpose / transverse); 1/2/3/4 leave them
 	 * alone. Returns a fresh int[2] so callers can mutate without aliasing.
@@ -294,6 +375,24 @@ final class GraftController
 	{
 		boolean swap = orient == 5 || orient == 6 || orient == 7 || orient == 8;
 		return swap ? new int[] { stored[1], stored[0] } : new int[] { stored[0], stored[1] };
+	}
+
+	/**
+	 * Inverse of an EXIF orientation transform — applying orient then inverseOrientation
+	 * gives the identity. Most orientations (1, 2, 3, 4, 5, 7) are involutions and map
+	 * to themselves; only the 90° rotations (6 ↔ 8) form an inverse pair.
+	 */
+	private static int inverseOrientation(int orient)
+	{
+		if (orient == 6)
+		{
+			return 8;
+		}
+		if (orient == 8)
+		{
+			return 6;
+		}
+		return orient;
 	}
 
 	/**
@@ -318,8 +417,14 @@ final class GraftController
 		try
 		{
 			inDisplay = BitmapUtils.applyOrientation(raw, editOrient);
-			raw = null; // applyOrientation may have recycled raw
+			// applyOrientation either recycled raw and returned a new rotated bitmap, OR
+			// (when editOrient is 1 / out of range) returned raw unchanged — in which case
+			// inDisplay aliases raw. Either way, the only live reference to those pixels is
+			// now inDisplay; null out the local so the finally block doesn't try to recycle
+			// twice on the alias case.
+			raw = null;
 			inOrigStored = BitmapUtils.applyOrientation(inDisplay, inverseOrientation(origOrient));
+			// Same alias logic for inDisplay → inOrigStored.
 			inDisplay = null;
 			ByteArrayOutputStream bos = new ByteArrayOutputStream();
 			inOrigStored.compress(Bitmap.CompressFormat.JPEG, 100, bos);
@@ -340,39 +445,5 @@ final class GraftController
 				inOrigStored.recycle();
 			}
 		}
-	}
-
-	/**
-	 * Inverse of an EXIF orientation transform — applying orient then inverseOrientation
-	 * gives the identity. Most orientations (1, 2, 3, 4, 5, 7) are involutions and map
-	 * to themselves; only the 90° rotations (6 ↔ 8) form an inverse pair.
-	 */
-	private static int inverseOrientation(int orient)
-	{
-		if (orient == 6)
-		{
-			return 8;
-		}
-		if (orient == 8)
-		{
-			return 6;
-		}
-		return orient;
-	}
-
-	/**
-	 * Decode-cheap dimension probe: returns the JPEG's stored width and height without
-	 * allocating pixel data. Returns null when BitmapFactory rejects the byte array.
-	 */
-	private static int[] decodeStoredDims(byte[] bytes)
-	{
-		BitmapFactory.Options opts = new BitmapFactory.Options();
-		opts.inJustDecodeBounds = true;
-		BitmapFactory.decodeByteArray(bytes, 0, bytes.length, opts);
-		if (opts.outWidth <= 0 || opts.outHeight <= 0)
-		{
-			return null;
-		}
-		return new int[] { opts.outWidth, opts.outHeight };
 	}
 }

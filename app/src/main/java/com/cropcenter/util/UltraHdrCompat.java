@@ -10,6 +10,8 @@ import android.graphics.Paint;
 import android.os.Process;
 import android.util.Log;
 
+import com.cropcenter.util.AiRegionDetector.AiMask;
+
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
@@ -38,7 +40,7 @@ public final class UltraHdrCompat
 	 */
 	public static byte[] compressWithGainmap(byte[] originalBytes, int quality, File cacheDir,
 		int imgW, int imgH, float centerX, float centerY, int cropW, int cropH,
-		float userRotation, int exifOrientation)
+		float userRotation, int exifOrientation, AiMask aiMask)
 	{
 		Bitmap current = null;
 		Bitmap output = null;
@@ -55,6 +57,16 @@ public final class UltraHdrCompat
 				+ " hasGm=" + current.hasGainmap()
 				+ " expected=" + imgW + "x" + imgH
 				+ " exif=" + exifOrientation);
+
+			// AI-region inpaint runs BEFORE applyExifOrientation: the mask was computed
+			// in source's stored orientation (BitmapFactory.decodeByteArray didn't apply
+			// EXIF rotation), and the gainmap bitmap here is also in stored orientation.
+			// Inpainting after applyExifOrientation would mean the mask coords no longer
+			// match the rotated gainmap. Operating on the bitmap in place via the
+			// ALPHA_8 / ARGB path preserves source's single-channel format — re-encoding
+			// through Bitmap.compress would force YCbCr 4:2:0 3-channel and break the
+			// downstream UHDR recognition.
+			inpaintGainmapIfMasked(current, aiMask);
 
 			current = applyExifOrientation(current, exifOrientation);
 
@@ -118,32 +130,29 @@ public final class UltraHdrCompat
 	}
 
 	/**
-	 * Decode the source JPEG into a Bitmap that preserves its gainmap. BitmapFactory
-	 * reads HDR gainmaps from files (not ByteArrays), so we write the bytes to a
-	 * cache file first. The cache file is deleted as soon as decodeFile returns,
-	 * whether it produced a bitmap or not — no "leaked cache file on decode failure"
-	 * path.
+	 * Scan data for the XMP "hdrgm" namespace marker — the signature of an Ultra HDR
+	 * gain map. Scans the full byte array (not a prefix window): a maxed-out EXIF thumbnail can
+	 * push the XMP segment past any fixed offset. Linear but cheap (~5ms for 20MB on modern
+	 * hardware) and runs at most once per export.
 	 */
-	private static Bitmap decodeHdrBitmap(byte[] originalBytes, File cacheDir) throws IOException
+	public static boolean containsHdrgm(byte[] data)
 	{
-		// Unique filename so concurrent exports never collide on the cache path. Single-
-		// threaded today; suffix is cheap insurance against future parallelism.
-		File hdrSourceCache = new File(cacheDir,
-			"hdr_src_" + Process.myPid() + "_" + System.nanoTime() + ".jpg");
-		try
+		if (data == null)
 		{
-			try (FileOutputStream fos = new FileOutputStream(hdrSourceCache))
+			return false;
+		}
+		// For a 5-byte pattern, last valid start index is (length - 5),
+		// so the exclusive loop bound is (length - 4).
+		int limit = data.length - 4;
+		for (int i = 0; i < limit; i++)
+		{
+			if (data[i] == 'h' && data[i + 1] == 'd' && data[i + 2] == 'r'
+				&& data[i + 3] == 'g' && data[i + 4] == 'm')
 			{
-				fos.write(originalBytes);
+				return true;
 			}
-			BitmapFactory.Options opts = new BitmapFactory.Options();
-			opts.inPreferredColorSpace = ColorSpace.get(ColorSpace.Named.DISPLAY_P3);
-			return BitmapFactory.decodeFile(hdrSourceCache.getAbsolutePath(), opts);
 		}
-		finally
-		{
-			hdrSourceCache.delete();
-		}
+		return false;
 	}
 
 	/**
@@ -175,20 +184,129 @@ public final class UltraHdrCompat
 	}
 
 	/**
-	 * Render the primary output bitmap via BitmapUtils.drawCropped so the result is
-	 * byte-identical to what CropExporter produces — crucial because the primary
-	 * bytes shipped to the user come from CropExporter, while the gainmap alignment
-	 * depends on UltraHdrCompat's primary matching.
+	 * Copy the HDR tone-mapping parameters (ratios, gamma, epsilon, display-ratio
+	 * thresholds) from source to target Gainmap. Preserving these verbatim is what
+	 * keeps the cropped HDR looking identical to the source at the kept pixels.
 	 */
-	private static Bitmap renderPrimary(Bitmap current, float srcX, float srcY,
-		int cropW, int cropH, float userRotation)
+	private static void copyGainmapMetadata(Gainmap sourceGainmap, Gainmap newGainmap)
 	{
-		Bitmap output = Bitmap.createBitmap(cropW, cropH, Bitmap.Config.ARGB_8888, true,
-			ColorSpace.get(ColorSpace.Named.DISPLAY_P3));
-		Canvas canvas = new Canvas(output);
-		Paint paint = new Paint(Paint.FILTER_BITMAP_FLAG);
-		BitmapUtils.drawCropped(canvas, current, srcX, srcY, userRotation, paint);
-		return output;
+		float[] ratioMin = sourceGainmap.getRatioMin();
+		float[] ratioMax = sourceGainmap.getRatioMax();
+		float[] gamma = sourceGainmap.getGamma();
+		float[] epsilonSdr = sourceGainmap.getEpsilonSdr();
+		float[] epsilonHdr = sourceGainmap.getEpsilonHdr();
+		newGainmap.setRatioMin(ratioMin[0], ratioMin[1], ratioMin[2]);
+		newGainmap.setRatioMax(ratioMax[0], ratioMax[1], ratioMax[2]);
+		newGainmap.setGamma(gamma[0], gamma[1], gamma[2]);
+		newGainmap.setEpsilonSdr(epsilonSdr[0], epsilonSdr[1], epsilonSdr[2]);
+		newGainmap.setEpsilonHdr(epsilonHdr[0], epsilonHdr[1], epsilonHdr[2]);
+		newGainmap.setDisplayRatioForFullHdr(sourceGainmap.getDisplayRatioForFullHdr());
+		newGainmap.setMinDisplayRatioForHdrTransition(
+			sourceGainmap.getMinDisplayRatioForHdrTransition());
+	}
+
+	/**
+	 * Decode the source JPEG into a Bitmap that preserves its gainmap. BitmapFactory
+	 * reads HDR gainmaps from files (not ByteArrays), so we write the bytes to a
+	 * cache file first. The cache file is deleted as soon as decodeFile returns,
+	 * whether it produced a bitmap or not — no "leaked cache file on decode failure"
+	 * path.
+	 */
+	private static Bitmap decodeHdrBitmap(byte[] originalBytes, File cacheDir) throws IOException
+	{
+		// Unique filename so concurrent exports never collide on the cache path. Single-
+		// threaded today; suffix is cheap insurance against future parallelism.
+		File hdrSourceCache = new File(cacheDir,
+			"hdr_src_" + Process.myPid() + "_" + System.nanoTime() + ".jpg");
+		try
+		{
+			try (FileOutputStream fos = new FileOutputStream(hdrSourceCache))
+			{
+				fos.write(originalBytes);
+			}
+			BitmapFactory.Options opts = new BitmapFactory.Options();
+			opts.inPreferredColorSpace = ColorSpace.get(ColorSpace.Named.DISPLAY_P3);
+			return BitmapFactory.decodeFile(hdrSourceCache.getAbsolutePath(), opts);
+		}
+		finally
+		{
+			hdrSourceCache.delete();
+		}
+	}
+
+	/**
+	 * Rotated gain-map draw. Cardinal rotations at integer-aligned draw offsets are
+	 * lossless integer-pixel remaps — disable bilinear so nearest-neighbor reads
+	 * source pixels verbatim. Fractional draw offsets need bilinear to match the
+	 * primary path (which bilinear-samples at sub-pixel offsets).
+	 */
+	private static void drawGainmapRotated(Canvas gainmapCanvas, Bitmap gainmapBitmap,
+		float gainmapDrawX, float gainmapDrawY, float userRotation, Paint gainmapPaint)
+	{
+		gainmapCanvas.save();
+		gainmapCanvas.rotate(userRotation,
+			gainmapDrawX + gainmapBitmap.getWidth() / 2f,
+			gainmapDrawY + gainmapBitmap.getHeight() / 2f);
+		boolean integerAligned = gainmapDrawX == Math.floor(gainmapDrawX)
+			&& gainmapDrawY == Math.floor(gainmapDrawY);
+		if (BitmapUtils.isCardinalRotation(userRotation) && integerAligned)
+		{
+			Paint nearestPaint = new Paint(gainmapPaint);
+			nearestPaint.setFilterBitmap(false);
+			gainmapCanvas.drawBitmap(gainmapBitmap, gainmapDrawX, gainmapDrawY, nearestPaint);
+		}
+		else
+		{
+			gainmapCanvas.drawBitmap(gainmapBitmap, gainmapDrawX, gainmapDrawY, gainmapPaint);
+		}
+		gainmapCanvas.restore();
+	}
+
+	/**
+	 * Inpaint the gainmap attached to `current` at the AI-mask coordinates, in place
+	 * when the gainmap bitmap is mutable, otherwise via a mutable copy that gets
+	 * substituted back on `current`. No-op when aiMask is null/empty or the bitmap
+	 * has no gainmap. Must run BEFORE applyExifOrientation so the mask coordinates
+	 * (in source's stored orientation, since BitmapFactory doesn't auto-rotate by
+	 * EXIF) align with the gainmap bitmap's coordinates.
+	 */
+	private static void inpaintGainmapIfMasked(Bitmap current, AiMask aiMask)
+	{
+		if (aiMask == null || !aiMask.hasMaskedPixels() || !current.hasGainmap())
+		{
+			return;
+		}
+		Gainmap sourceGainmap = current.getGainmap();
+		Bitmap gainmapBitmap = sourceGainmap.getGainmapContents();
+		if (gainmapBitmap == null)
+		{
+			return;
+		}
+		if (!gainmapBitmap.isMutable())
+		{
+			// Skia returns immutable bitmaps for some decode paths. Copy preserves
+			// the source config (ALPHA_8 for Samsung's 1-channel gain map) so the
+			// downstream encode keeps the right structural format. Bitmap.copy
+			// returns null when (Config, isMutable=true) is not supported — most
+			// commonly for HARDWARE-config sources on API ≥ 31 (HARDWARE bitmaps
+			// are GPU-resident and cannot be made mutable; copy returns null
+			// rather than silently downgrading the config). Low-memory conditions
+			// can also produce null. Fall through silently — the un-inpainted
+			// source gain map is the safe fallback; HDR will render with the
+			// original boost instead of the AI-region patched version.
+			Bitmap mutableCopy = gainmapBitmap.copy(gainmapBitmap.getConfig(), true);
+			if (mutableCopy == null)
+			{
+				Log.w(TAG, "Bitmap.copy returned null (config=" + gainmapBitmap.getConfig()
+					+ "); skipping inpaint, source gain map ships unchanged");
+				return;
+			}
+			Gainmap newGainmap = new Gainmap(mutableCopy);
+			copyGainmapMetadata(sourceGainmap, newGainmap);
+			current.setGainmap(newGainmap);
+			gainmapBitmap = mutableCopy;
+		}
+		GainMapInpainter.inpaintBitmap(gainmapBitmap, aiMask);
 	}
 
 	/**
@@ -233,78 +351,19 @@ public final class UltraHdrCompat
 	}
 
 	/**
-	 * Rotated gain-map draw. Cardinal rotations at integer-aligned draw offsets are
-	 * lossless integer-pixel remaps — disable bilinear so nearest-neighbor reads
-	 * source pixels verbatim. Fractional draw offsets need bilinear to match the
-	 * primary path (which bilinear-samples at sub-pixel offsets).
+	 * Render the primary output bitmap via BitmapUtils.drawCropped so the result is
+	 * byte-identical to what CropExporter produces — crucial because the primary
+	 * bytes shipped to the user come from CropExporter, while the gainmap alignment
+	 * depends on UltraHdrCompat's primary matching.
 	 */
-	private static void drawGainmapRotated(Canvas gainmapCanvas, Bitmap gainmapBitmap,
-		float gainmapDrawX, float gainmapDrawY, float userRotation, Paint gainmapPaint)
+	private static Bitmap renderPrimary(Bitmap current, float srcX, float srcY,
+		int cropW, int cropH, float userRotation)
 	{
-		gainmapCanvas.save();
-		gainmapCanvas.rotate(userRotation,
-			gainmapDrawX + gainmapBitmap.getWidth() / 2f,
-			gainmapDrawY + gainmapBitmap.getHeight() / 2f);
-		boolean integerAligned = gainmapDrawX == Math.floor(gainmapDrawX)
-			&& gainmapDrawY == Math.floor(gainmapDrawY);
-		if (BitmapUtils.isCardinalRotation(userRotation) && integerAligned)
-		{
-			Paint nearestPaint = new Paint(gainmapPaint);
-			nearestPaint.setFilterBitmap(false);
-			gainmapCanvas.drawBitmap(gainmapBitmap, gainmapDrawX, gainmapDrawY, nearestPaint);
-		}
-		else
-		{
-			gainmapCanvas.drawBitmap(gainmapBitmap, gainmapDrawX, gainmapDrawY, gainmapPaint);
-		}
-		gainmapCanvas.restore();
-	}
-
-	/**
-	 * Copy the HDR tone-mapping parameters (ratios, gamma, epsilon, display-ratio
-	 * thresholds) from source to target Gainmap. Preserving these verbatim is what
-	 * keeps the cropped HDR looking identical to the source at the kept pixels.
-	 */
-	private static void copyGainmapMetadata(Gainmap sourceGainmap, Gainmap newGainmap)
-	{
-		float[] ratioMin = sourceGainmap.getRatioMin();
-		float[] ratioMax = sourceGainmap.getRatioMax();
-		float[] gamma = sourceGainmap.getGamma();
-		float[] epsilonSdr = sourceGainmap.getEpsilonSdr();
-		float[] epsilonHdr = sourceGainmap.getEpsilonHdr();
-		newGainmap.setRatioMin(ratioMin[0], ratioMin[1], ratioMin[2]);
-		newGainmap.setRatioMax(ratioMax[0], ratioMax[1], ratioMax[2]);
-		newGainmap.setGamma(gamma[0], gamma[1], gamma[2]);
-		newGainmap.setEpsilonSdr(epsilonSdr[0], epsilonSdr[1], epsilonSdr[2]);
-		newGainmap.setEpsilonHdr(epsilonHdr[0], epsilonHdr[1], epsilonHdr[2]);
-		newGainmap.setDisplayRatioForFullHdr(sourceGainmap.getDisplayRatioForFullHdr());
-		newGainmap.setMinDisplayRatioForHdrTransition(
-			sourceGainmap.getMinDisplayRatioForHdrTransition());
-	}
-
-	/**
-	 * Scan data for the XMP "hdrgm" namespace marker — the signature of an Ultra HDR
-	 * gain map. Scans the full byte array (not a prefix window): a maxed-out EXIF thumbnail can
-	 * push the XMP segment past any fixed offset. Linear but cheap (~5ms for 20MB on modern
-	 * hardware) and runs at most once per export.
-	 */
-	public static boolean containsHdrgm(byte[] data)
-	{
-		if (data == null)
-		{
-			return false;
-		}
-		// For a 5-byte pattern, last valid start index is (length - 5),
-		// so the exclusive loop bound is (length - 4).
-		int limit = data.length - 4;
-		for (int i = 0; i < limit; i++)
-		{
-			if (data[i] == 'h' && data[i + 1] == 'd' && data[i + 2] == 'r'
-				&& data[i + 3] == 'g' && data[i + 4] == 'm')
-			{
-				return true;
-			}
-		}
-		return false;
+		Bitmap output = Bitmap.createBitmap(cropW, cropH, Bitmap.Config.ARGB_8888, true,
+			ColorSpace.get(ColorSpace.Named.DISPLAY_P3));
+		Canvas canvas = new Canvas(output);
+		Paint paint = new Paint(Paint.FILTER_BITMAP_FLAG);
+		BitmapUtils.drawCropped(canvas, current, srcX, srcY, userRotation, paint);
+		return output;
 	}
 }

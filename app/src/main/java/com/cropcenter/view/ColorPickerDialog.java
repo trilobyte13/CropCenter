@@ -31,6 +31,135 @@ public class ColorPickerDialog
 		void onColorSelected(int color);
 	}
 
+	/**
+	 * Container for the two widgets built by buildAlphaRow that the show() method
+	 * wires up independently — the SeekBar drives the alpha channel, the TextView
+	 * mirrors the current value.
+	 */
+	private record AlphaRow(SeekBar slider, TextView valueText)
+	{
+	}
+
+	/**
+	 * Grid view that draws color swatches in a tap-to-select grid.
+	 */
+	private static class ColorGridView extends View
+	{
+		interface OnColorTapListener
+		{
+			void onTap(int color);
+		}
+
+		// CLAUDE.md field order: `final` tier (alphabetical by type, uppercase types first,
+		// then alphabetical by name within a type) then regular (non-final) tier.
+		private final Paint borderPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+		private final Paint paint = new Paint();
+		private final int cellSize;
+		private final int cols;
+		private final int rows;
+		private final int[] colors;
+		private OnColorTapListener listener;
+		private int selectedColor;
+
+		ColorGridView(Context ctx, int[] colors, int cols, int rows, int cellSize, int selectedColor)
+		{
+			super(ctx);
+			this.colors = colors;
+			this.cols = cols;
+			this.rows = rows;
+			this.cellSize = cellSize;
+			this.selectedColor = selectedColor;
+			borderPaint.setStyle(Paint.Style.STROKE);
+			borderPaint.setStrokeWidth(3);
+			borderPaint.setColor(ThemeColors.MAUVE);
+		}
+
+		@Override
+		public boolean onTouchEvent(MotionEvent event)
+		{
+			if (event.getAction() == MotionEvent.ACTION_DOWN)
+			{
+				int col = (int) (event.getX() / (getWidth() / (float) cols));
+				int row = (int) (event.getY() / (getHeight() / (float) rows));
+				int idx = row * cols + col;
+				if (idx >= 0 && idx < colors.length)
+				{
+					selectedColor = colors[idx];
+					if (listener != null)
+					{
+						listener.onTap(colors[idx]);
+					}
+					invalidate();
+				}
+				return true;
+			}
+			return super.onTouchEvent(event);
+		}
+
+		@Override
+		protected void onDraw(Canvas canvas)
+		{
+			int cellWidth = getWidth() / cols;
+			int cellHeight = getHeight() / rows;
+			for (int i = 0; i < colors.length && i < cols * rows; i++)
+			{
+				int col = i % cols;
+				int row = i / cols;
+				float left = col * cellWidth;
+				float top = row * cellHeight;
+				// Checkerboard behind transparent cells
+				if (Color.alpha(colors[i]) < 255)
+				{
+					paint.setColor(0xFFCCCCCC);
+					canvas.drawRect(left, top, left + cellWidth, top + cellHeight, paint);
+					paint.setColor(0xFF999999);
+					canvas.drawRect(left, top, left + cellWidth / 2f, top + cellHeight / 2f, paint);
+					canvas.drawRect(left + cellWidth / 2f, top + cellHeight / 2f,
+						left + cellWidth, top + cellHeight, paint);
+				}
+				paint.setColor(colors[i]);
+				canvas.drawRect(left + 1, top + 1, left + cellWidth - 1, top + cellHeight - 1, paint);
+				if (colors[i] == selectedColor)
+				{
+					canvas.drawRect(left + 1, top + 1,
+						left + cellWidth - 1, top + cellHeight - 1, borderPaint);
+				}
+			}
+		}
+
+		@Override
+		protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec)
+		{
+			setMeasuredDimension(cols * cellSize, rows * cellSize);
+		}
+
+		void setOnColorTapListener(OnColorTapListener listener)
+		{
+			this.listener = listener;
+		}
+
+		/**
+		 * Update the highlighted swatch when the color was changed from outside the grid
+		 * (hex input or alpha slider). Re-invalidates so the mauve ring moves off the
+		 * previously-tapped swatch and onto whichever palette entry matches the new
+		 * color, or off the grid entirely when no swatch matches. Without this, the
+		 * grid's ring goes stale and the user sees a UI that lies about which color is
+		 * active.
+		 */
+		void setSelectedColor(int color)
+		{
+			if (this.selectedColor != color)
+			{
+				this.selectedColor = color;
+				invalidate();
+			}
+		}
+	}
+
+	private static final int COLS = 8;
+	private static final int LUMA_CONTRAST_CUTOFF = 140; // above this → dark text on the swatch
+	private static final int ROWS = 6;
+
 	// Standard 8x6 palette: mostly opaque colors, with a row of common translucents at bottom.
 	public static final int[] PALETTE_OPAQUE = {
 		0xFFFF0000, 0xFFFF8000, 0xFFFFFF00, 0xFF00FF00, 0xFF00FFFF, 0xFF0080FF, 0xFF0000FF, 0xFFFF00FF,
@@ -53,10 +182,6 @@ public class ColorPickerDialog
 		0xFF000000, 0xFFFFFFFF, 0xFFFF0000, 0xFF00FF00, 0xFF0000FF, 0xFFFFFF00, 0xFF00FFFF, 0xFFFF00FF,
 	};
 
-	private static final int COLS = 8;
-	private static final int LUMA_CONTRAST_CUTOFF = 140; // above this → dark text on the swatch
-	private static final int ROWS = 6;
-
 	public static void show(Context context, int currentColor, OnColorSelectedListener listener)
 	{
 		show(context, currentColor, PALETTE_OPAQUE, listener);
@@ -66,22 +191,21 @@ public class ColorPickerDialog
 		OnColorSelectedListener listener)
 	{
 		float density = context.getResources().getDisplayMetrics().density;
-		int dp = (int) density;
 
 		final int[] selected = { currentColor };
 		final boolean[] suppressHexWatcher = { false };
 
 		LinearLayout root = new LinearLayout(context);
 		root.setOrientation(LinearLayout.VERTICAL);
-		root.setPadding(12 * dp, 8 * dp, 12 * dp, 4 * dp);
+		root.setPadding(toPx(12, density), toPx(8, density), toPx(12, density), toPx(4, density));
 
-		int cellSize = (int) (36 * density);
+		int cellSize = Math.round(36 * density);
 		ColorGridView grid = new ColorGridView(context, palette, COLS, ROWS, cellSize, currentColor);
 		root.addView(grid, new LinearLayout.LayoutParams(
 			LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
 
-		AlphaRow alphaRow = buildAlphaRow(context, root, currentColor, dp);
-		EditText hexInput = buildHexInput(context, root, dp);
+		AlphaRow alphaRow = buildAlphaRow(context, root, currentColor, density);
+		EditText hexInput = buildHexInput(context, root, density);
 
 		Runnable syncHexToSelection = () -> syncHexDisplay(hexInput, selected[0], density,
 			suppressHexWatcher);
@@ -100,12 +224,30 @@ public class ColorPickerDialog
 	}
 
 	/**
+	 * Paint the hex EditText's background with the current color and pick a contrasting text color
+	 * (ITU-R BT.601 luma: Y' = 0.299R + 0.587G + 0.114B).
+	 */
+	private static void applySwatchPreview(EditText hexInput, int color, float density)
+	{
+		GradientDrawable bg = new GradientDrawable();
+		bg.setColor(color);
+		bg.setCornerRadius(4 * density);
+		bg.setStroke(1, ThemeColors.SURFACE1);
+		hexInput.setBackground(bg);
+		int r = (color >> 16) & 0xFF;
+		int g = (color >> 8) & 0xFF;
+		int b = color & 0xFF;
+		float lum = 0.299f * r + 0.587f * g + 0.114f * b;
+		hexInput.setTextColor(lum > LUMA_CONTRAST_CUTOFF ? Color.BLACK : Color.WHITE);
+	}
+
+	/**
 	 * Build and attach the "Opacity" slider row. Returns the SeekBar + value TextView
 	 * together so wiring can address both without reaching into the row's children by
 	 * index — that was fragile against future additions to the row.
 	 */
 	private static AlphaRow buildAlphaRow(Context context, LinearLayout root,
-		int currentColor, int dp)
+		int currentColor, float density)
 	{
 		LinearLayout alphaRow = new LinearLayout(context);
 		alphaRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -127,40 +269,31 @@ public class ColorPickerDialog
 		alphaValueText.setText(String.valueOf(Color.alpha(currentColor)));
 		alphaValueText.setTextSize(11);
 		alphaValueText.setTextColor(ThemeColors.MAUVE);
-		alphaValueText.setMinWidth(28 * dp);
+		alphaValueText.setMinWidth(toPx(28, density));
 		alphaValueText.setGravity(Gravity.END);
 		alphaRow.addView(alphaValueText);
 
 		LinearLayout.LayoutParams alphaRowLayoutParams = new LinearLayout.LayoutParams(
 			LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-		alphaRowLayoutParams.topMargin = 6 * dp;
+		alphaRowLayoutParams.topMargin = toPx(6, density);
 		root.addView(alphaRow, alphaRowLayoutParams);
 		return new AlphaRow(alphaSeekBar, alphaValueText);
 	}
 
 	/**
-	 * Container for the two widgets built by buildAlphaRow that the show() method
-	 * wires up independently — the SeekBar drives the alpha channel, the TextView
-	 * mirrors the current value.
-	 */
-	private record AlphaRow(SeekBar slider, TextView valueText)
-	{
-	}
-
-	/**
 	 * Build and attach the hex-code EditText. Background acts as the live swatch preview.
 	 */
-	private static EditText buildHexInput(Context context, LinearLayout root, int dp)
+	private static EditText buildHexInput(Context context, LinearLayout root, float density)
 	{
 		EditText hexInput = new EditText(context);
 		hexInput.setTextSize(14);
 		hexInput.setSingleLine(true);
 		hexInput.setGravity(Gravity.CENTER);
 		hexInput.setHint("#AARRGGBB");
-		hexInput.setPadding(12 * dp, 10 * dp, 12 * dp, 10 * dp);
+		hexInput.setPadding(toPx(12, density), toPx(10, density), toPx(12, density), toPx(10, density));
 		LinearLayout.LayoutParams hexInputLayoutParams = new LinearLayout.LayoutParams(
-			LinearLayout.LayoutParams.MATCH_PARENT, 44 * dp);
-		hexInputLayoutParams.topMargin = 8 * dp;
+			LinearLayout.LayoutParams.MATCH_PARENT, toPx(44, density));
+		hexInputLayoutParams.topMargin = toPx(8, density);
 		root.addView(hexInput, hexInputLayoutParams);
 		return hexInput;
 	}
@@ -179,19 +312,15 @@ public class ColorPickerDialog
 	}
 
 	/**
-	 * Grid tap → update selection, alpha slider, hex. The alpha listener updates its
-	 * own value label; the explicit syncHex call here covers the case where the tapped
-	 * color's alpha matches the current slider position so the listener wouldn't fire.
+	 * Convert dp to px for the supplied display density. Math.round (not int truncation)
+	 * so non-integer densities don't collapse small dp values to zero — density 1.5 with
+	 * truncation gave (int)(1.5)=1 and 12 * 1 = 12 px instead of the intended 18 px,
+	 * and density 0.75 gave (int)(0.75)=0 and 12 * 0 = 0 px (the dialog's spacing
+	 * disappeared entirely on those screens).
 	 */
-	private static void wireGridTap(ColorGridView grid, int[] selected, SeekBar alphaSeekBar,
-		Runnable syncHexToSelection)
+	private static int toPx(int dp, float density)
 	{
-		grid.setOnColorTapListener(color ->
-		{
-			selected[0] = color;
-			alphaSeekBar.setProgress(Color.alpha(color));
-			syncHexToSelection.run();
-		});
+		return Math.round(dp * density);
 	}
 
 	/**
@@ -219,6 +348,22 @@ public class ColorPickerDialog
 
 			@Override
 			public void onStopTrackingTouch(SeekBar seekBar) {}
+		});
+	}
+
+	/**
+	 * Grid tap → update selection, alpha slider, hex. The alpha listener updates its
+	 * own value label; the explicit syncHex call here covers the case where the tapped
+	 * color's alpha matches the current slider position so the listener wouldn't fire.
+	 */
+	private static void wireGridTap(ColorGridView grid, int[] selected, SeekBar alphaSeekBar,
+		Runnable syncHexToSelection)
+	{
+		grid.setOnColorTapListener(color ->
+		{
+			selected[0] = color;
+			alphaSeekBar.setProgress(Color.alpha(color));
+			syncHexToSelection.run();
 		});
 	}
 
@@ -278,139 +423,5 @@ public class ColorPickerDialog
 				}
 			}
 		});
-	}
-
-	/**
-	 * Paint the hex EditText's background with the current color and pick a contrasting text color
-	 * (ITU-R BT.601 luma: Y' = 0.299R + 0.587G + 0.114B).
-	 */
-	private static void applySwatchPreview(EditText hexInput, int color, float density)
-	{
-		GradientDrawable bg = new GradientDrawable();
-		bg.setColor(color);
-		bg.setCornerRadius(4 * density);
-		bg.setStroke(1, ThemeColors.SURFACE1);
-		hexInput.setBackground(bg);
-		int r = (color >> 16) & 0xFF;
-		int g = (color >> 8) & 0xFF;
-		int b = color & 0xFF;
-		float lum = 0.299f * r + 0.587f * g + 0.114f * b;
-		hexInput.setTextColor(lum > LUMA_CONTRAST_CUTOFF ? Color.BLACK : Color.WHITE);
-	}
-
-	/**
-	 * Grid view that draws color swatches in a tap-to-select grid.
-	 */
-	private static class ColorGridView extends View
-	{
-		interface OnColorTapListener
-		{
-			void onTap(int color);
-		}
-
-		// CLAUDE.md field order: `final` tier (alphabetical by type, uppercase types first,
-		// then alphabetical by name within a type) then regular (non-final) tier.
-		private final Paint borderPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-		private final Paint paint = new Paint();
-		private final int[] colors;
-		private final int cellSize;
-		private final int cols;
-		private final int rows;
-		private OnColorTapListener listener;
-		private int selectedColor;
-
-		ColorGridView(Context ctx, int[] colors, int cols, int rows, int cellSize, int selectedColor)
-		{
-			super(ctx);
-			this.colors = colors;
-			this.cols = cols;
-			this.rows = rows;
-			this.cellSize = cellSize;
-			this.selectedColor = selectedColor;
-			borderPaint.setStyle(Paint.Style.STROKE);
-			borderPaint.setStrokeWidth(3);
-			borderPaint.setColor(ThemeColors.MAUVE);
-		}
-
-		@Override
-		public boolean onTouchEvent(MotionEvent event)
-		{
-			if (event.getAction() == MotionEvent.ACTION_DOWN)
-			{
-				int col = (int) (event.getX() / (getWidth() / (float) cols));
-				int row = (int) (event.getY() / (getHeight() / (float) rows));
-				int idx = row * cols + col;
-				if (idx >= 0 && idx < colors.length)
-				{
-					selectedColor = colors[idx];
-					if (listener != null)
-					{
-						listener.onTap(colors[idx]);
-					}
-					invalidate();
-				}
-				return true;
-			}
-			return super.onTouchEvent(event);
-		}
-
-		void setOnColorTapListener(OnColorTapListener listener)
-		{
-			this.listener = listener;
-		}
-
-		/**
-		 * Update the highlighted swatch when the color was changed from outside the grid
-		 * (hex input or alpha slider). Re-invalidates so the mauve ring moves off the
-		 * previously-tapped swatch and onto whichever palette entry matches the new
-		 * color, or off the grid entirely when no swatch matches. Without this, the
-		 * grid's ring goes stale and the user sees a UI that lies about which color is
-		 * active.
-		 */
-		void setSelectedColor(int color)
-		{
-			if (this.selectedColor != color)
-			{
-				this.selectedColor = color;
-				invalidate();
-			}
-		}
-
-		@Override
-		protected void onDraw(Canvas canvas)
-		{
-			int cellWidth = getWidth() / cols;
-			int cellHeight = getHeight() / rows;
-			for (int i = 0; i < colors.length && i < cols * rows; i++)
-			{
-				int col = i % cols;
-				int row = i / cols;
-				float left = col * cellWidth;
-				float top = row * cellHeight;
-				// Checkerboard behind transparent cells
-				if (Color.alpha(colors[i]) < 255)
-				{
-					paint.setColor(0xFFCCCCCC);
-					canvas.drawRect(left, top, left + cellWidth, top + cellHeight, paint);
-					paint.setColor(0xFF999999);
-					canvas.drawRect(left, top, left + cellWidth / 2f, top + cellHeight / 2f, paint);
-					canvas.drawRect(left + cellWidth / 2f, top + cellHeight / 2f,
-						left + cellWidth, top + cellHeight, paint);
-				}
-				paint.setColor(colors[i]);
-				canvas.drawRect(left + 1, top + 1, left + cellWidth - 1, top + cellHeight - 1, paint);
-				if (colors[i] == selectedColor)
-				{
-					canvas.drawRect(left + 1, top + 1,
-						left + cellWidth - 1, top + cellHeight - 1, borderPaint);
-				}
-			}
-		}
-
-		@Override
-		protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec)
-		{
-			setMeasuredDimension(cols * cellSize, rows * cellSize);
-		}
 	}
 }

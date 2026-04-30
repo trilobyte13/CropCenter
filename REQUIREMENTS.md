@@ -80,7 +80,7 @@ combined Settings dialog (grid config, pixel-grid color, About).
 | `util/ByteBufferUtils` | Endian-aware read/write with bounds checking |
 | `util/HorizonDetector` | Sobel + Hough horizon detection (used by auto-rotate fallback) |
 | `util/RotationMath` | `rotate(x, y, cx, cy, deg)` / `inverse(...)` helpers, single source of truth for rotation math |
-| `util/SafFileHelper` | SAF/MediaStore URI helpers: copy, derive sibling, file-from-URI, query size, content-readback verify, create-sibling-placeholder, persistable bytes read |
+| `util/SafFileHelper` | SAF/MediaStore URI helpers: copy, derive sibling (handles both nested `primary:Pictures/foo.jpg` and root-level `primary:foo.jpg` document IDs), file-from-URI, query size, content-readback verify, create-sibling-placeholder, persistable bytes read |
 | `util/StoragePermissionHelper` | MANAGE_EXTERNAL_STORAGE detection + settings deep-link |
 | `util/TextFormat` | Locale-safe number formatting for the info bar |
 | `util/ThemeColors` | Catppuccin Mocha int constants for code paths without a Context |
@@ -101,6 +101,12 @@ combined Settings dialog (grid config, pixel-grid color, About).
 4. For JPEG: extract metadata segments, gain map, SEFT trailer, ICC profile
 5. Query MediaStore for file path and ID (for Samsung Revert)
 6. Display Samsung original data indicator if SEFT trailer present
+
+`CropState.setSourceFormat` seeds the export config to match the loaded format
+so the SaveDialog's format toggle and default filename arrive on the same
+format the user opened. Without this, loading a PNG would leave Save defaulting
+to JPEG (silent format conversion + alpha loss). The user can still flip the
+toggle in the SaveDialog before any individual save.
 
 **Input methods**:
 - Open button: `ACTION_OPEN_DOCUMENT` (JPEG, PNG)
@@ -123,7 +129,7 @@ combined Settings dialog (grid config, pixel-grid color, About).
 - Respects lock direction: H moves X only, V moves Y only, Both moves freely
 - Crop **size is preserved** in Move mode — `recomputeCrop` runs with `cropSizeDirty=false` so only the center is re-clamped against the rotated bounds; cropW/cropH never change
 - During the drag the center stays continuous (sub-pixel) for smooth motion; the drag's fractional accumulator lives in a separate "anchor" state so high-zoom slow drags build up across events without losing motion to the rotation clamp
-- On finger lift (`onPanRelease`), the center snaps to the parity that makes `cropImgX = centerX − cropW/2` integer (cropW even → centerX rounded; cropW odd → centerX floor + 0.5). This pixel-aligns the crop borders and grid without per-frame snap (which would cause flicker as cropW oscillates during rotation)
+- On finger lift (`onPanRelease`), the center snaps to the parity that makes `cropImageX = centerX − cropW/2` integer (cropW even → centerX rounded; cropW odd → centerX floor + 0.5). This pixel-aligns the crop borders and grid without per-frame snap (which would cause flicker as cropW oscillates during rotation)
 - Crop rectangle cannot be dragged outside image bounds (rotation-aware binary search inside `setCenter`)
 - Cross-axis drift on a locked axis is bounded to 0.5 px per event and rejected above that threshold
 - Tap does nothing (prevents accidental crop placement)
@@ -168,13 +174,15 @@ Per-mode lock preferences (Both/H/V) are remembered independently for Move and S
 ### 5. Rotation
 
 **Galaxy-style scrollable ruler** (persistent, below point controls):
-- Full range: -180.0 to +180.0 degrees at 0.1 degree resolution
-- Drag to scroll with momentum fling via OverScroller
-- Snap-to-detent at 0, +-45, +-90, +-180 degrees (within 0.8 degree threshold)
-- Tick marks: minor every 1 degree, major every 5 degrees with labels, detent ticks at key angles
+- Full range: -180.0 to +180.0 degrees, finest snap step 0.01° at maximum zoom
+- Drag to scroll with momentum fling via OverScroller; pinch to zoom the ruler scale
+- Tick configuration scales with visible-degrees-per-screen; minor steps from 10° down to 0.01° at deepest zoom (8 tiers)
+- Snap-to-detent at 0, ±45, ±90, ±180 degrees (within 0.8 degree threshold)
 - Center indicator: mauve triangle + line; zero marker in red
-- Degree readout in info bar (visible only when rotation != 0), tappable for exact numeric input
+- Degree readout in info bar (visible only when |rotation| ≥ ROTATION_EPSILON = 0.005°), tappable for exact numeric input
 - Ruler disabled (30% opacity, no touch) when no image loaded
+
+**Sub-epsilon rotation snap**: `CropState.setRotationDegrees` is the single chokepoint for every rotation entry point (ruler, precise-rotation dialog, horizon detector). After clamp it snaps `|deg| < ROTATION_EPSILON` to exactly 0, keeping the renderer, readout, and `ExportPipeline.canBypassEncode` aligned with the model — sub-epsilon values were the path that previously let the ruler land on a value the rest of the pipeline rounded to zero (no visible rotation, hidden readout, but the bypass disabled and forced a needless re-encode). The 0.005° epsilon sits a half-step below the ruler's 0.01° finest tick so every value the ruler / horizon detector can produce is honored end-to-end.
 
 **Auto-rotate button** (in the Points row, hidden until an image is loaded):
 - First attempts horizon detection from JPEG metadata via `HorizonDetector.detectFromMetadata`
@@ -221,7 +229,7 @@ Viewport clamped to prevent panning image off screen. Bitmap filtering disabled 
 
 **Save flow**: Always `ACTION_CREATE_DOCUMENT` with format-aware MIME type (image/jpeg or image/png). Collisions inside the user's chosen directory route through `ReplaceStrategy`'s crash-safe write-then-swap (Strategy A: File-I/O atomic move; B: SAF direct overwrite with byte-for-byte verify; C: SAF rename-with-fallback). Same-name results from `ACTION_CREATE_DOCUMENT` (provider-confirmed overwrites) get a sibling placeholder via `DocumentsContract.createDocument` and route through the same Replace flow; opaque-ID providers fall back to `exportOverwriteWithBackup` (direct write + Samsung Revert backup + preserve-on-failure).
 
-**No-edit bypass**: when the user has applied no transformations (no crop, no rotation, no grid bake-in, JPEG-to-JPEG round-trip) AND the in-memory image is not a graft (`!state.isGraftApplied()`), `ExportPipeline` writes `state.originalFileBytes` verbatim instead of canvas-encoding. Preserves byte-perfect fidelity for re-saves of unmodified Samsung originals. Cropped / rotated / grid-baked saves AND any graft save go through the canvas-encode + ExifPatcher pipeline. Graft saves are explicitly excluded from the bypass because the splice's `originalFileBytes` carries the edit's foreign ICC profile; bypassing skips the canvas-managed Display P3 conversion that the cropped graft path runs and would produce a slightly different output structure than save-after-crop.
+**No-edit bypass**: when the user has applied no transformations (no crop, no rotation, no grid bake-in, JPEG-to-JPEG round-trip) AND the in-memory image is not a graft (`!state.isGraftApplied()`), `ExportPipeline` writes `state.originalFileBytes` verbatim instead of canvas-encoding. Preserves byte-perfect fidelity for re-saves of unmodified Samsung originals. Cropped / rotated / grid-baked saves AND any graft save go through the canvas-encode + ExifPatcher pipeline. Graft saves are explicitly excluded from the bypass because the splice ships source's gain map verbatim over the edit's primary scan; if the user later crops, the gain map's spatial alignment shifts off the features it boosts. Forcing graft saves through the full encode regenerates the gain map from the spliced primary via `UltraHdrCompat.compressWithGainmap`, keeping save-without-crop and save-after-crop both correct.
 
 **JPEG quality**: 100 (hardcoded, always maximum) when canvas-encoding; verbatim when bypassing.
 
@@ -250,6 +258,14 @@ Canvas-rendered bitmap -> Bitmap.compress(JPEG, 100) -> inject original metadata
 Canvas-rendered bitmap -> Bitmap.compress(PNG) -> inject EXIF via eXIf chunk
 (PNG 1.6 spec: raw TIFF data in CRC32'd chunk after IHDR)
 ```
+
+The export canvas is **not** filled with `CANVAS_BG` for PNG — the bitmap stays
+on its default transparent background so source alpha round-trips and rotation
+corners stay see-through. JPEG keeps the dark-navy fill since the format can't
+represent alpha and the user expects rotation corners to read as the editor
+canvas color they saw in preview. The fill decision lives at
+`CropExporter.export` next to the `outBmp` allocation and gates on the same
+`isJpeg` flag that picks the Display P3 colorspace.
 
 ### 10. Metadata Preservation
 
@@ -302,7 +318,7 @@ Settings dialog (opened via the gear icon in the toolbar) shows:
    - Stored W × H from `BitmapFactory` bounds-only decode equal between loaded and picked. Mismatch → toast "Edit dimensions don't match: original WxH, edit WxH" and abort.
    - EXIF orientation tags match. Mismatch → toast "Edit EXIF orientation differs from original (X vs Y). Re-export with same orientation." and abort.
 5. `GraftWriter` splices the bytes in memory per the substitution rule below.
-6. `MainActivity.applyGraftedBytes` calls `applyImageBytes(grafted)` which installs the splice as the new in-memory image, then sets `state.setGraftApplied(true)` and `state.setAspectRatio(AspectRatio.FREE)`. The graft-applied flag gates the verbatim-write bypass (see below); the AR reset prevents the user's preserved AR from carving the freshly-applied graft into a sub-region.
+6. `MainActivity.applyGraftedBytes` calls `applyImageBytes(grafted)` which installs the splice as the new in-memory image, then sets `state.setGraftApplied(true)`. The graft-applied flag gates the verbatim-write bypass (see below). The user's saved AR preference applies to the post-graft crop the same way it does on a normal image load — if they want the full image, they pick "Full" in the spinner.
 7. Toast "External edit applied" confirms success. Default save name = `<original-stem>-graft.jpg`.
 8. User saves through the existing Save button. The save runs through `CropExporter.export` (the bypass is disabled for grafts), which canvas-renders the source onto a Display P3 bitmap, re-encodes via `Bitmap.compress(JPEG, 100)`, generates a fresh thumbnail, re-injects original's EXIF / XMP / MPF / SEFT, and appends the gain map.
 
@@ -314,11 +330,11 @@ Settings dialog (opened via the gear icon in the toolbar) shows:
 | APP0/JFIF | original | identity (density, version) |
 | APP1/EXIF | **original** | identity: Make, Model, Software, MakerNote, GPS coordinates, DateTimeOriginal, lens info |
 | APP1/XMP | **original** | preserves Samsung's HDR `hdrgm` metadata (matches original's gain map) |
-| APP2/ICC | **edit** | matches the edit's pixels' colour space; the canvas-encode pass converts to Display P3 anyway, so this is a fallback when the canvas path is skipped |
+| APP2/ICC | **original** | source's "DCI-P3 D65 Gamut with sRGB Transfer" profile matches the gain map's calibration; trusting the edit's ICC would mis-tag the spliced output (the reorient pass injects Skia's synthetic sRGB profile that describes Skia's container, not the actual P3-numerical pixels) |
 | APP2/MPF | original (offset-patched) | Samsung-shape MPF is what Gallery's Revert pre-flight recognises; edit's MPF (Adobe-flavoured `MPType` for the gain-map entry) breaks Revert |
 | vendor APPs (APP3-APP15), COM | original | Samsung sensor hints, scene labels |
 | DQT, DHT, SOF, SOS+scan, EOI | **edit** | the AI-edited pixels — byte-verbatim from edit's primary |
-| gain map JPEG | **original** | preserves Samsung's HDR rendering for the unedited area; mismatch in the AI-fill region is acceptable for low-frequency Generative Remove fills |
+| gain map JPEG | **original, AI-region inpainted** | preserves Samsung's HDR rendering across the unedited area; the AI region's gain values are replaced with their unmasked-neighbor average so the boost in the fill matches its surroundings instead of the original (now-removed) features |
 | SEFT trailer | original | the sole reason Gallery still surfaces and successfully services Revert |
 
 **Saved output**: the canvas-encoded pipeline runs for **every** graft save (no-crop and cropped alike — `state.isGraftApplied()` disables the bypass). Output structure:
@@ -334,12 +350,12 @@ The canvas conversion is near-identity in colour terms: `graftedBytes` already c
 - **XMP (`SWAP_XMP=false`)**: preserves Samsung's HDR metadata (`hdrgm` namespace) which describes original's gain map. Edit's XMP describes the editor's gain map — incoherent with the kept original gain map.
 - **ICC (`SWAP_ICC=false`)**: keeps source's "DCI-P3 D65 Gamut with sRGB Transfer" profile. The recommended editor (Photoshop with Camera Raw disabled) preserves source's pixel values verbatim outside the AI fill, so the edit's pixels are P3-numerical even when no ICC tag is written. When `GraftController.reorientEdit` re-encodes the edit through `Bitmap.compress` to fix a stored-layout mismatch, Skia injects its own synthetic 456-byte sRGB profile — that ICC describes Skia's container, not the actual pixel encoding. Trusting it would tag the spliced output as sRGB while the pixels remain P3-numerical and the gain map is calibrated for P3, producing washed-out HDR composition.
 - **MPF (`SWAP_HDR_MPF=false`)**: confirmed via bisection — substituting edit's MPF segment alone reliably hangs Samsung Gallery's Revert. Original's MPF stays Samsung-shape; only its offset/size fields are patched after the gain-map splice.
-- **Gain map (`SWAP_HDR_GAINMAP=false`)**: preserves Samsung's HDR rendering across the unedited area (≈ 99.99% of the frame for typical Generative Remove fills). The fill region inherits original's gain map (calibrated for the original content, not the AI fill), but for low-frequency fills (sky, grass, wall) the gain-map mismatch is below visual threshold.
+- **Gain map (`SWAP_HDR_GAINMAP=false`, AI region inpainted at save time)**: preserves Samsung's HDR rendering across the unedited area (≈ 99.99% of the frame for typical Generative Remove fills). Inside the AI region the gain map's HDR boost was calibrated for the original (now-removed) content and would mis-target the new fill — `AiRegionDetector` locates that region (diff source vs aligned-edit at sampleSize=4) when the graft is applied and stashes the mask on `state.aiMask`. `GainMapInpainter` then runs at HDR re-encode time inside `UltraHdrCompat.compressWithGainmap`, mutating the source's gain-map Bitmap in place via frontier-tracked grow-from-boundary (each masked pixel becomes the average of its unmasked 8-neighbors). The fill ends up with the same HDR boost as its surroundings, which is exactly what Generative Remove visually intends ("this region should look like its neighbors"). Inpainting at save time (rather than at graft time on the gain-map JPEG bytes) is critical — Samsung's gain map is single-channel grayscale, and `Bitmap.compress` always emits 3-channel YCbCr 4:2:0 regardless of input config, so a graft-time JPEG round-trip would force a structural format change that downstream UHDR decoders silently reject (HDR drops). Operating on the Bitmap in place from `Gainmap.getGainmapContents()` keeps source's single-channel format intact through the save's `Bitmap.compress(JPEG)` call, which preserves the gainmap's container format when the bitmap has an attached `Gainmap`.
 - **Vendor APPs (`STRIP_VENDOR_APPS=false`)**: confirmed no rendering effect; Samsung sensor / scene identity data preserved.
 
 **`ExportPipeline.canBypassEncode`**: returns `true` only when output is JPEG, source is JPEG, **no graft applied**, no rotation, no grid bake-in, source bytes available, AND (no crop OR full-image crop). The graft-applied check is what forces graft saves through `CropExporter.export`. Without it, the verbatim-write bypass would ship source's gain map (calibrated for source's primary) over the spliced primary; if the user later crops, the gain map's spatial alignment shifts off the features it boosts. The canvas-encode path regenerates the gain map for the spliced primary, keeping save-without-crop and save-after-crop both correct.
 
-**`MainActivity.applyGraftedBytes`**: after `applyImageBytes`, sets `state.setAspectRatio(AspectRatio.FREE)` (so the user's preserved AR doesn't carve the graft into a sub-region) and `state.setGraftApplied(true)` (so `canBypassEncode` returns false for this image). The flag is cleared by `CropState.reset()` on the next image load.
+**`MainActivity.applyGraftedBytes`**: after `applyImageBytes`, sets `state.setGraftApplied(true)` so `canBypassEncode` returns false for this image and the save runs through the full encode + gain-map regeneration. The flag is cleared by `CropState.reset()` on the next image load. The user's AR preference is left alone — graft behaves like a normal image load with respect to the crop overlay.
 
 **Validation that the splice is decoder-coherent**: both inputs must share SOF0 dimensions AND EXIF orientation. Caller (`GraftController`) checks via `BitmapFactory.decodeByteArray(inJustDecodeBounds=true)` for stored dims and `BitmapUtils.readExifOrientation` for orientation; mismatch aborts before invoking `GraftWriter`.
 

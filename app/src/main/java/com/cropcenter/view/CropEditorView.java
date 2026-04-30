@@ -209,10 +209,10 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
 	 * makes cropW flip even↔odd during rotation sweeps and the crop flickers). A one-shot
 	 * snap on release has no such flicker problem: no sweep is in progress.
 	 *
-	 * Snap formula matches what getCropImgXFloat / exporter integer floor expect:
+	 * Snap formula matches what getCropImageXFloat / exporter integer floor expect:
 	 *   cropW even → centerX must be integer   → round to nearest int
 	 *   cropW odd  → centerX must end in .5    → floor + 0.5
-	 * Both cases produce an integer cropImgX = centerX − cropW/2, so the grid's outer
+	 * Both cases produce an integer cropImageX = centerX − cropW/2, so the grid's outer
 	 * borders land exactly on pixel boundaries and the rule-of-thirds lines hit pixel
 	 * centers when cropW is divisible by 3. Viewport-pan releases (not moving the crop)
 	 * skip the snap entirely.
@@ -252,118 +252,6 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
 		{
 			state.endBatch();
 		}
-	}
-
-	/**
-	 * True when a pan gesture should move the crop box (Move mode + center placed +
-	 * not in Pan-the-viewport lock mode). Otherwise the pan gesture moves the viewport.
-	 */
-	private boolean isMovingCrop()
-	{
-		return state.getEditorMode() == EditorMode.MOVE
-			&& state.hasCenter()
-			&& state.getCenterMode() != CenterMode.LOCKED;
-	}
-
-	/**
-	 * Move the crop center by the current gesture's delta, respecting the lock mode.
-	 * The anchor accumulates unclamped intent across events; state.centerX is what
-	 * setCenter's rotation clamp produced. Reading newCenter from the anchor (not
-	 * centerX) lets sub-pixel motion accumulate across events — a slow drag at high
-	 * zoom would otherwise make no progress because each event would read back the
-	 * just-clamped centerX.
-	 *
-	 * Wrapped in a beginBatch / endBatch pair so the two setCenter calls (ours below
-	 * plus the one inside CropEngine.recomputeCrop) coalesce into a single listener
-	 * fire — otherwise each pan event triggers two full applyStateToUi cycles.
-	 */
-	private void dragCropCenter(float dx, float dy)
-	{
-		state.beginBatch();
-		try
-		{
-			float scale = viewport.getBaseScale() * viewport.getZoom();
-			CenterMode lock = state.getCenterMode();
-			resyncAnchorIfStale();
-
-			float newCenterX = state.getAnchorX();
-			float newCenterY = state.getAnchorY();
-			// Cache the pre-drag CLAMPED center for the cross-axis drift test below.
-			// Comparing to the anchor would compare intent (pre-clamp) to intent
-			// (pre-clamp), which can't detect the rotation clamp moving the locked axis.
-			float preDragCenterX = state.getCenterX();
-			float preDragCenterY = state.getCenterY();
-
-			if (lock == CenterMode.HORIZONTAL)
-			{
-				newCenterX += dx / scale;
-			}
-			else if (lock == CenterMode.VERTICAL)
-			{
-				newCenterY += dy / scale;
-			}
-			else
-			{
-				newCenterX += dx / scale;
-				newCenterY += dy / scale;
-			}
-
-			// setCenter clamps both axes jointly (binary search under rotation). On a
-			// locked axis we only want motion on the unlocked axis — reject moves that
-			// would drift the locked axis more than 0.5 px from its pre-drag position.
-			state.setCropSizeDirty(false);
-			state.setCenter(newCenterX, newCenterY);
-			if (!crossAxisDrifted(lock, preDragCenterX, preDragCenterY))
-			{
-				// Advance the anchor to the clamped (still fractional) drag position so
-				// the next event continues accumulating from here.
-				state.setAnchor(state.getCenterX(), state.getCenterY());
-			}
-			// Recompute crop size + rotation fit. When rejected, the anchor is
-			// unchanged — recomputeCrop re-derives centerX / Y from the unchanged
-			// anchor, restoring the pre-drag position on the locked axis.
-			CropEngine.recomputeCrop(state);
-			invalidate();
-		}
-		finally
-		{
-			state.endBatch();
-		}
-	}
-
-	/**
-	 * Resync the drag anchor back to centerX/centerY when they've diverged by more than
-	 * a pixel. A gap that large means the anchor went stale: rotation / AR shrunk the
-	 * crop and setCenter's rotation clamp pulled centerX inward while the anchor stayed
-	 * put, or the user switched Select → Move without a selection and the anchor still
-	 * reflects an old intent. Without the resync the first drag event would be absorbed
-	 * by the clamp and produce no visible motion.
-	 */
-	private void resyncAnchorIfStale()
-	{
-		if (Math.abs(state.getAnchorX() - state.getCenterX()) > 1f
-			|| Math.abs(state.getAnchorY() - state.getCenterY()) > 1f)
-		{
-			state.setAnchor(state.getCenterX(), state.getCenterY());
-		}
-	}
-
-	/**
-	 * True when the locked axis moved more than 0.5 px between preDrag* and the current
-	 * state.centerX/centerY — i.e. the joint clamp in setCenter pushed the locked axis.
-	 * Used to reject moves on a locked axis and restore via recomputeCrop.
-	 */
-	private boolean crossAxisDrifted(CenterMode lock, float preDragCenterX, float preDragCenterY)
-	{
-		if (lock == CenterMode.HORIZONTAL)
-		{
-			return Math.abs(state.getCenterY() - preDragCenterY) > 0.5f;
-		}
-		if (lock == CenterMode.VERTICAL)
-		{
-			return Math.abs(state.getCenterX() - preDragCenterX) > 0.5f;
-		}
-		return false;
 	}
 
 	@Override
@@ -580,6 +468,90 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
 		fitToView();
 	}
 
+	/**
+	 * True when the locked axis moved more than 0.5 px between preDrag* and the current
+	 * state.centerX/centerY — i.e. the joint clamp in setCenter pushed the locked axis.
+	 * Used to reject moves on a locked axis and restore via recomputeCrop.
+	 */
+	private boolean crossAxisDrifted(CenterMode lock, float preDragCenterX, float preDragCenterY)
+	{
+		if (lock == CenterMode.HORIZONTAL)
+		{
+			return Math.abs(state.getCenterY() - preDragCenterY) > 0.5f;
+		}
+		if (lock == CenterMode.VERTICAL)
+		{
+			return Math.abs(state.getCenterX() - preDragCenterX) > 0.5f;
+		}
+		return false;
+	}
+
+	/**
+	 * Move the crop center by the current gesture's delta, respecting the lock mode.
+	 * The anchor accumulates unclamped intent across events; state.centerX is what
+	 * setCenter's rotation clamp produced. Reading newCenter from the anchor (not
+	 * centerX) lets sub-pixel motion accumulate across events — a slow drag at high
+	 * zoom would otherwise make no progress because each event would read back the
+	 * just-clamped centerX.
+	 *
+	 * Wrapped in a beginBatch / endBatch pair so the two setCenter calls (ours below
+	 * plus the one inside CropEngine.recomputeCrop) coalesce into a single listener
+	 * fire — otherwise each pan event triggers two full applyStateToUi cycles.
+	 */
+	private void dragCropCenter(float dx, float dy)
+	{
+		state.beginBatch();
+		try
+		{
+			float scale = viewport.getBaseScale() * viewport.getZoom();
+			CenterMode lock = state.getCenterMode();
+			resyncAnchorIfStale();
+
+			float newCenterX = state.getAnchorX();
+			float newCenterY = state.getAnchorY();
+			// Cache the pre-drag CLAMPED center for the cross-axis drift test below.
+			// Comparing to the anchor would compare intent (pre-clamp) to intent
+			// (pre-clamp), which can't detect the rotation clamp moving the locked axis.
+			float preDragCenterX = state.getCenterX();
+			float preDragCenterY = state.getCenterY();
+
+			if (lock == CenterMode.HORIZONTAL)
+			{
+				newCenterX += dx / scale;
+			}
+			else if (lock == CenterMode.VERTICAL)
+			{
+				newCenterY += dy / scale;
+			}
+			else
+			{
+				newCenterX += dx / scale;
+				newCenterY += dy / scale;
+			}
+
+			// setCenter clamps both axes jointly (binary search under rotation). On a
+			// locked axis we only want motion on the unlocked axis — reject moves that
+			// would drift the locked axis more than 0.5 px from its pre-drag position.
+			state.setCropSizeDirty(false);
+			state.setCenter(newCenterX, newCenterY);
+			if (!crossAxisDrifted(lock, preDragCenterX, preDragCenterY))
+			{
+				// Advance the anchor to the clamped (still fractional) drag position so
+				// the next event continues accumulating from here.
+				state.setAnchor(state.getCenterX(), state.getCenterY());
+			}
+			// Recompute crop size + rotation fit. When rejected, the anchor is
+			// unchanged — recomputeCrop re-derives centerX / Y from the unchanged
+			// anchor, restoring the pre-drag position on the locked axis.
+			CropEngine.recomputeCrop(state);
+			invalidate();
+		}
+		finally
+		{
+			state.endBatch();
+		}
+	}
+
 	private void init(Context context)
 	{
 		gestureHandler = new TouchGestureHandler(context, this);
@@ -600,6 +572,17 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
 		int imgH = state.getImageHeight();
 		float[] imagePoint = viewport.screenToImagePixel(screenX, screenY, state);
 		return imagePoint[0] >= 0 && imagePoint[0] <= imgW && imagePoint[1] >= 0 && imagePoint[1] <= imgH;
+	}
+
+	/**
+	 * True when a pan gesture should move the crop box (Move mode + center placed +
+	 * not in Pan-the-viewport lock mode). Otherwise the pan gesture moves the viewport.
+	 */
+	private boolean isMovingCrop()
+	{
+		return state.getEditorMode() == EditorMode.MOVE
+			&& state.hasCenter()
+			&& state.getCenterMode() != CenterMode.LOCKED;
 	}
 
 	private void notifyPointsChanged()
@@ -632,4 +615,20 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
 		invalidate();
 	}
 
+	/**
+	 * Resync the drag anchor back to centerX/centerY when they've diverged by more than
+	 * a pixel. A gap that large means the anchor went stale: rotation / AR shrunk the
+	 * crop and setCenter's rotation clamp pulled centerX inward while the anchor stayed
+	 * put, or the user switched Select → Move without a selection and the anchor still
+	 * reflects an old intent. Without the resync the first drag event would be absorbed
+	 * by the clamp and produce no visible motion.
+	 */
+	private void resyncAnchorIfStale()
+	{
+		if (Math.abs(state.getAnchorX() - state.getCenterX()) > 1f
+			|| Math.abs(state.getAnchorY() - state.getCenterY()) > 1f)
+		{
+			state.setAnchor(state.getCenterX(), state.getCenterY());
+		}
+	}
 }

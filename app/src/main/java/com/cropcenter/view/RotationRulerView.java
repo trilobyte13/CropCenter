@@ -21,7 +21,9 @@ import com.cropcenter.util.ThemeColors;
  *
  * Drag to scroll, fling for momentum. Pinch to zoom the ruler scale, enabling 0.01° precision at
  * the highest zoom. After drag/fling settles, the value snaps to the nearest tick interval for
- * the current zoom level.
+ * the current zoom level. The finest snap step (0.01°) sits above BitmapUtils.ROTATION_EPSILON
+ * so the renderer, readout, and ExportPipeline.canBypassEncode all honor every tick the ruler
+ * can produce.
  */
 public class RotationRulerView extends View
 {
@@ -30,6 +32,22 @@ public class RotationRulerView extends View
 		void onRotationChanged(float degrees);
 	}
 
+	private record TickConfig(float minor, float major) {}
+
+	// Pre-built tick configurations for each zoom level. Indexed parallel to TICK_THRESHOLDS:
+	// the first config whose threshold is strictly below degreesVisible wins. Cached as
+	// static finals because chooseTickConfig is called on every onDraw and every snapToTick
+	// during a fling — otherwise we'd allocate 60+ TickConfig records per second.
+	private static final TickConfig[] TICK_CONFIGS = {
+		new TickConfig(10f,   45f),
+		new TickConfig(5f,    45f),
+		new TickConfig(1f,    10f),
+		new TickConfig(1f,    5f),
+		new TickConfig(0.5f,  1f),
+		new TickConfig(0.1f,  0.5f),
+		new TickConfig(0.05f, 0.1f),
+		new TickConfig(0.01f, 0.1f),
+	};
 	private static final float FLING_VELOCITY_THRESHOLD = 200f; // px/s — below this, snap instead
 	private static final float MAX_DEG = 180f;
 	private static final float MAX_PPD_FACTOR = 120f; // enough to show 0.01° ticks
@@ -39,6 +57,9 @@ public class RotationRulerView extends View
 	private static final float SCROLL_SUBPIXEL_SCALE = 1000f; // int scroller → preserve fractional degrees
 	private static final float TAP_SLOP = 8f;                 // pixels — tap vs drag threshold
 	private static final float ZERO_MARKER_MARGIN = 5f;       // px — tighter cull than ticks for the 0° line
+	private static final float[] TICK_THRESHOLDS = {
+		270f, 90f, 30f, 10f, 3f, 1f, 0.3f, 0f,
+	};
 
 	private final Choreographer.FrameCallback flingFrameCallback;
 	private final OverScroller scroller;
@@ -189,21 +210,6 @@ public class RotationRulerView extends View
 	}
 
 	@Override
-	protected void onDetachedFromWindow()
-	{
-		// If the view is torn down mid-gesture (config change, parent removal), Android won't
-		// dispatch ACTION_UP/CANCEL — the tracker and scroller leak without this cleanup.
-		if (velocityTracker != null)
-		{
-			velocityTracker.recycle();
-			velocityTracker = null;
-		}
-		stopFling();
-		listener = null;
-		super.onDetachedFromWindow();
-	}
-
-	@Override
 	public boolean onTouchEvent(MotionEvent event)
 	{
 		if (!enabled)
@@ -226,6 +232,145 @@ public class RotationRulerView extends View
 			case MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> handleTouchRelease(event);
 		}
 		return true;
+	}
+
+	public void setDegrees(float deg)
+	{
+		deg = Math.clamp(deg, MIN_DEG, MAX_DEG);
+		if (deg != currentDegrees)
+		{
+			currentDegrees = deg;
+			stopFling();
+			invalidate();
+		}
+	}
+
+	public void setOnRotationChangedListener(OnRotationChangedListener listener)
+	{
+		this.listener = listener;
+	}
+
+	public void setRulerEnabled(boolean enabled)
+	{
+		this.enabled = enabled;
+		setAlpha(enabled ? 1f : 0.3f);
+	}
+
+	/**
+	 * Multiply the current ruler zoom by a factor and clamp into the valid range. Use
+	 * scaleFactor > 1 to zoom in (finer ticks, smaller visible degree span); < 1 to zoom out.
+	 * Used by the toolbar's − / + buttons that flank the ruler.
+	 */
+	public void zoomBy(float scaleFactor)
+	{
+		pixelsPerDegree = Math.clamp(pixelsPerDegree * scaleFactor,
+			basePixelsPerDegree * MIN_PPD_FACTOR, basePixelsPerDegree * MAX_PPD_FACTOR);
+		invalidate();
+	}
+
+	/**
+	 * Snap the ruler to its maximum zoom level (finest 0.01° tick precision). Called by the
+	 * auto-rotate flow after horizon detection lands a precise angle, so the user can
+	 * immediately fine-tune around the detected value.
+	 */
+	public void zoomToMax()
+	{
+		pixelsPerDegree = basePixelsPerDegree * MAX_PPD_FACTOR;
+		invalidate();
+	}
+
+	@Override
+	protected void onDetachedFromWindow()
+	{
+		// If the view is torn down mid-gesture (config change, parent removal), Android won't
+		// dispatch ACTION_UP/CANCEL — the tracker and scroller leak without this cleanup.
+		if (velocityTracker != null)
+		{
+			velocityTracker.recycle();
+			velocityTracker = null;
+		}
+		stopFling();
+		listener = null;
+		super.onDetachedFromWindow();
+	}
+
+	@Override
+	protected void onDraw(Canvas canvas)
+	{
+		int width = getWidth();
+		int height = getHeight();
+		float centerX = width / 2f;
+		float labelY = height - 1;
+		float tickTop = 2;
+		float tickBot = height - labelPaint.getTextSize() - 3;
+
+		float degreesVisible = width / pixelsPerDegree;
+		TickConfig tickConfig = chooseTickConfig(degreesVisible);
+
+		// Use integer tick indices to avoid float accumulation errors.
+		// tickIndex * tickConfig.minor = degree value.
+		float halfVisible = degreesVisible / 2f;
+		int iStart = (int) Math.floor((currentDegrees - halfVisible - tickConfig.major) / tickConfig.minor);
+		int iEnd = (int) Math.ceil((currentDegrees + halfVisible + tickConfig.major) / tickConfig.minor);
+
+		// Multiplier to convert minor intervals to major check (integer comparison)
+		int majorEvery = Math.round(tickConfig.major / tickConfig.minor);
+		int detentEvery = Math.round(45f / tickConfig.minor);
+
+		for (int i = iStart; i <= iEnd; i++)
+		{
+			float deg = i * tickConfig.minor;
+			if (deg < MIN_DEG || deg > MAX_DEG)
+			{
+				continue;
+			}
+
+			float x = centerX + (deg - currentDegrees) * pixelsPerDegree;
+			if (x < -OFF_SCREEN_MARGIN || x > width + OFF_SCREEN_MARGIN)
+			{
+				continue;
+			}
+
+			boolean isDetent = detentEvery > 0 && i % detentEvery == 0;
+			boolean isMajor = majorEvery > 0 && i % majorEvery == 0;
+
+			if (isDetent)
+			{
+				canvas.drawLine(x, tickTop, x, tickBot, detentTickPaint);
+				canvas.drawText(TextFormat.degrees(deg), x, labelY, labelPaint);
+			}
+			else if (isMajor)
+			{
+				float mid = (tickTop + tickBot) / 2f;
+				float halfH = (tickBot - tickTop) * 0.35f;
+				canvas.drawLine(x, mid - halfH, x, mid + halfH, majorTickPaint);
+				canvas.drawText(TextFormat.degrees(deg), x, labelY, labelPaint);
+			}
+			else
+			{
+				float mid = (tickTop + tickBot) / 2f;
+				float halfH = (tickBot - tickTop) * 0.18f;
+				canvas.drawLine(x, mid - halfH, x, mid + halfH, minorTickPaint);
+			}
+		}
+
+		// Zero marker
+		float zeroX = centerX - currentDegrees * pixelsPerDegree;
+		if (zeroX > -ZERO_MARKER_MARGIN && zeroX < width + ZERO_MARKER_MARGIN && currentDegrees != 0f)
+		{
+			canvas.drawLine(zeroX, tickTop, zeroX, tickBot, zeroPaint);
+		}
+
+		float triangleHeight = 4 * getResources().getDisplayMetrics().density;
+		indicatorPaint.setStyle(Paint.Style.FILL);
+		indicatorTriangle.rewind();
+		indicatorTriangle.moveTo(centerX, tickTop);
+		indicatorTriangle.lineTo(centerX - triangleHeight, tickTop + triangleHeight);
+		indicatorTriangle.lineTo(centerX + triangleHeight, tickTop + triangleHeight);
+		indicatorTriangle.close();
+		canvas.drawPath(indicatorTriangle, indicatorPaint);
+		indicatorPaint.setStyle(Paint.Style.STROKE);
+		canvas.drawLine(centerX, tickTop + triangleHeight, centerX, tickBot, indicatorPaint);
 	}
 
 	/**
@@ -311,164 +456,12 @@ public class RotationRulerView extends View
 		velocityTracker = null;
 	}
 
-	/**
-	 * Fire the OverScroller + register the Choreographer frame callback for fling.
-	 * Separated from handleTouchRelease so the high-velocity branch reads as a single
-	 * named action rather than eight lines of scroller-setup arithmetic.
-	 */
-	private void startFling(float xVelocity)
-	{
-		float scaled = pixelsPerDegree * SCROLL_SUBPIXEL_SCALE;
-		int startX = (int) (currentDegrees * scaled);
-		int minX = (int) (MIN_DEG * scaled);
-		int maxX = (int) (MAX_DEG * scaled);
-		scroller.fling(startX, 0, (int) (-xVelocity * SCROLL_SUBPIXEL_SCALE), 0,
-			minX, maxX, 0, 0);
-		flingActive = true;
-		Choreographer.getInstance().postFrameCallback(flingFrameCallback);
-	}
-
-	public void setDegrees(float deg)
-	{
-		deg = Math.clamp(deg, MIN_DEG, MAX_DEG);
-		if (deg != currentDegrees)
-		{
-			currentDegrees = deg;
-			stopFling();
-			invalidate();
-		}
-	}
-
-	public void setOnRotationChangedListener(OnRotationChangedListener listener)
-	{
-		this.listener = listener;
-	}
-
-	public void setRulerEnabled(boolean enabled)
-	{
-		this.enabled = enabled;
-		setAlpha(enabled ? 1f : 0.3f);
-	}
-
-	/**
-	 * Multiply the current ruler zoom by a factor and clamp into the valid range. Use
-	 * scaleFactor > 1 to zoom in (finer ticks, smaller visible degree span); < 1 to zoom out.
-	 * Used by the toolbar's − / + buttons that flank the ruler.
-	 */
-	public void zoomBy(float scaleFactor)
-	{
-		pixelsPerDegree = Math.clamp(pixelsPerDegree * scaleFactor,
-			basePixelsPerDegree * MIN_PPD_FACTOR, basePixelsPerDegree * MAX_PPD_FACTOR);
-		invalidate();
-	}
-
-	/**
-	 * Snap the ruler to its maximum zoom level (finest 0.01° tick precision). Called by the
-	 * auto-rotate flow after horizon detection lands a precise angle, so the user can
-	 * immediately fine-tune around the detected value.
-	 */
-	public void zoomToMax()
-	{
-		pixelsPerDegree = basePixelsPerDegree * MAX_PPD_FACTOR;
-		invalidate();
-	}
-
-	@Override
-	protected void onDraw(Canvas canvas)
-	{
-		int width = getWidth();
-		int height = getHeight();
-		float centerX = width / 2f;
-		float labelY = height - 1;
-		float tickTop = 2;
-		float tickBot = height - labelPaint.getTextSize() - 3;
-
-		float degreesVisible = width / pixelsPerDegree;
-		TickConfig tickConfig = chooseTickConfig(degreesVisible);
-
-		// Use integer tick indices to avoid float accumulation errors.
-		// tickIndex * tickConfig.minor = degree value.
-		float halfVisible = degreesVisible / 2f;
-		int iStart = (int) Math.floor((currentDegrees - halfVisible - tickConfig.major) / tickConfig.minor);
-		int iEnd = (int) Math.ceil((currentDegrees + halfVisible + tickConfig.major) / tickConfig.minor);
-
-		// Multiplier to convert minor intervals to major check (integer comparison)
-		int majorEvery = Math.round(tickConfig.major / tickConfig.minor);
-		int detentEvery = Math.round(45f / tickConfig.minor);
-
-		for (int i = iStart; i <= iEnd; i++)
-		{
-			float deg = i * tickConfig.minor;
-			if (deg < MIN_DEG || deg > MAX_DEG)
-			{
-				continue;
-			}
-
-			float x = centerX + (deg - currentDegrees) * pixelsPerDegree;
-			if (x < -OFF_SCREEN_MARGIN || x > width + OFF_SCREEN_MARGIN)
-			{
-				continue;
-			}
-
-			boolean isDetent = detentEvery > 0 && i % detentEvery == 0;
-			boolean isMajor = majorEvery > 0 && i % majorEvery == 0;
-
-			if (isDetent)
-			{
-				canvas.drawLine(x, tickTop, x, tickBot, detentTickPaint);
-				canvas.drawText(TextFormat.degrees(deg), x, labelY, labelPaint);
-			}
-			else if (isMajor)
-			{
-				float mid = (tickTop + tickBot) / 2f;
-				float halfH = (tickBot - tickTop) * 0.35f;
-				canvas.drawLine(x, mid - halfH, x, mid + halfH, majorTickPaint);
-				canvas.drawText(TextFormat.degrees(deg), x, labelY, labelPaint);
-			}
-			else
-			{
-				float mid = (tickTop + tickBot) / 2f;
-				float halfH = (tickBot - tickTop) * 0.18f;
-				canvas.drawLine(x, mid - halfH, x, mid + halfH, minorTickPaint);
-			}
-		}
-
-		// Zero marker
-		float zeroX = centerX - currentDegrees * pixelsPerDegree;
-		if (zeroX > -ZERO_MARKER_MARGIN && zeroX < width + ZERO_MARKER_MARGIN && currentDegrees != 0f)
-		{
-			canvas.drawLine(zeroX, tickTop, zeroX, tickBot, zeroPaint);
-		}
-
-		float triangleHeight = 4 * getResources().getDisplayMetrics().density;
-		indicatorPaint.setStyle(Paint.Style.FILL);
-		indicatorTriangle.rewind();
-		indicatorTriangle.moveTo(centerX, tickTop);
-		indicatorTriangle.lineTo(centerX - triangleHeight, tickTop + triangleHeight);
-		indicatorTriangle.lineTo(centerX + triangleHeight, tickTop + triangleHeight);
-		indicatorTriangle.close();
-		canvas.drawPath(indicatorTriangle, indicatorPaint);
-		indicatorPaint.setStyle(Paint.Style.STROKE);
-		canvas.drawLine(centerX, tickTop + triangleHeight, centerX, tickBot, indicatorPaint);
-	}
-
 	private void notifyChanged()
 	{
 		if (listener != null)
 		{
 			listener.onRotationChanged(currentDegrees);
 		}
-	}
-
-	/**
-	 * Cancel any active fling and unregister the pending frame callback so it doesn't reschedule
-	 * itself. Safe to call when no fling is active — idempotent.
-	 */
-	private void stopFling()
-	{
-		flingActive = false;
-		scroller.forceFinished(true);
-		Choreographer.getInstance().removeFrameCallback(flingFrameCallback);
 	}
 
 	private void snapAndNotify()
@@ -492,23 +485,33 @@ public class RotationRulerView extends View
 		return snapTo(deg, tickConfig.minor);
 	}
 
-	// Pre-built tick configurations for each zoom level. Indexed parallel to TICK_THRESHOLDS:
-	// the first config whose threshold is strictly below degreesVisible wins. Cached as
-	// static finals because chooseTickConfig is called on every onDraw and every snapToTick
-	// during a fling — otherwise we'd allocate 60+ TickConfig records per second.
-	private static final TickConfig[] TICK_CONFIGS = {
-		new TickConfig(10f,   45f),
-		new TickConfig(5f,    45f),
-		new TickConfig(1f,    10f),
-		new TickConfig(1f,    5f),
-		new TickConfig(0.5f,  1f),
-		new TickConfig(0.1f,  0.5f),
-		new TickConfig(0.05f, 0.1f),
-		new TickConfig(0.01f, 0.1f),
-	};
-	private static final float[] TICK_THRESHOLDS = {
-		270f, 90f, 30f, 10f, 3f, 1f, 0.3f, 0f,
-	};
+	/**
+	 * Fire the OverScroller + register the Choreographer frame callback for fling.
+	 * Separated from handleTouchRelease so the high-velocity branch reads as a single
+	 * named action rather than eight lines of scroller-setup arithmetic.
+	 */
+	private void startFling(float xVelocity)
+	{
+		float scaled = pixelsPerDegree * SCROLL_SUBPIXEL_SCALE;
+		int startX = (int) (currentDegrees * scaled);
+		int minX = (int) (MIN_DEG * scaled);
+		int maxX = (int) (MAX_DEG * scaled);
+		scroller.fling(startX, 0, (int) (-xVelocity * SCROLL_SUBPIXEL_SCALE), 0,
+			minX, maxX, 0, 0);
+		flingActive = true;
+		Choreographer.getInstance().postFrameCallback(flingFrameCallback);
+	}
+
+	/**
+	 * Cancel any active fling and unregister the pending frame callback so it doesn't reschedule
+	 * itself. Safe to call when no fling is active — idempotent.
+	 */
+	private void stopFling()
+	{
+		flingActive = false;
+		scroller.forceFinished(true);
+		Choreographer.getInstance().removeFrameCallback(flingFrameCallback);
+	}
 
 	/**
 	 * Choose tick intervals based on how many degrees are visible on screen. Walks
@@ -531,6 +534,4 @@ public class RotationRulerView extends View
 	{
 		return Math.round(val / step) * step;
 	}
-
-	private record TickConfig(float minor, float major) {}
 }

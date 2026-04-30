@@ -25,11 +25,11 @@ import com.cropcenter.metadata.GainMapExtractor;
 import com.cropcenter.metadata.JpegMetadataExtractor;
 import com.cropcenter.metadata.JpegSegment;
 import com.cropcenter.metadata.SeftExtractor;
-import com.cropcenter.model.AspectRatio;
 import com.cropcenter.model.CenterMode;
 import com.cropcenter.model.CropState;
 import com.cropcenter.model.EditorMode;
 import com.cropcenter.model.ExportConfig;
+import com.cropcenter.util.AiRegionDetector.AiMask;
 import com.cropcenter.util.BitmapUtils;
 import com.cropcenter.util.SafFileHelper;
 import com.cropcenter.util.StoragePermissionHelper;
@@ -47,6 +47,7 @@ public class MainActivity extends AppCompatActivity implements SaveHost, UiHost,
 	private static final String TAG = "CropCenter";
 
 	private final AtomicBoolean busy = new AtomicBoolean(false);
+	private final CropState state = new CropState();
 	// Single-thread executor with daemon-threaded worker — serialises load/export/horizon-detect
 	// so only one heavyweight CropState-touching task runs at a time. Daemon thread doesn't
 	// prevent JVM exit, so we don't shut it down on onDestroy — any in-flight task that outlives
@@ -57,11 +58,15 @@ public class MainActivity extends AppCompatActivity implements SaveHost, UiHost,
 		t.setDaemon(true);
 		return t;
 	});
+	// safFiles / permissions declared before saveController and graftController because both
+	// constructors take them — Java initialises fields in declaration order, so dependencies
+	// must come first regardless of strict alphabetical ordering.
 	private final SafFileHelper safFiles = new SafFileHelper(this);
 	private final StoragePermissionHelper permissions = new StoragePermissionHelper(this);
 	private final SaveController saveController = new SaveController(this, safFiles, permissions);
 	private final GraftController graftController = new GraftController(this, safFiles,
 		this::applyGraftedBytes);
+	// ui declared before toolbar for the same dependency reason.
 	private final UiSync ui = new UiSync(this);
 	private final ToolbarBinder toolbar = new ToolbarBinder(this, ui);
 
@@ -71,7 +76,6 @@ public class MainActivity extends AppCompatActivity implements SaveHost, UiHost,
 	private CenterMode moveLockPref = CenterMode.VERTICAL;
 	private CenterMode selectLockPref = CenterMode.BOTH;
 	private CropEditorView editorView;
-	private CropState state = new CropState();
 	private RotationRulerView rotationRuler;
 	private TextView txtImageFormats;
 	private TextView txtImageInfo;
@@ -466,51 +470,39 @@ public class MainActivity extends AppCompatActivity implements SaveHost, UiHost,
 	 * (original's identity metadata + edit's pixel content + original's HDR package + SEFT
 	 * trailer); applyImageBytes treats them like any other freshly-loaded JPEG so the
 	 * existing crop / save pipeline operates on them unchanged. Invoked on the UI thread
-	 * via the BiConsumer that GraftController fires from runOnUiThread.
+	 * via the GraftReadyHandler that GraftController fires from runOnUiThread.
 	 *
 	 * pathAndId is null — the grafted file isn't on disk anywhere; future Save uses
 	 * ACTION_CREATE_DOCUMENT with the suggested name as default.
 	 *
-	 * Two follow-ups after applyImageBytes returns:
-	 *   - AspectRatio.FREE so the UI's auto-recompute (ensureCropCenter +
-	 *     recomputeCrop, triggered by cropSizeDirty=true after reset) lands on a
-	 *     full-image crop. Without this, the user's preserved AR preference
-	 *     (typically 4:5) would carve the freshly-applied graft into a sub-region —
-	 *     not what the user wants from "apply this edit".
+	 * Busy ownership: GraftController.onEditPicked claims busy on the UI thread before
+	 * dispatching its bg work, and that claim is held all the way through to here. We
+	 * inherit it (no compareAndSet — racing here is impossible because Save / Open
+	 * couldn't have started while busy was held) and release it in finally.
+	 *
+	 * Two follow-ups after applyImageBytes returns (both must happen AFTER, since
+	 * applyImageBytes calls state.reset() which would clear them):
 	 *   - graftApplied=true so ExportPipeline routes the next save through
 	 *     CropExporter.export instead of the verbatim-write bypass. The canvas
 	 *     pipeline regenerates the gain map (UltraHdrCompat.compressWithGainmap) so
-	 *     the HDR boost stays spatially aligned with the edit's primary pixels — the
-	 *     bypass would ship the source's gain map over the spliced primary verbatim,
-	 *     and any user crop would shift the boost off the features it's meant for.
-	 *     The canvas P3 conversion is near-identity here (graftedBytes carries
-	 *     source's DCI-P3 ICC; Bitmap canvas is DISPLAY_P3 — same chromaticities and
-	 *     white point), so the path adds no color drift, only re-encodes consistently.
+	 *     the HDR boost stays spatially aligned with the edit's primary pixels.
+	 *   - aiMask stashed on state so UltraHdrCompat can inpaint the gain map's boost
+	 *     values inside the AI fill (matches Generative Remove's intent of "this
+	 *     region looks like its neighbors" without the gain map's stale boost-the-
+	 *     removed-features artifact). Null when no AI region was detected.
 	 */
-	private void applyGraftedBytes(byte[] graftedBytes, String displayName)
+	private void applyGraftedBytes(byte[] graftedBytes, String displayName, AiMask aiMask)
 	{
-		if (!busy.compareAndSet(false, true))
-		{
-			showBusyToast();
-			return;
-		}
-		setBusyUi(true);
-
 		runInBackground(() ->
 		{
 			try
 			{
 				applyImageBytes(graftedBytes, displayName, null);
-				state.setAspectRatio(AspectRatio.FREE);
-				// Tell ExportPipeline this image is a graft, not a clean Samsung load —
-				// the verbatim-write bypass would skip the canvas-managed P3 conversion that
-				// the cropped graft path runs through CropExporter, producing a slightly
-				// different output structure than save-after-crop produces. Forcing the full
-				// encode path makes save-without-crop and save-after-crop yield byte-similar
-				// output (both go through Bitmap.compress on a Display P3 canvas + EXIF
-				// re-injection + fresh thumbnail). Has to happen AFTER applyImageBytes since
-				// applyImageBytes calls state.reset() which clears this flag.
 				state.setGraftApplied(true);
+				if (aiMask != null && aiMask.hasMaskedPixels())
+				{
+					state.setAiMask(aiMask);
+				}
 			}
 			catch (Exception e)
 			{
@@ -755,6 +747,23 @@ public class MainActivity extends AppCompatActivity implements SaveHost, UiHost,
 	}
 
 	/**
+	 * Append `part` to the format string if `cond` is true, separated from prior parts
+	 * by '+' (e.g. "EXIF+ICC+HDR"). No-op when `cond` is false.
+	 */
+	private static void appendIf(StringBuilder sb, boolean cond, String part)
+	{
+		if (!cond)
+		{
+			return;
+		}
+		if (sb.length() > 0)
+		{
+			sb.append('+');
+		}
+		sb.append(part);
+	}
+
+	/**
 	 * Scan the loaded JPEG for EXIF/ICC/XMP/HDR/SEFT markers, populate state, and build the
 	 * human-readable format string shown in the info bar.
 	 */
@@ -808,19 +817,6 @@ public class MainActivity extends AppCompatActivity implements SaveHost, UiHost,
 		appendIf(sb, gainMap != null, "HDR");
 		appendIf(sb, hasSeft, "Samsung");
 		return sb.toString();
-	}
-
-	private static void appendIf(StringBuilder sb, boolean cond, String part)
-	{
-		if (!cond)
-		{
-			return;
-		}
-		if (sb.length() > 0)
-		{
-			sb.append('+');
-		}
-		sb.append(part);
 	}
 
 }

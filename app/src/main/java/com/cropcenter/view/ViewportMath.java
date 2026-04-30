@@ -17,8 +17,8 @@ import com.cropcenter.util.RotationMath;
  */
 final class ViewportMath
 {
-	private static final float MIN_ZOOM = 1f;
 	private static final float MAX_ZOOM = 256f;
+	private static final float MIN_ZOOM = 1f;
 
 	private final View view;
 

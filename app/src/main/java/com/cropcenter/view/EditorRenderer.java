@@ -113,9 +113,9 @@ final class EditorRenderer
 			int cropW = state.getCropW();
 			int cropH = state.getCropH();
 			// Use the continuous-float crop origin for rendering so smooth rotation produces
-			// smooth crop motion. The exporter's integer getCropImgX absorbs the sub-pixel.
-			gridImgX = state.getCropImgXFloat();
-			gridImgY = state.getCropImgYFloat();
+			// smooth crop motion. The exporter's integer getCropImageX absorbs the sub-pixel.
+			gridImgX = state.getCropImageXFloat();
+			gridImgY = state.getCropImageYFloat();
 			gridW = cropW;
 			gridH = cropH;
 			drawCropOverlay(canvas, state, gridImgX, gridImgY, cropW, cropH);
@@ -244,34 +244,72 @@ final class EditorRenderer
 	}
 
 	/**
-	 * Return [startX, startY, endX, endY] — the integer AABB of image coords visible
-	 * under the current viewport + rotation, clamped to the bitmap's bounds. Computed
-	 * by un-rotating each of the four screen-viewport corners into image space and
-	 * taking the axis-aligned bbox of those points.
+	 * Draw the numeric index label next to each selection point. Labels are drawn
+	 * axis-aligned (upright) at the rotated screen position of each point so the digits
+	 * stay legible under rotation. This runs in the un-rotated canvas — caller must
+	 * have already restored out of the rotated canvas before calling.
 	 */
-	private int[] visibleImageBoundsAabb(CropState state, int imgW, int imgH)
+	private void drawSelectionLabels(Canvas canvas, CropState state,
+		List<SelectionPoint> points, float scale)
 	{
-		int viewWidth = view.getWidth();
-		int viewHeight = view.getHeight();
-		float[] cornerTopLeft = viewport.screenToImagePixel(0f, 0f, state);
-		float[] cornerTopRight = viewport.screenToImagePixel(viewWidth, 0f, state);
-		float[] cornerBottomLeft = viewport.screenToImagePixel(0f, viewHeight, state);
-		float[] cornerBottomRight = viewport.screenToImagePixel(viewWidth, viewHeight, state);
+		float pixelSize = scale;
+		int labelIndex = 0;
+		for (SelectionPoint point : points)
+		{
+			labelIndex++;
+			if (pixelSize >= 6f)
+			{
+				int pixelX = (int) Math.floor(point.x());
+				int pixelY = (int) Math.floor(point.y());
+				float[] center = viewport.imageToScreenRotated(
+					pixelX + 0.5f, pixelY + 0.5f, state);
+				infoPaint.setTextAlign(Paint.Align.CENTER);
+				infoPaint.setTextSize(Math.min(pixelSize * 0.6f, 14f * density));
+				infoPaint.setColor(POINT_LABEL_COLOR);
+				float labelOffset = infoPaint.getTextSize() * 0.35f;
+				canvas.drawText(String.valueOf(labelIndex),
+					center[0], center[1] + labelOffset, infoPaint);
+			}
+			else
+			{
+				float[] center = viewport.imageToScreenRotated(point.x(), point.y(), state);
+				infoPaint.setTextAlign(Paint.Align.CENTER);
+				infoPaint.setTextSize(9f * density);
+				infoPaint.setColor(POINT_LABEL_COLOR);
+				canvas.drawText(String.valueOf(labelIndex),
+					center[0], center[1] + 4, infoPaint);
+			}
+		}
+	}
 
-		float minX = Math.min(Math.min(cornerTopLeft[0], cornerTopRight[0]),
-			Math.min(cornerBottomLeft[0], cornerBottomRight[0]));
-		float maxX = Math.max(Math.max(cornerTopLeft[0], cornerTopRight[0]),
-			Math.max(cornerBottomLeft[0], cornerBottomRight[0]));
-		float minY = Math.min(Math.min(cornerTopLeft[1], cornerTopRight[1]),
-			Math.min(cornerBottomLeft[1], cornerBottomRight[1]));
-		float maxY = Math.max(Math.max(cornerTopLeft[1], cornerTopRight[1]),
-			Math.max(cornerBottomLeft[1], cornerBottomRight[1]));
-
-		int startX = Math.max(0, (int) Math.floor(minX) - 1);
-		int startY = Math.max(0, (int) Math.floor(minY) - 1);
-		int endX = Math.min(imgW, (int) Math.ceil(maxX) + 1);
-		int endY = Math.min(imgH, (int) Math.ceil(maxY) + 1);
-		return new int[] { startX, startY, endX, endY };
+	/**
+	 * Draw the per-selection-point marker. Filled image-pixel square when zoomed past
+	 * 6× screen-pixel per image-pixel (marker visibly follows the rotated pixel grid,
+	 * becoming a rotated quadrilateral at non-cardinal angles); a 10-px circle when
+	 * zoomed out (single pixel is too small to see).
+	 */
+	private void drawSelectionMarkers(Canvas canvas, List<SelectionPoint> points, float scale)
+	{
+		float pixelSize = scale; // one image pixel in screen pixels
+		for (SelectionPoint point : points)
+		{
+			if (pixelSize >= 6f)
+			{
+				int pixelX = (int) Math.floor(point.x());
+				int pixelY = (int) Math.floor(point.y());
+				float pixelLeft = viewport.imageToScreenX(pixelX);
+				float pixelTop = viewport.imageToScreenY(pixelY);
+				float pixelRight = viewport.imageToScreenX(pixelX + 1);
+				float pixelBottom = viewport.imageToScreenY(pixelY + 1);
+				canvas.drawRect(pixelLeft, pixelTop, pixelRight, pixelBottom, pointPaint);
+			}
+			else
+			{
+				float screenX = viewport.imageToScreenX(point.x());
+				float screenY = viewport.imageToScreenY(point.y());
+				canvas.drawCircle(screenX, screenY, 10, pointPaint);
+			}
+		}
 	}
 
 	private void drawSelectionPoints(Canvas canvas, CropState state, float scale)
@@ -340,72 +378,34 @@ final class EditorRenderer
 	}
 
 	/**
-	 * Draw the per-selection-point marker. Filled image-pixel square when zoomed past
-	 * 6× screen-pixel per image-pixel (marker visibly follows the rotated pixel grid,
-	 * becoming a rotated quadrilateral at non-cardinal angles); a 10-px circle when
-	 * zoomed out (single pixel is too small to see).
+	 * Return [startX, startY, endX, endY] — the integer AABB of image coords visible
+	 * under the current viewport + rotation, clamped to the bitmap's bounds. Computed
+	 * by un-rotating each of the four screen-viewport corners into image space and
+	 * taking the axis-aligned bbox of those points.
 	 */
-	private void drawSelectionMarkers(Canvas canvas, List<SelectionPoint> points, float scale)
+	private int[] visibleImageBoundsAabb(CropState state, int imgW, int imgH)
 	{
-		float pixelSize = scale; // one image pixel in screen pixels
-		for (SelectionPoint point : points)
-		{
-			if (pixelSize >= 6f)
-			{
-				int pixelX = (int) Math.floor(point.x());
-				int pixelY = (int) Math.floor(point.y());
-				float pixelLeft = viewport.imageToScreenX(pixelX);
-				float pixelTop = viewport.imageToScreenY(pixelY);
-				float pixelRight = viewport.imageToScreenX(pixelX + 1);
-				float pixelBottom = viewport.imageToScreenY(pixelY + 1);
-				canvas.drawRect(pixelLeft, pixelTop, pixelRight, pixelBottom, pointPaint);
-			}
-			else
-			{
-				float screenX = viewport.imageToScreenX(point.x());
-				float screenY = viewport.imageToScreenY(point.y());
-				canvas.drawCircle(screenX, screenY, 10, pointPaint);
-			}
-		}
-	}
+		int viewWidth = view.getWidth();
+		int viewHeight = view.getHeight();
+		float[] cornerTopLeft = viewport.screenToImagePixel(0f, 0f, state);
+		float[] cornerTopRight = viewport.screenToImagePixel(viewWidth, 0f, state);
+		float[] cornerBottomLeft = viewport.screenToImagePixel(0f, viewHeight, state);
+		float[] cornerBottomRight = viewport.screenToImagePixel(viewWidth, viewHeight, state);
 
-	/**
-	 * Draw the numeric index label next to each selection point. Labels are drawn
-	 * axis-aligned (upright) at the rotated screen position of each point so the digits
-	 * stay legible under rotation. This runs in the un-rotated canvas — caller must
-	 * have already restored out of the rotated canvas before calling.
-	 */
-	private void drawSelectionLabels(Canvas canvas, CropState state,
-		List<SelectionPoint> points, float scale)
-	{
-		float pixelSize = scale;
-		int labelIndex = 0;
-		for (SelectionPoint point : points)
-		{
-			labelIndex++;
-			if (pixelSize >= 6f)
-			{
-				int pixelX = (int) Math.floor(point.x());
-				int pixelY = (int) Math.floor(point.y());
-				float[] center = viewport.imageToScreenRotated(
-					pixelX + 0.5f, pixelY + 0.5f, state);
-				infoPaint.setTextAlign(Paint.Align.CENTER);
-				infoPaint.setTextSize(Math.min(pixelSize * 0.6f, 14f * density));
-				infoPaint.setColor(POINT_LABEL_COLOR);
-				float labelOffset = infoPaint.getTextSize() * 0.35f;
-				canvas.drawText(String.valueOf(labelIndex),
-					center[0], center[1] + labelOffset, infoPaint);
-			}
-			else
-			{
-				float[] center = viewport.imageToScreenRotated(point.x(), point.y(), state);
-				infoPaint.setTextAlign(Paint.Align.CENTER);
-				infoPaint.setTextSize(9f * density);
-				infoPaint.setColor(POINT_LABEL_COLOR);
-				canvas.drawText(String.valueOf(labelIndex),
-					center[0], center[1] + 4, infoPaint);
-			}
-		}
+		float minX = Math.min(Math.min(cornerTopLeft[0], cornerTopRight[0]),
+			Math.min(cornerBottomLeft[0], cornerBottomRight[0]));
+		float maxX = Math.max(Math.max(cornerTopLeft[0], cornerTopRight[0]),
+			Math.max(cornerBottomLeft[0], cornerBottomRight[0]));
+		float minY = Math.min(Math.min(cornerTopLeft[1], cornerTopRight[1]),
+			Math.min(cornerBottomLeft[1], cornerBottomRight[1]));
+		float maxY = Math.max(Math.max(cornerTopLeft[1], cornerTopRight[1]),
+			Math.max(cornerBottomLeft[1], cornerBottomRight[1]));
+
+		int startX = Math.max(0, (int) Math.floor(minX) - 1);
+		int startY = Math.max(0, (int) Math.floor(minY) - 1);
+		int endX = Math.min(imgW, (int) Math.ceil(maxX) + 1);
+		int endY = Math.min(imgH, (int) Math.ceil(maxY) + 1);
+		return new int[] { startX, startY, endX, endY };
 	}
 
 	private static int withAlpha(int color, int alpha)

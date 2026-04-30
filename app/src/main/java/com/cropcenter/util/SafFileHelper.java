@@ -74,11 +74,15 @@ public final class SafFileHelper
 	 * auto-renaming) into the crash-safe Replace pattern: write+verify the placeholder,
 	 * then swap onto the target.
 	 *
-	 * Derives the parent document URI from `docUri`'s document ID by stripping the last
-	 * `/`-delimited segment — works for path-addressed providers (ExternalStorageProvider's
-	 * "primary:Pictures/foo.jpg"). Returns null when `docUri` has no document ID, an opaque
-	 * ID without slashes, or when the provider rejects createDocument (doesn't support
-	 * FLAG_DIR_SUPPORTS_CREATE). The caller must have a fallback plan for null.
+	 * Derives the parent document URI from `docUri`'s document ID. For path-addressed
+	 * providers like ExternalStorageProvider, the parent is the prefix up to the last `/`
+	 * ("primary:Pictures/foo.jpg" → "primary:Pictures"); when the file lives at the
+	 * provider root the volume `:` separator stands in ("primary:foo.jpg" → "primary:")
+	 * so root-level documents still get the crash-safe sibling-replace path instead of
+	 * falling onto the in-place fallback. Returns null when `docUri` has no document ID,
+	 * an opaque ID without either separator, or when the provider rejects createDocument
+	 * (doesn't support FLAG_DIR_SUPPORTS_CREATE). The caller must have a fallback plan
+	 * for null.
 	 */
 	public Uri createSiblingPlaceholder(Uri docUri, String mimeType, String placeholderName)
 	{
@@ -89,12 +93,11 @@ public final class SafFileHelper
 			{
 				return null;
 			}
-			int slash = docId.lastIndexOf('/');
-			if (slash <= 0)
+			String parentDocId = parentDocIdOf(docId);
+			if (parentDocId == null)
 			{
 				return null;
 			}
-			String parentDocId = docId.substring(0, slash);
 			Uri parentUri = DocumentsContract.buildDocumentUri(
 				docUri.getAuthority(), parentDocId);
 			return DocumentsContract.createDocument(
@@ -108,10 +111,12 @@ public final class SafFileHelper
 	}
 
 	/**
-	 * Build a sibling document URI by swapping the last path segment of src's document ID for
-	 * siblingName. Works on providers that encode paths in their document IDs (notably the
-	 * built-in external-storage provider). Returns null for opaque-ID providers or providers
-	 * that don't expose a document ID.
+	 * Build a sibling document URI by swapping the last segment of src's document ID for
+	 * siblingName. Works on providers that encode paths in their document IDs (notably
+	 * ExternalStorageProvider). Handles files at the provider root by treating the volume
+	 * `:` as the segment separator ("primary:foo.jpg" → "primary:siblingName") so root-
+	 * level documents get the same sibling-derivation as nested ones. Returns null for
+	 * opaque-ID providers or providers that don't expose a document ID.
 	 */
 	public Uri deriveSiblingUri(Uri src, String siblingName)
 	{
@@ -122,13 +127,13 @@ public final class SafFileHelper
 			{
 				return null;
 			}
-			int slash = docId.lastIndexOf('/');
-			if (slash < 0)
+			int sepEnd = lastSegmentSeparatorEnd(docId);
+			if (sepEnd < 0)
 			{
 				return null;
 			}
 			return DocumentsContract.buildDocumentUri(src.getAuthority(),
-				docId.substring(0, slash + 1) + siblingName);
+				docId.substring(0, sepEnd) + siblingName);
 		}
 		catch (Exception e)
 		{
@@ -679,5 +684,48 @@ public final class SafFileHelper
 		}
 		// PNG signature start (89 50 4E 47)
 		return (bytes[0] & 0xFF) == 0x89 && bytes[1] == 'P' && bytes[2] == 'N' && bytes[3] == 'G';
+	}
+
+	/**
+	 * Index just past the separator that ends the parent's segment of a path-addressed
+	 * SAF document ID. For nested files ("primary:Pictures/foo.jpg") this is the position
+	 * after the last "/", so docId.substring(0, end) + child yields the sibling. For files
+	 * at the provider root ("primary:foo.jpg") it falls back to the position after the
+	 * volume ":". Returns -1 for opaque IDs that have neither separator.
+	 */
+	private static int lastSegmentSeparatorEnd(String docId)
+	{
+		int slash = docId.lastIndexOf('/');
+		if (slash >= 0)
+		{
+			return slash + 1;
+		}
+		int colon = docId.indexOf(':');
+		if (colon >= 0)
+		{
+			return colon + 1;
+		}
+		return -1;
+	}
+
+	/**
+	 * Parent document ID of a path-addressed SAF document ID, or null when the ID is opaque.
+	 * Strips the trailing "/segment" for nested paths; for root-level files the parent is
+	 * the volume prefix including the ":" ("primary:foo.jpg" → "primary:"), which
+	 * ExternalStorageProvider accepts as the root document.
+	 */
+	private static String parentDocIdOf(String docId)
+	{
+		int slash = docId.lastIndexOf('/');
+		if (slash > 0)
+		{
+			return docId.substring(0, slash);
+		}
+		int colon = docId.indexOf(':');
+		if (colon >= 0)
+		{
+			return docId.substring(0, colon + 1);
+		}
+		return null;
 	}
 }

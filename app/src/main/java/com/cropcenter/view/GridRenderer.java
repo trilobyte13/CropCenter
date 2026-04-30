@@ -45,17 +45,17 @@ public class GridRenderer
 	 * exporter's drawGridPixels writes.
 	 *
 	 * @param canvas              the canvas to draw on (screen coordinates)
-	 * @param cropImgX            crop left in image pixels
-	 * @param cropImgY            crop top in image pixels
-	 * @param cropImgW            crop width in image pixels
-	 * @param cropImgH            crop height in image pixels
+	 * @param cropImageX            crop left in image pixels
+	 * @param cropImageY            crop top in image pixels
+	 * @param cropImageW            crop width in image pixels
+	 * @param cropImageH            crop height in image pixels
 	 * @param config              grid configuration
 	 * @param pixelsPerImagePixel screen pixels per image pixel (baseScale * zoom)
 	 * @param imgToScreenX        converts image X to screen X
 	 * @param imgToScreenY        converts image Y to screen Y
 	 */
-	public void draw(Canvas canvas, float cropImgX, float cropImgY,
-		int cropImgW, int cropImgH, GridConfig config, float pixelsPerImagePixel,
+	public void draw(Canvas canvas, float cropImageX, float cropImageY,
+		int cropImageW, int cropImageH, GridConfig config, float pixelsPerImagePixel,
 		CoordMapper imgToScreenX, CoordMapper imgToScreenY)
 	{
 		if (!config.enabled() || config.columns() <= 0 || config.rows() <= 0)
@@ -68,26 +68,26 @@ public class GridRenderer
 		gridPaint.setStrokeWidth(Math.max(1, config.lineWidth() * pixelsPerImagePixel));
 		gridPaint.setStyle(Paint.Style.STROKE);
 
-		float screenTop = imgToScreenY.map(cropImgY);
-		float screenBottom = imgToScreenY.map(cropImgY + cropImgH);
-		float screenLeft = imgToScreenX.map(cropImgX);
-		float screenRight = imgToScreenX.map(cropImgX + cropImgW);
+		float screenTop = imgToScreenY.map(cropImageY);
+		float screenBottom = imgToScreenY.map(cropImageY + cropImageH);
+		float screenLeft = imgToScreenX.map(cropImageX);
+		float screenRight = imgToScreenX.map(cropImageX + cropImageW);
 
 		// Vertical lines.
-		float cropCenterX = cropImgX + cropImgW / 2f;
+		float cropCenterX = cropImageX + cropImageW / 2f;
 		for (int i = 1; i < config.columns(); i++)
 		{
 			float sx = imgToScreenX.map(
-				linePos(i, config.columns(), cropImgX, cropImgW, cropCenterX));
+				linePos(i, config.columns(), cropImageX, cropImageW, cropCenterX));
 			canvas.drawLine(sx, screenTop, sx, screenBottom, gridPaint);
 		}
 
 		// Horizontal lines.
-		float cropCenterY = cropImgY + cropImgH / 2f;
+		float cropCenterY = cropImageY + cropImageH / 2f;
 		for (int i = 1; i < config.rows(); i++)
 		{
 			float sy = imgToScreenY.map(
-				linePos(i, config.rows(), cropImgY, cropImgH, cropCenterY));
+				linePos(i, config.rows(), cropImageY, cropImageH, cropCenterY));
 			canvas.drawLine(screenLeft, sy, screenRight, sy, gridPaint);
 		}
 	}

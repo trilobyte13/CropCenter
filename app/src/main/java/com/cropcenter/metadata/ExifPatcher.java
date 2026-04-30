@@ -20,8 +20,8 @@ public final class ExifPatcher
 	private static final String TAG = "ExifPatcher";
 	// APP1 segment size constraints (per JPEG spec): the 2-byte length field caps total segment
 	// bytes at 65535 and payload (segment minus the 2-byte length prefix) at 65533.
-	private static final int APP1_MAX_SEGMENT_BYTES = 65535;
 	private static final int APP1_MAX_PAYLOAD_BYTES = 65533;
+	private static final int APP1_MAX_SEGMENT_BYTES = 65535;
 	private static final int DEFAULT_THUMB_BUDGET = 20_000; // used when we can't measure the segment
 	private static final int IFD1_ESTIMATED_OVERHEAD = 42; // rough bytes for the IFD1 header we'd add
 	private static final int TIFF_HEADER_OFFSET = 10; // bytes from start of APP1 data to the TIFF header

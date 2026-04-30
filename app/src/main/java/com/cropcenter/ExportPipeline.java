@@ -8,6 +8,7 @@ import android.widget.Toast;
 import com.cropcenter.crop.CropExporter;
 import com.cropcenter.model.CropState;
 import com.cropcenter.model.ExportConfig;
+import com.cropcenter.util.BitmapUtils;
 import com.cropcenter.util.SafFileHelper;
 import com.cropcenter.util.UltraHdrCompat;
 
@@ -334,7 +335,12 @@ final class ExportPipeline
 		{
 			return false;
 		}
-		if (state.getRotationDegrees() != 0f)
+		// Honor the same epsilon the renderer uses — sub-epsilon rotation is a no-op there,
+		// so forcing a re-encode for it would burn cycles + add quantization noise to a
+		// visually identical primary. The ruler caps its finest snap step at this same epsilon
+		// so it can never produce a rotation we'd treat as "real" while CropEngine /
+		// ViewportMath / BitmapUtils.drawCropped collapse it to zero.
+		if (Math.abs(state.getRotationDegrees()) >= BitmapUtils.ROTATION_EPSILON)
 		{
 			return false;
 		}
