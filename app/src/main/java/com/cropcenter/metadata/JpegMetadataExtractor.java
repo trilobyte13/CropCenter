@@ -54,15 +54,23 @@ public final class JpegMetadataExtractor
 			}
 			int totalLen = 2 + segLen; // FF xx + segment length (includes the 2 length bytes)
 
+			// Bounds + overflow guard. segLen is u16 so totalLen ≤ 65539, no int overflow
+			// is possible here in practice — but the off+totalLen sum CAN overflow if a
+			// crafted file walks far enough that off itself is near Integer.MAX_VALUE.
+			// Bail if the segment claims to extend past EOF rather than continuing the
+			// loop with off advanced into negative territory (which would then index a
+			// negative offset on the next iteration's marker read, throwing IOOBE).
+			if (off + totalLen > jpeg.length || off + totalLen < off)
+			{
+				break;
+			}
+
 			// Keep APPn (E0-EF) and COM (FE)
 			if ((marker >= 0xE0 && marker <= 0xEF) || marker == 0xFE)
 			{
-				if (off + totalLen <= jpeg.length)
-				{
-					byte[] segData = new byte[totalLen];
-					System.arraycopy(jpeg, off, segData, 0, totalLen);
-					segments.add(new JpegSegment(marker, segData));
-				}
+				byte[] segData = new byte[totalLen];
+				System.arraycopy(jpeg, off, segData, 0, totalLen);
+				segments.add(new JpegSegment(marker, segData));
 			}
 
 			off += totalLen;

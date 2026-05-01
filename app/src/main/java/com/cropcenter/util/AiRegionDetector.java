@@ -35,18 +35,38 @@ public final class AiRegionDetector
 		 * True when at least one pixel is flagged as AI-modified. Callers use this to
 		 * skip the inpaint step entirely when the edit didn't change anything (the
 		 * inpaint would be a no-op but the JPEG re-encode of the gain map would still
-		 * burn cycles + add minor quantization noise to the saved file).
+		 * burn cycles + add minor quantization noise to the saved file). Short-circuits
+		 * on the first true pixel — use maskedCount when the actual number is needed.
 		 */
 		public boolean hasMaskedPixels()
 		{
-			for (boolean b : mask)
+			for (boolean flag : mask)
 			{
-				if (b)
+				if (flag)
 				{
 					return true;
 				}
 			}
 			return false;
+		}
+
+		/**
+		 * Total number of AI-modified pixels in the mask. Used by the graft sanity check
+		 * — a fraction (count / mask.length) far above what a typical Generative Remove
+		 * touch-up produces (~0.001%-0.5% of pixels) signals either a wrong-file pick or
+		 * a wholesale global edit, both of which the graft pipeline isn't designed for.
+		 */
+		public int maskedCount()
+		{
+			int count = 0;
+			for (boolean flag : mask)
+			{
+				if (flag)
+				{
+					count++;
+				}
+			}
+			return count;
 		}
 	}
 
@@ -89,7 +109,8 @@ public final class AiRegionDetector
 			edit = BitmapFactory.decodeByteArray(editBytes, 0, editBytes.length, opts);
 			if (source == null || edit == null)
 			{
-				Log.w(TAG, "Decode failed (source=" + (source != null) + ", edit=" + (edit != null) + ")");
+				Log.w(TAG, "Decode failed (source=" + (source != null)
+					+ ", edit=" + (edit != null) + ")");
 				return null;
 			}
 			int width = source.getWidth();

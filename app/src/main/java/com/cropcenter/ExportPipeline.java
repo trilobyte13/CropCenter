@@ -14,7 +14,6 @@ import com.cropcenter.util.UltraHdrCompat;
 
 import java.io.IOException;
 import java.io.OutputStream;
-import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 
 /**
@@ -40,7 +39,22 @@ final class ExportPipeline
 	{
 		// Default: caller is confident the URI is a fresh document (plain Save As, case C
 		// user-renamed, case B Keep). Cleanup a partial write on failure by deleting the URI.
-		exportTo(uri, null, null, false, null);
+		exportTo(uri, null, false, null);
+	}
+
+	/**
+	 * Overwrite fallback for SaveController case A when the target is a confirmed existing
+	 * file (priorSize > 0) AND sibling placeholder creation wasn't available (opaque-ID
+	 * provider). Direct-writes to `uri` with preserveOnFailure=true so a verification failure
+	 * doesn't destroy the original. `replacedName` is used for the success toast ("Replaced
+	 * <name>") so the user gets overwrite-specific confirmation that matches what this path
+	 * actually did — a generic "Saved N KB" would misrepresent a confirmed overwrite. Not as
+	 * crash-safe as Replace's write-then-swap — the destructive write is unavoidable on a
+	 * provider that won't give us a sibling placeholder.
+	 */
+	void exportToOverwrite(Uri uri, String replacedName)
+	{
+		exportTo(uri, null, true, replacedName);
 	}
 
 	/**
@@ -54,36 +68,11 @@ final class ExportPipeline
 	 */
 	void exportToPreserving(Uri uri)
 	{
-		exportTo(uri, null, null, true, null);
-	}
-
-	/**
-	 * Overwrite fallback for SaveController case A when the target is a confirmed existing
-	 * file (priorSize > 0) AND sibling placeholder creation wasn't available (opaque-ID
-	 * provider). Runs the Samsung Gallery Revert backup hook on the bg thread BEFORE the
-	 * encoder so the SEFT trailer can claim a backup path the user can recover through
-	 * Gallery's Revert UI, then direct-writes to `uri` with preserveOnFailure=true so a
-	 * verification failure doesn't destroy the original. `replacedName` is used for the
-	 * success toast ("Replaced <name>") so the user gets overwrite-specific confirmation
-	 * that matches the backup / SEFT semantics this path ran — a generic "Saved N KB"
-	 * would misrepresent a confirmed overwrite. Not as crash-safe as Replace's write-then-
-	 * swap — the destructive write is unavoidable on a provider that won't give us a
-	 * sibling placeholder — but the backup gives the user a recoverable path from the raw
-	 * bytes if the in-place write corrupts the target.
-	 */
-	void exportOverwriteWithBackup(Uri uri, BooleanSupplier preEncodeBg, String replacedName)
-	{
-		exportTo(uri, preEncodeBg, null, true, replacedName);
+		exportTo(uri, null, true, null);
 	}
 
 	/**
 	 * Encode-and-write on a background thread.
-	 *
-	 * `preEncodeBg` (optional): runs first on the background thread, before the encoder. Used
-	 * by the Replace flow to write the Samsung Gallery Revert backup BEFORE the SEFT trailer
-	 * is encoded — the supplier's boolean return controls whether the encoded SEFT claims a
-	 * backup exists. Without this pre-step, the SEFT would claim a backup that might not
-	 * actually get written (or might fail to write) in `onSavedBg`.
 	 *
 	 * `onSavedBg` (optional): runs after the write verifies. The callback receives the exact
 	 * bytes written so the Replace flow can drop them onto the target file without re-reading
@@ -91,15 +80,15 @@ final class ExportPipeline
 	 * present, doExport's "Saved" toast is suppressed — the callback issues its own
 	 * final-outcome message (success or failure dialog).
 	 */
-	void exportTo(Uri uri, BooleanSupplier preEncodeBg, Consumer<byte[]> onSavedBg)
+	void exportTo(Uri uri, Consumer<byte[]> onSavedBg)
 	{
 		// Replace flow: the placeholder URI is known-fresh (auto-rename or programmatic
 		// createDocument) so delete-on-failure is the correct cleanup. If a future caller
-		// needs preserveOnFailure + preEncode + onSavedBg together, add another overload.
-		exportTo(uri, preEncodeBg, onSavedBg, false, null);
+		// needs preserveOnFailure + onSavedBg together, add another overload.
+		exportTo(uri, onSavedBg, false, null);
 	}
 
-	private void exportTo(Uri uri, BooleanSupplier preEncodeBg, Consumer<byte[]> onSavedBg,
+	private void exportTo(Uri uri, Consumer<byte[]> onSavedBg,
 		boolean preserveOnFailure, String replacedName)
 	{
 		if (host.getState().getSourceImage() == null)
@@ -134,23 +123,7 @@ final class ExportPipeline
 		{
 			try
 			{
-				// Pre-encode hook: Replace writes the backup here so the upcoming SEFT encode
-				// knows whether to claim a backup exists. Failure is surfaced via the hook's
-				// return value; the hook itself is responsible for warning the user.
-				boolean includeBackupInSeft = false;
-				if (preEncodeBg != null)
-				{
-					try
-					{
-						includeBackupInSeft = preEncodeBg.getAsBoolean();
-					}
-					catch (Exception e)
-					{
-						Log.w(TAG, "pre-encode hook threw", e);
-					}
-				}
-				byte[] data = doExport(uri, isReplaceSave, includeBackupInSeft,
-					preserveOnFailure, replacedName);
+				byte[] data = doExport(uri, isReplaceSave, preserveOnFailure, replacedName);
 				if (data != null && onSavedBg != null)
 				{
 					try
@@ -197,14 +170,7 @@ final class ExportPipeline
 	 *
 	 * `isReplaceSave` — true when this export is the placeholder write of a Replace flow.
 	 * Suppresses doExport's "Saved" toast because the Replace swap that follows fires its own
-	 * outcome message. Applies regardless of whether the backup succeeded.
-	 *
-	 * `includeBackupInSeft` — true ONLY when the Replace flow has already successfully written
-	 * the Samsung Gallery Revert backup file (via ExportPipeline's pre-encode hook). Gates
-	 * SEFT backup-path generation in the encoder: Samsung Gallery reads that path and offers
-	 * Revert if the file exists, so claiming a backup that doesn't exist would surface Revert
-	 * on a non-revertable file. Always false for plain Save As / Keep, and also false for
-	 * Replace when the backup write failed.
+	 * outcome message.
 	 *
 	 * `preserveOnFailure` — when verifyPhase rejects the write, true leaves the partial file
 	 * on disk; false deletes it. Set by the caller based on whether the URI might point at
@@ -213,20 +179,20 @@ final class ExportPipeline
 	 *
 	 * `replacedName` — when non-null AND isReplaceSave is false, a successful save emits
 	 * "Replaced <replacedName>" instead of the generic "Saved N KB" toast. Used by the
-	 * opaque-ID overwrite-fallback path (exportOverwriteWithBackup) so a confirmed
-	 * overwrite announces itself as an overwrite, matching the backup / SEFT semantics
-	 * that path ran. Null for plain Save As and the fallback preservation path.
+	 * opaque-ID overwrite-fallback path (exportToOverwrite) so a confirmed overwrite
+	 * announces itself as an overwrite. Null for plain Save As and the fallback
+	 * preservation path.
 	 *
 	 * Failure toasts fire regardless of the flags.
 	 */
-	private byte[] doExport(Uri uri, boolean isReplaceSave, boolean includeBackupInSeft,
+	private byte[] doExport(Uri uri, boolean isReplaceSave,
 		boolean preserveOnFailure, String replacedName)
 	{
 		boolean isPng = ExportConfig.FORMAT_PNG.equals(host.getState().getExportConfig().format());
 		boolean srcHadHdr = host.getState().getGainMap() != null
 			&& host.getState().getGainMap().length > 0;
 
-		byte[] data = encodePhase(isPng, srcHadHdr, includeBackupInSeft);
+		byte[] data = encodePhase(isPng, srcHadHdr);
 		if (data == null)
 		{
 			return null;
@@ -254,22 +220,19 @@ final class ExportPipeline
 	/**
 	 * Phase 1 — encode. Runs CropExporter on the current state and returns the JPEG /
 	 * PNG bytes, or null when encoding failed (in which case a failure toast is already
-	 * queued). Backup writing used to live here but now runs only when the Replace
-	 * flow needs it (ReplaceStrategy.replaceColliding) — plain Save As / Keep paths
-	 * no longer pay the backup I/O for a save that isn't actually overwriting the
-	 * original.
+	 * queued).
 	 *
 	 * Bypass: when the user has applied no transformations (no crop, no rotation, no
-	 * grid bake-in, JPEG-to-JPEG round-trip), write `state.originalFileBytes` verbatim
-	 * instead of canvas-encoding. This preserves byte-perfect fidelity for re-saves AND
-	 * for the graft flow's "apply external edit then save without further editing" path.
-	 * The canvas re-encode + ExifPatcher pipeline (especially the IFD1 thumbnail
-	 * regeneration) appears to break Samsung Gallery's Revert action when the source's
-	 * SEFT trailer references a backup with different pixel content — bypassing them
-	 * keeps the saved file structurally identical to what Gallery's Revert chain
-	 * already accepts.
+	 * grid bake-in, JPEG-to-JPEG round-trip on a NON-graft source), write
+	 * `state.originalFileBytes` verbatim instead of canvas-encoding. This preserves byte-
+	 * perfect fidelity for re-saves of an unedited file. The bypass is explicitly
+	 * disabled for grafts (canBypassEncode rejects state.isGraftApplied) — graft saves
+	 * need the canvas re-encode to regenerate the gain map from the spliced primary, so
+	 * the HDR boost stays spatially aligned with the edit's pixels. Skipping that for a
+	 * graft would ship source's gain map verbatim over the spliced primary and visibly
+	 * mis-place the boost wherever the edit changed pixels.
 	 */
-	private byte[] encodePhase(boolean isPng, boolean srcHadHdr, boolean includeBackupInSeft)
+	private byte[] encodePhase(boolean isPng, boolean srcHadHdr)
 	{
 		try
 		{
@@ -280,9 +243,9 @@ final class ExportPipeline
 				return data;
 			}
 			byte[] data = CropExporter.export(
-				host.getState(), host.getActivity().getCacheDir(), includeBackupInSeft).data();
+				host.getState(), host.getActivity().getCacheDir()).data();
 			Log.d(TAG, "Encoded " + data.length + " bytes (srcHdr=" + srcHadHdr
-				+ " isPng=" + isPng + " seftBackup=" + includeBackupInSeft + ")");
+				+ " isPng=" + isPng + ")");
 			return data;
 		}
 		catch (Exception e)
@@ -447,7 +410,7 @@ final class ExportPipeline
 	 */
 	private void reportSuccess(byte[] data, boolean srcHadHdr, boolean isPng)
 	{
-		final String hdrSuffix;
+		String hdrSuffix;
 		if (!srcHadHdr || isPng)
 		{
 			hdrSuffix = "";
@@ -466,10 +429,11 @@ final class ExportPipeline
 
 	/**
 	 * Phase 4 — overwrite-specific success report. Fires "Replaced <name>" when the caller
-	 * is the opaque-ID overwrite-fallback path, which did the overwrite-specific work (pre-
-	 * encode Samsung backup, SEFT backup-path claim) and deserves a matching user message.
-	 * The full Replace flow (with placeholder + swap) does not use this path — its success
-	 * toast is fired by ReplaceStrategy after verifyReplace confirms the final state.
+	 * is the opaque-ID overwrite-fallback path that direct-wrote to the target with
+	 * preserve-on-failure (a real overwrite, not a fresh save), and deserves a matching
+	 * user message. The full Replace flow (with placeholder + swap) does not use this
+	 * path — its success toast is fired by ReplaceStrategy after verifyReplace confirms
+	 * the final state.
 	 */
 	private void reportReplaced(String name)
 	{

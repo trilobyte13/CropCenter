@@ -157,14 +157,14 @@ public final class HorizonDetector
 	{
 		float maxVal = 0;
 		int nonZero = 0;
-		for (float v : edges)
+		for (float edge : edges)
 		{
-			if (v > 0)
+			if (edge > 0)
 			{
 				nonZero++;
-				if (v > maxVal)
+				if (edge > maxVal)
 				{
-					maxVal = v;
+					maxVal = edge;
 				}
 			}
 		}
@@ -174,11 +174,11 @@ public final class HorizonDetector
 		}
 		int bins = 256;
 		int[] hist = new int[bins];
-		for (float v : edges)
+		for (float edge : edges)
 		{
-			if (v > 0)
+			if (edge > 0)
 			{
-				hist[Math.min(bins - 1, (int) (v / maxVal * (bins - 1)))]++;
+				hist[Math.min(bins - 1, (int) (edge / maxVal * (bins - 1)))]++;
 			}
 		}
 		int target = (int) (nonZero * (1f - topFraction));

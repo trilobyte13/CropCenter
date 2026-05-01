@@ -128,10 +128,16 @@ public final class BitmapUtils
 	}
 
 	/**
-	 * True when `rotation` is within ROTATION_EPSILON of an exact multiple of 90°
-	 * (±90°, 180°, ±270°, …). Cardinal rotations map integer source pixels to
-	 * integer destination pixels and are therefore losslessly expressible with
+	 * True when `rotation` is within ROTATION_EPSILON of ±90°, 180°, or ±270°
+	 * (mod 360). Cardinal rotations map integer source pixels to integer
+	 * destination pixels and are therefore losslessly expressible with
 	 * nearest-neighbor sampling. Non-cardinal rotations require bilinear filtering.
+	 *
+	 * 0° (and ±360°, ±720°, …) is explicitly NOT cardinal here — drawCropped's
+	 * cardinal branch is the rotated path, and 0° already goes through the
+	 * unrotated fast path higher up that gates on
+	 * Math.abs(rotation) >= ROTATION_EPSILON. Including 0 would route an
+	 * already-handled case through a strictly-worse code path.
 	 */
 	public static boolean isCardinalRotation(float rotation)
 	{
@@ -225,7 +231,17 @@ public final class BitmapUtils
 				{
 					return 1;
 				}
-				boolean isLittleEndian = jpeg[tiffStart] == 0x49; // 'I' = little-endian
+				// TIFF byte-order marker is 2 bytes — "II" (little) or "MM" (big). A
+				// malformed mismatched pair would silently be treated as little-endian
+				// and produce nonsense u32 reads downstream.
+				int byteOrderHi = jpeg[tiffStart] & 0xFF;
+				int byteOrderLo = jpeg[tiffStart + 1] & 0xFF;
+				if (!((byteOrderHi == 0x49 && byteOrderLo == 0x49)
+					|| (byteOrderHi == 0x4D && byteOrderLo == 0x4D)))
+				{
+					return 1;
+				}
+				boolean isLittleEndian = byteOrderHi == 0x49;
 
 				long ifdOff = ByteBufferUtils.readU32(jpeg, tiffStart + 4, isLittleEndian);
 				int ifd = (int) (tiffStart + ifdOff);

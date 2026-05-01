@@ -2,9 +2,7 @@ package com.cropcenter;
 
 import android.app.AlertDialog;
 import android.net.Uri;
-import android.widget.Toast;
 
-import com.cropcenter.crop.CropExporter;
 import com.cropcenter.model.ExportConfig;
 import com.cropcenter.util.SafFileHelper;
 import com.cropcenter.util.StoragePermissionHelper;
@@ -23,10 +21,9 @@ import java.util.Locale;
 final class SaveController
 {
 	private final ExportPipeline exportPipeline;
-	private final SaveHost host;
 	private final ReplaceStrategy replaceStrategy;
 	private final SafFileHelper safFiles;
-	private final StoragePermissionHelper permissions;
+	private final SaveHost host;
 
 	// Filename we asked SAF to create. When SAF silently auto-renames to avoid a collision (e.g.
 	// "vacation.jpg" → "vacation (1).jpg"), the returned URI's display name won't match this —
@@ -42,8 +39,9 @@ final class SaveController
 	{
 		this.host = host;
 		this.safFiles = safFiles;
-		this.permissions = permissions;
 		this.exportPipeline = new ExportPipeline(host, safFiles);
+		// permissions is forwarded to ReplaceStrategy and not retained on this — SaveController
+		// itself never prompts for permissions, so storing it would be dead state.
 		this.replaceStrategy = new ReplaceStrategy(host, exportPipeline, safFiles, permissions);
 	}
 
@@ -67,10 +65,11 @@ final class SaveController
 	 *     SAF prompted "Replace?" and the user accepted. Since we can't distinguish the two
 	 *     from the URI alone, always try to create a sibling placeholder and route through
 	 *     ReplaceStrategy: this gives provider-confirmed overwrites the crash-safe write-
-	 *     first-then-swap pattern AND a Samsung Gallery Revert backup. When createDocument
-	 *     isn't supported (opaque-ID providers), fall back to exportToPreserving (writes
-	 *     to newUri directly but doesn't delete on verification failure — minimises data
-	 *     loss on the narrow fallback path).
+	 *     first-then-swap pattern. When createDocument isn't supported (opaque-ID
+	 *     providers), fall back to exportToPreserving (writes to newUri directly but
+	 *     doesn't delete on verification failure — minimises data loss on the narrow
+	 *     fallback path) for ambiguous cases, or exportToOverwrite for confirmed
+	 *     overwrites where the success toast should announce as "Replaced <name>".
 	 *
 	 * (B) chosen ends in an "(N)" auto-rename suffix AND the inferred base name still exists
 	 *     in the picked directory — SAF silently renamed to dodge a collision. The detection
@@ -120,14 +119,12 @@ final class SaveController
 		// crash-safe Replace flow — we can't rule out provider-confirmed overwrite from
 		// the URI alone (SIZE == 0 may be an empty existing file, SIZE == -1 is unknown).
 		// The priorSize query discriminates messaging:
-		//   priorSize  > 0  → confirmed overwrite → wasOverwrite=true: write Samsung
-		//                     Revert backup, toast "Replaced"
+		//   priorSize  > 0  → confirmed overwrite → wasOverwrite=true: toast "Replaced"
 		//   priorSize  ≤ 0  → ambiguous (fresh doc OR zero-byte existing OR no-SIZE
-		//                     provider) → wasOverwrite=false: skip backup, toast "Saved"
+		//                     provider) → wasOverwrite=false: toast "Saved"
 		// Sibling placeholder creation is required for the full write-then-swap safety;
 		// when that's unavailable (opaque-ID providers), fall back to a direct write with
-		// preserveOnFailure. A confirmed overwrite on an opaque-ID provider additionally
-		// runs the Samsung backup inline so Gallery Revert still works post-save.
+		// preserveOnFailure.
 		if (requested != null && chosen != null && requested.equalsIgnoreCase(chosen))
 		{
 			savePending = false;
@@ -135,7 +132,7 @@ final class SaveController
 			//   priorSize >  0                → confirmed overwrite
 			//   priorSize == 0                → ambiguous (treat as not-overwrite; empty
 			//                                   placeholder nearly always, no meaningful
-			//                                   content to revert to either way)
+			//                                   content there either way)
 			//   priorSize == -1 (no-SIZE)     → fall back to a content-stream probe; if the
 			//                                   URI serves at least one byte it's a real
 			//                                   existing file regardless of missing SIZE
@@ -155,25 +152,11 @@ final class SaveController
 			}
 			else if (wasOverwrite)
 			{
-				// Opaque-ID + confirmed overwrite: can't placeholder, but we can still
-				// write the Samsung Revert backup and preserve the target on failure.
-				// Pass `requested` so the success toast says "Replaced <name>" — the
-				// overwrite-specific backup / SEFT work this path ran deserves a matching
-				// message, not the generic "Saved N KB" a plain Save As would produce.
-				exportPipeline.exportOverwriteWithBackup(newUri, () ->
-				{
-					CropExporter.BackupStatus backup =
-						CropExporter.saveOriginalBackup(host.getState());
-					if (backup == CropExporter.BackupStatus.FAILED)
-					{
-						host.runOnUiThread(() -> host.toastIfAlive(
-							"Warning: couldn't write revert backup — "
-								+ "Gallery Revert won't work",
-							Toast.LENGTH_LONG));
-					}
-					return backup == CropExporter.BackupStatus.WRITTEN
-						|| backup == CropExporter.BackupStatus.ALREADY_EXISTS;
-				}, requested);
+				// Opaque-ID + confirmed overwrite: can't placeholder. Direct overwrite
+				// with preserve-on-failure. Pass `requested` so the success toast says
+				// "Replaced <name>" — a generic "Saved N KB" would misrepresent a
+				// confirmed overwrite.
+				exportPipeline.exportToOverwrite(newUri, requested);
 			}
 			else
 			{
@@ -184,7 +167,7 @@ final class SaveController
 			return;
 		}
 
-		// Case (B): SAF auto-renamed (pattern like "X (N).ext"). Detection works on `chosen`
+		// Case (B): chosen has a "X (N).ext" auto-rename pattern. Detection works on `chosen`
 		// alone so it catches the case where the user edited the filename in the picker and
 		// THAT name collided — the "X" in "X (N)" doesn't have to match the original
 		// pendingSaveName. Verify the inferred base still lives in the same directory before
@@ -195,13 +178,6 @@ final class SaveController
 		String autoRenameBase = autoRenameBaseName(chosen);
 		if (autoRenameBase != null)
 		{
-			// deriveSiblingUri returns null on opaque-ID providers, but SAF already
-			// PROVED a collision exists by returning the auto-renamed name. Pass through
-			// regardless — ReplaceStrategy's strategy C (DocumentsContract.renameDocument)
-			// may still succeed on opaque-ID providers that support rename even without
-			// sibling-URI derivation. If every strategy fails, verifyReplace's failure
-			// dialog surfaces the situation to the user instead of silently keeping the
-			// auto-renamed duplicate.
 			Uri baseUri = safFiles.deriveSiblingUri(newUri, autoRenameBase);
 			if (siblingLooksLikeCollision(baseUri))
 			{
@@ -359,7 +335,7 @@ final class SaveController
 			{
 				savePending = false;
 				// Case B: user explicitly confirmed Replace on a detected collision — always
-				// a real overwrite, so full Replace semantics (backup + "Replaced" toast).
+				// a real overwrite, so full Replace semantics (write-then-swap + "Replaced" toast).
 				replaceStrategy.replaceColliding(newUri, requested, true);
 			})
 			.setNeutralButton("Keep", (dialog, which) ->
@@ -381,50 +357,24 @@ final class SaveController
 	}
 
 	/**
-	 * Return ExportConfig.FORMAT_JPEG or FORMAT_PNG for a filename's extension, or null when
-	 * the extension is missing or unrecognised. Used by handleSaveAsResult to detect when a
-	 * user's extension change in the SAF picker would produce a MIME/content mismatch.
-	 */
-	private static String formatFromExtension(String name)
-	{
-		if (name == null)
-		{
-			return null;
-		}
-		String lower = name.toLowerCase(Locale.ROOT);
-		if (lower.endsWith(ExportConfig.PNG_EXT))
-		{
-			return ExportConfig.FORMAT_PNG;
-		}
-		if (lower.endsWith(ExportConfig.JPEG_EXT) || lower.endsWith(".jpeg"))
-		{
-			return ExportConfig.FORMAT_JPEG;
-		}
-		return null;
-	}
-
-	/**
 	 * Decide whether a sibling URI (the inferred pre-auto-rename target) actually has a
-	 * colliding document behind it. SAF auto-renaming is strong evidence that some file
-	 * already exists with the inferred name, but we still try to disambiguate the rare case
-	 * where the user typed "(N)" intentionally with no real collision. Disambiguation ladder:
-	 *   1. baseUri == null (deriveSiblingUri failed, opaque-ID provider) → trust the SAF
-	 *      auto-rename pattern directly; we have no probe to run but SAF's behavior is
-	 *      strong evidence. Offer Replace; worst case the user taps Keep.
-	 *   2. getDisplayName non-null → document accessible and named → collision confirmed
-	 *   3. getDisplayName null + fileFromSafUri returns a File: use File.exists() as the
-	 *      ground-truth answer. If the File definitely does not exist, the user typed "(N)"
-	 *      intentionally; fall through to plain save.
-	 *   4. getDisplayName null AND fileFromSafUri returns null — both probes are
-	 *      inconclusive (opaque-ID provider + SecurityException on constructed sibling URI,
-	 *      common for prior-install / foreign-owned files). Trust the auto-rename pattern
-	 *      itself: SAF doesn't auto-rename without reason.
+	 * colliding document behind it. The "(N)" suffix on `chosen` could be either SAF
+	 * auto-renaming around a real collision OR the user typing "(N)" intentionally in the
+	 * picker — we can't tell from the suffix alone. Probe order:
+	 *   1. getDisplayName non-null → document accessible and named → collision confirmed.
+	 *   2. fileFromSafUri returns a File: File.exists() is the authoritative answer.
+	 *   3. baseUri == null (opaque-ID provider can't derive the sibling) OR both probes
+	 *      inconclusive: return false. We have no proof of collision and asserting one
+	 *      surfaces a Replace dialog about a phantom file when the user just typed
+	 *      "(N)" themselves. The fall-through path saves the user's "(N)" name as-is;
+	 *      a real collision in this rare opaque-provider case becomes a duplicate save
+	 *      under a different name (no data loss), not silent overwrite.
 	 */
 	private boolean siblingLooksLikeCollision(Uri baseUri)
 	{
 		if (baseUri == null)
 		{
-			return true;
+			return false;
 		}
 		if (safFiles.getDisplayName(baseUri) != null)
 		{
@@ -436,8 +386,9 @@ final class SaveController
 			// Filesystem accessible — authoritative answer regardless of SAF query result.
 			return baseFile.exists();
 		}
-		// Both probes inconclusive. Trust SAF's auto-rename as collision evidence.
-		return true;
+		// Both probes inconclusive. Without proof, prefer the false-negative outcome
+		// (save under the SAF-assigned "(N)" name) over the false-positive Replace dialog.
+		return false;
 	}
 
 	/**
@@ -498,5 +449,28 @@ final class SaveController
 			return null;
 		}
 		return baseStem + choExt;
+	}
+
+	/**
+	 * Return ExportConfig.FORMAT_JPEG or FORMAT_PNG for a filename's extension, or null when
+	 * the extension is missing or unrecognised. Used by handleSaveAsResult to detect when a
+	 * user's extension change in the SAF picker would produce a MIME/content mismatch.
+	 */
+	private static String formatFromExtension(String name)
+	{
+		if (name == null)
+		{
+			return null;
+		}
+		String lower = name.toLowerCase(Locale.ROOT);
+		if (lower.endsWith(ExportConfig.PNG_EXT))
+		{
+			return ExportConfig.FORMAT_PNG;
+		}
+		if (lower.endsWith(ExportConfig.JPEG_EXT) || lower.endsWith(".jpeg"))
+		{
+			return ExportConfig.FORMAT_JPEG;
+		}
+		return null;
 	}
 }

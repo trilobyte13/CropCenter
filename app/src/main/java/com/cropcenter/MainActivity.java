@@ -29,7 +29,7 @@ import com.cropcenter.model.CenterMode;
 import com.cropcenter.model.CropState;
 import com.cropcenter.model.EditorMode;
 import com.cropcenter.model.ExportConfig;
-import com.cropcenter.util.AiRegionDetector.AiMask;
+import com.cropcenter.model.Graft;
 import com.cropcenter.util.BitmapUtils;
 import com.cropcenter.util.SafFileHelper;
 import com.cropcenter.util.StoragePermissionHelper;
@@ -50,8 +50,8 @@ public class MainActivity extends AppCompatActivity implements SaveHost, UiHost,
 	private final CropState state = new CropState();
 	// Single-thread executor with daemon-threaded worker — serialises load/export/horizon-detect
 	// so only one heavyweight CropState-touching task runs at a time. Daemon thread doesn't
-	// prevent JVM exit, so we don't shut it down on onDestroy — any in-flight task that outlives
-	// the Activity harmlessly finishes (UI callbacks no-op via isDestroyed).
+	// prevent JVM exit; onDestroy shuts the executor down gracefully so config-change rotation
+	// doesn't leak an orphaned worker per recreation.
 	private final ExecutorService backgroundExecutor = Executors.newSingleThreadExecutor(r ->
 	{
 		Thread t = new Thread(r, "CropCenter-bg");
@@ -85,135 +85,6 @@ public class MainActivity extends AppCompatActivity implements SaveHost, UiHost,
 	private TextView txtZoomBadge;
 	private boolean applyingStateToUi;
 	private boolean rulerUpdating;
-
-	@Override
-	protected void onCreate(Bundle savedInstanceState)
-	{
-		super.onCreate(savedInstanceState);
-		setContentView(R.layout.activity_main);
-
-		// Handle edge-to-edge: apply system bar insets as padding to root layout
-		View root = findViewById(android.R.id.content);
-		ViewCompat.setOnApplyWindowInsetsListener(root, (view, insets) ->
-		{
-			Insets sys = insets.getInsets(WindowInsetsCompat.Type.systemBars());
-			view.setPadding(sys.left, sys.top, sys.right, sys.bottom);
-			return insets;
-		});
-
-		editorView = findViewById(R.id.editorView);
-		rotationRuler = findViewById(R.id.rotationRuler);
-		txtZoomBadge = findViewById(R.id.txtZoomBadge);
-		txtSidebarCropSize = findViewById(R.id.txtSidebarCropSize);
-		txtImageInfo = findViewById(R.id.txtImageInfo);
-		txtImageFormats = findViewById(R.id.txtImageFormats);
-		txtRotDegrees = findViewById(R.id.txtRotDegrees);
-		txtTransformArrow = findViewById(R.id.txtTransformArrow);
-
-		editorView.setState(state);
-		editorView.setOnZoomChangedListener(ui::updateZoomBadge);
-		editorView.setOnPointsChangedListener(ui::updatePointButtonStates);
-		state.setListener(() -> runOnUiThread(this::applyStateToUi));
-
-		openLauncher = registerForActivityResult(new ActivityResultContracts.OpenDocument(), uri ->
-		{
-			if (uri != null)
-			{
-				tryTakePersistable(uri, "(open)", true);
-				loadImage(uri);
-			}
-		});
-
-		saveAsLauncher = registerForActivityResult(
-			new ActivityResultContracts.CreateDocument(ExportConfig.JPEG_MIME)
-			{
-				@Override
-				public Intent createIntent(Context ctx, String input)
-				{
-					Intent intent = super.createIntent(ctx, input);
-					if (input != null && input.endsWith(ExportConfig.PNG_EXT))
-					{
-						intent.setType(ExportConfig.PNG_MIME);
-					}
-					return intent;
-				}
-			},
-			uri ->
-			{
-				// SAF result: URI (file picked) or null (cancelled). Clear the pending-save flag
-				// either way so the Save button re-enables.
-				if (uri != null)
-				{
-					// Persistable permission lets Replace's SAF fallbacks reopen the same
-					// document later (re-read, re-rename). SAF grants write on creation but
-					// the grant expires at process death without this; file-I/O fallback
-					// still works when MANAGE_EXTERNAL_STORAGE is held, so failure is
-					// non-fatal but worth warning about.
-					tryTakePersistable(uri, "(save)", true);
-					saveController.handleSaveAsResult(uri);
-				}
-				else
-				{
-					saveController.onSaveCancelled();
-				}
-			});
-
-		graftPickerLauncher = registerForActivityResult(new ActivityResultContracts.OpenDocument(),
-			uri ->
-			{
-				if (uri != null)
-				{
-					graftController.onEditPicked(uri);
-				}
-				else
-				{
-					graftController.onEditPickerCancelled();
-				}
-			});
-
-		View btnOpen = findViewById(R.id.btnOpen);
-		btnOpen.setOnClickListener(view ->
-			openLauncher.launch(new String[] { ExportConfig.JPEG_MIME, ExportConfig.PNG_MIME }));
-		btnOpen.setOnLongClickListener(view -> graftController.start(graftPickerLauncher));
-		findViewById(R.id.btnSave).setOnClickListener(view -> saveController.showSaveDialog());
-		setBusyUi(false); // Save stays disabled until an image is loaded
-		findViewById(R.id.btnSettings).setOnClickListener(view -> SettingsDialog.show(this, state));
-
-		// Display-only toggle; full grid settings live in the Settings dialog.
-		CheckBox chkGrid = findViewById(R.id.chkGridMain);
-		chkGrid.setChecked(state.getGridConfig().enabled());
-		chkGrid.setOnCheckedChangeListener((button, isChecked) ->
-			state.updateGridConfig(g -> g.withEnabled(isChecked)));
-
-		toolbar.bindAll();
-
-		ui.updateModeHighlight();
-		ui.updateLockHighlight();
-		// MANAGE_EXTERNAL_STORAGE is no longer requested at startup — Replace's failure dialog
-		// (showReplaceFailureDialog) offers the grant prompt only when an overwrite actually
-		// hits a permission-bound failure. Most Save As flows never need this permission.
-		handleIncomingIntent(getIntent());
-	}
-
-	@Override
-	protected void onDestroy()
-	{
-		// Clear the state listener FIRST so any in-flight notifyChanged() from a background
-		// task doesn't fire an Activity-destroyed callback.
-		state.setListener(null);
-		// Do NOT recycle the source bitmap here. A background thread may still be reading it
-		// (export encode or horizon detection) and recycle() would crash those threads. On
-		// minSdk 35 the GC reclaims bitmap memory once the last reference is released, so the
-		// trade-off — delayed reclaim vs. a hard crash — favours not recycling.
-		super.onDestroy();
-	}
-
-	@Override
-	protected void onNewIntent(Intent intent)
-	{
-		super.onNewIntent(intent);
-		handleIncomingIntent(intent);
-	}
 
 	@Override
 	public void applyLockMode()
@@ -265,15 +136,15 @@ public class MainActivity extends AppCompatActivity implements SaveHost, UiHost,
 	}
 
 	@Override
-	public RotationRulerView getRotationRuler()
-	{
-		return rotationRuler;
-	}
-
-	@Override
 	public TextView getRotDegreesTextView()
 	{
 		return txtRotDegrees;
+	}
+
+	@Override
+	public RotationRulerView getRotationRuler()
+	{
+		return rotationRuler;
 	}
 
 	@Override
@@ -328,7 +199,12 @@ public class MainActivity extends AppCompatActivity implements SaveHost, UiHost,
 	@Override
 	public boolean isPanning()
 	{
-		return ((CheckBox) findViewById(R.id.chkPan)).isChecked();
+		// findViewById can return null on a destroyed Activity (or, theoretically,
+		// before view inflation completes if a listener fires very early). Without
+		// the null check the cast-and-isChecked NPEs the UI thread. Pattern-match on
+		// CheckBox to dodge both the null and any unlikely class mismatch.
+		View view = findViewById(R.id.chkPan);
+		return view instanceof CheckBox checkBox && checkBox.isChecked();
 	}
 
 	@Override
@@ -464,44 +340,181 @@ public class MainActivity extends AppCompatActivity implements SaveHost, UiHost,
 		}
 	}
 
+	@Override
+	protected void onCreate(Bundle savedInstanceState)
+	{
+		super.onCreate(savedInstanceState);
+		setContentView(R.layout.activity_main);
+
+		// Handle edge-to-edge: apply system bar insets as padding to root layout
+		View root = findViewById(android.R.id.content);
+		ViewCompat.setOnApplyWindowInsetsListener(root, (view, insets) ->
+		{
+			Insets sys = insets.getInsets(WindowInsetsCompat.Type.systemBars());
+			view.setPadding(sys.left, sys.top, sys.right, sys.bottom);
+			return insets;
+		});
+
+		editorView = findViewById(R.id.editorView);
+		rotationRuler = findViewById(R.id.rotationRuler);
+		txtZoomBadge = findViewById(R.id.txtZoomBadge);
+		txtSidebarCropSize = findViewById(R.id.txtSidebarCropSize);
+		txtImageInfo = findViewById(R.id.txtImageInfo);
+		txtImageFormats = findViewById(R.id.txtImageFormats);
+		txtRotDegrees = findViewById(R.id.txtRotDegrees);
+		txtTransformArrow = findViewById(R.id.txtTransformArrow);
+
+		editorView.setState(state);
+		editorView.setOnZoomChangedListener(ui::updateZoomBadge);
+		editorView.setOnPointsChangedListener(ui::updatePointButtonStates);
+		state.setListener(() -> runOnUiThread(this::applyStateToUi));
+
+		openLauncher = registerForActivityResult(new ActivityResultContracts.OpenDocument(), uri ->
+		{
+			if (uri != null)
+			{
+				tryTakePersistable(uri, "(open)", true);
+				loadImage(uri);
+			}
+		});
+
+		saveAsLauncher = registerForActivityResult(
+			new ActivityResultContracts.CreateDocument(ExportConfig.JPEG_MIME)
+			{
+				@Override
+				public Intent createIntent(Context ctx, String input)
+				{
+					Intent intent = super.createIntent(ctx, input);
+					if (input != null && input.endsWith(ExportConfig.PNG_EXT))
+					{
+						intent.setType(ExportConfig.PNG_MIME);
+					}
+					return intent;
+				}
+			},
+			uri ->
+			{
+				// SAF result: URI (file picked) or null (cancelled). Clear the pending-save flag
+				// either way so the Save button re-enables.
+				if (uri != null)
+				{
+					// Persistable permission lets Replace's SAF fallbacks reopen the same
+					// document later (re-read, re-rename). SAF grants write on creation but
+					// the grant expires at process death without this; file-I/O fallback
+					// still works when MANAGE_EXTERNAL_STORAGE is held, so failure is
+					// non-fatal but worth warning about.
+					tryTakePersistable(uri, "(save)", true);
+					saveController.handleSaveAsResult(uri);
+				}
+				else
+				{
+					saveController.onSaveCancelled();
+				}
+			});
+
+		graftPickerLauncher = registerForActivityResult(new ActivityResultContracts.OpenDocument(),
+			uri ->
+			{
+				if (uri != null)
+				{
+					graftController.onEditPicked(uri);
+				}
+				else
+				{
+					graftController.onEditPickerCancelled();
+				}
+			});
+
+		View btnOpen = findViewById(R.id.btnOpen);
+		btnOpen.setOnClickListener(view ->
+			openLauncher.launch(new String[] { ExportConfig.JPEG_MIME, ExportConfig.PNG_MIME }));
+		btnOpen.setOnLongClickListener(view -> graftController.start(graftPickerLauncher));
+		findViewById(R.id.btnSave).setOnClickListener(view -> saveController.showSaveDialog());
+		setBusyUi(false); // Save stays disabled until an image is loaded
+		findViewById(R.id.btnSettings).setOnClickListener(view -> SettingsDialog.show(this, state));
+
+		// Display-only toggle; full grid settings live in the Settings dialog.
+		CheckBox chkGrid = findViewById(R.id.chkGridMain);
+		chkGrid.setChecked(state.getGridConfig().enabled());
+		chkGrid.setOnCheckedChangeListener((button, isChecked) ->
+			state.updateGridConfig(g -> g.withEnabled(isChecked)));
+
+		toolbar.bindAll();
+
+		ui.updateModeHighlight();
+		ui.updateLockHighlight();
+		// MANAGE_EXTERNAL_STORAGE is no longer requested at startup — Replace's failure dialog
+		// (showReplaceFailureDialog) offers the grant prompt only when an overwrite actually
+		// hits a permission-bound failure. Most Save As flows never need this permission.
+		handleIncomingIntent(getIntent());
+	}
+
+	@Override
+	protected void onDestroy()
+	{
+		// Clear the state listener FIRST so any in-flight notifyChanged() from a background
+		// task doesn't fire an Activity-destroyed callback.
+		state.setListener(null);
+		// Shut down the executor gracefully (NOT shutdownNow): in-flight tasks finish, no
+		// new tasks accepted, the daemon worker thread exits cleanly when the queue drains.
+		// Without this, configuration changes (rotation) accumulate orphaned executors —
+		// each new MainActivity creates a fresh executor while the old one's worker thread
+		// idles forever, retaining the queue and any references the worker held.
+		backgroundExecutor.shutdown();
+		// Do NOT recycle the source bitmap here. A background thread may still be reading it
+		// (export encode or horizon detection) and recycle() would crash those threads. On
+		// minSdk 35 the GC reclaims bitmap memory once the last reference is released, so the
+		// trade-off — delayed reclaim vs. a hard crash — favours not recycling.
+		super.onDestroy();
+	}
+
+	@Override
+	protected void onNewIntent(Intent intent)
+	{
+		super.onNewIntent(intent);
+		handleIncomingIntent(intent);
+	}
+
 	/**
-	 * Replace the in-memory image with pre-baked bytes — used by the graft flow once
-	 * GraftController has produced the spliced output. The bytes carry the full file
-	 * (original's identity metadata + edit's pixel content + original's HDR package + SEFT
-	 * trailer); applyImageBytes treats them like any other freshly-loaded JPEG so the
-	 * existing crop / save pipeline operates on them unchanged. Invoked on the UI thread
-	 * via the GraftReadyHandler that GraftController fires from runOnUiThread.
-	 *
-	 * pathAndId is null — the grafted file isn't on disk anywhere; future Save uses
-	 * ACTION_CREATE_DOCUMENT with the suggested name as default.
+	 * Replace the in-memory image with pre-baked graft bytes — used by the graft flow once
+	 * GraftController has produced the splice. The bytes carry the full file (original's
+	 * identity metadata + edit's pixel content + original's HDR package + SEFT trailer if
+	 * any); applyImageBytes treats them like any other freshly-loaded JPEG so the existing
+	 * crop / save pipeline operates on them unchanged. Invoked on the UI thread via the
+	 * GraftReadyHandler that GraftController fires from runOnUiThread.
 	 *
 	 * Busy ownership: GraftController.onEditPicked claims busy on the UI thread before
 	 * dispatching its bg work, and that claim is held all the way through to here. We
 	 * inherit it (no compareAndSet — racing here is impossible because Save / Open
 	 * couldn't have started while busy was held) and release it in finally.
 	 *
-	 * Two follow-ups after applyImageBytes returns (both must happen AFTER, since
-	 * applyImageBytes calls state.reset() which would clear them):
-	 *   - graftApplied=true so ExportPipeline routes the next save through
-	 *     CropExporter.export instead of the verbatim-write bypass. The canvas
-	 *     pipeline regenerates the gain map (UltraHdrCompat.compressWithGainmap) so
-	 *     the HDR boost stays spatially aligned with the edit's primary pixels.
-	 *   - aiMask stashed on state so UltraHdrCompat can inpaint the gain map's boost
-	 *     values inside the AI fill (matches Generative Remove's intent of "this
-	 *     region looks like its neighbors" without the gain map's stale boost-the-
-	 *     removed-features artifact). Null when no AI region was detected.
+	 * Post-apply state writes flow through state.installGraft, which encapsulates the
+	 * "graftApplied AND aiMask, both AFTER reset" invariant. Skipping the call would let
+	 * canBypassEncode short-circuit the canvas pass and ship source's gain map verbatim
+	 * over the spliced primary, plus leave the gain-map inpaint silent.
 	 */
-	private void applyGraftedBytes(byte[] graftedBytes, String displayName, AiMask aiMask)
+	private void applyGraftedBytes(Graft graft)
 	{
 		runInBackground(() ->
 		{
 			try
 			{
-				applyImageBytes(graftedBytes, displayName, null);
-				state.setGraftApplied(true);
-				if (aiMask != null && aiMask.hasMaskedPixels())
+				// installGraft must only run on a successful apply — if the splice bytes
+				// fail to decode, applyImageBytes posts the "Failed to decode" toast and
+				// the OLD image stays loaded. Installing graftApplied + aiMask on top of
+				// that old state would force the next save through the canvas re-encode
+				// path AND apply the failed graft's AI mask to the OLD image's gain map,
+				// which produces a corrupted save with a different image's inpaint
+				// region. Gating on the boolean return keeps the failure local.
+				//
+				// The "External edit applied" success toast also fires here, not earlier
+				// in GraftController — firing it before applyImageBytes ran could lie
+				// about state for a brief window if the apply failed afterward.
+				if (applyImageBytes(graft.bytes(), graft.displayName()))
 				{
-					state.setAiMask(aiMask);
+					state.installGraft(graft);
+					runOnUiThread(() ->
+						toastIfAlive("External edit applied", Toast.LENGTH_SHORT));
 				}
 			}
 			catch (Exception e)
@@ -525,73 +538,101 @@ public class MainActivity extends AppCompatActivity implements SaveHost, UiHost,
 	 * refresh. The caller has already acquired busy and is responsible for releasing it in a
 	 * finally block.
 	 *
-	 * pathAndId is the MediaStore (path, id) pair for files loaded via SAF; null for in-
-	 * memory grafts (no on-disk source — the grafted bytes only exist in memory until the
-	 * user saves).
+	 * Returns true on a successful apply; false when the bytes failed to decode (the
+	 * "Failed to decode" toast has already been posted). The graft flow gates installGraft
+	 * on this so a failed splice can't leave graftApplied / aiMask installed onto the
+	 * previously-loaded image.
 	 */
-	private void applyImageBytes(byte[] fileBytes, String origName, String[] pathAndId)
+	private boolean applyImageBytes(byte[] fileBytes, String origName)
 	{
 		Bitmap raw = BitmapFactory.decodeByteArray(fileBytes, 0, fileBytes.length);
 		if (raw == null || raw.getWidth() <= 0 || raw.getHeight() <= 0)
 		{
 			runOnUiThread(() -> toastIfAlive("Failed to decode", Toast.LENGTH_SHORT));
-			return;
+			return false;
 		}
 		int orientation = BitmapUtils.readExifOrientation(fileBytes);
 		Bitmap bmp = BitmapUtils.applyOrientation(raw, orientation);
 
-		// Mutations below run on the background executor. They become visible to the
-		// posted UI-thread runnable via Handler.post's happens-before, so the
-		// runnable's body (setSourceImage + setState + setText) sees a fully
-		// populated state. Concurrent UI-thread reads that beat the post — an
-		// onDraw or gesture fired before setSourceImage is dispatched — see the
-		// field they read either unchanged (state.reset clears, no tearing) or
-		// not yet written; EditorRenderer / tap paths null-check getSourceImage
-		// so a null-during-load snapshot is handled as "no image loaded". No
-		// tearing, no volatile needed, no visibility gap.
-		state.reset();
-		state.setOriginalFileBytes(fileBytes);
-		state.setOriginalFilename(origName);
-		if (pathAndId != null)
+		// `bmp` is allocated above and ownership transfers to the UI runnable below
+		// (which posts setSourceImage). If extractMetadata or any step between here
+		// and the post throws — JpegMetadataExtractor / GainMapExtractor /
+		// SeftExtractor could raise on a malformed source segment — bmp would
+		// otherwise leak its native pixel buffer to the GC finalizer and CropState
+		// would be left half-populated (originalFileBytes set, sourceImage null,
+		// jpegMeta cleared by reset but not repopulated). The handedOff flag flips
+		// the moment the runnable is queued; until then the catch path recycles
+		// bmp and rethrows so the caller's catch (in applyGraftedBytes / loadImage)
+		// posts a real failure toast.
+		boolean handedOff = false;
+		try
 		{
-			state.setOriginalFilePath(pathAndId[0]);
-			try
+			// Mutations below run on the background executor. They become visible to the
+			// posted UI-thread runnable via Handler.post's happens-before, so the
+			// runnable's body (setSourceImage + setState + setText) sees a fully
+			// populated state. Concurrent UI-thread reads that beat the post — an
+			// onDraw or gesture fired before setSourceImage is dispatched — see the
+			// field they read either unchanged (state.reset clears, no tearing) or
+			// not yet written; EditorRenderer / tap paths null-check getSourceImage
+			// so a null-during-load snapshot is handled as "no image loaded". No
+			// tearing, no volatile needed, no visibility gap.
+			state.reset();
+			state.setOriginalFileBytes(fileBytes);
+			state.setOriginalFilename(origName);
+
+			final String metaInfo = extractMetadata(state, fileBytes);
+
+			int width = bmp.getWidth();
+			int height = bmp.getHeight();
+
+			final String sizeInfo = width + "\u00D7" + height;
+
+			// handedOff flips only after width/height are read so a (theoretical)
+			// recycle race during those reads still leaves the finally responsible
+			// for the cleanup. In practice nothing else holds bmp at this point.
+			handedOff = true;
+			runOnUiThread(() ->
 			{
-				state.setMediaStoreId(Long.parseLong(pathAndId[1]));
-			}
-			catch (NumberFormatException ignored)
+				// Activity-destroyed guard: bg load tasks dispatched via runInBackground
+				// can outlive the Activity (rotation, app backgrounded then killed).
+				// findViewById on a destroyed Activity returns null, and the immediate
+				// CheckBox cast below would NPE the main thread, taking down the app.
+				// state.setListener(null) in onDestroy suppresses listener-driven UI
+				// updates but not these inline findViewByIds, so the guard has to
+				// live here. The leaked bmp from this branch is reclaimed by the GC
+				// finalizer once the destroyed Activity itself is GC'd.
+				if (isDestroyed())
+				{
+					return;
+				}
+				// CropState.reset() restored editorMode and centerMode to defaults
+				// (Select + Both) and cleared centerLocked, but the Pan / Lock
+				// toolbar checkboxes are UI-driven state that doesn't auto-sync.
+				// Uncheck them here so the visual state matches CropState, then
+				// call applyLockMode() to propagate the unchecked Pan into
+				// centerMode (no-op since reset already set BOTH, but keeps the
+				// invariant that state.centerMode follows chkPan + lock-axis pref).
+				((CheckBox) findViewById(R.id.chkPan)).setChecked(false);
+				((CheckBox) findViewById(R.id.chkLockCenter)).setChecked(false);
+				applyLockMode();
+				ui.updateModeHighlight();
+				ui.updateLockHighlight();
+
+				state.setSourceImage(bmp);
+				editorView.setState(state);
+				editorView.clearUndoHistory();
+				txtImageInfo.setText(sizeInfo);
+				txtImageFormats.setText(metaInfo);
+			});
+			return true;
+		}
+		finally
+		{
+			if (!handedOff)
 			{
+				bmp.recycle();
 			}
 		}
-
-		final String metaInfo = extractMetadata(state, fileBytes);
-
-		final int width = bmp.getWidth();
-		final int height = bmp.getHeight();
-
-		final String sizeInfo = width + "\u00D7" + height;
-
-		runOnUiThread(() ->
-		{
-			// CropState.reset() restored editorMode and centerMode to defaults
-			// (Select + Both) and cleared centerLocked, but the Pan / Lock
-			// toolbar checkboxes are UI-driven state that doesn't auto-sync.
-			// Uncheck them here so the visual state matches CropState, then
-			// call applyLockMode() to propagate the unchecked Pan into
-			// centerMode (no-op since reset already set BOTH, but keeps the
-			// invariant that state.centerMode follows chkPan + lock-axis pref).
-			((CheckBox) findViewById(R.id.chkPan)).setChecked(false);
-			((CheckBox) findViewById(R.id.chkLockCenter)).setChecked(false);
-			applyLockMode();
-			ui.updateModeHighlight();
-			ui.updateLockHighlight();
-
-			state.setSourceImage(bmp);
-			editorView.setState(state);
-			editorView.clearUndoHistory();
-			txtImageInfo.setText(sizeInfo);
-			txtImageFormats.setText(metaInfo);
-		});
 	}
 
 	/**
@@ -699,8 +740,7 @@ public class MainActivity extends AppCompatActivity implements SaveHost, UiHost,
 			{
 				byte[] fileBytes = safFiles.readUriBytes(uri);
 				Log.d(TAG, "Loaded " + fileBytes.length + " raw bytes (via cache)");
-				applyImageBytes(fileBytes, safFiles.getDisplayName(uri),
-					safFiles.getFilePathAndId(uri));
+				applyImageBytes(fileBytes, safFiles.getDisplayName(uri));
 			}
 			catch (Exception e)
 			{

@@ -184,30 +184,6 @@ public final class CropEngine
 	}
 
 	/**
-	 * Axis-aligned bounding-box midpoint of a non-empty selection. A single point is its own
-	 * midpoint; with multiple points we average the min/max on each axis (cheaper than a
-	 * true centroid and matches how the crop engine frames the selection).
-	 */
-	public static float[] selectionMidpoint(List<SelectionPoint> points)
-	{
-		float minX = Float.MAX_VALUE;
-		float minY = Float.MAX_VALUE;
-		float maxX = -Float.MAX_VALUE;
-		float maxY = -Float.MAX_VALUE;
-		for (SelectionPoint point : points)
-		{
-			minX = Math.min(minX, point.x());
-			minY = Math.min(minY, point.y());
-			maxX = Math.max(maxX, point.x());
-			maxY = Math.max(maxY, point.y());
-		}
-		int count = points.size();
-		float midX = (count == 1) ? minX : (minX + maxX) / 2f;
-		float midY = (count == 1) ? minY : (minY + maxY) / 2f;
-		return new float[] { midX, midY };
-	}
-
-	/**
 	 * Shift free-axis centers so the crop rectangle stays inside the image. Guards
 	 * against images smaller than the minimum crop: when cropW ≥ imgW the upper bound
 	 * falls below the lower bound and Math.clamp would throw — fall back to centering.
@@ -367,5 +343,31 @@ public final class CropEngine
 		int refinedCropH = Math.max(4, Math.round(cropH));
 		state.setCropSizeSilent(refinedCropW, refinedCropH);
 		state.setCenter(finalCenterX, finalCenterY);
+	}
+
+	/**
+	 * Axis-aligned bounding-box midpoint of a non-empty selection. A single point is its own
+	 * midpoint; with multiple points we average the min/max on each axis (cheaper than a
+	 * true centroid and matches how the crop engine frames the selection). Private — the
+	 * only consumer outside CropEngine is rotatedSelectionMidpoint, which transforms the
+	 * midpoint through rotation before returning. Direct callers want the rotated form.
+	 */
+	private static float[] selectionMidpoint(List<SelectionPoint> points)
+	{
+		float minX = Float.MAX_VALUE;
+		float minY = Float.MAX_VALUE;
+		float maxX = -Float.MAX_VALUE;
+		float maxY = -Float.MAX_VALUE;
+		for (SelectionPoint point : points)
+		{
+			minX = Math.min(minX, point.x());
+			minY = Math.min(minY, point.y());
+			maxX = Math.max(maxX, point.x());
+			maxY = Math.max(maxY, point.y());
+		}
+		int count = points.size();
+		float midX = (count == 1) ? minX : (minX + maxX) / 2f;
+		float midY = (count == 1) ? minY : (minY + maxY) / 2f;
+		return new float[] { midX, midY };
 	}
 }

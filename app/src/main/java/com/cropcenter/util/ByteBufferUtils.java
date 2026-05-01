@@ -159,7 +159,14 @@ public final class ByteBufferUtils
 
 	private static void checkRead(byte[] data, int offset, int length)
 	{
-		if (data == null || offset < 0 || offset + length > data.length)
+		// `offset + length > data.length` could silently wrap to a negative
+		// value for offsets near Integer.MAX_VALUE, bypassing the bounds
+		// check. Subtracting on the right (`offset > data.length - length`)
+		// can't overflow when length is small positive (2 or 4 in practice
+		// here). Defensive — current callers cap offsets via metadata
+		// pipeline guards well below the overflow range, but the helper
+		// shouldn't rely on that invariant.
+		if (data == null || offset < 0 || length < 0 || offset > data.length - length)
 		{
 			String dataLen = data == null ? "null" : String.valueOf(data.length);
 			throw new IndexOutOfBoundsException(
@@ -169,7 +176,7 @@ public final class ByteBufferUtils
 
 	private static void checkWrite(byte[] data, int offset, int length)
 	{
-		if (data == null || offset < 0 || offset + length > data.length)
+		if (data == null || offset < 0 || length < 0 || offset > data.length - length)
 		{
 			String dataLen = data == null ? "null" : String.valueOf(data.length);
 			throw new IndexOutOfBoundsException(

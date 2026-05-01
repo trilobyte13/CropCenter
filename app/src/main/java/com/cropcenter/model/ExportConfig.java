@@ -11,13 +11,13 @@ public record ExportConfig(String format)
 	// Internal format tags stored in ExportConfig.format.
 	public static final String FORMAT_JPEG = "jpeg";
 	public static final String FORMAT_PNG = "png";
-
-	// File extensions (leading dot included) — passed to SAF filename builders.
+	// JPEG_EXT/PNG_EXT — file extensions (leading dot included) passed to SAF filename
+	// builders. JPEG_MIME/PNG_MIME — MIME types passed to ContentResolver / SAF picker
+	// intents. Constants are listed alphabetically rather than grouped by purpose to
+	// match the project-wide field-ordering rule.
 	public static final String JPEG_EXT = ".jpg";
-	public static final String PNG_EXT = ".png";
-
-	// MIME types — passed to ContentResolver / SAF picker intents.
 	public static final String JPEG_MIME = "image/jpeg";
+	public static final String PNG_EXT = ".png";
 	public static final String PNG_MIME = "image/png";
 
 	/**

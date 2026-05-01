@@ -2,7 +2,7 @@
 
 ## Overview
 
-CropCenter is a native Android image cropping tool focused on precise center-based cropping with full metadata preservation, including Samsung Ultra HDR gain map data and Samsung SEFT trailer for Galaxy Gallery Revert support.
+CropCenter is a native Android image cropping tool focused on precise center-based cropping with full metadata preservation, including Samsung Ultra HDR gain map data and verbatim re-append of any existing Samsung SEFT trailer (so a Gallery-edited file keeps its Revert chain across CropCenter re-edits).
 
 **Package**: `com.cropcenter`
 **Min SDK**: 35 (Android 15)
@@ -56,7 +56,7 @@ combined Settings dialog (grid config, pixel-grid color, About).
 | Color Picker | `view/ColorPickerDialog` | Tap-to-select grid + alpha + hex input |
 | Settings | `view/SettingsDialog` | Combined dialog: grid config (cols, rows, presets 2x2–8x8, color, width), pixel-grid toggle/color, About (build-time version) |
 | Save Dialog | `view/SaveDialog` | Filename, format, export-grid bake-in toggle |
-| Save Flow | `SaveController` + `ReplaceStrategy` + `ExportPipeline` | SAF picker routing, collision detection (auto-rename + sibling-create), crash-safe write-then-swap with Samsung Revert backup pre-encode |
+| Save Flow | `SaveController` + `ReplaceStrategy` + `ExportPipeline` | SAF picker routing, collision detection (auto-rename + sibling-create), crash-safe write-then-swap |
 
 ### Metadata Pipeline
 
@@ -68,8 +68,7 @@ combined Settings dialog (grid config, pixel-grid color, About).
 | `metadata/GainMapExtractor` | Extract HDR gain map from between primary EOI and SEFT |
 | `metadata/GainMapComposer` | Append gain map + trigger MPF patch |
 | `metadata/MpfPatcher` | Fix MPF APP2 offsets after primary size changes |
-| `metadata/SeftBuilder` | Build Samsung SEFT trailer for Galaxy Gallery Revert |
-| `metadata/SeftExtractor` | Extract existing SEFT trailer |
+| `metadata/SeftExtractor` | Extract existing SEFT trailer (re-appended verbatim by CropExporter) |
 | `metadata/JpegSegment` | Data class for a single JPEG marker segment |
 
 ### Utilities
@@ -227,7 +226,7 @@ Viewport clamped to prevent panning image off screen. Bitmap filtering disabled 
 
 ### 9. Export
 
-**Save flow**: Always `ACTION_CREATE_DOCUMENT` with format-aware MIME type (image/jpeg or image/png). Collisions inside the user's chosen directory route through `ReplaceStrategy`'s crash-safe write-then-swap (Strategy A: File-I/O atomic move; B: SAF direct overwrite with byte-for-byte verify; C: SAF rename-with-fallback). Same-name results from `ACTION_CREATE_DOCUMENT` (provider-confirmed overwrites) get a sibling placeholder via `DocumentsContract.createDocument` and route through the same Replace flow; opaque-ID providers fall back to `exportOverwriteWithBackup` (direct write + Samsung Revert backup + preserve-on-failure).
+**Save flow**: Always `ACTION_CREATE_DOCUMENT` with format-aware MIME type (image/jpeg or image/png). Collisions inside the user's chosen directory route through `ReplaceStrategy`'s crash-safe write-then-swap (Strategy A: File-I/O atomic move; B: SAF direct overwrite with byte-for-byte verify; C: SAF rename-with-fallback). Same-name results from `ACTION_CREATE_DOCUMENT` (provider-confirmed overwrites) get a sibling placeholder via `DocumentsContract.createDocument` and route through the same Replace flow; opaque-ID providers fall back to `exportToOverwrite` (direct write to the target with preserve-on-failure, "Replaced <name>" toast on success).
 
 **No-edit bypass**: when the user has applied no transformations (no crop, no rotation, no grid bake-in, JPEG-to-JPEG round-trip) AND the in-memory image is not a graft (`!state.isGraftApplied()`), `ExportPipeline` writes `state.originalFileBytes` verbatim instead of canvas-encoding. Preserves byte-perfect fidelity for re-saves of unmodified Samsung originals. Cropped / rotated / grid-baked saves AND any graft save go through the canvas-encode + ExifPatcher pipeline. Graft saves are explicitly excluded from the bypass because the splice ships source's gain map verbatim over the edit's primary scan; if the user later crops, the gain map's spatial alignment shifts off the features it boosts. Forcing graft saves through the full encode regenerates the gain map from the spliced primary via `UltraHdrCompat.compressWithGainmap`, keeping save-without-crop and save-after-crop both correct.
 
@@ -240,7 +239,7 @@ Original JPEG -> decode with gainmap -> render primary on cropW x cropH canvas
 -> apply identical transform to gainmap bitmap at gainmap resolution
 -> attach gainmap to output bitmap -> Bitmap.compress -> Ultra HDR JPEG
 -> extract gain map portion -> compose with canvas-rendered primary
--> inject original EXIF (patched) -> append SEFT trailer
+-> inject original EXIF (patched) -> re-append existing SEFT trailer verbatim (if any)
 ```
 
 The gain map undergoes the exact same canvas transform as the primary (same position, pivot, angle, scaled to gainmap resolution), guaranteeing spatial alignment regardless of rotation or crop position.
@@ -250,7 +249,7 @@ The gain map undergoes the exact same canvas transform as the primary (same posi
 **Non-HDR JPEG Export**:
 ```
 Canvas-rendered bitmap -> Bitmap.compress(JPEG, 100) -> inject original metadata
--> append gain map bytes (fallback) -> fix MPF -> append SEFT
+-> append gain map bytes (fallback) -> fix MPF -> re-append existing SEFT trailer verbatim (if any)
 ```
 
 **PNG Export**:
@@ -278,21 +277,22 @@ canvas color they saw in preview. The fill decision lives at
 - **Direct file-path read bypasses Samsung MediaStore mangling** (`SafFileHelper.tryReadDirectlyFromPath`). Samsung's MediaStore ContentProvider rewrites the EXIF segment as it streams JPEG bytes through `openInputStream` — zeros out GPS sub-IFD value blocks and reorders IFD0 entries — likely a privacy-driven sanitisation pass on Samsung firmware. `readUriBytes` resolves the URI to a filesystem path (handles both `com.android.providers.media.documents` and `com.android.externalstorage.documents` SAF authorities, requires `MANAGE_EXTERNAL_STORAGE`) and reads via `FileInputStream` when possible, returning the on-disk bytes that still carry GPS. Falls back to the SAF stream copy for cloud or SAF-only sources where no filesystem path is resolvable.
 
 #### Samsung SEFT Trailer
-- Extracted on load, re-appended on save (preserves Galaxy Gallery Revert chain)
-- For first-time edits: generates new SEFT with re-edit JSON and backup path
-- Original backup saved to `/storage/emulated/0/.cropcenter/{SHA256(path)}_{mediaId}.jpg`
-- Requires `MANAGE_EXTERNAL_STORAGE` for the File-I/O strategy in collision-overwrite Replace; the grant prompt is offered from the Replace failure dialog (`ReplaceStrategy.showReplaceFailureDialog`) only when a collision-overwrite hits an SAF-permission limit, never up-front at app start or save-dialog open. Plain Save As flows that don't hit a collision never need this permission, so most users are never prompted.
+- Extracted on load and re-appended on save **byte-for-byte** — a Gallery-edited file that's been re-edited in CropCenter keeps its working Revert chain because the trailer's backup-path reference still points at Gallery's own `/data/sec/photoeditor/` backup, which we never touched.
+- **CropCenter does not generate fresh SEFT trailers for new edits.** Samsung Gallery's Revert pre-flight validates the trailer's backup path against Samsung-blessed locations like `/data/sec/photoeditor/` that third-party apps cannot write to. A SEFT we generate pointing at our own writable shared-storage location is silently rejected by Gallery, so fabricating one would produce disk bloat for no Revert benefit. A file edited first in CropCenter (no prior SEFT) saves with no SEFT and no Revert option in Gallery — that's expected.
+- Requires `MANAGE_EXTERNAL_STORAGE` for the File-I/O strategy in collision-overwrite Replace AND for the Samsung MediaStore EXIF workaround (`SafFileHelper.tryReadDirectlyFromPath`); the grant prompt is offered from the Replace failure dialog (`ReplaceStrategy.showReplaceFailureDialog`) only when a collision-overwrite hits an SAF-permission limit, never up-front at app start or save-dialog open. Plain Save As flows that don't hit a collision never need this permission, so most users are never prompted.
 
 #### HDR Gain Map
 - Extracted via JPEG marker walking (handles SEFT trailer boundary via backward FFD9 scan)
 - Re-generated via canvas-based gainmap transform matching the primary
 - Composed with primary via `GainMapComposer` + `MpfPatcher` for MPF offset correction
+- **Fail-closed on MPF anchor failure**: when `MpfPatcher.patch` returns false (no MPF segment, malformed/unsupported MPF, byte-order mismatch, 3+ image MPF without MPType match, negative relative offset, etc.), `GainMapComposer.compose` returns the primary verbatim instead of shipping the gain-map bytes appended without an MPF entry pointing at them. Strict decoders' Revert pre-flight would reject an unanchored gain map; lenient decoders that scan for the `hdrgm` signature would render with the wrong offset; and `ExportPipeline.reportSuccess` (which only checks for the `hdrgm` marker) would falsely announce "[HDR OK]". A clean SDR JPEG is strictly safer than orphaned HDR.
 - `containsHdrgm()` verification on output; toast shows [HDR OK] or [HDR FAILED]
 
 #### ICC, XMP, MPF
 - ICC profiles preserved as raw APP2 segments
 - XMP with hdrgm namespace preserved from original
 - MPF offsets recalculated after primary size changes
+- `MpfPatcher` validates the MP Endian field as a full 2-byte pair (`II` / `MM`) rather than a single-byte check, locates the gain-map entry by walking entries for MPType `0x010005` ("Original Preservation") rather than hard-coding entry[1], refuses to patch 3+ image MPFs that have no MPType match (the entry[1] fallback is restricted to the 2-image Samsung Ultra HDR layout where the gain map is reliably at index 1 even when the MPType field is malformed), and rejects negative `relativeOffset` (`primarySize < mpfStart`) before it would otherwise be reinterpreted as a huge u32 offset
 
 ### 11. Settings / About
 
@@ -313,14 +313,17 @@ Settings dialog (opened via the gear icon in the toolbar) shows:
 1. User loads the original Samsung HDR JPEG (the metadata source) into CropCenter normally.
 2. User long-presses Open.
 3. SAF `ACTION_OPEN_DOCUMENT` (image/jpeg) → user picks the external edit (the pixel donor).
-4. Validation:
+4. Validation (`GraftController.alignEditToOriginalLayout`):
    - Picked file is a JPEG (SOI = `FFD8`).
-   - Stored W × H from `BitmapFactory` bounds-only decode equal between loaded and picked. Mismatch → toast "Edit dimensions don't match: original WxH, edit WxH" and abort.
-   - EXIF orientation tags match. Mismatch → toast "Edit EXIF orientation differs from original (X vs Y). Re-export with same orientation." and abort.
-5. `GraftWriter` splices the bytes in memory per the substitution rule below.
-6. `MainActivity.applyGraftedBytes` calls `applyImageBytes(grafted)` which installs the splice as the new in-memory image, then sets `state.setGraftApplied(true)`. The graft-applied flag gates the verbatim-write bypass (see below). The user's saved AR preference applies to the post-graft crop the same way it does on a normal image load — if they want the full image, they pick "Full" in the spinner.
-7. Toast "External edit applied" confirms success. Default save name = `<original-stem>-graft.jpg`.
-8. User saves through the existing Save button. The save runs through `CropExporter.export` (the bypass is disabled for grafts), which canvas-renders the source onto a Display P3 bitmap, re-encodes via `Bitmap.compress(JPEG, 100)`, generates a fresh thumbnail, re-injects original's EXIF / XMP / MPF / SEFT, and appends the gain map.
+   - **Display** dimensions match between loaded and picked (stored dims after applying each side's EXIF orientation). Photoshop tends to write its export with the orientation flag normalized to 1, so the stored layouts may differ even when the visible pixels align — comparing display dims rather than stored dims accommodates that.
+   - When stored layouts differ but display layouts match, the edit JPEG is decoded and re-encoded back to the original's stored layout via `Bitmap.compress(JPEG, 100)` before splicing. This adds ~1 channel-noise level to the edit pixels (same noise floor the save-time canvas pass would add anyway) but produces a graft whose primary scan is decoder-coherent against the original's EXIF orientation tag.
+   - Mismatched display dimensions → toast "Edit display dimensions don't match…" and abort.
+5. **AI region detection** — `AiRegionDetector.detect` runs on the source/aligned-edit pair (only for HDR sources, since the mask is consumed only by `UltraHdrCompat.compressWithGainmap`). The detected mask travels with the graft into `state.installGraft` and drives the gain-map inpaint at save time.
+6. **Sanity check** — when the AI mask flags more than 10% of pixels (`GraftController.LARGE_EDIT_FRACTION`), the user is shown a confirm dialog ("This edit changed about N% of pixels — much larger than typical for AI spot removal. Apply anyway?"). The feature targets small Generative Remove / Fill touch-ups (typical real cases at 0.001%-0.5%); a wholesale global edit (Lightroom tone curve, Photoshop colour grade) or a wrong-file pick would spike the fraction far past 10%, and the dialog turns the silent "graft an unrelated image into my metadata" footgun into a visible decision point.
+7. `GraftWriter` splices the bytes in memory per the substitution rule below.
+8. `MainActivity.applyGraftedBytes` calls `applyImageBytes(grafted)` which installs the splice as the new in-memory image. **Only on a successful decode** (applyImageBytes returns true) does it then call `state.installGraft(graft)` — installGraft atomically sets `graftApplied=true` (which gates the verbatim-write bypass) and stashes the AI mask. A decode failure leaves the previously-loaded image intact and surfaces "Failed to decode" to the user. The user's saved AR preference applies to the post-graft crop the same way it does on a normal image load — if they want the full image, they pick "Full" in the spinner.
+9. Toast "External edit applied" confirms a successful apply (fired only after `applyImageBytes` returns true, not when the splice is queued). Default save name = `<original-stem>-graft.jpg`.
+10. User saves through the existing Save button. The save runs through `CropExporter.export` (the bypass is disabled for grafts), which canvas-renders the source onto a Display P3 bitmap, re-encodes via `Bitmap.compress(JPEG, 100)`, generates a fresh thumbnail, re-injects original's EXIF / XMP / MPF / SEFT (verbatim re-append, no fresh trailer), and appends the gain map (regenerated by `UltraHdrCompat.compressWithGainmap` with the AI-mask-driven inpaint applied).
 
 **Substitution rule** (per-segment provenance — see `GraftWriter.SWAP_*` constants):
 
@@ -410,7 +413,7 @@ The canvas conversion is near-identity in colour terms: `graftedBytes` already c
 3. **Single image**: Only one image can be open at a time.
 4. **Large files**: Files > 128MB are rejected (`SafFileHelper.MAX_READ_BYTES`). Entire file is read into memory via a per-call `createTempFile` cache file (so concurrent loads don't clobber each other).
 5. **MediaStore owner on plain Save As**: `ACTION_CREATE_DOCUMENT` to a different directory creates a new file with a different MediaStore owner. Same-directory same-name saves route through the Replace flow which preserves the original document where the provider supports it.
-6. **Samsung Revert**: Backup written to shared storage from the pre-encode hook (so the SEFT trailer only claims a backup that actually wrote); Galaxy Gallery recognition depends on Samsung firmware version.
+6. **Samsung Revert** only works for files that came in with an existing SEFT trailer (i.e., a Gallery-edited file re-edited in CropCenter). For files first edited in CropCenter, Gallery does not surface a Revert option — Gallery's Revert validates the backup path against Samsung-blessed locations a third-party app cannot write to, so fabricating SEFTs pointing at our own shared-storage writes is a no-op that we explicitly skip.
 7. **EXIF thumbnail overflow**: If original EXIF metadata + new thumbnail would exceed the 65535-byte APP1 limit, thumbnail is reduced or dropped. `oldThumbLen` is sanity-clamped against `data.length` to prevent malformed source EXIF from inflating the budget calculation.
 8. **No saved instance state**: Configuration changes handled via `configChanges`; process death loses all crop state.
 9. **Opaque-ID providers**: Providers without document-ID path encoding (some cloud / SD-card providers) lose the strongest collision-detection paths. The Save flow trusts SAF auto-rename as collision evidence on those providers — false positives surface as a Replace dialog the user can dismiss with Keep, never as silent data loss.

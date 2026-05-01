@@ -53,15 +53,21 @@ public final class JpegMetadataInjector
 			{
 				break; // malformed segment
 			}
-			// Defensive: a lying segLen could drive scanStart past EOF, which would make the
-			// final out.write(...) call below throw IndexOutOfBoundsException with negative
-			// length. If that happens, fall back to skipping nothing.
+			// A lying segLen claiming to extend past EOF means the re-encoded buffer is
+			// genuinely malformed (Skia produced a corrupt JPEG, or the byte stream got
+			// damaged between encode and injector). Earlier versions silently fell back
+			// to `scanStart = 2`, which then wrote a verbatim copy of the entire re-
+			// encoded image AFTER the SOI as the "primary scan" — that included the
+			// re-encoder's own APP markers (JFIF, sRGB ICC) duplicated alongside
+			// original's, exactly the situation this function is supposed to avoid.
+			// Throw instead so the caller (ExportPipeline.encodePhase) surfaces a real
+			// "Export failed" toast rather than silently shipping a JPEG with
+			// duplicate APP segments.
 			if (scanStart + 2L + segLen > reencoded.length)
 			{
-				Log.w(TAG, "APP segment length " + segLen + " at " + scanStart + " exceeds file; "
-					+ "falling back to scanStart=2");
-				scanStart = 2;
-				break;
+				throw new IOException("Re-encoded APP segment at " + scanStart
+					+ " claims length " + segLen + " but only " + (reencoded.length - scanStart - 2)
+					+ " bytes remain");
 			}
 			scanStart += 2 + segLen;
 		}

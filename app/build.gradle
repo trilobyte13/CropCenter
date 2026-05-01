@@ -35,6 +35,18 @@ android {
         sourceCompatibility JavaVersion.VERSION_21
         targetCompatibility JavaVersion.VERSION_21
     }
+
+    testOptions {
+        // Local JVM unit tests don't need an emulator. The few classes that touch
+        // android.graphics types stay out of the test source set; everything tested is
+        // pure-Java logic (parsing, math, model state) that runs on the host JVM.
+        // returnDefaultValues lets unmocked Android stubs return sensible defaults
+        // (0 / null / false) so tests don't need a Robolectric runtime just to construct
+        // an object that happens to import an Android type.
+        unitTests {
+            returnDefaultValues = true
+        }
+    }
 }
 
 dependencies {
@@ -42,4 +54,6 @@ dependencies {
     implementation 'com.google.android.material:material:1.12.0'
     implementation 'androidx.core:core:1.16.0'
     implementation 'androidx.activity:activity:1.9.0'
+
+    testImplementation 'junit:junit:4.13.2'
 }

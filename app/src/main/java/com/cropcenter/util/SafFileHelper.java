@@ -137,6 +137,7 @@ public final class SafFileHelper
 		}
 		catch (Exception e)
 		{
+			Log.w(TAG, "deriveSiblingUri " + siblingName + " failed: " + e.getMessage());
 			return null;
 		}
 	}
@@ -174,12 +175,31 @@ public final class SafFileHelper
 			String tail = docId.substring(colon + 1);
 			if ("primary".equalsIgnoreCase(volume))
 			{
+				// Path-traversal guard: a malicious app sending a Share intent with a
+				// crafted docId like "primary:../../data/data/com.othertarget/foo" would
+				// otherwise produce a File pointing outside the volume root. The
+				// getFilePathAndId branch (the MediaStore-Documents path) already applies
+				// this same guard; missing it here let the shorter primary-handler reach
+				// the raw filesystem on a rooted device. Reject anything that looks like
+				// it would escape the volume.
+				if (tail.contains("..") || tail.startsWith("/"))
+				{
+					Log.w(TAG, "fileFromSafUri rejected suspicious docId tail: " + tail);
+					return null;
+				}
 				File primaryRoot = Environment.getExternalStorageDirectory();
 				return new File(primaryRoot, tail);
 			}
-			// DownloadStorageProvider "raw:<absolute path>" — use the path as-is.
+			// DownloadStorageProvider "raw:<absolute path>" — use the path as-is. The
+			// "raw" form is by spec an absolute path, so we don't reject "/" here, but
+			// we still guard against ".." which has no legitimate use in a docId.
 			if ("raw".equalsIgnoreCase(volume))
 			{
+				if (tail.contains(".."))
+				{
+					Log.w(TAG, "fileFromSafUri rejected raw docId with ..: " + tail);
+					return null;
+				}
 				return new File(tail);
 			}
 		}
@@ -273,9 +293,9 @@ public final class SafFileHelper
 			// MANAGE_EXTERNAL_STORAGE we can read those paths directly via FileInputStream,
 			// bypassing the ContentProvider's EXIF-mangling openInputStream stream — which is
 			// the entire reason this resolver exists. MediaStore _id is unavailable on this
-			// path (the provider doesn't expose it), so we return path-only with id=null;
-			// callers that need the MediaStore id (Samsung Revert backup pre-encode) treat a
-			// null id as "no MediaStore mapping available" and skip the backup write.
+			// path (the provider doesn't expose it), so we return path-only with id=null —
+			// the id slot is preserved in the return shape for symmetry with the
+			// MediaStore-Documents branch below, even though no current caller reads it.
 			if ("com.android.externalstorage.documents".equals(uri.getAuthority()))
 			{
 				String docId = DocumentsContract.getDocumentId(uri);
@@ -381,70 +401,98 @@ public final class SafFileHelper
 	 */
 	public long readbackByteCount(Uri uri, byte[] expected)
 	{
-		long total = 0;
 		try (InputStream is = ctx.getContentResolver().openInputStream(uri))
 		{
 			if (is == null)
 			{
 				return -1;
 			}
-			byte[] buf = new byte[ByteBufferUtils.IO_BUFFER];
-			int n;
-			while ((n = is.read(buf)) != -1)
-			{
-				if (total + n > expected.length)
-				{
-					// Trailing bytes beyond what we wrote — treat as corruption.
-					Log.w(TAG, "readback: provider returned more bytes than written");
-					return total;
-				}
-				for (int i = 0; i < n; i++)
-				{
-					if (buf[i] != expected[(int) total + i])
-					{
-						Log.w(TAG, "readback: byte mismatch at offset " + (total + i));
-						return total + i;
-					}
-				}
-				total += n;
-				if (total == expected.length)
-				{
-					// All bytes matched. Confirm EOF — trailing bytes would mean a stale
-					// longer payload wasn't truncated. Wrap the EOF-check read in its OWN
-					// try so a throw here doesn't fall through to the outer catch, which
-					// returns `total` (== expected.length) and would falsely claim the
-					// save is verified despite never confirming EOF.
-					int trailing;
-					try
-					{
-						trailing = is.read(buf);
-					}
-					catch (Exception eofException)
-					{
-						Log.w(TAG, "readback: EOF-check threw, treating as unverified: "
-							+ eofException.getMessage());
-						return -1;
-					}
-					if (trailing > 0)
-					{
-						// Provider served MORE than we wrote — stale trailing bytes that
-						// never got truncated. MUST NOT return `total` here because
-						// callers check `verifiedBytes == expected.length` and would
-						// mistake this for a clean save. Return a value > expected.length
-						// so equality fails; verifyPhase then reports the save as lost.
-						Log.w(TAG, "readback: unexpected trailing " + trailing + " bytes");
-						return total + trailing;
-					}
-					return total;
-				}
-			}
-			return total;
+			return readbackByteCountFromStream(is, expected);
 		}
 		catch (Exception e)
 		{
 			Log.w(TAG, "readbackByteCount: " + e.getMessage());
-			return total > 0 ? total : -1;
+			// Any exception (open failure, mid-stream read failure, close throwing
+			// AFTER the helper's success-return value was queued) lands here. The
+			// helper either returns a valid byte-count contract value or throws —
+			// the only path to expected.length is via a successful return that, if
+			// preceded by a close throw, must NOT be reported as verified. Always
+			// return -1 from this catch; the contract for callers is "strict
+			// equality vs expected.length", which -1 always fails. This is also
+			// the round-5 H1 contract: never return expected.length from the
+			// outer catch.
+			return -1;
 		}
+	}
+
+	/**
+	 * Stream-only core of readbackByteCount, exposed package-private for unit
+	 * testing (tests can pass a ByteArrayInputStream subclass that throws on
+	 * close / read to exercise error paths without an Android Context).
+	 *
+	 * Returns the same value classes documented on readbackByteCount: expected.length
+	 * for clean match + EOF, total + trailing or total + n for trailing bytes,
+	 * total + i for mismatch, total for short stream, -1 if the EOF-check read
+	 * throws after the byte-by-byte comparison passed.
+	 *
+	 * Throws IOException when the main read loop (NOT the EOF check) errors. The
+	 * outer caller catches and returns -1.
+	 */
+	static long readbackByteCountFromStream(InputStream is, byte[] expected) throws IOException
+	{
+		long total = 0;
+		byte[] buf = new byte[ByteBufferUtils.IO_BUFFER];
+		int n;
+		while ((n = is.read(buf)) != -1)
+		{
+			if (total + n > expected.length)
+			{
+				// Trailing bytes beyond what we wrote — treat as corruption. Return
+				// total + n (a value strictly > expected.length) so callers checking
+				// `verifiedBytes == expected.length` see the mismatch via the same
+				// idiom as the EOF-check branch below.
+				Log.w(TAG, "readback: provider returned more bytes than written");
+				return total + n;
+			}
+			for (int i = 0; i < n; i++)
+			{
+				if (buf[i] != expected[(int) total + i])
+				{
+					Log.w(TAG, "readback: byte mismatch at offset " + (total + i));
+					return total + i;
+				}
+			}
+			total += n;
+			if (total == expected.length)
+			{
+				// All bytes matched. Confirm EOF — trailing bytes would mean a stale
+				// longer payload wasn't truncated. Wrap the EOF-check read in its OWN
+				// try so a throw here doesn't propagate to the helper's caller, which
+				// would return total (== expected.length) via the outer success path
+				// and falsely claim the save is verified despite never confirming EOF.
+				int trailing;
+				try
+				{
+					trailing = is.read(buf);
+				}
+				catch (Exception eofException)
+				{
+					Log.w(TAG, "readback: EOF-check threw, treating as unverified: "
+						+ eofException.getMessage());
+					return -1;
+				}
+				if (trailing > 0)
+				{
+					// Provider served MORE than we wrote — stale trailing bytes that
+					// never got truncated. Return a value > expected.length so
+					// equality fails; verifyPhase then reports the save as lost.
+					Log.w(TAG, "readback: unexpected trailing " + trailing + " bytes");
+					return total + trailing;
+				}
+				return total;
+			}
+		}
+		return total;
 	}
 
 	/**
@@ -465,9 +513,9 @@ public final class SafFileHelper
 		// bytes. Diagnosed via logcat trace: the bytes that arrive at applyImageBytes already
 		// have scrambled tag order before any of our code touches them. Direct file read from
 		// the resolved DATA column bypasses the ContentProvider entirely, returning pristine
-		// on-disk bytes. Requires MANAGE_EXTERNAL_STORAGE for paths under /storage/emulated; we
-		// already hold that permission for Samsung Revert backup writes. Falls back to the SAF
-		// stream copy below when no path is resolvable (cloud / SAF-only URIs).
+		// on-disk bytes. Requires MANAGE_EXTERNAL_STORAGE for paths under /storage/emulated —
+		// the same permission ReplaceStrategy needs for its File-I/O atomic-move strategy. Falls
+		// back to the SAF stream copy below when no path is resolvable (cloud / SAF-only URIs).
 		byte[] direct = tryReadDirectlyFromPath(uri);
 		if (direct != null)
 		{
@@ -692,8 +740,13 @@ public final class SafFileHelper
 	 * after the last "/", so docId.substring(0, end) + child yields the sibling. For files
 	 * at the provider root ("primary:foo.jpg") it falls back to the position after the
 	 * volume ":". Returns -1 for opaque IDs that have neither separator.
+	 *
+	 * Package-private (not private) so SafFileHelperTest in the same package can verify
+	 * the path-vs-volume-vs-opaque branches directly without going through Context-bound
+	 * createDocument calls. The pure-string nature of this helper is exactly the kind of
+	 * unit-testable logic that's worth covering at this level.
 	 */
-	private static int lastSegmentSeparatorEnd(String docId)
+	static int lastSegmentSeparatorEnd(String docId)
 	{
 		int slash = docId.lastIndexOf('/');
 		if (slash >= 0)
@@ -712,9 +765,10 @@ public final class SafFileHelper
 	 * Parent document ID of a path-addressed SAF document ID, or null when the ID is opaque.
 	 * Strips the trailing "/segment" for nested paths; for root-level files the parent is
 	 * the volume prefix including the ":" ("primary:foo.jpg" → "primary:"), which
-	 * ExternalStorageProvider accepts as the root document.
+	 * ExternalStorageProvider accepts as the root document. Package-private for
+	 * SafFileHelperTest, same rationale as lastSegmentSeparatorEnd.
 	 */
-	private static String parentDocIdOf(String docId)
+	static String parentDocIdOf(String docId)
 	{
 		int slash = docId.lastIndexOf('/');
 		if (slash > 0)

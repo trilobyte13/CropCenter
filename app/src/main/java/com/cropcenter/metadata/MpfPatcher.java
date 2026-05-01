@@ -59,7 +59,21 @@ public final class MpfPatcher
 				{
 					return false;
 				}
-				boolean isLittleEndian = jpeg[mpfStart] == 0x49; // 'I' = little-endian
+				// MP Endian field is 2 bytes per spec — "II" (0x49 0x49) for little-endian or
+				// "MM" (0x4D 0x4D) for big-endian. Only checking jpeg[mpfStart] would treat
+				// a malformed "IM" / "MI" as little-endian and parse subsequent IFD offsets
+				// with the wrong byte order, producing nonsensical bounds-check passes that
+				// land writes on arbitrary positions.
+				int hi = jpeg[mpfStart] & 0xFF;
+				int lo = jpeg[mpfStart + 1] & 0xFF;
+				boolean isLittleEndian = hi == 0x49 && lo == 0x49;
+				boolean isBigEndian = hi == 0x4D && lo == 0x4D;
+				if (!isLittleEndian && !isBigEndian)
+				{
+					Log.w(TAG, "MPF byte-order field is not II/MM: 0x"
+						+ Integer.toHexString(hi) + Integer.toHexString(lo));
+					return false;
+				}
 
 				// IFD offset (relative to mpfStart)
 				long ifdOffRel = ByteBufferUtils.readU32(jpeg, mpfStart + 4, isLittleEndian);
@@ -125,6 +139,16 @@ public final class MpfPatcher
 
 		int gainMapSize = jpeg.length - primarySize;
 		int relativeOffset = primarySize - mpfStart;
+		// On a malformed MPF where the segment is positioned later in the file than the
+		// gain map start, relativeOffset is negative and writeU32 reinterprets it as a
+		// huge u32 — emitting a corrupt MP entry that decoders treat as an offset past
+		// EOF. Refuse to patch rather than write a poison value.
+		if (relativeOffset < 0)
+		{
+			Log.w(TAG, "MPF relativeOffset negative (primarySize=" + primarySize
+				+ " < mpfStart=" + mpfStart + "); refusing to patch");
+			return false;
+		}
 
 		Log.d(TAG, numImages + " images, mpfStart=" + mpfStart);
 
@@ -143,17 +167,44 @@ public final class MpfPatcher
 		ByteBufferUtils.writeU32(jpeg, entryOff + 4, primarySize, isLittleEndian);
 		Log.d(TAG, "entry[0] size → " + primarySize);
 
-		// Update ONLY entry[1] — the gain map slot in Ultra HDR.
-		// Files with additional MP entries (depth maps, burst frames,
-		// Apple Portrait layers) must leave those untouched; previously
-		// this loop wrote the gain-map size/offset into every secondary
-		// entry, silently corrupting the MPF index for multi-image files.
-		// numImages >= 2 is already guaranteed by the guard above.
-		int gainMapEntryBase = entryOff + 16;
+		// Locate the gain-map entry. Per the MPF spec, the entry's lower 24 bits of
+		// `attr` carry the MPType (0x010005 = "Original Preservation" / gain map).
+		// Samsung Ultra HDR files always place the gain map at index 1, but multi-
+		// image MPFs (depth maps, burst frames, Apple Portrait layers) can shuffle
+		// it elsewhere — patching entry[1] unconditionally would write the gain-map
+		// size into the wrong slot and leave the actual gain-map entry stale, which
+		// strict-MPF decoders then reject. Walk all entries; if no MPType match is
+		// found, fall back to entry[1] ONLY when numImages == 2 (the empirical
+		// Samsung Ultra HDR pattern, which sometimes ships a malformed MPType field
+		// but reliably keeps the gain map at index 1). For numImages >= 3 with no
+		// MPType match, refuse the patch — writing entry[1] in that case can land
+		// the gain-map size on a depth map, burst frame, or thumbnail entry and
+		// leave the real gain-map entry stale.
+		int gainMapEntryBase = -1;
+		for (int img = 1; img < numImages; img++)
+		{
+			int base = entryOff + img * 16;
+			long attr = ByteBufferUtils.readU32(jpeg, base, isLittleEndian);
+			if ((attr & 0x00FFFFFFL) == 0x00010005L)
+			{
+				gainMapEntryBase = base;
+				break;
+			}
+		}
+		if (gainMapEntryBase < 0)
+		{
+			if (numImages != 2)
+			{
+				Log.w(TAG, "MPF has " + numImages + " entries but no gain-map MPType match;"
+					+ " refusing to patch (fallback to entry[1] only valid for 2-image MPF)");
+				return false;
+			}
+			gainMapEntryBase = entryOff + 16;
+		}
 		ByteBufferUtils.writeU32(jpeg, gainMapEntryBase + 4, gainMapSize, isLittleEndian);
 		ByteBufferUtils.writeU32(jpeg, gainMapEntryBase + 8, relativeOffset, isLittleEndian);
-		Log.d(TAG, "entry[1] offset → " + relativeOffset
-			+ " size → " + gainMapSize);
+		Log.d(TAG, "gain-map entry @ +" + (gainMapEntryBase - entryOff) / 16
+			+ " offset → " + relativeOffset + " size → " + gainMapSize);
 
 		// Log after
 		for (int img = 0; img < numImages; img++)

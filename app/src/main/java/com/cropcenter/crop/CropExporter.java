@@ -11,7 +11,6 @@ import com.cropcenter.metadata.ExifPatcher;
 import com.cropcenter.metadata.GainMapComposer;
 import com.cropcenter.metadata.JpegMetadataInjector;
 import com.cropcenter.metadata.JpegSegment;
-import com.cropcenter.metadata.SeftBuilder;
 import com.cropcenter.model.CropState;
 import com.cropcenter.model.ExportConfig;
 import com.cropcenter.model.GridConfig;
@@ -20,7 +19,6 @@ import com.cropcenter.util.UltraHdrCompat;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
-import java.io.FileOutputStream;
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.List;
@@ -32,35 +30,20 @@ import java.util.zip.CRC32;
  */
 public final class CropExporter
 {
-	/**
-	 * Status of a saveOriginalBackup() attempt.
-	 */
-	public enum BackupStatus
-	{
-		// Not applicable — source isn't a MediaStore file we can back up.
-		NOT_APPLICABLE,
-		// A backup for this file was already on disk; left untouched.
-		ALREADY_EXISTS,
-		// Wrote a fresh backup.
-		WRITTEN,
-		// Backup was needed but writing failed — Gallery Revert will not work.
-		FAILED
-	}
-
 	public record ExportResult(byte[] data, String extension) {}
 
 	private static final String TAG = "CropExporter";
 	private static final int CANVAS_BG = 0xFF0D0E14; // opaque very-dark-navy — visible at rotation corners
 	private static final int MAX_THUMBNAIL_BUDGET = 60_000; // JPEG thumbnail cap (leaves room under APP1 limit)
-	private static final int THUMBNAIL_DEFAULT_BUDGET = MAX_THUMBNAIL_BUDGET; // used when no EXIF is present
-		// to measure against — defaults to the same cap, separate name so the two can
-		// diverge later without a literal hunt.
+	// Used when no EXIF is present to measure against — defaults to the same cap. Kept as a
+	// separate constant so the two can diverge later without a literal hunt.
+	private static final int THUMBNAIL_DEFAULT_BUDGET = MAX_THUMBNAIL_BUDGET;
 	private static final int THUMBNAIL_MARGIN_BYTES = 200; // margin for IFD changes beyond measured size
 	private static final int THUMBNAIL_MAX_DIM = 1024;
 
 	private CropExporter() {}
 
-	public static ExportResult export(CropState state, File cacheDir, boolean includeBackupInSeft)
+	public static ExportResult export(CropState state, File cacheDir)
 		throws IOException
 	{
 		Bitmap src = state.getSourceImage();
@@ -111,192 +94,72 @@ public final class CropExporter
 			outBmp = Bitmap.createBitmap(cropW, cropH, Bitmap.Config.ARGB_8888);
 		}
 
-		Canvas canvas = new Canvas(outBmp);
-		Paint paint = new Paint(Paint.FILTER_BITMAP_FLAG | Paint.ANTI_ALIAS_FLAG);
-		// JPEG can't represent alpha — fill with the editor's canvas color so rotation
-		// corners and any transparent source pixels read as the same dark navy the user saw
-		// in the preview. PNG keeps the bitmap's default transparent state so alpha sources
-		// round-trip and rotation corners stay see-through.
-		if (isJpeg)
-		{
-			canvas.drawColor(CANVAS_BG);
-		}
-
-		BitmapUtils.drawCropped(canvas, src, srcX, srcY, state.getRotationDegrees(), paint);
-
-		// Optional grid overlay bake-in (independent of whether grid is visible on screen)
-		GridConfig grid = state.getGridConfig();
-		if (grid.includeInExport())
-		{
-			drawGridPixels(outBmp, cropW, cropH, grid);
-		}
-
-		return switch (state.getExportConfig().format())
-		{
-			case ExportConfig.FORMAT_JPEG -> exportJpeg(state, outBmp, cropW, cropH, cacheDir,
-				includeBackupInSeft);
-			default -> exportPng(state, outBmp, cropW, cropH);
-		};
-	}
-
-	/**
-	 * Save the original file to shared storage for Samsung Gallery Revert.
-	 * Uses /storage/emulated/0/.cropcenter/ which is readable by Gallery.
-	 *
-	 * Reads `state.getOriginalFileBytes()` — the in-memory byte array captured at load —
-	 * not the on-disk file. The Replace flow calls this from ExportPipeline's pre-encode
-	 * hook, BEFORE the encoder emits the SEFT trailer, so the exporter can decide
-	 * whether to include a backup path claim based on whether this write actually
-	 * succeeded. (Earlier builds wrote the backup AFTER the placeholder write, which
-	 * meant the SEFT could claim a backup that then failed to materialise.)
-	 *
-	 * @return a BackupStatus so the caller can surface FAILED cases (missing storage
-	 *         permission, quota, etc.) to the user instead of silently overwriting without a
-	 *         revertable backup. WRITTEN / ALREADY_EXISTS are both "backup on disk";
-	 *         NOT_APPLICABLE / FAILED must NOT lead to SEFT claiming a backup.
-	 */
-	public static BackupStatus saveOriginalBackup(CropState state)
-	{
-		if (state.getOriginalFilePath() == null || state.getMediaStoreId() < 0)
-		{
-			return BackupStatus.NOT_APPLICABLE;
-		}
-		byte[] origBytes = state.getOriginalFileBytes();
-		if (origBytes == null)
-		{
-			return BackupStatus.NOT_APPLICABLE;
-		}
-
-		String backupPath = SeftBuilder.generateBackupPath(
-			state.getOriginalFilePath(), state.getMediaStoreId());
-		File backupFile = new File(backupPath);
-
-		// Don't overwrite an existing backup (might be from a previous edit)
-		if (backupFile.exists())
-		{
-			Log.d(TAG, "Backup already exists: " + backupPath);
-			return BackupStatus.ALREADY_EXISTS;
-		}
-
+		// outBmp ownership transfers to exportJpeg / exportPng on the success path — both
+		// recycle in their own finally. But if drawCropped or drawGridPixels throws
+		// (OOM on huge inputs is the realistic case), or if the switch hits the encode-
+		// failure branch before ownership transfers, outBmp would leak its native pixel
+		// buffer to the GC finalizer. The handedOff flag flips true the moment the
+		// switch is about to delegate, so the catch / non-success paths recycle locally.
+		boolean handedOff = false;
 		try
 		{
-			File dir = backupFile.getParentFile();
-			if (dir != null && !dir.exists())
+			Canvas canvas = new Canvas(outBmp);
+			Paint paint = new Paint(Paint.FILTER_BITMAP_FLAG | Paint.ANTI_ALIAS_FLAG);
+			// JPEG can't represent alpha — fill with the editor's canvas color so rotation
+			// corners and any transparent source pixels read as the same dark navy the user
+			// saw in the preview. PNG keeps the bitmap's default transparent state so alpha
+			// sources round-trip and rotation corners stay see-through.
+			if (isJpeg)
 			{
-				dir.mkdirs();
+				canvas.drawColor(CANVAS_BG);
 			}
-			try (FileOutputStream fos = new FileOutputStream(backupFile))
+
+			BitmapUtils.drawCropped(canvas, src, srcX, srcY, state.getRotationDegrees(), paint);
+
+			// Optional grid overlay bake-in (independent of whether grid is visible on screen)
+			GridConfig grid = state.getGridConfig();
+			if (grid.includeInExport())
 			{
-				fos.write(origBytes);
+				drawGridPixels(outBmp, cropW, cropH, grid);
 			}
-			Log.d(TAG, "Original backed up to: " + backupPath + " (" + origBytes.length + " bytes)");
-			return BackupStatus.WRITTEN;
+
+			handedOff = true;
+			return switch (state.getExportConfig().format())
+			{
+				case ExportConfig.FORMAT_JPEG -> exportJpeg(state, outBmp, cropW, cropH, cacheDir);
+				default -> exportPng(state, outBmp, cropW, cropH);
+			};
 		}
-		catch (Exception e)
+		finally
 		{
-			Log.w(TAG, "Cannot save backup to " + backupPath + ": " + e.getMessage());
-			return BackupStatus.FAILED;
+			if (!handedOff)
+			{
+				outBmp.recycle();
+			}
 		}
 	}
 
 	/**
-	 * Append Samsung SEFT trailer.
-	 * - If existing SEFT: re-append it verbatim (preserves Gallery's Revert data)
-	 * - If no existing SEFT but have backup info: generate new SEFT for Revert
-	 * - Otherwise: no SEFT appended
+	 * Re-append an existing SEFT trailer verbatim, or return the JPEG unchanged when none was
+	 * captured at load. CropCenter does not generate fresh SEFTs — Samsung Gallery's Revert
+	 * validates a backup path the SEFT claims, and only honors paths under Samsung-blessed
+	 * locations like `/data/sec/photoeditor/` that third-party apps cannot write to. A SEFT
+	 * we generate pointing at our own `/storage/emulated/0/.cropcenter/` write is silently
+	 * rejected by Gallery, so fabricating one is a net negative (disk bloat with no Revert
+	 * benefit). Files that came in with a SEFT — Gallery-edited originals — keep their
+	 * working Revert chain because we re-append exactly the bytes we extracted at load.
 	 */
-	private static byte[] appendSeft(byte[] jpeg, byte[] existingSeft, String backupPath,
-		float normCenterX, float normCenterY, float normCropW, float normCropH,
-		boolean isCropped, int exifRotation)
+	private static byte[] appendSeft(byte[] jpeg, byte[] existingSeft)
 	{
-		byte[] seft;
-		if (existingSeft != null && existingSeft.length > 0)
-		{
-			// Re-append existing SEFT verbatim — preserves Gallery's re-edit data and backup path
-			seft = existingSeft;
-			Log.d(TAG, "Preserving existing SEFT trailer: " + seft.length + " bytes");
-		}
-		else if (backupPath != null)
-		{
-			// No existing SEFT — generate new one for Galaxy Revert
-			seft = SeftBuilder.build(backupPath, normCenterX, normCenterY, normCropW, normCropH,
-				isCropped, exifRotation, System.currentTimeMillis());
-			if (seft == null)
-			{
-				return jpeg;
-			}
-			Log.d(TAG, "Generated new SEFT trailer: " + seft.length + " bytes");
-		}
-		else
+		if (existingSeft == null || existingSeft.length == 0)
 		{
 			return jpeg;
 		}
-
-		byte[] result = new byte[jpeg.length + seft.length];
+		Log.d(TAG, "Preserving existing SEFT trailer: " + existingSeft.length + " bytes");
+		byte[] result = new byte[jpeg.length + existingSeft.length];
 		System.arraycopy(jpeg, 0, result, 0, jpeg.length);
-		System.arraycopy(seft, 0, result, jpeg.length, seft.length);
+		System.arraycopy(existingSeft, 0, result, jpeg.length, existingSeft.length);
 		return result;
-	}
-
-	/**
-	 * Compute SEFT params from state and delegate to appendSeft.
-	 *
-	 * `includeBackupInSeft` gates fresh backupPath generation: Samsung Gallery reads the
-	 * SEFT `PhotoEditor_Re_Edit_Data`'s backup path and offers Revert if the file exists.
-	 * The caller (ExportPipeline's pre-encode hook for the Replace flow) must only set
-	 * this true AFTER actually writing the `.cropcenter` backup — plain Save As / Keep
-	 * never produce a backup, and Replace with a failed backup write also gets false. A
-	 * SEFT that claims a backup which doesn't exist points Gallery at a missing file,
-	 * surfacing Revert on a non-revertable copy. When the source already carried an
-	 * existing SEFT, appendSeft preserves it verbatim regardless (that one's backupPath
-	 * points at the ORIGINAL on-disk image, which is still there post-save-as).
-	 */
-	private static byte[] appendSeftForState(byte[] jpeg, CropState state, int cropW, int cropH,
-		boolean includeBackupInSeft)
-	{
-		int imgW = state.getImageWidth();
-		int imgH = state.getImageHeight();
-		boolean isCropped = state.hasCenter() && (cropW != imgW || cropH != imgH);
-
-		// Normalized crop params (0..1 relative to image dimensions) — Samsung SEFT format expects these.
-		float normCenterX;
-		float normCenterY;
-		float normCropW;
-		float normCropH;
-		if (state.hasCenter())
-		{
-			normCenterX = state.getCenterX() / imgW;
-			normCenterY = state.getCenterY() / imgH;
-			normCropW = (float) cropW / imgW;
-			normCropH = (float) cropH / imgH;
-		}
-		else
-		{
-			normCenterX = 0.5f;
-			normCenterY = 0.5f;
-			normCropW = 1f;
-			normCropH = 1f;
-		}
-
-		// Only claim a backup path when one is actually being written (Replace flow).
-		String backupPath = null;
-		if (includeBackupInSeft
-			&& state.getOriginalFilePath() != null
-			&& state.getMediaStoreId() >= 0)
-		{
-			backupPath = SeftBuilder.generateBackupPath(
-				state.getOriginalFilePath(), state.getMediaStoreId());
-		}
-
-		int exifOrient = 1;
-		byte[] origBytes = state.getOriginalFileBytes();
-		if (origBytes != null)
-		{
-			exifOrient = BitmapUtils.readExifOrientation(origBytes);
-		}
-
-		return appendSeft(jpeg, state.getSeftTrailer(), backupPath,
-			normCenterX, normCenterY, normCropW, normCropH, isCropped, exifOrient);
 	}
 
 	/**
@@ -385,7 +248,7 @@ public final class CropExporter
 	}
 
 	private static ExportResult exportJpeg(CropState state, Bitmap bmp, int cropW, int cropH,
-		File cacheDir, boolean includeBackupInSeft) throws IOException
+		File cacheDir) throws IOException
 	{
 		int quality = 100;
 		byte[] thumbnail = buildEmbeddedThumbnail(state, bmp);
@@ -408,7 +271,7 @@ public final class CropExporter
 
 		jpegBytes = injectExifMetadata(jpegBytes, state, cropW, cropH, thumbnail);
 		jpegBytes = composeGainMap(jpegBytes, state, croppedGainMap);
-		jpegBytes = appendSeftForState(jpegBytes, state, cropW, cropH, includeBackupInSeft);
+		jpegBytes = appendSeft(jpegBytes, state.getSeftTrailer());
 
 		return new ExportResult(jpegBytes, "jpg");
 	}

@@ -1,5 +1,6 @@
 package com.cropcenter;
 
+import android.app.AlertDialog;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.net.Uri;
@@ -10,6 +11,7 @@ import androidx.activity.result.ActivityResultLauncher;
 
 import com.cropcenter.metadata.GraftWriter;
 import com.cropcenter.model.ExportConfig;
+import com.cropcenter.model.Graft;
 import com.cropcenter.util.AiRegionDetector;
 import com.cropcenter.util.AiRegionDetector.AiMask;
 import com.cropcenter.util.BitmapUtils;
@@ -41,26 +43,36 @@ import java.io.IOException;
 final class GraftController
 {
 	/**
-	 * Callback for delivering a successfully spliced graft to MainActivity. Carries
-	 * the assembled JPEG bytes, suggested display name, and the AI-region mask
-	 * (null when no AI fill was detected). MainActivity must apply these atomically
-	 * in its bg apply task — setting state.aiMask AFTER applyImageBytes since
-	 * applyImageBytes runs state.reset() which clears aiMask.
+	 * Callback for delivering a successfully spliced graft to MainActivity. The Graft
+	 * record carries the assembled JPEG bytes, suggested display name, and the AI-region
+	 * mask (null when no AI fill was detected). MainActivity is expected to drive
+	 * applyImageBytes followed by state.installGraft(graft) atomically — installGraft
+	 * encapsulates the "must happen after reset, both fields required" invariant so
+	 * callers can't accidentally skip one half of the post-apply state setup.
 	 */
 	@FunctionalInterface
 	interface GraftReadyHandler
 	{
-		void onReady(byte[] graftedBytes, String displayName, AiMask aiMask);
+		void onReady(Graft graft);
 	}
 
+	// Mask-fraction threshold above which we ask the user to confirm the apply. The feature
+	// is for small Generative Remove / Generative Fill touch-ups — typical real cases land
+	// at 0.001%-0.5% of pixels. A wrong-file pick (different photo with matching dimensions)
+	// or a wholesale global edit (Lightroom tone curve, Photoshop colour grade) will spike
+	// far past 10%. Confirmation lets those cases proceed if the user actually meant it,
+	// while turning the silent "graft an unrelated image into my metadata" footgun into a
+	// visible decision point.
 	private static final String TAG = "GraftController";
+
+	private static final float LARGE_EDIT_FRACTION = 0.10f;
 
 	// Receives the graft result. MainActivity wires this to applyGraftedBytes, which
 	// decodes the bytes and replaces the in-memory image. Invoked on the UI thread so
 	// the receiver doesn't have to dispatch internally.
 	private final GraftReadyHandler onGraftReady;
-	private final SaveHost host;
 	private final SafFileHelper safFiles;
+	private final SaveHost host;
 
 	// Read on the UI thread (start, onEditPicked entry, onEditPickerCancelled) and written
 	// from both the UI thread and the background graft executor (after each terminal step
@@ -68,6 +80,16 @@ final class GraftController
 	// transition to false promptly, so a fresh long-press isn't spuriously rejected with
 	// the busy toast after the bg work has finished.
 	private volatile boolean graftPending;
+
+	// Snapshot of the original file's bytes at the moment the user long-pressed Open. Read
+	// on the bg graft executor, written on the UI thread (start, onEditPicked completion,
+	// onEditPickerCancelled). Captured so onEditPicked grafts onto the image the user
+	// actually long-pressed, not whatever happens to be loaded when the picker returns —
+	// without this, the user could load image B while the picker for image A is still
+	// open, and onEditPicked would graft the picked edit onto B's bytes (with B's
+	// metadata pretending to describe A's primary scan). Volatile because of the cross-
+	// thread visibility requirement.
+	private volatile byte[] pendingOriginalBytes;
 
 	GraftController(SaveHost host, SafFileHelper safFiles, GraftReadyHandler onGraftReady)
 	{
@@ -121,7 +143,11 @@ final class GraftController
 					return;
 				}
 
-				byte[] originalBytes = host.getState().getOriginalFileBytes();
+				// Use the bytes captured at long-press time, not whatever state currently
+				// holds — the user might have loaded a new image while the picker was
+				// open, and grafting onto the wrong source would silently produce a
+				// file with mismatched metadata vs. primary scan.
+				byte[] originalBytes = pendingOriginalBytes;
 				if (originalBytes == null)
 				{
 					toast("Original bytes unavailable — reload the image and try again");
@@ -155,8 +181,16 @@ final class GraftController
 					? AiRegionDetector.detect(originalBytes, alignedEditBytes)
 					: null;
 
-				byte[] grafted = GraftWriter.graft(originalBytes, alignedEditBytes);
-				String suggested = suggestedFilename();
+				Graft graft = new Graft(
+					GraftWriter.graft(originalBytes, alignedEditBytes),
+					suggestedFilename(),
+					aiMask);
+				// Compute the mask fraction here on the bg thread so the UI-thread handoff
+				// doesn't have to walk a 750k-bool array twice (once for the sanity check,
+				// once again for the dialog message). Negative count means "no mask" — both
+				// the sanity gate and the dialog code treat that as "skip the dialog".
+				int maskedPixelCount = (aiMask != null) ? aiMask.maskedCount() : -1;
+				int maskTotal = (aiMask != null) ? aiMask.mask().length : 0;
 				graftPending = false;
 				handedOff = true;
 				host.runOnUiThread(() ->
@@ -165,12 +199,21 @@ final class GraftController
 					// into state.originalFileBytes via applyImageBytes and the save pipeline
 					// will canvas-encode through CropExporter (forced via state.graftApplied),
 					// which generates a fresh thumbnail in the saved output. Pre-injecting one
-					// here would just be discarded by the encode pass. The aiMask travels
-					// with the bytes so MainActivity can stash it on state AFTER its own
-					// applyImageBytes call clears state via state.reset(). applyGraftedBytes
-					// inherits the held busy flag and releases it when the apply completes.
-					onGraftReady.onReady(grafted, suggested, aiMask);
-					host.toastIfAlive("External edit applied", Toast.LENGTH_SHORT);
+					// here would just be discarded by the encode pass. The receiver runs
+					// applyImageBytes + state.installGraft(graft); installGraft encapsulates
+					// the "set graftApplied AND aiMask, both AFTER reset" rule. The receiver
+					// inherits the held busy flag and releases it when the apply completes
+					// (and fires the user-visible "External edit applied" toast on success
+					// — firing it here would lie about state during the brief window
+					// between handoff and the bg apply finishing or failing).
+					if (isOversizedEdit(maskedPixelCount, maskTotal))
+					{
+						confirmOversizedThenApply(graft, maskedPixelCount, maskTotal);
+					}
+					else
+					{
+						onGraftReady.onReady(graft);
+					}
 				});
 			}
 			catch (IOException e)
@@ -187,6 +230,12 @@ final class GraftController
 			}
 			finally
 			{
+				// Drop the captured-bytes reference on every exit path — it served its
+				// purpose (locked in the long-pressed source for this graft) and a
+				// long-lived strong reference to a multi-MB byte[] is wasted memory.
+				// Clearing here covers every path: success (handoff happened), failure
+				// (toast + early return), and unexpected throw.
+				pendingOriginalBytes = null;
 				// Release busy on every failure path. The success path leaves it held
 				// because applyGraftedBytes is about to claim it transitively.
 				if (!handedOff)
@@ -200,11 +249,12 @@ final class GraftController
 
 	/**
 	 * Edit-picker cancellation: user backed out before picking an external edit. Clear
-	 * graftPending so a fresh long-press can start over.
+	 * graftPending and the captured bytes so a fresh long-press can start over.
 	 */
 	void onEditPickerCancelled()
 	{
 		graftPending = false;
+		pendingOriginalBytes = null;
 	}
 
 	/**
@@ -246,6 +296,12 @@ final class GraftController
 			toast("Apply External Edit only works on JPEG sources");
 			return true;
 		}
+		// Snapshot the bytes the user actually long-pressed on. onEditPicked uses this
+		// reference instead of re-reading state.originalFileBytes — without the snapshot,
+		// loading a different image while the picker is open would cause the graft to
+		// land on the new image's bytes, silently producing a file with mismatched
+		// metadata vs primary scan.
+		pendingOriginalBytes = originalBytes;
 		graftPending = true;
 		try
 		{
@@ -255,6 +311,7 @@ final class GraftController
 		{
 			Log.w(TAG, "Edit picker launch failed", e);
 			graftPending = false;
+			pendingOriginalBytes = null;
 			throw e;
 		}
 		return true;
@@ -320,6 +377,59 @@ final class GraftController
 			+ ") from " + editStored[0] + "x" + editStored[1]
 			+ " to original's stored layout (" + origStored[0] + "x" + origStored[1] + ")");
 		return reoriented;
+	}
+
+	/**
+	 * UI-thread confirm dialog for an unusually-large AI-edit fraction. Apply proceeds with
+	 * the prepared graft; Cancel discards it and releases the busy flag GraftController is
+	 * holding (no MainActivity.applyGraftedBytes will run, so its finally won't release
+	 * either). Back-button / outside-tap dismissal routes through the cancel listener for
+	 * the same reason. If the Activity is destroyed between the bg-thread post and the
+	 * dialog show — common when the user backgrounds the app while the picker is still
+	 * processing — the destroyed-Activity guard releases busy and bails rather than
+	 * throwing WindowManager.BadTokenException.
+	 *
+	 * Takes the mask fraction (count + total) as parameters rather than re-walking the
+	 * mask array on the UI thread — the bg thread already paid the O(N) walk, no point
+	 * paying it again here.
+	 *
+	 * Lives here rather than in a util because the cleanup contract — release the busy flag
+	 * we own, clear the UI's busy indicator — is GraftController-specific and would leak
+	 * busy ownership if hoisted to a generic helper.
+	 */
+	private void confirmOversizedThenApply(Graft graft, int maskedPixelCount, int maskTotal)
+	{
+		Runnable releaseBusy = () ->
+		{
+			host.getBusy().set(false);
+			host.setBusyUi(false);
+		};
+		if (host.isDestroyed())
+		{
+			Log.w(TAG, "skipping oversized-edit dialog on destroyed activity");
+			releaseBusy.run();
+			return;
+		}
+		int pct = (int) Math.round(100.0 * maskedPixelCount / Math.max(1, maskTotal));
+		String message = "This edit changed about " + pct + "% of pixels — much larger than"
+			+ " typical for AI spot removal. Apply anyway?";
+		try
+		{
+			new AlertDialog.Builder(host.getActivity())
+				.setTitle("Large edit detected")
+				.setMessage(message)
+				.setPositiveButton("Apply", (dialog, which) -> onGraftReady.onReady(graft))
+				.setNegativeButton("Cancel", (dialog, which) -> releaseBusy.run())
+				.setOnCancelListener(dialog -> releaseBusy.run())
+				.show();
+		}
+		catch (RuntimeException e)
+		{
+			// BadTokenException if the activity died between isDestroyed and show, or any
+			// other UI-thread throw from the dialog plumbing. Don't strand busy.
+			Log.w(TAG, "oversized-edit dialog failed to show", e);
+			releaseBusy.run();
+		}
 	}
 
 	/**
@@ -393,6 +503,24 @@ final class GraftController
 			return 6;
 		}
 		return orient;
+	}
+
+	/**
+	 * True when the AI mask covers a fraction of the image larger than the small-touch-up
+	 * profile this feature targets. Triggers the user-visible confirm path. SDR sources
+	 * (no mask) and empty masks (no detected change) pass through with maskedPixelCount<0
+	 * or maskTotal==0 and skip the dialog.
+	 *
+	 * Pre-counted args (rather than the AiMask record) so callers don't pay the O(N) mask
+	 * walk twice — once here, once again to format the dialog message.
+	 */
+	private static boolean isOversizedEdit(int maskedPixelCount, int maskTotal)
+	{
+		if (maskedPixelCount < 0 || maskTotal <= 0)
+		{
+			return false;
+		}
+		return maskedPixelCount > maskTotal * LARGE_EDIT_FRACTION;
 	}
 
 	/**

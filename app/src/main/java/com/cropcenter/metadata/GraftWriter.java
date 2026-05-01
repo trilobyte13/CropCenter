@@ -16,10 +16,16 @@ import java.util.List;
  * Photoshop Generative Fill / Generative Remove edit through CropCenter while preserving
  * Samsung Gallery's Revert button.
  *
- * Both inputs must be JPEGs and must share the same SOF0 dimensions and EXIF orientation —
- * otherwise the output's metadata (from original) describes different pixels than the SOF
- * (from edit) carries, producing an incoherent decoder result. The caller validates this
- * before invoking; GraftWriter itself trusts the caller and throws IOException only on
+ * Both inputs must be JPEGs and must share the same stored SOF0 dimensions when this
+ * splice runs — otherwise the output's metadata (from original) describes different pixel
+ * counts than the SOF (from edit) carries, producing an incoherent decoder result. The
+ * caller is responsible for getting the edit into source's stored layout: Photoshop tends
+ * to bake the orientation into pixels and write orientation=1, which means a
+ * portrait-display source from a landscape-stored Samsung original (orient=6) and the
+ * Photoshop edit (orient=1, stored portrait) will have matching DISPLAY dimensions but
+ * different STORED dimensions. GraftController.alignEditToOriginalLayout decodes + re-
+ * rotates the edit back to the source's stored layout in that case before invoking
+ * GraftWriter. GraftWriter itself trusts the caller and throws IOException only on
  * structural malformation (missing SOI, missing primary EOI, etc.).
  *
  * Per-segment provenance (see SWAP_* constants):
@@ -52,13 +58,14 @@ public final class GraftWriter
 	// Per-segment substitution toggles. Current production configuration is locked in
 	// — see the class Javadoc for rationale per segment. Toggles remain as named
 	// constants rather than baked-in branches so a future Samsung firmware change can
-	// be tested by flipping one flag without restructuring the splice loop.
+	// be tested by flipping one flag without restructuring the splice loop. Sorted
+	// alphabetically (STRIP < SWAP) per field-ordering rule.
+	private static final boolean STRIP_VENDOR_APPS = false;
 	private static final boolean SWAP_EXIF = false;
 	private static final boolean SWAP_HDR_GAINMAP = false;
 	private static final boolean SWAP_HDR_MPF = false;
 	private static final boolean SWAP_ICC = false;
 	private static final boolean SWAP_XMP = false;
-	private static final boolean STRIP_VENDOR_APPS = false;
 
 	private GraftWriter() {}
 
@@ -348,8 +355,25 @@ public final class GraftWriter
 			}
 			if (marker == 0xDA)
 			{
+				// SOS needs 4 bytes (FF DA + 2-byte segLen) before reading sosLen.
+				// On a truncated edit that ends mid-SOS-header the readU16BE would
+				// throw IndexOutOfBoundsException; bail with -1 to let the caller
+				// surface a "graft failed" toast instead of a runtime exception.
+				if (off + 4 > file.length)
+				{
+					return -1;
+				}
 				int sosLen = ByteBufferUtils.readU16BE(file, off + 2);
 				int scanOff = off + 2 + sosLen;
+				// Defensive: a lying or adversarial sosLen plus a large `off` could either
+				// produce a scanOff past EOF (handled by the inner loop's bounds) OR an
+				// integer-overflow negative scanOff that satisfies `< file.length - 1` and
+				// then indexes a negative offset → AIOOBE. The same overflow pattern is
+				// guarded in JpegMetadataExtractor for segment lengths.
+				if (scanOff < off || scanOff > file.length)
+				{
+					return -1;
+				}
 				while (scanOff < file.length - 1)
 				{
 					if ((file[scanOff] & 0xFF) != 0xFF)

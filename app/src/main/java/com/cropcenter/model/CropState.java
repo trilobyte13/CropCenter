@@ -50,7 +50,6 @@ public class CropState
 	// synchronisation.
 	private volatile List<SelectionPoint> selectionPoints = new ArrayList<>();
 	private OnStateChangedListener listener;
-	private String originalFilePath; // absolute path for Samsung Revert
 	private String originalFilename;
 	private String sourceFormat; // "jpeg" or "png"
 	// Batch mechanism used by the UI listener: notifyChanged during an open batch sets the
@@ -81,7 +80,6 @@ public class CropState
 	private int batchDepth; // beginBatch / endBatch nesting counter — see batchDirty comment
 	private int cropH;
 	private int cropW;
-	private long mediaStoreId = -1; // MediaStore _ID for Samsung Revert
 
 	/**
 	 * Append a selection point. Fires the state listener once.
@@ -299,31 +297,13 @@ public class CropState
 	}
 
 	/**
-	 * MediaStore _ID of the loaded image, or −1 when the source isn't a MediaStore file.
-	 * Used by ReplaceStrategy to locate the original for Samsung Gallery Revert backup.
-	 */
-	public long getMediaStoreId()
-	{
-		return mediaStoreId;
-	}
-
-	/**
-	 * Original file bytes captured at load. Used by saveOriginalBackup (which reads from
-	 * memory, not disk, so backup is safe to call even after an overwrite has started).
-	 * Null when the source was loaded via SAF stream that wasn't buffered.
+	 * Original file bytes captured at load. Used by ExportPipeline.canBypassEncode for the
+	 * verbatim-write path and by GraftController.onEditPicked as the splice base. Null when
+	 * the source was loaded via a SAF stream that wasn't buffered.
 	 */
 	public byte[] getOriginalFileBytes()
 	{
 		return originalFileBytes;
-	}
-
-	/**
-	 * Absolute on-disk path of the loaded image, or null when unknown (SAF-only source).
-	 * Used for Samsung Revert backup path derivation.
-	 */
-	public String getOriginalFilePath()
-	{
-		return originalFilePath;
 	}
 
 	/**
@@ -344,8 +324,11 @@ public class CropState
 
 	/**
 	 * Samsung Extended Format Trailer captured at load, or null for non-Samsung sources.
-	 * Appended to the exported JPEG so Samsung Gallery's Revert feature can find and use
-	 * the backup written by saveOriginalBackup.
+	 * Re-appended verbatim to the exported JPEG so a Gallery-edited source's existing
+	 * Revert chain stays intact across CropCenter re-edits — the trailer's backup-path
+	 * reference still points at Gallery's own `/data/sec/photoeditor/` backup, which we
+	 * never touched. CropCenter does not generate fresh trailers for new edits (Gallery
+	 * rejects backup paths outside its blessed locations).
 	 */
 	public byte[] getSeftTrailer()
 	{
@@ -386,6 +369,33 @@ public class CropState
 	public boolean hasCenter()
 	{
 		return hasCenter;
+	}
+
+	/**
+	 * Apply the post-applyImageBytes side-effects for a successful graft: set graftApplied
+	 * (which forces ExportPipeline through the canvas-encode path so the gain map gets
+	 * regenerated from the spliced primary, keeping HDR boost spatially aligned with the
+	 * edit's pixels) and stash the AI-region mask (which UltraHdrCompat then reads at HDR
+	 * encode time to drive GainMapInpainter inside the Generative Remove fill).
+	 *
+	 * MUST be called only after applyImageBytes returns true — that path runs reset()
+	 * which clears both fields, so calling installGraft before applyImageBytes leaves the
+	 * fields cleared, and calling it on a decode failure (applyImageBytes returned false)
+	 * would install graft state onto the previously-loaded image. Encapsulates the "two
+	 * state writes, both after reset, both required" rule in a single call site so a
+	 * future refactor of the apply flow can't silently skip one. Without graftApplied,
+	 * canBypassEncode short-circuits the canvas pass and ships source's gain map verbatim
+	 * over the spliced primary (boost lands on the wrong features). Without aiMask, the
+	 * inpaint step is a no-op and the gain map's stale boost-the-removed-features
+	 * artifact survives in the output.
+	 */
+	public void installGraft(Graft graft)
+	{
+		setGraftApplied(true);
+		if (graft.hasAiMask())
+		{
+			setAiMask(graft.aiMask());
+		}
 	}
 
 	/**
@@ -507,8 +517,6 @@ public class CropState
 			gridConfig = gridConfig.withIncludeInExport(false);
 		}
 		originalFilename = null;
-		originalFilePath = null;
-		mediaStoreId = -1;
 		// Replace rather than clear-in-place. reset() runs on the background loadImage
 		// executor, and an in-place ArrayList.clear() would CME a UI-thread iterator
 		// (onTap / draw / auto-rotate metadata read). Volatile reference swap publishes
@@ -519,17 +527,6 @@ public class CropState
 		gainMap = null;
 		seftTrailer = null;
 		aiMask = null;
-	}
-
-	/**
-	 * Stash an AI-region mask produced by the graft pipeline. The save-time HDR
-	 * re-encode path (UltraHdrCompat) reads it via getAiMask and applies the
-	 * gain-map inpaint inside the masked region. Cleared by reset() on the next
-	 * image load.
-	 */
-	public void setAiMask(AiMask mask)
-	{
-		this.aiMask = mask;
 	}
 
 	/**
@@ -664,18 +661,6 @@ public class CropState
 	}
 
 	/**
-	 * Mark the in-memory image as a graft result. MainActivity calls this in
-	 * applyGraftedBytes after applyImageBytes installs the spliced bytes — which is
-	 * the only call site, since this flag exists solely to gate ExportPipeline's
-	 * bypass. No listener fire — the bypass decision is read at save time, not
-	 * rendered. Cleared by reset() on the next image load.
-	 */
-	public void setGraftApplied(boolean grafted)
-	{
-		this.graftApplied = grafted;
-	}
-
-	/**
 	 * Replace the JPEG segment list en-bloc. No listener fire — the segment list is
 	 * consulted by the exporter, not rendered.
 	 */
@@ -694,28 +679,11 @@ public class CropState
 	}
 
 	/**
-	 * Record the MediaStore _ID of the loaded image (for Samsung Revert support). No
-	 * listener fire — the ID is plumbing, not user-visible state.
-	 */
-	public void setMediaStoreId(long id)
-	{
-		this.mediaStoreId = id;
-	}
-
-	/**
 	 * Record the original file bytes for in-memory backup use. No listener fire.
 	 */
 	public void setOriginalFileBytes(byte[] bytes)
 	{
 		this.originalFileBytes = bytes;
-	}
-
-	/**
-	 * Record the original file's absolute path (may be null for SAF sources).
-	 */
-	public void setOriginalFilePath(String path)
-	{
-		this.originalFilePath = path;
 	}
 
 	/**
@@ -910,6 +878,28 @@ public class CropState
 			return;
 		}
 		fireListener();
+	}
+
+	/**
+	 * Stash the AI-region mask produced by the graft pipeline. Private because the only
+	 * legitimate call path is through installGraft, which atomically pairs this with the
+	 * graftApplied flag write — calling setAiMask on its own would leave the export bypass
+	 * still enabled and the inpaint silently inactive.
+	 */
+	private void setAiMask(AiMask mask)
+	{
+		this.aiMask = mask;
+	}
+
+	/**
+	 * Mark the in-memory image as a graft result so ExportPipeline.canBypassEncode forces
+	 * a full canvas re-encode on the next save. Private for the same reason setAiMask is:
+	 * installGraft is the single chokepoint that pairs this with the AI mask write so the
+	 * gain-map regeneration and inpaint stay in lockstep.
+	 */
+	private void setGraftApplied(boolean grafted)
+	{
+		this.graftApplied = grafted;
 	}
 
 	/**

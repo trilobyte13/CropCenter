@@ -7,7 +7,6 @@ import android.provider.DocumentsContract;
 import android.util.Log;
 import android.widget.Toast;
 
-import com.cropcenter.crop.CropExporter;
 import com.cropcenter.util.SafFileHelper;
 import com.cropcenter.util.StoragePermissionHelper;
 
@@ -23,12 +22,11 @@ import java.nio.file.StandardCopyOption;
  * granted), then SAF direct overwrite, then SAF delete-then-rename. Verifies the end state and
  * surfaces a failure dialog when disk doesn't match the intent.
  *
- * Samsung Gallery Revert backup runs in the ExportPipeline pre-encode hook — BEFORE the
- * placeholder bytes are encoded and written. This means the SEFT trailer baked into the
- * export can honestly claim a backup path only when the backup write actually succeeded; a
- * post-write backup (the old layout) would have produced files whose SEFT pointed at
- * backups that might never materialise. The hook's boolean return flows through to
- * CropExporter.export via includeBackupInSeft.
+ * Existing SEFT trailers on the source survive untouched: CropExporter re-appends the byte-
+ * for-byte trailer captured at load, so a Gallery-edited file re-edited by CropCenter keeps
+ * its working Revert chain. CropCenter does not generate fresh SEFT trailers for new edits —
+ * Gallery's Revert validates the backup path against Samsung-blessed locations our writes
+ * can't reach.
  *
  * Lives downstream of the save flow — SaveController decides whether to invoke this.
  */
@@ -37,8 +35,8 @@ final class ReplaceStrategy
 	private static final String TAG = "ReplaceStrategy";
 
 	private final ExportPipeline exportPipeline;
-	private final SaveHost host;
 	private final SafFileHelper safFiles;
+	private final SaveHost host;
 	private final StoragePermissionHelper permissions;
 
 	ReplaceStrategy(SaveHost host, ExportPipeline exportPipeline, SafFileHelper safFiles,
@@ -81,40 +79,7 @@ final class ReplaceStrategy
 		// returns — providers may relocate the document to a new URI, and verifyReplace's
 		// follow-up query MUST use the fresh URI or it hits a stale ID.
 		final Uri[] verifyUriBox = { newUri };
-		exportPipeline.exportTo(newUri,
-			() ->
-			{
-				// Samsung Gallery Revert backup runs BEFORE the encoder so the SEFT trailer
-				// only claims a backup path when one actually exists on disk. Returning true
-				// here tells the exporter to include PhotoEditor_Re_Edit_Data pointing at the
-				// just-written `.cropcenter` file; returning false leaves SEFT silent about
-				// backup so Gallery won't surface a Revert option that would fail.
-				//
-				// wasOverwrite=false means the caller (SaveController case A with unknown
-				// or zero prior size) routed through Replace for crash-safety only, NOT
-				// because an existing file needed overwriting. Skip the backup write
-				// entirely: there's no prior target to revert to, and writing a backup
-				// would cost I/O for no user-visible benefit. The SEFT stays silent, and
-				// the success toast later announces "Saved" rather than "Replaced".
-				if (!wasOverwrite)
-				{
-					return false;
-				}
-				CropExporter.BackupStatus backup = CropExporter.saveOriginalBackup(host.getState());
-				if (backup == CropExporter.BackupStatus.FAILED)
-				{
-					host.runOnUiThread(() -> host.toastIfAlive(
-						"Warning: couldn't write revert backup — Gallery Revert won't work",
-						Toast.LENGTH_LONG));
-				}
-				// WRITTEN (freshly created) and ALREADY_EXISTS (backup was already on disk
-				// from a prior session) both mean a valid file is at the SEFT's backup path.
-				// NOT_APPLICABLE (no original path / media-store ID) and FAILED both mean
-				// the SEFT must NOT claim a backup.
-				return backup == CropExporter.BackupStatus.WRITTEN
-					|| backup == CropExporter.BackupStatus.ALREADY_EXISTS;
-			},
-			data ->
+		exportPipeline.exportTo(newUri, data ->
 		{
 			// A. File I/O. Writes the encoded bytes directly from `data` — avoids re-reading the
 			// placeholder through FUSE/MediaStore layers that may not be in sync yet. Verifies
@@ -239,7 +204,7 @@ final class ReplaceStrategy
 				// target (SaveController case A, priorSize == -1), we can't honestly claim
 				// a replace happened; say "Saved" instead. Keeps the toast truthful when
 				// the Replace path ran over what turned out to be a fresh document.
-				final String verb = wasOverwrite ? "Replaced " : "Saved ";
+				String verb = wasOverwrite ? "Replaced " : "Saved ";
 				final String announce = verb + requestedName;
 				host.runOnUiThread(() -> host.toastIfAlive(announce, Toast.LENGTH_SHORT));
 			}
@@ -338,8 +303,40 @@ final class ReplaceStrategy
 		String[] pathsToScan = placeholderGone
 			? new String[] { target.getAbsolutePath() }
 			: new String[] { target.getAbsolutePath(), placeholder.getAbsolutePath() };
-		MediaScannerConnection.scanFile(host.getActivity(), pathsToScan, null, null);
+		// Pass the application context (not the Activity) — scanFile holds its Context for
+		// the lifetime of the MediaScannerConnection. Using the Activity would keep a
+		// destroyed Activity alive when a save coincides with a config change, slowly
+		// leaking memory across many saves. The scan itself is a fire-and-forget MediaStore
+		// rebuild; it doesn't need Activity-scoped state.
+		MediaScannerConnection.scanFile(
+			host.getActivity().getApplicationContext(), pathsToScan, null, null);
 		return true;
+	}
+
+	/**
+	 * Post an AlertDialog to the UI thread describing a failed/partial Replace. Unlike a Toast,
+	 * this has no line-length cap and stays on screen until dismissed. Offers a one-tap link to
+	 * the "All files access" Settings screen when the app doesn't hold that permission.
+	 */
+	private void showReplaceFailureDialog(String title, String message)
+	{
+		host.runOnUiThread(() ->
+		{
+			if (host.isDestroyed())
+			{
+				return;
+			}
+			AlertDialog.Builder builder = new AlertDialog.Builder(host.getActivity())
+				.setTitle(title)
+				.setMessage(message)
+				.setPositiveButton("OK", null);
+			if (!permissions.hasStoragePermission())
+			{
+				builder.setNeutralButton("Grant access",
+					(dialog, which) -> permissions.openStoragePermissionSettings());
+			}
+			builder.show();
+		});
 	}
 
 	/**
@@ -388,32 +385,6 @@ final class ReplaceStrategy
 	}
 
 	/**
-	 * Post an AlertDialog to the UI thread describing a failed/partial Replace. Unlike a Toast,
-	 * this has no line-length cap and stays on screen until dismissed. Offers a one-tap link to
-	 * the "All files access" Settings screen when the app doesn't hold that permission.
-	 */
-	private void showReplaceFailureDialog(String title, String message)
-	{
-		host.runOnUiThread(() ->
-		{
-			if (host.isDestroyed())
-			{
-				return;
-			}
-			AlertDialog.Builder builder = new AlertDialog.Builder(host.getActivity())
-				.setTitle(title)
-				.setMessage(message)
-				.setPositiveButton("OK", null);
-			if (!permissions.hasStoragePermission())
-			{
-				builder.setNeutralButton("Grant access",
-					(dialog, which) -> permissions.openStoragePermissionSettings());
-			}
-			builder.show();
-		});
-	}
-
-	/**
 	 * Check disk after a Replace attempt. Returns true when the end state is clean (target
 	 * present at requestedName with the expected length AND placeholder absent). Anything else
 	 * fires a failure dialog (not a toast — toasts get truncated on Android 11+) describing
@@ -421,6 +392,13 @@ final class ReplaceStrategy
 	 * Settings screen, and returns false. `expectedLength` guards against "file exists but
 	 * empty" — an existence-only check was letting silent-zero-byte writes register as success.
 	 * Runs on the bg thread; dialog is posted to UI thread.
+	 *
+	 * `placeholderUri` may have already been rewritten to the renamed-to-target URI by
+	 * Strategy C (DocumentsContract.renameDocument relocates the document onto the target
+	 * path). When that happens, the URI's resolved File has the same name as the target,
+	 * meaning placeholder == target on disk. A naive existence check would see "placeholder
+	 * exists AND target exists" and trigger the "two files" branch, falsely failing a clean
+	 * Strategy C success. The same-name short-circuit at the top handles that case.
 	 */
 	private boolean verifyReplace(Uri placeholderUri, String requestedName, int expectedLength)
 	{
@@ -430,6 +408,44 @@ final class ReplaceStrategy
 		{
 			File parent = placeholder.getParentFile();
 			File target = (parent != null) ? new File(parent, requestedName) : null;
+			// Strategy C path: rename moved placeholder onto target's path. placeholder == target
+			// on disk. Treat as clean replace iff the file exists at target name with the
+			// expected length — there's only one file, no "two files" reconciliation needed.
+			if (target != null && placeholder.getName().equals(target.getName()))
+			{
+				if (target.exists() && target.length() == expectedLength)
+				{
+					return true; // clean replace via Strategy C rename
+				}
+				// Same-name but wrong content/missing — there's still only one file (placeholder
+				// == target after rename), so a "two files" report would be misleading. Fire a
+				// truncation- or missing-file dialog so the user is told the save didn't land,
+				// rather than the silent return-false that earlier versions produced here.
+				String title;
+				String message;
+				if (target.exists())
+				{
+					long targetLen = target.length();
+					if (!target.delete())
+					{
+						Log.w(TAG, "verifyReplace: failed to remove corrupt target " + target);
+					}
+					title = "Replace produced an incomplete file";
+					message = requestedName + " was " + targetLen + " bytes instead of the"
+						+ " expected " + expectedLength + " and has been removed. Re-save,"
+						+ " and if it keeps happening, grant “All files access” or"
+						+ " move the save target to a folder you own.";
+				}
+				else
+				{
+					title = "Save may have failed";
+					message = requestedName + " is not on disk after Replace. Check your save"
+						+ " directory and try again.";
+				}
+				Log.w(TAG, "verifyReplace (same-name): " + title + " — " + message);
+				showReplaceFailureDialog(title, message);
+				return false;
+			}
 			boolean placeholderExists = placeholder.exists();
 			boolean targetOk = target != null && target.exists()
 				&& target.length() == expectedLength;
@@ -439,8 +455,8 @@ final class ReplaceStrategy
 			}
 			boolean targetExists = target != null && target.exists();
 			long targetLen = targetExists ? target.length() : -1;
-			final String title;
-			final String message;
+			String title;
+			String message;
 			if (targetExists && !placeholderExists)
 			{
 				// Target exists but wrong length — the write silently truncated or corrupted.
@@ -488,8 +504,8 @@ final class ReplaceStrategy
 		{
 			return true; // clean replace per SAF
 		}
-		final String title;
-		final String message;
+		String title;
+		String message;
 		if (finalName != null)
 		{
 			title = "Couldn't replace " + requestedName;
