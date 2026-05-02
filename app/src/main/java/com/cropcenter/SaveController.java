@@ -3,20 +3,18 @@ package com.cropcenter;
 import android.app.AlertDialog;
 import android.net.Uri;
 
-import com.cropcenter.model.ExportConfig;
+import com.cropcenter.model.Format;
 import com.cropcenter.util.SafFileHelper;
 import com.cropcenter.util.StoragePermissionHelper;
 import com.cropcenter.view.SaveDialog;
 
 import java.io.File;
-import java.util.Locale;
 
 /**
- * Top-level save flow router: permission prompt → SaveDialog (format/grid) → SAF picker →
- * route result to ExportPipeline (plain save) or ReplaceStrategy (collision). Holds the
- * per-save state (pendingSaveName, savePending) and owns the user-facing dialogs that guard
- * the encode pipeline. Encode/write/verify itself lives in ExportPipeline; collision policy
- * in ReplaceStrategy.
+ * Top-level save flow router: permission prompt → SaveDialog (format/grid) → SAF picker → route result to
+ * ExportPipeline (plain save) or ReplaceStrategy (collision). Holds the per-save state (pendingSaveName, savePending)
+ * and owns the user-facing dialogs that guard the encode pipeline. Encode/write/verify itself lives in ExportPipeline;
+ * collision policy in ReplaceStrategy.
  */
 final class SaveController
 {
@@ -25,14 +23,13 @@ final class SaveController
 	private final SafFileHelper safFiles;
 	private final SaveHost host;
 
-	// Filename we asked SAF to create. When SAF silently auto-renames to avoid a collision (e.g.
-	// "vacation.jpg" → "vacation (1).jpg"), the returned URI's display name won't match this —
-	// that's how we detect the rename.
+	// Filename we asked SAF to create. When SAF silently auto-renames to avoid a collision (e.g. "vacation.jpg" →
+	// "vacation (1).jpg"), the returned URI's display name won't match this — that's how we detect the rename.
 	private String pendingSaveName;
-	// Set when we launch the SAF picker and cleared when its result arrives (URI or cancel) or
-	// the Replace confirmation finishes. Gates rapid taps between launch and result, and also
-	// between the result and the Replace dialog response — host.getBusy().get() doesn't flip
-	// until exportTo actually runs, so it isn't sufficient on its own.
+	// Set when we launch the SAF picker and cleared when its result arrives (URI or cancel) or the Replace
+	// confirmation finishes. Gates rapid taps between launch and result, and also between the result and the
+	// Replace dialog response — host.getBusy().get() doesn't flip until exportTo actually runs, so it isn't
+	// sufficient on its own.
 	private boolean savePending;
 
 	SaveController(SaveHost host, SafFileHelper safFiles, StoragePermissionHelper permissions)
@@ -40,24 +37,23 @@ final class SaveController
 		this.host = host;
 		this.safFiles = safFiles;
 		this.exportPipeline = new ExportPipeline(host, safFiles);
-		// permissions is forwarded to ReplaceStrategy and not retained on this — SaveController
-		// itself never prompts for permissions, so storing it would be dead state.
+		// permissions is forwarded to ReplaceStrategy and not retained on this — SaveController itself never
+		// prompts for permissions, so storing it would be dead state.
 		this.replaceStrategy = new ReplaceStrategy(host, exportPipeline, safFiles, permissions);
 	}
 
 	/**
 	 * Route the SAF-returned URI to the correct save path.
 	 *
-	 * SAF's ACTION_CREATE_DOCUMENT behaviour on filename collision is inconsistent across
-	 * providers. The returned URI's display name tells us what actually happened.
+	 * SAF's ACTION_CREATE_DOCUMENT behaviour on filename collision is inconsistent across providers. The returned
+	 * URI's display name tells us what actually happened.
 	 *
-	 * Preflight: if the user changed the extension to one that implies a different encoder
-	 * (.jpg ↔ .png), the document's MIME — locked before the picker opened — no longer
-	 * matches the bytes we would write. Reject with a dialog and leave newUri on disk.
-	 * We do NOT delete the placeholder here: ACTION_CREATE_DOCUMENT may have returned an
-	 * existing zero-byte file after the provider's own Replace prompt, and that case is
-	 * indistinguishable from a fresh SAF-created empty doc. Deleting on rejection would
-	 * risk destroying a real user file; a leftover fresh placeholder is acceptable fallout.
+	 * Preflight: if the user changed the extension to one that implies a different encoder (.jpg ↔ .png), the
+	 * document's MIME — locked before the picker opened — no longer matches the bytes we would write. Reject with a
+	 * dialog and leave newUri on disk. We do NOT delete the placeholder here: ACTION_CREATE_DOCUMENT may have
+	 * returned an existing zero-byte file after the provider's own Replace prompt, and that case is
+	 * indistinguishable from a fresh SAF-created empty doc. Deleting on rejection would risk destroying a real user
+	 * file; a leftover fresh placeholder is acceptable fallout.
 	 *
 	 * Otherwise:
 	 *
@@ -90,25 +86,22 @@ final class SaveController
 
 		String chosen = safFiles.getDisplayName(newUri);
 
-		// Extension-change guard: SAF set the document's MIME from `requested` before the picker
-		// opened. If the user renamed ".jpg" → ".png" (or vice versa) in the picker, writing the
-		// new format's bytes would land them in a document whose MIME still says the old type —
-		// Gallery / MediaStore consumers would then misidentify the file. Reject the save and
-		// redirect the user to the Save dialog's format picker.
-		String requestedFormat = formatFromExtension(requested);
-		String chosenFormat = formatFromExtension(chosen);
-		if (requestedFormat != null && chosenFormat != null
-			&& !requestedFormat.equals(chosenFormat))
+		// Extension-change guard: SAF set the document's MIME from `requested` before the picker opened. If the
+		// user renamed ".jpg" → ".png" (or vice versa) in the picker, writing the new format's bytes would land
+		// them in a document whose MIME still says the old type — Gallery / MediaStore consumers would then
+		// misidentify the file. Reject the save and redirect the user to the Save dialog's format picker.
+		Format requestedFormat = Format.fromExtension(requested);
+		Format chosenFormat = Format.fromExtension(chosen);
+		if (requestedFormat != null && chosenFormat != null && requestedFormat != chosenFormat)
 		{
 			savePending = false;
-			// Do NOT delete newUri on this rejection path. The same-name save logic below
-			// correctly treats priorSize <= 0 as ambiguous — a zero-byte URI can be either
-			// a fresh SAF placeholder OR an already-existing empty file the provider
-			// returned after its own Replace prompt. We can't tell from SAF alone, and
-			// losing a real zero-byte file (unusual but valid) to a rejection cleanup is
-			// strictly worse than leaving a disposable fresh placeholder behind. The
-			// dialog tells the user to fix the format in the Save dialog; a leftover
-			// placeholder is a minor file-manager annoyance, not data loss.
+			// Do NOT delete newUri on this rejection path. The same-name save logic below correctly treats
+			// priorSize <= 0 as ambiguous — a zero-byte URI can be either a fresh SAF placeholder OR an
+			// already-existing empty file the provider returned after its own Replace prompt. We can't tell
+			// from SAF alone, and losing a real zero-byte file (unusual but valid) to a rejection cleanup
+			// is strictly worse than leaving a disposable fresh placeholder behind. The dialog tells the
+			// user to fix the format in the Save dialog; a leftover placeholder is a minor file-manager
+			// annoyance, not data loss.
 			showExtensionMismatchDialog(requested, chosen);
 			return;
 		}
@@ -140,10 +133,8 @@ final class SaveController
 			//                                   provider-refused / security-exception, which
 			//                                   all coincide with "don't claim overwrite".
 			long priorSize = safFiles.querySafFileSize(newUri);
-			boolean wasOverwrite = priorSize > 0
-				|| (priorSize < 0 && safFiles.hasExistingContent(newUri));
-			String mime = ExportConfig.FORMAT_PNG.equals(host.getState().getExportConfig().format())
-				? ExportConfig.PNG_MIME : ExportConfig.JPEG_MIME;
+			boolean wasOverwrite = priorSize > 0 || (priorSize < 0 && safFiles.hasExistingContent(newUri));
+			String mime = host.getState().getExportConfig().format().mimeType();
 			String placeholderName = ".cropcenter-tmp-" + System.currentTimeMillis() + "-" + requested;
 			Uri placeholder = safFiles.createSiblingPlaceholder(newUri, mime, placeholderName);
 			if (placeholder != null)
@@ -152,29 +143,27 @@ final class SaveController
 			}
 			else if (wasOverwrite)
 			{
-				// Opaque-ID + confirmed overwrite: can't placeholder. Direct overwrite
-				// with preserve-on-failure. Pass `requested` so the success toast says
-				// "Replaced <name>" — a generic "Saved N KB" would misrepresent a
-				// confirmed overwrite.
+				// Opaque-ID + confirmed overwrite: can't placeholder. Direct overwrite with
+				// preserve-on-failure. Pass `requested` so the success toast says "Replaced <name>" — a
+				// generic "Saved N KB" would misrepresent a confirmed overwrite.
 				exportPipeline.exportToOverwrite(newUri, requested);
 			}
 			else
 			{
-				// Opaque-ID + ambiguous: can't confirm existing content, can't placeholder.
-				// Preserve on failure so we don't destroy a file the user might own.
+				// Opaque-ID + ambiguous: can't confirm existing content, can't placeholder. Preserve on
+				// failure so we don't destroy a file the user might own.
 				exportPipeline.exportToPreserving(newUri);
 			}
 			return;
 		}
 
-		// Case (B): chosen has a "X (N).ext" auto-rename pattern. Detection works on `chosen`
-		// alone so it catches the case where the user edited the filename in the picker and
-		// THAT name collided — the "X" in "X (N)" doesn't have to match the original
-		// pendingSaveName. Verify the inferred base still lives in the same directory before
-		// showing the Replace dialog so a user who intentionally typed "foo (1).jpg" without
-		// a real collision doesn't get offered Replace on a phantom. getDisplayName is a
-		// more robust "does this document exist" probe than querySafFileSize > 0 — it catches
-		// zero-byte files AND providers that don't expose OpenableColumns.SIZE.
+		// Case (B): chosen has a "X (N).ext" auto-rename pattern. Detection works on `chosen` alone so it
+		// catches the case where the user edited the filename in the picker and THAT name collided — the "X" in
+		// "X (N)" doesn't have to match the original pendingSaveName. Verify the inferred base still lives in
+		// the same directory before showing the Replace dialog so a user who intentionally typed "foo (1).jpg"
+		// without a real collision doesn't get offered Replace on a phantom. getDisplayName is a more robust
+		// "does this document exist" probe than querySafFileSize > 0 — it catches zero-byte files AND providers
+		// that don't expose OpenableColumns.SIZE.
 		String autoRenameBase = autoRenameBaseName(chosen);
 		if (autoRenameBase != null)
 		{
@@ -186,8 +175,8 @@ final class SaveController
 			}
 		}
 
-		// Case (C): user changed the name intentionally (no "(N)" suffix, or "(N)" stripped
-		// doesn't collide with anything in the picked directory).
+		// Case (C): user changed the name intentionally (no "(N)" suffix, or "(N)" stripped doesn't collide
+		// with anything in the picked directory).
 		savePending = false;
 		exportPipeline.exportTo(newUri);
 	}
@@ -202,11 +191,10 @@ final class SaveController
 	}
 
 	/**
-	 * Save button handler. Runs SaveDialog (format + grid-bake options); on its "Continue"
-	 * the SAF picker opens with the correct extension pre-filled. Replace/Keep confirmation is
-	 * handled downstream in handleSaveAsResult(); that's also where MANAGE_EXTERNAL_STORAGE
-	 * is prompted if the user actually hits a collision — ordinary Save As flows no longer
-	 * carry the overwrite-oriented permission UX.
+	 * Save button handler. Runs SaveDialog (format + grid-bake options); on its "Continue" the SAF picker opens
+	 * with the correct extension pre-filled. Replace/Keep confirmation is handled downstream in
+	 * handleSaveAsResult(); that's also where MANAGE_EXTERNAL_STORAGE is prompted if the user actually hits a
+	 * collision — ordinary Save As flows no longer carry the overwrite-oriented permission UX.
 	 */
 	void showSaveDialog()
 	{
@@ -231,70 +219,71 @@ final class SaveController
 		{
 			return;
 		}
-		String lower = name.toLowerCase(Locale.ROOT);
-		if (lower.endsWith(ExportConfig.PNG_EXT))
+		Format derived = Format.fromExtension(name);
+		if (derived != null)
 		{
-			host.getState().updateExportConfig(c -> c.withFormat(ExportConfig.FORMAT_PNG));
+			host.getState().updateExportConfig(c -> c.withFormat(derived));
 		}
-		else if (lower.endsWith(ExportConfig.JPEG_EXT) || lower.endsWith(".jpeg"))
+		// Unknown extension leaves the format unchanged (source default).
+	}
+
+	/**
+	 * SaveDialog "Continue" handler — runs once the user has chosen format / grid options. Re-checks busy +
+	 * savePending (the dialog interaction itself can race a parallel Save tap), derives the default filename from
+	 * the source-image stem and the just-picked format extension, then launches the SAF CreateDocument picker.
+	 * Releases the pending flag on launch failure so a missing-picker exception doesn't strand subsequent Save
+	 * attempts behind a permanent "Busy" toast.
+	 */
+	private void onSaveDialogConfirmed()
+	{
+		if (host.getBusy().get() || savePending)
 		{
-			host.getState().updateExportConfig(c -> c.withFormat(ExportConfig.FORMAT_JPEG));
+			host.showBusyToast();
+			return;
 		}
-		// Anything else leaves the format unchanged (source default).
+		// Extension follows the format the user just picked in SaveDialog; if they change the extension in the
+		// SAF picker, applyFormatFromFilename updates ExportConfig.format again before encode.
+		String stem = host.getState().getOriginalFilename();
+		if (stem == null || stem.isEmpty())
+		{
+			stem = "crop";
+		}
+		int dot = stem.lastIndexOf('.');
+		if (dot > 0)
+		{
+			stem = stem.substring(0, dot);
+		}
+		String ext = host.getState().getExportConfig().format().extension();
+		String name = stem + ext;
+		pendingSaveName = name;
+		savePending = true;
+		try
+		{
+			host.getSaveAsLauncher().launch(name);
+		}
+		catch (RuntimeException e)
+		{
+			// ActivityNotFoundException (no SAF picker installed) or similar provider failure — without
+			// this clear, savePending stays true forever and every subsequent Save tap hits the "Busy — try
+			// again" toast. Mirror ExportPipeline's pre-enqueue guard: release the pending flag and rethrow
+			// so the caller sees the real error.
+			savePending = false;
+			pendingSaveName = null;
+			throw e;
+		}
 	}
 
 	private void openSaveOptionsDialog()
 	{
-		SaveDialog.show(host.getActivity(), host.getState(), () ->
-		{
-			if (host.getBusy().get() || savePending)
-			{
-				host.showBusyToast();
-				return;
-			}
-			// Extension follows the format the user just picked in SaveDialog; if they change the
-			// extension in the SAF picker, applyFormatFromFilename updates ExportConfig.format
-			// again before encode.
-			String stem = host.getState().getOriginalFilename();
-			if (stem == null || stem.isEmpty())
-			{
-				stem = "crop";
-			}
-			int dot = stem.lastIndexOf('.');
-			if (dot > 0)
-			{
-				stem = stem.substring(0, dot);
-			}
-			String name = stem
-				+ (ExportConfig.FORMAT_PNG.equals(host.getState().getExportConfig().format())
-					? ExportConfig.PNG_EXT : ExportConfig.JPEG_EXT);
-			pendingSaveName = name;
-			savePending = true;
-			try
-			{
-				host.getSaveAsLauncher().launch(name);
-			}
-			catch (RuntimeException e)
-			{
-				// ActivityNotFoundException (no SAF picker installed) or similar provider
-				// failure — without this clear, savePending stays true forever and every
-				// subsequent Save tap hits the "Busy — try again" toast. Mirror ExportPipeline's
-				// pre-enqueue guard: release the pending flag and rethrow so the caller sees
-				// the real error.
-				savePending = false;
-				pendingSaveName = null;
-				throw e;
-			}
-		});
+		SaveDialog.show(host.getActivity(), host.getState(), this::onSaveDialogConfirmed);
 	}
 
 	/**
-	 * Warn the user that renaming the extension in the SAF picker would produce a
-	 * MIME/content mismatch and tell them to change format in the Save dialog instead.
-	 * The caller does NOT delete the placeholder — ACTION_CREATE_DOCUMENT can return an
-	 * existing zero-byte file after the provider's own Replace prompt, and that case is
-	 * indistinguishable from a fresh empty doc; deleting on rejection would risk data
-	 * loss. A disposable fresh placeholder left on disk is acceptable fallout.
+	 * Warn the user that renaming the extension in the SAF picker would produce a MIME/content mismatch and tell
+	 * them to change format in the Save dialog instead. The caller does NOT delete the placeholder —
+	 * ACTION_CREATE_DOCUMENT can return an existing zero-byte file after the provider's own Replace prompt, and
+	 * that case is indistinguishable from a fresh empty doc; deleting on rejection would risk data loss. A
+	 * disposable fresh placeholder left on disk is acceptable fallout.
 	 */
 	private void showExtensionMismatchDialog(String requested, String chosen)
 	{
@@ -324,8 +313,7 @@ final class SaveController
 	private void showReplaceDialog(Uri newUri, String requested, String safName)
 	{
 		String message = "A file with this name already exists in the selected location.\n\n"
-			+ "Replace \u2014 overwrite it.\n"
-			+ "Keep \u2014 save as \"" + safName + "\" instead.\n"
+			+ "Replace \u2014 overwrite it.\n" + "Keep \u2014 save as \"" + safName + "\" instead.\n"
 			+ "Cancel \u2014 don't save.";
 		Runnable cleanupPlaceholder = () -> safFiles.tryDeleteSafDocument(newUri);
 		new AlertDialog.Builder(host.getActivity())
@@ -334,8 +322,8 @@ final class SaveController
 			.setPositiveButton("Replace", (dialog, which) ->
 			{
 				savePending = false;
-				// Case B: user explicitly confirmed Replace on a detected collision — always
-				// a real overwrite, so full Replace semantics (write-then-swap + "Replaced" toast).
+				// Case B: user explicitly confirmed Replace on a detected collision — always a real
+				// overwrite, so full Replace semantics (write-then-swap + "Replaced" toast).
 				replaceStrategy.replaceColliding(newUri, requested, true);
 			})
 			.setNeutralButton("Keep", (dialog, which) ->
@@ -386,15 +374,14 @@ final class SaveController
 			// Filesystem accessible — authoritative answer regardless of SAF query result.
 			return baseFile.exists();
 		}
-		// Both probes inconclusive. Without proof, prefer the false-negative outcome
-		// (save under the SAF-assigned "(N)" name) over the false-positive Replace dialog.
+		// Both probes inconclusive. Without proof, prefer the false-negative outcome (save under the
+		// SAF-assigned "(N)" name) over the false-positive Replace dialog.
 		return false;
 	}
 
 	/**
-	 * Detect SAF's auto-rename pattern on `chosen` alone and return the inferred base name
-	 * (what the user was actually trying to save). Returns null when chosen doesn't look
-	 * like an auto-rename.
+	 * Detect SAF's auto-rename pattern on `chosen` alone and return the inferred base name (what the user was
+	 * actually trying to save). Returns null when chosen doesn't look like an auto-rename.
 	 *
 	 * Pattern: "X (N).ext" where X is any non-empty stem and N is 1+ digits, optionally
 	 * preceded by whitespace. The caller uses the returned base as the `requested` name
@@ -404,8 +391,8 @@ final class SaveController
 	 * (2) user-edited-then-collided (pendingSaveName = "crop.jpg", user typed "foo.jpg",
 	 *     chosen = "foo (1).jpg" → base = "foo.jpg", the ACTUAL name that collided).
 	 *
-	 * A false positive from a user typing "(N)" intentionally without a real collision is
-	 * filtered at the call site by querying whether the base name actually exists.
+	 * A false positive from a user typing "(N)" intentionally without a real collision is filtered at the call site
+	 * by querying whether the base name actually exists.
 	 */
 	private static String autoRenameBaseName(String chosen)
 	{
@@ -420,8 +407,8 @@ final class SaveController
 		}
 		String choStem = chosen.substring(0, choDot);
 		String choExt = chosen.substring(choDot);
-		// Must end with "(digits)"; allow optional whitespace between the stem and the
-		// open paren to match SAF variants that use "stem (1)" vs "stem(1)".
+		// Must end with "(digits)"; allow optional whitespace between the stem and the open paren to match SAF
+		// variants that use "stem (1)" vs "stem(1)".
 		if (!choStem.endsWith(")"))
 		{
 			return null;
@@ -432,16 +419,9 @@ final class SaveController
 			return null;
 		}
 		String between = choStem.substring(openParen + 1, choStem.length() - 1);
-		if (between.isEmpty())
+		if (between.isEmpty() || !between.chars().allMatch(Character::isDigit))
 		{
 			return null;
-		}
-		for (int i = 0; i < between.length(); i++)
-		{
-			if (!Character.isDigit(between.charAt(i)))
-			{
-				return null;
-			}
 		}
 		String baseStem = choStem.substring(0, openParen).stripTrailing();
 		if (baseStem.isEmpty())
@@ -451,26 +431,4 @@ final class SaveController
 		return baseStem + choExt;
 	}
 
-	/**
-	 * Return ExportConfig.FORMAT_JPEG or FORMAT_PNG for a filename's extension, or null when
-	 * the extension is missing or unrecognised. Used by handleSaveAsResult to detect when a
-	 * user's extension change in the SAF picker would produce a MIME/content mismatch.
-	 */
-	private static String formatFromExtension(String name)
-	{
-		if (name == null)
-		{
-			return null;
-		}
-		String lower = name.toLowerCase(Locale.ROOT);
-		if (lower.endsWith(ExportConfig.PNG_EXT))
-		{
-			return ExportConfig.FORMAT_PNG;
-		}
-		if (lower.endsWith(ExportConfig.JPEG_EXT) || lower.endsWith(".jpeg"))
-		{
-			return ExportConfig.FORMAT_JPEG;
-		}
-		return null;
-	}
 }

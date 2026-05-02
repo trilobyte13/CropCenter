@@ -6,8 +6,8 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Extracts all APP and COM marker segments from a JPEG file's header. Stops at SOS (FF DA) or EOI
- * (FF D9). Preserves raw segment bytes verbatim.
+ * Extracts all APP and COM marker segments from a JPEG file's header. Stops at SOS (FF DA) or EOI (FF D9). Preserves
+ * raw segment bytes verbatim.
  */
 public final class JpegMetadataExtractor
 {
@@ -16,7 +16,7 @@ public final class JpegMetadataExtractor
 	public static List<JpegSegment> extract(byte[] jpeg)
 	{
 		List<JpegSegment> segments = new ArrayList<>();
-		if (jpeg.length < 4 || jpeg[0] != (byte) 0xFF || jpeg[1] != (byte) 0xD8)
+		if (jpeg.length < 4 || jpeg[0] != (byte) 0xFF || jpeg[1] != (byte) JpegMarker.SOI)
 		{
 			return segments;
 		}
@@ -31,13 +31,14 @@ public final class JpegMetadataExtractor
 			int marker = jpeg[off + 1] & 0xFF;
 
 			// Stop at SOS or EOI
-			if (marker == 0xDA || marker == 0xD9)
+			if (marker == JpegMarker.SOS || marker == JpegMarker.EOI)
 			{
 				break;
 			}
 
 			// Standalone markers (no length)
-			if (marker == 0x00 || marker == 0x01 || (marker >= 0xD0 && marker <= 0xD7))
+			if (marker == JpegMarker.STUFFING || marker == JpegMarker.TEM
+				|| (marker >= JpegMarker.RST_FIRST && marker <= JpegMarker.RST_LAST))
 			{
 				off += 2;
 				continue;
@@ -46,19 +47,18 @@ public final class JpegMetadataExtractor
 			int segLen = ByteBufferUtils.readU16BE(jpeg, off + 2);
 			if (segLen < 2)
 			{
-				// Segment length MUST include the 2 length bytes themselves (JPEG spec).
-				// Zero or one means the file is corrupt / malicious — bail rather than
-				// add a bogus 2-byte segment that downstream injector / renderers will
-				// mis-parse, shifting every following segment by that amount.
+				// Segment length MUST include the 2 length bytes themselves (JPEG spec). Zero or one
+				// means the file is corrupt / malicious — bail rather than add a bogus 2-byte segment
+				// that downstream injector / renderers will mis-parse, shifting every following segment
+				// by that amount.
 				break;
 			}
 			int totalLen = 2 + segLen; // FF xx + segment length (includes the 2 length bytes)
 
-			// Bounds + overflow guard. segLen is u16 so totalLen ≤ 65539, no int overflow
-			// is possible here in practice — but the off+totalLen sum CAN overflow if a
-			// crafted file walks far enough that off itself is near Integer.MAX_VALUE.
-			// Bail if the segment claims to extend past EOF rather than continuing the
-			// loop with off advanced into negative territory (which would then index a
+			// Bounds + overflow guard. segLen is u16 so totalLen ≤ 65539, no int overflow is possible here
+			// in practice — but the off+totalLen sum CAN overflow if a crafted file walks far enough that
+			// off itself is near Integer.MAX_VALUE. Bail if the segment claims to extend past EOF rather
+			// than continuing the loop with off advanced into negative territory (which would then index a
 			// negative offset on the next iteration's marker read, throwing IOOBE).
 			if (off + totalLen > jpeg.length || off + totalLen < off)
 			{

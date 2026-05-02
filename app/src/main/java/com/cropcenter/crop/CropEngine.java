@@ -11,12 +11,10 @@ import com.cropcenter.util.RotationMath;
 import java.util.List;
 
 /**
- * Computes the crop rectangle from CropState — given the user's selection points,
- * aspect ratio, lock mode (Both / H / V), rotation, and image bounds, derives a
- * center point and width/height that respect all of those constraints. The two
- * public entry points are autoComputeFromPoints (selection-driven) and
- * recomputeCrop (general "given the current state, fit the crop to it"). Pure
- * math: no Bitmap reads, no rendering, no listener firing — callers handle
+ * Computes the crop rectangle from CropState — given the user's selection points, aspect ratio, lock mode (Both / H /
+ * V), rotation, and image bounds, derives a center point and width/height that respect all of those constraints. The
+ * two public entry points are autoComputeFromPoints (selection-driven) and recomputeCrop (general "given the current
+ * state, fit the crop to it"). Pure math: no Bitmap reads, no rendering, no listener firing — callers handle
  * notifyChanged through the CropState setter pattern.
  */
 public final class CropEngine
@@ -26,9 +24,9 @@ public final class CropEngine
 	/**
 	 * Auto-compute crop from selection points, respecting lock mode.
 	 *
-	 * Both:  center on selection midpoint for both axes (symmetric around points)
-	 * H:     center horizontally on points, vertically on image center (max height)
-	 * V:     center vertically on points, horizontally on image center (max width)
+	 * Both: center on selection midpoint for both axes (symmetric around points) H: center horizontally on points,
+	 * vertically on image center (max height) V: center vertically on points, horizontally on image center (max
+	 * width)
 	 */
 	public static void autoComputeFromPoints(CropState state)
 	{
@@ -38,10 +36,10 @@ public final class CropEngine
 		}
 		if (state.getCenterMode() == CenterMode.LOCKED)
 		{
-			// Pan mode: crop is frozen while the user drags the viewport. Points may still be
-			// added or removed, but the crop box must not resize/relocate until Pan turns off
-			// and the chkPan handler fires recomputeForLockChange(), which runs this method
-			// again with the real centerMode restored.
+			// Pan mode: crop is frozen while the user drags the viewport. Points may still be added or
+			// removed, but the crop box must not resize/relocate until Pan turns off and the chkPan handler
+			// fires recomputeForLockChange(), which runs this method again with the real centerMode
+			// restored.
 			return;
 		}
 		List<SelectionPoint> points = state.getSelectionPoints();
@@ -51,26 +49,23 @@ public final class CropEngine
 		}
 		float[] mid = selectionMidpoint(points);
 
-		// Always start centered on the selection midpoint.
-		// Locked axes: crop is symmetric around this center.
-		// Free axes: crop extends to max available size, but stays centered on the points as
-		// much as possible (recomputeCrop clamps if needed to fit).
+		// Always start centered on the selection midpoint. Locked axes: crop is symmetric around this center.
+		// Free axes: crop extends to max available size, but stays centered on the points as much as possible
+		// (recomputeCrop clamps if needed to fit).
 		state.markCropSizeDirty();
 		state.setCenterUnclamped(mid[0], mid[1]);
 		recomputeCrop(state);
-		// Sync the rotation/drag anchor to the post-recompute center so a later non-selection
-		// recompute (e.g. user switches to Move mode then rotates or changes AR) starts from
-		// where the selection put the crop, not a stale anchor left over from load time or a
-		// prior pan. Without this sync, findCropCenter's non-select path reads the stale
-		// anchor and the crop jumps back toward the old center the first time the user rotates
-		// after selecting off-center points.
+		// Sync the rotation/drag anchor to the post-recompute center so a later non-selection recompute (e.g.
+		// user switches to Move mode then rotates or changes AR) starts from where the selection put the crop,
+		// not a stale anchor left over from load time or a prior pan. Without this sync, findCropCenter's
+		// non-select path reads the stale anchor and the crop jumps back toward the old center the first time
+		// the user rotates after selecting off-center points.
 		state.setAnchor(state.getCenterX(), state.getCenterY());
 	}
 
 	/**
-	 * Recompute crop size and clamp center.
-	 * When cropSizeDirty: computes maximum crop at current AR centered on current center.
-	 * Otherwise: just ensures center stays in valid bounds.
+	 * Recompute crop size and clamp center. When cropSizeDirty: computes maximum crop at current AR centered on
+	 * current center. Otherwise: just ensures center stays in valid bounds.
 	 */
 	public static void recomputeCrop(CropState state)
 	{
@@ -89,8 +84,8 @@ public final class CropEngine
 
 		if (!state.isCropSizeDirty() && state.getCropW() > 0 && state.getCropH() > 0)
 		{
-			// Size locked — keep cropW / cropH, let setCenter clamp centerX / centerY into the
-			// rotated image bounds. No parity snap: cropImageX comes from getCropImageX's floor().
+			// Size locked — keep cropW / cropH, let setCenter clamp centerX / centerY into the rotated
+			// image bounds. No parity snap: cropImageX comes from getCropImageX's floor().
 			state.setCropSizeSilent(state.getCropW(), state.getCropH());
 			state.setCenter(centerX, centerY);
 			return;
@@ -105,18 +100,16 @@ public final class CropEngine
 		float cropW = cropSize[0];
 		float cropH = cropSize[1];
 
-		// Free-axis clamp runs BEFORE the rotation shrink so H / V / BOTH stay visibly
-		// distinct under rotation — see recomputeCrop_design-note.md. If the rotation
-		// shrink ran first, the shrunk crop fits at any mode's requested center, collapsing
-		// all modes to the same result.
-		float[] clampedCenter = clampFreeAxes(centerX, centerY, cropW, cropH,
-			imgW, imgH, lockedX, lockedY);
+		// Free-axis clamp runs BEFORE the rotation shrink so H / V / BOTH stay visibly distinct under rotation
+		// — see recomputeCrop_design-note.md. If the rotation shrink ran first, the shrunk crop fits at any
+		// mode's requested center, collapsing all modes to the same result.
+		float[] clampedCenter = clampFreeAxes(centerX, centerY, cropW, cropH, imgW, imgH, lockedX, lockedY);
 		centerX = clampedCenter[0];
 		centerY = clampedCenter[1];
 
-		// Sub-epsilon rotation is drawn / exported as zero by the render pipeline, so
-		// skip the rotation-fit shrink here too — otherwise a residual 0.01° would
-		// needlessly shrink a crop the user sees as unrotated.
+		// Sub-epsilon rotation is drawn / exported as zero by the render pipeline, so skip the rotation-fit
+		// shrink here too — otherwise a residual 0.01° would needlessly shrink a crop the user sees as
+		// unrotated.
 		boolean effectiveRotation = Math.abs(rotation) >= BitmapUtils.ROTATION_EPSILON;
 		if (effectiveRotation && cropW > 0 && cropH > 0)
 		{
@@ -138,25 +131,28 @@ public final class CropEngine
 	}
 
 	/**
-	 * AABB midpoint of the selection points in ROTATED image space — rotate each point
-	 * around the image center first, then take the axis-aligned bounding box of the
-	 * rotated positions, then return its midpoint. Rotation doesn't commute with
-	 * axis-aligned-bbox, so this gives a different (correct) result than rotating the
+	 * AABB midpoint of the selection points in ROTATED image space — rotate each point around the image center
+	 * first, then take the axis-aligned bounding box of the rotated positions, then return its midpoint. Rotation
+	 * doesn't commute with axis-aligned-bbox, so this gives a different (correct) result than rotating the
 	 * un-rotated midpoint.
 	 *
-	 * Used by CropEngine.recomputeCrop (Select-mode center derivation) AND by callers
-	 * that need to match its framing in other modes (MainActivity.recenterOnSelection
-	 * when the user switches lock axis in Move mode on a rotated image). Keeping both
-	 * paths on the same formula means switching between Select and Move can't shift
+	 * Used by CropEngine.recomputeCrop (Select-mode center derivation) AND by callers that need to match its
+	 * framing in other modes (MainActivity.recenterOnSelection when the user switches lock axis in Move mode on a
+	 * rotated image). Keeping both paths on the same formula means switching between Select and Move can't shift
 	 * the crop's visual position on a rotated image.
 	 *
-	 * For a single selection point, snaps to the nearest half-integer in rotated space
-	 * so the grid's middle line can draw through the marker pixel (onTap already
-	 * pre-snaps the stored point to pixel+0.5 in un-rotated coords; under rotation
-	 * the rotated position is fractional, so a re-snap is needed).
+	 * For a single selection point, snaps to the nearest half-integer in rotated space so the grid's middle line
+	 * can draw through the marker pixel (onTap already pre-snaps the stored point to pixel+0.5 in un-rotated
+	 * coords; under rotation the rotated position is fractional, so a re-snap is needed).
+	 *
+	 * @param points   selection points in un-rotated image coords
+	 * @param imgW     source image width
+	 * @param imgH     source image height
+	 * @param rotation user-applied rotation in degrees
+	 * @return [midX, midY] in un-rotated image coords; for a single-point input the
+	 *         result is snapped to a pixel-half-integer in rotated space
 	 */
-	public static float[] rotatedSelectionMidpoint(List<SelectionPoint> points,
-		int imgW, int imgH, float rotation)
+	public static float[] rotatedSelectionMidpoint(List<SelectionPoint> points, int imgW, int imgH, float rotation)
 	{
 		float imageMidX = imgW / 2f;
 		float imageMidY = imgH / 2f;
@@ -176,17 +172,16 @@ public final class CropEngine
 		if (points.size() == 1)
 		{
 			return new float[] {
-				(float) Math.floor(minX) + 0.5f,
-				(float) Math.floor(minY) + 0.5f
+				(float) Math.floor(minX) + 0.5f, (float) Math.floor(minY) + 0.5f
 			};
 		}
 		return new float[] { (minX + maxX) / 2f, (minY + maxY) / 2f };
 	}
 
 	/**
-	 * Shift free-axis centers so the crop rectangle stays inside the image. Guards
-	 * against images smaller than the minimum crop: when cropW ≥ imgW the upper bound
-	 * falls below the lower bound and Math.clamp would throw — fall back to centering.
+	 * Shift free-axis centers so the crop rectangle stays inside the image. Guards against images smaller than the
+	 * minimum crop: when cropW ≥ imgW the upper bound falls below the lower bound and Math.clamp would throw — fall
+	 * back to centering.
 	 */
 	private static float[] clampFreeAxes(float centerX, float centerY,
 		float cropW, float cropH, int imgW, int imgH, boolean lockedX, boolean lockedY)
@@ -203,10 +198,9 @@ public final class CropEngine
 	}
 
 	/**
-	 * Compute the maximum crop size on each axis, subject to lock mode and aspect ratio.
-	 * Locked axes are symmetric about the center (so a selection stays framed); free
-	 * axes get the full image extent and will be clamped / shifted later by
-	 * clampFreeAxes.
+	 * Compute the maximum crop size on each axis, subject to lock mode and aspect ratio. Locked axes are symmetric
+	 * about the center (so a selection stays framed); free axes get the full image extent and will be clamped /
+	 * shifted later by clampFreeAxes.
 	 */
 	private static float[] computeMaxCropSize(AspectRatio ar, float centerX, float centerY,
 		int imgW, int imgH, boolean lockedX, boolean lockedY)
@@ -246,10 +240,9 @@ public final class CropEngine
 	}
 
 	/**
-	 * Derive the crop center for this recompute pass. In Select mode with points,
-	 * returns the AABB midpoint of the selection points IN ROTATED IMAGE SPACE via
-	 * rotatedSelectionMidpoint. In all other cases returns the stable rotation anchor
-	 * (the user's intended, un-clamped center).
+	 * Derive the crop center for this recompute pass. In Select mode with points, returns the AABB midpoint of the
+	 * selection points IN ROTATED IMAGE SPACE via rotatedSelectionMidpoint. In all other cases returns the stable
+	 * rotation anchor (the user's intended, un-clamped center).
 	 */
 	private static float[] findCropCenter(CropState state, int imgW, int imgH, float rotation)
 	{
@@ -263,10 +256,9 @@ public final class CropEngine
 	}
 
 	/**
-	 * Find the max scale factor (0..1) so that a crop of (cropW*s, cropH*s) centered at
-	 * (centerX, centerY) fits entirely within an imgW × imgH image rotated by
-	 * rotation degrees. Each crop corner, un-rotated around image center, must land inside
-	 * [0, imgW] × [0, imgH].
+	 * Find the max scale factor (0..1) so that a crop of (cropW*s, cropH*s) centered at (centerX, centerY) fits
+	 * entirely within an imgW × imgH image rotated by rotation degrees. Each crop corner, un-rotated around image
+	 * center, must land inside [0, imgW] × [0, imgH].
 	 */
 	private static float maxScaleForRotation(float centerX, float centerY, float cropW, float cropH,
 		int imgW, int imgH, float rotation)
@@ -287,8 +279,8 @@ public final class CropEngine
 			// Un-rotate the corner around the image midpoint.
 			RotationMath.inverse(cornerX, cornerY, imageMidX, imageMidY, rotation, unrotated);
 
-			// If this corner already fits at scale=1, nothing to do. Otherwise binary-search the
-			// largest scale factor that brings it inside image bounds.
+			// If this corner already fits at scale=1, nothing to do. Otherwise binary-search the largest
+			// scale factor that brings it inside image bounds.
 			if (unrotated[0] < 0 || unrotated[0] > imgW || unrotated[1] < 0 || unrotated[1] > imgH)
 			{
 				float loScale = 0.01f;           // min 1% to avoid degenerate 0-size crops
@@ -317,10 +309,9 @@ public final class CropEngine
 	}
 
 	/**
-	 * Second rotation-fit pass: integer rounding of cropW / cropH above may push the
-	 * corners just outside the rotated image bounds. If maxScaleForRotation reports the
-	 * post-rounding crop is meaningfully too big (recheck < 0.99), shrink + re-round +
-	 * re-commit. Uses the state's current (post-setCenter) values because setCenter's
+	 * Second rotation-fit pass: integer rounding of cropW / cropH above may push the corners just outside the
+	 * rotated image bounds. If maxScaleForRotation reports the post-rounding crop is meaningfully too big (recheck
+	 * < 0.99), shrink + re-round + re-commit. Uses the state's current (post-setCenter) values because setCenter's
 	 * own rotation clamp may have nudged the center.
 	 */
 	private static void recheckRotationFit(CropState state, int imgW, int imgH, float rotation)
@@ -346,11 +337,10 @@ public final class CropEngine
 	}
 
 	/**
-	 * Axis-aligned bounding-box midpoint of a non-empty selection. A single point is its own
-	 * midpoint; with multiple points we average the min/max on each axis (cheaper than a
-	 * true centroid and matches how the crop engine frames the selection). Private — the
-	 * only consumer outside CropEngine is rotatedSelectionMidpoint, which transforms the
-	 * midpoint through rotation before returning. Direct callers want the rotated form.
+	 * Axis-aligned bounding-box midpoint of a non-empty selection. A single point is its own midpoint; with
+	 * multiple points we average the min/max on each axis (cheaper than a true centroid and matches how the crop
+	 * engine frames the selection). Private — the only consumer outside CropEngine is rotatedSelectionMidpoint,
+	 * which transforms the midpoint through rotation before returning. Direct callers want the rotated form.
 	 */
 	private static float[] selectionMidpoint(List<SelectionPoint> points)
 	{

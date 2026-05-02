@@ -1,10 +1,9 @@
 package com.cropcenter.model;
 
 /**
- * Which axes of the crop box are locked symmetrically around the selection. In Select
- * mode the user picks one of BOTH / HORIZONTAL / VERTICAL to control how the crop frames
- * the points. In Move mode the state is LOCKED — the crop is fixed and drag events pan
- * the viewport instead.
+ * Which axes of the crop box are locked symmetrically around the selection. In Select mode the user picks one of BOTH /
+ * HORIZONTAL / VERTICAL to control how the crop frames the points. In Move mode the state is LOCKED — the crop is fixed
+ * and drag events pan the viewport instead.
  */
 public enum CenterMode
 {

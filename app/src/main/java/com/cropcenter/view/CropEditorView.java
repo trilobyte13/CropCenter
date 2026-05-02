@@ -16,8 +16,7 @@ import com.cropcenter.model.SelectionPoint;
 import java.util.List;
 
 /**
- * Custom view that renders the source image with crop overlay, handles touch gestures for
- * pan/zoom/center-set.
+ * Custom view that renders the source image with crop overlay, handles touch gestures for pan/zoom/center-set.
  */
 public class CropEditorView extends View implements TouchGestureHandler.Callback
 {
@@ -61,8 +60,8 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
 	}
 
 	/**
-	 * True when there is at least one selection-point edit on the redo stack — the
-	 * toolbar uses this to enable / disable the Redo button.
+	 * True when there is at least one selection-point edit on the redo stack — the toolbar uses this to enable /
+	 * disable the Redo button.
 	 */
 	public boolean canRedo()
 	{
@@ -78,8 +77,8 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
 	}
 
 	/**
-	 * Drop both undo and redo stacks. Called by the image-load flow so edits from the
-	 * previous image don't leak into the new session.
+	 * Drop both undo and redo stacks. Called by the image-load flow so edits from the previous image don't leak
+	 * into the new session.
 	 */
 	public void clearUndoHistory()
 	{
@@ -88,8 +87,8 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
 	}
 
 	/**
-	 * Reset zoom to 1 and center the viewport on the image. Called on image load and
-	 * on double-tap outside Select mode.
+	 * Reset zoom to 1 and center the viewport on the image. Called on image load and on double-tap outside Select
+	 * mode.
 	 */
 	public void fitToView()
 	{
@@ -147,9 +146,9 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
 		{
 			return;
 		}
-		// Un-rotate: selection points live in un-rotated image coords but the image is drawn
-		// rotated. A tap must map through the inverse rotation so the nearest-point test
-		// compares like-for-like with what the user visually tapped.
+		// Un-rotate: selection points live in un-rotated image coords but the image is drawn rotated. A tap
+		// must map through the inverse rotation so the nearest-point test compares like-for-like with what the
+		// user visually tapped.
 		float[] imagePoint = viewport.screenToImagePixel(screenX, screenY, state);
 		float imageX = imagePoint[0];
 		float imageY = imagePoint[1];
@@ -203,11 +202,10 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
 	}
 
 	/**
-	 * Drag-release handler: applies parity snap to centerX/centerY so the crop lands on a
-	 * pixel-aligned position once the finger lifts. Mid-drag keeps centerX/Y continuous
-	 * (CropEngine.recomputeCrop intentionally does NOT snap per-frame — a continuous snap
-	 * makes cropW flip even↔odd during rotation sweeps and the crop flickers). A one-shot
-	 * snap on release has no such flicker problem: no sweep is in progress.
+	 * Drag-release handler: applies parity snap to centerX/centerY so the crop lands on a pixel-aligned position
+	 * once the finger lifts. Mid-drag keeps centerX/Y continuous (CropEngine.recomputeCrop intentionally does NOT
+	 * snap per-frame — a continuous snap makes cropW flip even↔odd during rotation sweeps and the crop flickers). A
+	 * one-shot snap on release has no such flicker problem: no sweep is in progress.
 	 *
 	 * Snap formula matches what getCropImageXFloat / exporter integer floor expect:
 	 *   cropW even → centerX must be integer   → round to nearest int
@@ -242,9 +240,9 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
 		try
 		{
 			state.setCenter(snappedX, snappedY);
-			// Update anchor too so a subsequent rotation / AR change starts from the
-			// snapped position rather than the pre-snap float — otherwise recomputeCrop's
-			// non-select path would re-derive the un-snapped center from the stale anchor.
+			// Update anchor too so a subsequent rotation / AR change starts from the snapped position
+			// rather than the pre-snap float — otherwise recomputeCrop's non-select path would re-derive
+			// the un-snapped center from the stale anchor.
 			state.setAnchor(state.getCenterX(), state.getCenterY());
 			invalidate();
 		}
@@ -261,9 +259,9 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
 		{
 			return;
 		}
-		// Un-rotate: same reasoning as onLongPress — selection points are stored in un-rotated
-		// image coords, so the tap location must be converted through the inverse rotation
-		// before comparing to existing points or adding a new one.
+		// Un-rotate: same reasoning as onLongPress — selection points are stored in un-rotated image coords, so
+		// the tap location must be converted through the inverse rotation before comparing to existing points
+		// or adding a new one.
 		float[] imagePoint = viewport.screenToImagePixel(screenX, screenY, state);
 		float imageX = imagePoint[0];
 		float imageY = imagePoint[1];
@@ -271,7 +269,6 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
 		// Tap does nothing in Move mode — use drag to reposition crop.
 		if (state.getEditorMode() == EditorMode.SELECT_FEATURE)
 		{
-			// Check if tapping on existing point → remove it
 			float threshold = TOUCH_THRESHOLD_PX / (viewport.getBaseScale() * viewport.getZoom());
 			for (int i = 0; i < state.getSelectionPoints().size(); i++)
 			{
@@ -300,13 +297,12 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
 			}
 			pushUndo();
 			// Snap the stored point to the tapped pixel's centre (image X in [P, P+1) → P + 0.5).
-			// GridRenderer.linePos draws the grid's middle line at the crop centre regardless
-			// of cropW parity, so placing the point on a half-integer and letting CropEngine
-			// carry that through to cropCenter lands the middle grid line over the marker.
-			// Clamp to the last valid pixel centre: isInsideRotatedImage accepts coords equal
-			// to imgW / imgH (inclusive bounds), but floor(imgW) + 0.5 = imgW + 0.5 which is
-			// outside the source. Rotated-tap float precision can also push marginal taps just
-			// past the edge; the clamp absorbs both.
+			// GridRenderer.linePos draws the grid's middle line at the crop centre regardless of cropW
+			// parity, so placing the point on a half-integer and letting CropEngine carry that through to
+			// cropCenter lands the middle grid line over the marker. Clamp to the last valid pixel centre:
+			// isInsideRotatedImage accepts coords equal to imgW / imgH (inclusive bounds), but floor(imgW)
+			// + 0.5 = imgW + 0.5 which is outside the source. Rotated-tap float precision can also push
+			// marginal taps just past the edge; the clamp absorbs both.
 			int imgW = state.getImageWidth();
 			int imgH = state.getImageHeight();
 			float snappedX = Math.clamp((float) Math.floor(imageX) + 0.5f, 0.5f, imgW - 0.5f);
@@ -326,17 +322,16 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
 			float screenX = event.getX();
 			float screenY = event.getY();
 			// Use the rotation-aware mapper: painted points are consumed by
-			// HorizonDetector.detectFromPaintedRegion, which operates on the UN-rotated source
-			// bitmap. Without un-rotation here, any rotation at paint time produces garbage
-			// horizon angles.
+			// HorizonDetector.detectFromPaintedRegion, which operates on the UN-rotated source bitmap.
+			// Without un-rotation here, any rotation at paint time produces garbage horizon angles.
 			switch (event.getActionMasked())
 			{
 				case MotionEvent.ACTION_DOWN ->
 				{
 					float[] imagePoint = viewport.screenToImagePixel(screenX, screenY, state);
 					horizon.begin(screenX, screenY, imagePoint);
-					// getParent() is null between detach and re-attach (config change
-					// mid-gesture); skip the request rather than NPE.
+					// getParent() is null between detach and re-attach (config change mid-gesture);
+					// skip the request rather than NPE.
 					ViewParent parent = getParent();
 					if (parent != null)
 					{
@@ -372,8 +367,7 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
 	}
 
 	/**
-	 * Re-apply the most recently undone selection-point edit. No-op when the redo
-	 * stack is empty.
+	 * Re-apply the most recently undone selection-point edit. No-op when the redo stack is empty.
 	 */
 	public void redo()
 	{
@@ -395,8 +389,8 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
 		float imageMidY = state.getImageHeight() / 2f;
 		state.markCropSizeDirty();
 		state.setCenterUnclamped(imageMidX, imageMidY);
-		// Reset the rotation anchor too — the user's "intent" is now the image center,
-		// not whatever point was selected before (which may have been far away).
+		// Reset the rotation anchor too — the user's "intent" is now the image center, not whatever point was
+		// selected before (which may have been far away).
 		state.setAnchor(imageMidX, imageMidY);
 		CropEngine.recomputeCrop(state);
 	}
@@ -411,9 +405,8 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
 	}
 
 	/**
-	 * Subscribe to "selection points changed" events — fired whenever the user adds,
-	 * removes, or restores a selection point. The host uses this to refresh
-	 * undo / redo / clear button enablement.
+	 * Subscribe to "selection points changed" events — fired whenever the user adds, removes, or restores a
+	 * selection point. The host uses this to refresh undo / redo / clear button enablement.
 	 */
 	public void setOnPointsChangedListener(Runnable r)
 	{
@@ -421,8 +414,8 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
 	}
 
 	/**
-	 * Subscribe to zoom-changed events — fired on every pinch-zoom gesture step. The
-	 * host uses this to update the zoom badge in the info bar.
+	 * Subscribe to zoom-changed events — fired on every pinch-zoom gesture step. The host uses this to update the
+	 * zoom badge in the info bar.
 	 */
 	public void setOnZoomChangedListener(Runnable r)
 	{
@@ -430,8 +423,8 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
 	}
 
 	/**
-	 * Hand the view the CropState to render. Triggers an initial fit-to-view and
-	 * redraw. Call again after loading a new image.
+	 * Hand the view the CropState to render. Triggers an initial fit-to-view and redraw. Call again after loading a
+	 * new image.
 	 */
 	public void setState(CropState state)
 	{
@@ -469,9 +462,9 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
 	}
 
 	/**
-	 * True when the locked axis moved more than 0.5 px between preDrag* and the current
-	 * state.centerX/centerY — i.e. the joint clamp in setCenter pushed the locked axis.
-	 * Used to reject moves on a locked axis and restore via recomputeCrop.
+	 * True when the locked axis moved more than 0.5 px between preDrag* and the current state.centerX/centerY —
+	 * i.e. the joint clamp in setCenter pushed the locked axis. Used to reject moves on a locked axis and restore
+	 * via recomputeCrop.
 	 */
 	private boolean crossAxisDrifted(CenterMode lock, float preDragCenterX, float preDragCenterY)
 	{
@@ -487,16 +480,14 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
 	}
 
 	/**
-	 * Move the crop center by the current gesture's delta, respecting the lock mode.
-	 * The anchor accumulates unclamped intent across events; state.centerX is what
-	 * setCenter's rotation clamp produced. Reading newCenter from the anchor (not
-	 * centerX) lets sub-pixel motion accumulate across events — a slow drag at high
-	 * zoom would otherwise make no progress because each event would read back the
-	 * just-clamped centerX.
+	 * Move the crop center by the current gesture's delta, respecting the lock mode. The anchor accumulates
+	 * unclamped intent across events; state.centerX is what setCenter's rotation clamp produced. Reading newCenter
+	 * from the anchor (not centerX) lets sub-pixel motion accumulate across events — a slow drag at high zoom would
+	 * otherwise make no progress because each event would read back the just-clamped centerX.
 	 *
-	 * Wrapped in a beginBatch / endBatch pair so the two setCenter calls (ours below
-	 * plus the one inside CropEngine.recomputeCrop) coalesce into a single listener
-	 * fire — otherwise each pan event triggers two full applyStateToUi cycles.
+	 * Wrapped in a beginBatch / endBatch pair so the two setCenter calls (ours below plus the one inside
+	 * CropEngine.recomputeCrop) coalesce into a single listener fire — otherwise each pan event triggers two full
+	 * applyStateToUi cycles.
 	 */
 	private void dragCropCenter(float dx, float dy)
 	{
@@ -509,9 +500,9 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
 
 			float newCenterX = state.getAnchorX();
 			float newCenterY = state.getAnchorY();
-			// Cache the pre-drag CLAMPED center for the cross-axis drift test below.
-			// Comparing to the anchor would compare intent (pre-clamp) to intent
-			// (pre-clamp), which can't detect the rotation clamp moving the locked axis.
+			// Cache the pre-drag CLAMPED center for the cross-axis drift test below. Comparing to the
+			// anchor would compare intent (pre-clamp) to intent (pre-clamp), which can't detect the
+			// rotation clamp moving the locked axis.
 			float preDragCenterX = state.getCenterX();
 			float preDragCenterY = state.getCenterY();
 
@@ -529,20 +520,20 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
 				newCenterY += dy / scale;
 			}
 
-			// setCenter clamps both axes jointly (binary search under rotation). On a
-			// locked axis we only want motion on the unlocked axis — reject moves that
-			// would drift the locked axis more than 0.5 px from its pre-drag position.
+			// setCenter clamps both axes jointly (binary search under rotation). On a locked axis we only
+			// want motion on the unlocked axis — reject moves that would drift the locked axis more than
+			// 0.5 px from its pre-drag position.
 			state.setCropSizeDirty(false);
 			state.setCenter(newCenterX, newCenterY);
 			if (!crossAxisDrifted(lock, preDragCenterX, preDragCenterY))
 			{
-				// Advance the anchor to the clamped (still fractional) drag position so
-				// the next event continues accumulating from here.
+				// Advance the anchor to the clamped (still fractional) drag position so the next event
+				// continues accumulating from here.
 				state.setAnchor(state.getCenterX(), state.getCenterY());
 			}
-			// Recompute crop size + rotation fit. When rejected, the anchor is
-			// unchanged — recomputeCrop re-derives centerX / Y from the unchanged
-			// anchor, restoring the pre-drag position on the locked axis.
+			// Recompute crop size + rotation fit. When rejected, the anchor is unchanged — recomputeCrop
+			// re-derives centerX / Y from the unchanged anchor, restoring the pre-drag position on the
+			// locked axis.
 			CropEngine.recomputeCrop(state);
 			invalidate();
 		}
@@ -559,8 +550,8 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
 	}
 
 	/**
-	 * Check if a SCREEN point is inside the visible (rotated) image content.
-	 * The image is drawn rotated by state.getRotationDegrees() around its center.
+	 * Check if a SCREEN point is inside the visible (rotated) image content. The image is drawn rotated by
+	 * state.getRotationDegrees() around its center.
 	 */
 	private boolean isInsideRotatedImage(float screenX, float screenY)
 	{
@@ -575,13 +566,12 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
 	}
 
 	/**
-	 * True when a pan gesture should move the crop box (Move mode + center placed +
-	 * not in Pan-the-viewport lock mode). Otherwise the pan gesture moves the viewport.
+	 * True when a pan gesture should move the crop box (Move mode + center placed + not in Pan-the-viewport lock
+	 * mode). Otherwise the pan gesture moves the viewport.
 	 */
 	private boolean isMovingCrop()
 	{
-		return state.getEditorMode() == EditorMode.MOVE
-			&& state.hasCenter()
+		return state.getEditorMode() == EditorMode.MOVE && state.hasCenter()
 			&& state.getCenterMode() != CenterMode.LOCKED;
 	}
 
@@ -600,8 +590,8 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
 
 	private void restorePoints(List<SelectionPoint> snapshot)
 	{
-		// SelectionPoint is an immutable record, so we can share the instances directly rather
-		// than deep-copy them.
+		// SelectionPoint is an immutable record, so we can share the instances directly rather than deep-copy
+		// them.
 		state.replaceSelectionPoints(snapshot);
 		if (snapshot.isEmpty())
 		{
@@ -616,12 +606,11 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
 	}
 
 	/**
-	 * Resync the drag anchor back to centerX/centerY when they've diverged by more than
-	 * a pixel. A gap that large means the anchor went stale: rotation / AR shrunk the
-	 * crop and setCenter's rotation clamp pulled centerX inward while the anchor stayed
-	 * put, or the user switched Select → Move without a selection and the anchor still
-	 * reflects an old intent. Without the resync the first drag event would be absorbed
-	 * by the clamp and produce no visible motion.
+	 * Resync the drag anchor back to centerX/centerY when they've diverged by more than a pixel. A gap that large
+	 * means the anchor went stale: rotation / AR shrunk the crop and setCenter's rotation clamp pulled centerX
+	 * inward while the anchor stayed put, or the user switched Select → Move without a selection and the anchor
+	 * still reflects an old intent. Without the resync the first drag event would be absorbed by the clamp and
+	 * produce no visible motion.
 	 */
 	private void resyncAnchorIfStale()
 	{

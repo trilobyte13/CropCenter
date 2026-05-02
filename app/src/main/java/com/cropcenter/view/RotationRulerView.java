@@ -19,16 +19,23 @@ import com.cropcenter.util.ThemeColors;
 /**
  * Galaxy-style scrollable rotation ruler with pinch-to-zoom.
  *
- * Drag to scroll, fling for momentum. Pinch to zoom the ruler scale, enabling 0.01° precision at
- * the highest zoom. After drag/fling settles, the value snaps to the nearest tick interval for
- * the current zoom level. The finest snap step (0.01°) sits above BitmapUtils.ROTATION_EPSILON
- * so the renderer, readout, and ExportPipeline.canBypassEncode all honor every tick the ruler
- * can produce.
+ * Drag to scroll, fling for momentum. Pinch to zoom the ruler scale, enabling 0.01° precision at the highest zoom.
+ * After drag/fling settles, the value snaps to the nearest tick interval for the current zoom level. The finest snap
+ * step (0.01°) sits above BitmapUtils.ROTATION_EPSILON so the renderer, readout, and ExportPipeline.canBypassEncode all
+ * honor every tick the ruler can produce.
  */
 public class RotationRulerView extends View
 {
+	/**
+	 * Receives rotation-degree updates as the user drags / flings / pinches the ruler. The view fires this on every
+	 * degree change — including momentum frames during a fling — so listeners that mutate state should be cheap.
+	 * The degree value is already clamped to [MIN_DEG, MAX_DEG].
+	 */
 	public interface OnRotationChangedListener
 	{
+		/**
+		 * @param degrees current rotation reading in degrees, clamped to [MIN_DEG, MAX_DEG]
+		 */
 		void onRotationChanged(float degrees);
 	}
 
@@ -39,14 +46,10 @@ public class RotationRulerView extends View
 	// static finals because chooseTickConfig is called on every onDraw and every snapToTick
 	// during a fling — otherwise we'd allocate 60+ TickConfig records per second.
 	private static final TickConfig[] TICK_CONFIGS = {
-		new TickConfig(10f,   45f),
-		new TickConfig(5f,    45f),
-		new TickConfig(1f,    10f),
-		new TickConfig(1f,    5f),
-		new TickConfig(0.5f,  1f),
-		new TickConfig(0.1f,  0.5f),
-		new TickConfig(0.05f, 0.1f),
-		new TickConfig(0.01f, 0.1f),
+		new TickConfig(10f,   45f), new TickConfig(5f,    45f),
+		new TickConfig(1f,    10f), new TickConfig(1f,    5f),
+		new TickConfig(0.5f,  1f), new TickConfig(0.1f,  0.5f),
+		new TickConfig(0.05f, 0.1f), new TickConfig(0.01f, 0.1f),
 	};
 	private static final float FLING_VELOCITY_THRESHOLD = 200f; // px/s — below this, snap instead
 	private static final float MAX_DEG = 180f;
@@ -86,16 +89,26 @@ public class RotationRulerView extends View
 	private float pixelsPerDegree;
 	private float totalDragDx; // cumulative drag distance since touchdown
 
+	/**
+	 * Programmatic-construction overload — no XML attributes, no style. Forwards to the 3-arg base.
+	 */
 	public RotationRulerView(Context context)
 	{
 		this(context, null);
 	}
 
+	/**
+	 * XML-inflation overload (AttributeSet from layout, no explicit defStyle). Forwards to the 3-arg base.
+	 */
 	public RotationRulerView(Context context, AttributeSet attrs)
 	{
 		this(context, attrs, 0);
 	}
 
+	/**
+	 * Base constructor — sets up paints, scroller, and the scale detector. Called either directly or via the 1-arg
+	 * / 2-arg overloads. The defStyle parameter is forwarded to View's constructor for theming.
+	 */
 	public RotationRulerView(Context context, AttributeSet attrs, int defStyle)
 	{
 		super(context, attrs, defStyle);
@@ -152,16 +165,13 @@ public class RotationRulerView extends View
 			}
 		});
 
-		// Drive the fling from a Choreographer frame callback rather than View.computeScroll.
-		// computeScroll runs inside the view's own draw pass — since the editor view sits above
-		// this ruler in the layout, by the time computeScroll fires and invalidates the editor,
-		// the editor's draw for this frame is already complete. The editor then catches up one
-		// frame later, which at high fling velocity is visible as the crop/grid briefly
-		// appearing at the previous rotation's position.
-		//
-		// A FrameCallback runs in Choreographer's animation phase, BEFORE traversal — so the
-		// state update lands in time for both the ruler and the editor to draw it in the same
-		// frame. No lag, no flicker.
+		// Drive the fling from a Choreographer frame callback rather than View.computeScroll. computeScroll
+		// runs inside the view's own draw pass — since the editor view sits above this ruler in the layout, by
+		// the time computeScroll fires and invalidates the editor, the editor's draw for this frame is already
+		// complete. The editor then catches up one frame later, which at high fling velocity is visible as the
+		// crop/grid briefly appearing at the previous rotation's position. A FrameCallback runs in
+		// Choreographer's animation phase, BEFORE traversal — so the state update lands in time for both the
+		// ruler and the editor to draw it in the same frame. No lag, no flicker.
 		flingFrameCallback = new Choreographer.FrameCallback()
 		{
 			@Override
@@ -186,11 +196,11 @@ public class RotationRulerView extends View
 						flingActive = false;
 						snapAndNotify();
 					}
-					// Re-check flingActive before reposting: notifyChanged above ultimately
-					// calls back into setDegrees via the state listener, and a future caller
-					// invoking setDegrees outside the isRulerUpdating guard could flip
-					// flingActive=false via stopFling. Reposting unconditionally would
-					// resurrect the fling. Cheap defence against that class of bug.
+					// Re-check flingActive before reposting: notifyChanged above ultimately calls
+					// back into setDegrees via the state listener, and a future caller invoking
+					// setDegrees outside the isRulerUpdating guard could flip flingActive=false via
+					// stopFling. Reposting unconditionally would resurrect the fling. Cheap defence
+					// against that class of bug.
 					else if (flingActive)
 					{
 						Choreographer.getInstance().postFrameCallback(this);
@@ -202,11 +212,6 @@ public class RotationRulerView extends View
 				}
 			}
 		};
-	}
-
-	public float getDegrees()
-	{
-		return currentDegrees;
 	}
 
 	@Override
@@ -234,6 +239,14 @@ public class RotationRulerView extends View
 		return true;
 	}
 
+	/**
+	 * Set the ruler reading programmatically. Clamps `deg` into [MIN_DEG, MAX_DEG] and stops any in-flight fling so
+	 * the ruler doesn't keep coasting past the new value. Does NOT fire onRotationChanged — callers use this to
+	 * sync the ruler to externally-changed state (e.g. auto-rotate result from horizon detection), not to drive the
+	 * listener loop.
+	 *
+	 * @param deg desired rotation reading; values outside [MIN_DEG, MAX_DEG] are clamped
+	 */
 	public void setDegrees(float deg)
 	{
 		deg = Math.clamp(deg, MIN_DEG, MAX_DEG);
@@ -250,6 +263,12 @@ public class RotationRulerView extends View
 		this.listener = listener;
 	}
 
+	/**
+	 * Toggle the ruler's interactive state. Disabled rulers ignore touch events and dim to 30% alpha so the user
+	 * can see the value but can't change it (used during long-running operations like image load).
+	 *
+	 * @param enabled true to accept touch input and render at full opacity
+	 */
 	public void setRulerEnabled(boolean enabled)
 	{
 		this.enabled = enabled;
@@ -257,9 +276,9 @@ public class RotationRulerView extends View
 	}
 
 	/**
-	 * Multiply the current ruler zoom by a factor and clamp into the valid range. Use
-	 * scaleFactor > 1 to zoom in (finer ticks, smaller visible degree span); < 1 to zoom out.
-	 * Used by the toolbar's − / + buttons that flank the ruler.
+	 * Multiply the current ruler zoom by a factor and clamp into the valid range. Use scaleFactor > 1 to zoom in
+	 * (finer ticks, smaller visible degree span); < 1 to zoom out. Used by the toolbar's − / + buttons that flank
+	 * the ruler.
 	 */
 	public void zoomBy(float scaleFactor)
 	{
@@ -269,9 +288,8 @@ public class RotationRulerView extends View
 	}
 
 	/**
-	 * Snap the ruler to its maximum zoom level (finest 0.01° tick precision). Called by the
-	 * auto-rotate flow after horizon detection lands a precise angle, so the user can
-	 * immediately fine-tune around the detected value.
+	 * Snap the ruler to its maximum zoom level (finest 0.01° tick precision). Called by the auto-rotate flow after
+	 * horizon detection lands a precise angle, so the user can immediately fine-tune around the detected value.
 	 */
 	public void zoomToMax()
 	{
@@ -282,15 +300,20 @@ public class RotationRulerView extends View
 	@Override
 	protected void onDetachedFromWindow()
 	{
-		// If the view is torn down mid-gesture (config change, parent removal), Android won't
-		// dispatch ACTION_UP/CANCEL — the tracker and scroller leak without this cleanup.
+		// If the view is torn down mid-gesture (config change, parent removal), Android won't dispatch
+		// ACTION_UP/CANCEL — the tracker and scroller leak without this cleanup.
 		if (velocityTracker != null)
 		{
 			velocityTracker.recycle();
 			velocityTracker = null;
 		}
 		stopFling();
-		listener = null;
+		// Don't null `listener` here. setOnRotationChangedListener is called once in
+		// ToolbarBinder.setupRotation during MainActivity.onCreate; if the view detaches and re-attaches
+		// without Activity recreation (fragment swap, removeView/addView, view-tree manipulation), there's no
+		// path to re-register and the ruler would silently no-op every gesture. The listener is activity-scoped
+		// (ToolbarBinder lives for the activity) so leaving it bound across detach/reattach cycles doesn't
+		// leak.
 		super.onDetachedFromWindow();
 	}
 
@@ -307,8 +330,8 @@ public class RotationRulerView extends View
 		float degreesVisible = width / pixelsPerDegree;
 		TickConfig tickConfig = chooseTickConfig(degreesVisible);
 
-		// Use integer tick indices to avoid float accumulation errors.
-		// tickIndex * tickConfig.minor = degree value.
+		// Use integer tick indices to avoid float accumulation errors. tickIndex * tickConfig.minor = degree
+		// value.
 		float halfVisible = degreesVisible / 2f;
 		int iStart = (int) Math.floor((currentDegrees - halfVisible - tickConfig.major) / tickConfig.minor);
 		int iEnd = (int) Math.ceil((currentDegrees + halfVisible + tickConfig.major) / tickConfig.minor);
@@ -374,10 +397,9 @@ public class RotationRulerView extends View
 	}
 
 	/**
-	 * ACTION_DOWN: stop any in-flight fling, reset per-gesture accumulators, and ask
-	 * the parent not to intercept subsequent moves (the rotation dial owns horizontal
-	 * drag inside its bounds). getParent() is null between detach and re-attach during
-	 * config changes — skip the request rather than NPE.
+	 * ACTION_DOWN: stop any in-flight fling, reset per-gesture accumulators, and ask the parent not to intercept
+	 * subsequent moves (the rotation dial owns horizontal drag inside its bounds). getParent() is null between
+	 * detach and re-attach during config changes — skip the request rather than NPE.
 	 */
 	private void handleTouchDown(MotionEvent event)
 	{
@@ -393,8 +415,8 @@ public class RotationRulerView extends View
 	}
 
 	/**
-	 * ACTION_MOVE: single-finger horizontal drag advances currentDegrees; pinch drags
-	 * are handled by scaleDetector and suppressed here (isScaling / pointerCount > 1).
+	 * ACTION_MOVE: single-finger horizontal drag advances currentDegrees; pinch drags are handled by scaleDetector
+	 * and suppressed here (isScaling / pointerCount > 1).
 	 */
 	private void handleTouchMove(MotionEvent event)
 	{
@@ -415,22 +437,19 @@ public class RotationRulerView extends View
 	}
 
 	/**
-	 * ACTION_UP / ACTION_CANCEL: classify the gesture as tap / drag-release-slow /
-	 * drag-release-fast and dispatch accordingly. Recycles the velocity tracker on
-	 * every exit so the next gesture starts fresh.
+	 * ACTION_UP / ACTION_CANCEL: classify the gesture as tap / drag-release-slow / drag-release-fast and dispatch
+	 * accordingly. Recycles the velocity tracker on every exit so the next gesture starts fresh.
 	 */
 	private void handleTouchRelease(MotionEvent event)
 	{
-		// If a pinch-zoom occurred during this gesture, skip the angle fling / snap
-		// entirely. onScaleEnd fires before ACTION_UP so isScaling is already false
-		// here — but scalingOccurred stays true for the full gesture lifetime, and
-		// without this check the VelocityTracker's x-velocity (populated by the pinch
+		// If a pinch-zoom occurred during this gesture, skip the angle fling / snap entirely. onScaleEnd fires
+		// before ACTION_UP so isScaling is already false here — but scalingOccurred stays true for the full
+		// gesture lifetime, and without this check the VelocityTracker's x-velocity (populated by the pinch
 		// focus-point motion) would trigger a spurious rotation change on release.
 		if (!isScaling && !scalingOccurred)
 		{
 			// Tap: total movement below the slop.
-			if (totalDragDx <= TAP_SLOP
-				&& event.getActionMasked() == MotionEvent.ACTION_UP)
+			if (totalDragDx <= TAP_SLOP && event.getActionMasked() == MotionEvent.ACTION_UP)
 			{
 				float centerX = getWidth() / 2f;
 				float tappedDeg = currentDegrees + (downX - centerX) / pixelsPerDegree;
@@ -486,9 +505,9 @@ public class RotationRulerView extends View
 	}
 
 	/**
-	 * Fire the OverScroller + register the Choreographer frame callback for fling.
-	 * Separated from handleTouchRelease so the high-velocity branch reads as a single
-	 * named action rather than eight lines of scroller-setup arithmetic.
+	 * Fire the OverScroller + register the Choreographer frame callback for fling. Separated from
+	 * handleTouchRelease so the high-velocity branch reads as a single named action rather than eight lines of
+	 * scroller-setup arithmetic.
 	 */
 	private void startFling(float xVelocity)
 	{
@@ -496,15 +515,14 @@ public class RotationRulerView extends View
 		int startX = (int) (currentDegrees * scaled);
 		int minX = (int) (MIN_DEG * scaled);
 		int maxX = (int) (MAX_DEG * scaled);
-		scroller.fling(startX, 0, (int) (-xVelocity * SCROLL_SUBPIXEL_SCALE), 0,
-			minX, maxX, 0, 0);
+		scroller.fling(startX, 0, (int) (-xVelocity * SCROLL_SUBPIXEL_SCALE), 0, minX, maxX, 0, 0);
 		flingActive = true;
 		Choreographer.getInstance().postFrameCallback(flingFrameCallback);
 	}
 
 	/**
-	 * Cancel any active fling and unregister the pending frame callback so it doesn't reschedule
-	 * itself. Safe to call when no fling is active — idempotent.
+	 * Cancel any active fling and unregister the pending frame callback so it doesn't reschedule itself. Safe to
+	 * call when no fling is active — idempotent.
 	 */
 	private void stopFling()
 	{
@@ -514,9 +532,9 @@ public class RotationRulerView extends View
 	}
 
 	/**
-	 * Choose tick intervals based on how many degrees are visible on screen. Walks
-	 * TICK_THRESHOLDS in order; the first threshold strictly below degreesVisible picks
-	 * that index's TickConfig. The last threshold is 0 so the loop always terminates.
+	 * Choose tick intervals based on how many degrees are visible on screen. Walks TICK_THRESHOLDS in order; the
+	 * first threshold strictly below degreesVisible picks that index's TickConfig. The last threshold is 0 so the
+	 * loop always terminates.
 	 */
 	private static TickConfig chooseTickConfig(float degreesVisible)
 	{

@@ -1,18 +1,15 @@
 package com.cropcenter.util;
 
 /**
- * Catppuccin Mocha palette — UI colors shared across views and dialogs. Mirrors
- * res/values/colors.xml for code paths that don't have an android.content.Context handy (static
- * helpers, Paint setup, custom View construction, etc.).
+ * Catppuccin Mocha palette — UI colors shared across views and dialogs. Mirrors res/values/colors.xml for code paths
+ * that don't have an android.content.Context handy (static helpers, Paint setup, custom View construction, etc.).
  *
- * When a Context is available, prefer getResources().getColor(R.color.X, null) — the XML
- * definition is the single source of truth. This class exists to avoid forcing a Context
- * parameter through code that's otherwise context-free.
+ * When a Context is available, prefer getResources().getColor(R.color.X, null) — the XML definition is the single
+ * source of truth. This class exists to avoid forcing a Context parameter through code that's otherwise context-free.
  */
 public final class ThemeColors
 {
 	// Catppuccin Mocha — surfaces & text
-	public static final int BASE       = 0xFF1E1E2E;
 	public static final int CRUST      = 0xFF11111B;
 	public static final int OVERLAY0   = 0xFF6C7086;
 	public static final int SUBTEXT0   = 0xFFA6ADC8;

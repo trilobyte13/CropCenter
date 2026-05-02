@@ -7,7 +7,7 @@ import android.widget.Toast;
 
 import com.cropcenter.crop.CropExporter;
 import com.cropcenter.model.CropState;
-import com.cropcenter.model.ExportConfig;
+import com.cropcenter.model.Format;
 import com.cropcenter.util.BitmapUtils;
 import com.cropcenter.util.SafFileHelper;
 import com.cropcenter.util.UltraHdrCompat;
@@ -17,17 +17,25 @@ import java.io.OutputStream;
 import java.util.function.Consumer;
 
 /**
- * Encode → write → verify → report pipeline used by SaveController for plain saves and by
- * ReplaceStrategy for the write-first-then-swap flow. Busy-gates, spawns the background
- * worker, and reports success/failure toasts. Knows nothing about collision handling or
- * SAF picker routing — that lives in SaveController / ReplaceStrategy.
+ * Encode → write → verify → report pipeline used by SaveController for plain saves and by ReplaceStrategy for the
+ * write-first-then-swap flow. Busy-gates, spawns the background worker, and reports success/failure toasts. Knows
+ * nothing about collision handling or SAF picker routing — that lives in SaveController / ReplaceStrategy.
  */
 final class ExportPipeline
 {
+	/**
+	 * Result of phase 2. exception is non-null when openOutputStream / write / close threw; writeReturned is true
+	 * when close() succeeded (close-after-write is the final barrier between "written" and "thrown"). Field order
+	 * follows CLAUDE.md's uppercase-type-before-primitive rule.
+	 */
+	private record WriteOutcome(Exception exception, boolean writeReturned)
+	{
+	}
+
 	private static final String TAG = "ExportPipeline";
 
-	private final SaveHost host;
 	private final SafFileHelper safFiles;
+	private final SaveHost host;
 
 	ExportPipeline(SaveHost host, SafFileHelper safFiles)
 	{
@@ -37,20 +45,35 @@ final class ExportPipeline
 
 	void exportTo(Uri uri)
 	{
-		// Default: caller is confident the URI is a fresh document (plain Save As, case C
-		// user-renamed, case B Keep). Cleanup a partial write on failure by deleting the URI.
+		// Default: caller is confident the URI is a fresh document (plain Save As, case C user-renamed, case B
+		// Keep). Cleanup a partial write on failure by deleting the URI.
 		exportTo(uri, null, false, null);
 	}
 
 	/**
-	 * Overwrite fallback for SaveController case A when the target is a confirmed existing
-	 * file (priorSize > 0) AND sibling placeholder creation wasn't available (opaque-ID
-	 * provider). Direct-writes to `uri` with preserveOnFailure=true so a verification failure
-	 * doesn't destroy the original. `replacedName` is used for the success toast ("Replaced
-	 * <name>") so the user gets overwrite-specific confirmation that matches what this path
-	 * actually did — a generic "Saved N KB" would misrepresent a confirmed overwrite. Not as
-	 * crash-safe as Replace's write-then-swap — the destructive write is unavoidable on a
-	 * provider that won't give us a sibling placeholder.
+	 * Encode-and-write on a background thread.
+	 *
+	 * `onSavedBg` (optional): runs after the write verifies. The callback receives the exact bytes written so the
+	 * Replace flow can drop them onto the target file without re-reading the placeholder (FUSE/MediaStore caching
+	 * makes that read unreliable). When onSavedBg is present, doExport's "Saved" toast is suppressed — the callback
+	 * issues its own final-outcome message (success or failure dialog).
+	 */
+	void exportTo(Uri uri, Consumer<byte[]> onSavedBg)
+	{
+		// Replace flow: the placeholder URI is known-fresh (auto-rename or programmatic createDocument) so
+		// delete-on-failure is the correct cleanup. If a future caller needs preserveOnFailure + onSavedBg
+		// together, add another overload.
+		exportTo(uri, onSavedBg, false, null);
+	}
+
+	/**
+	 * Overwrite fallback for SaveController case A when the target is a confirmed existing file (priorSize > 0) AND
+	 * sibling placeholder creation wasn't available (opaque-ID provider). Direct-writes to `uri` with
+	 * preserveOnFailure=true so a verification failure doesn't destroy the original. `replacedName` is used for the
+	 * success toast ("Replaced <name>") so the user gets overwrite-specific confirmation that matches what this
+	 * path actually did — a generic "Saved N KB" would misrepresent a confirmed overwrite. Not as crash-safe as
+	 * Replace's write-then-swap — the destructive write is unavoidable on a provider that won't give us a sibling
+	 * placeholder.
 	 */
 	void exportToOverwrite(Uri uri, String replacedName)
 	{
@@ -58,99 +81,16 @@ final class ExportPipeline
 	}
 
 	/**
-	 * Variant for the narrow fallback path in SaveController case A where the provider returned
-	 * an ACTION_CREATE_DOCUMENT URI that might point at an existing file and we couldn't
-	 * create a sibling placeholder to route through the crash-safe Replace flow. Verification
-	 * failure MUST NOT delete the URI — it could destroy the user's original. The residual
-	 * cost is a partial-write file left on disk when the URI was actually a fresh document on
-	 * a provider that doesn't support createDocument; acceptable since both intersections
-	 * (opaque-ID provider + fresh-doc create + verify failure) are rare.
+	 * Variant for the narrow fallback path in SaveController case A where the provider returned an
+	 * ACTION_CREATE_DOCUMENT URI that might point at an existing file and we couldn't create a sibling placeholder
+	 * to route through the crash-safe Replace flow. Verification failure MUST NOT delete the URI — it could destroy
+	 * the user's original. The residual cost is a partial-write file left on disk when the URI was actually a fresh
+	 * document on a provider that doesn't support createDocument; acceptable since both intersections (opaque-ID
+	 * provider + fresh-doc create + verify failure) are rare.
 	 */
 	void exportToPreserving(Uri uri)
 	{
 		exportTo(uri, null, true, null);
-	}
-
-	/**
-	 * Encode-and-write on a background thread.
-	 *
-	 * `onSavedBg` (optional): runs after the write verifies. The callback receives the exact
-	 * bytes written so the Replace flow can drop them onto the target file without re-reading
-	 * the placeholder (FUSE/MediaStore caching makes that read unreliable). When onSavedBg is
-	 * present, doExport's "Saved" toast is suppressed — the callback issues its own
-	 * final-outcome message (success or failure dialog).
-	 */
-	void exportTo(Uri uri, Consumer<byte[]> onSavedBg)
-	{
-		// Replace flow: the placeholder URI is known-fresh (auto-rename or programmatic
-		// createDocument) so delete-on-failure is the correct cleanup. If a future caller
-		// needs preserveOnFailure + onSavedBg together, add another overload.
-		exportTo(uri, onSavedBg, false, null);
-	}
-
-	private void exportTo(Uri uri, Consumer<byte[]> onSavedBg,
-		boolean preserveOnFailure, String replacedName)
-	{
-		if (host.getState().getSourceImage() == null)
-		{
-			return;
-		}
-		if (!host.getBusy().compareAndSet(false, true))
-		{
-			host.showBusyToast();
-			return;
-		}
-		// Between the busy acquire and the runInBackground enqueue, any throw from the UI
-		// setup (setBusyUi / showProgress can hit findViewById / setText during an unusual
-		// view-tree state) would otherwise strand busy=true forever — the background finally
-		// never runs because the Runnable was never submitted. Clear busy + hide UI before
-		// propagating so a second Save tap isn't permanently rejected with "Busy — try again".
-		try
-		{
-			host.setBusyUi(true);
-			host.showProgress("Saving\u2026");
-		}
-		catch (RuntimeException e)
-		{
-			Log.w(TAG, "pre-enqueue UI setup threw; releasing busy flag", e);
-			host.getBusy().set(false);
-			host.setBusyUi(false);
-			host.hideProgress();
-			throw e;
-		}
-		boolean isReplaceSave = onSavedBg != null;
-		host.runInBackground(() ->
-		{
-			try
-			{
-				byte[] data = doExport(uri, isReplaceSave, preserveOnFailure, replacedName);
-				if (data != null && onSavedBg != null)
-				{
-					try
-					{
-						onSavedBg.accept(data);
-					}
-					catch (Exception e)
-					{
-						// The replace callback normally owns its own success/failure toast, so
-						// doExport suppresses the "Saved" toast when onSavedBg is set. If the
-						// callback itself throws before firing its outcome message, that
-						// suppression leaves the user with no feedback — silent save, no
-						// dialog. Fire an explicit failure toast here so the user knows
-						// something went wrong; the exception detail is in the log.
-						Log.w(TAG, "post-save step threw", e);
-						host.runOnUiThread(() -> host.toastIfAlive(
-							"Save step failed \u2014 check log", Toast.LENGTH_LONG));
-					}
-				}
-			}
-			finally
-			{
-				host.getBusy().set(false);
-				host.runOnUiThread(() -> host.setBusyUi(false));
-				host.hideProgress();
-			}
-		});
 	}
 
 	/**
@@ -168,29 +108,25 @@ final class ExportPipeline
 	 * filesystem — that read can go through FUSE/MediaStore layers that aren't necessarily in
 	 * sync with the SAF write we just did.
 	 *
-	 * `isReplaceSave` — true when this export is the placeholder write of a Replace flow.
-	 * Suppresses doExport's "Saved" toast because the Replace swap that follows fires its own
-	 * outcome message.
+	 * `isReplaceSave` — true when this export is the placeholder write of a Replace flow. Suppresses doExport's
+	 * "Saved" toast because the Replace swap that follows fires its own outcome message.
 	 *
-	 * `preserveOnFailure` — when verifyPhase rejects the write, true leaves the partial file
-	 * on disk; false deletes it. Set by the caller based on whether the URI might point at
-	 * user data (e.g. SaveController's case-A fallback when we can't determine the URI is a
-	 * fresh doc) vs. being a known-fresh placeholder (Replace flow, plain Save As, etc.).
+	 * `preserveOnFailure` — when verifyPhase rejects the write, true leaves the partial file on disk; false deletes
+	 * it. Set by the caller based on whether the URI might point at user data (e.g. SaveController's case-A
+	 * fallback when we can't determine the URI is a fresh doc) vs. being a known-fresh placeholder (Replace flow,
+	 * plain Save As, etc.).
 	 *
-	 * `replacedName` — when non-null AND isReplaceSave is false, a successful save emits
-	 * "Replaced <replacedName>" instead of the generic "Saved N KB" toast. Used by the
-	 * opaque-ID overwrite-fallback path (exportToOverwrite) so a confirmed overwrite
-	 * announces itself as an overwrite. Null for plain Save As and the fallback
+	 * `replacedName` — when non-null AND isReplaceSave is false, a successful save emits "Replaced <replacedName>"
+	 * instead of the generic "Saved N KB" toast. Used by the opaque-ID overwrite-fallback path (exportToOverwrite)
+	 * so a confirmed overwrite announces itself as an overwrite. Null for plain Save As and the fallback
 	 * preservation path.
 	 *
 	 * Failure toasts fire regardless of the flags.
 	 */
-	private byte[] doExport(Uri uri, boolean isReplaceSave,
-		boolean preserveOnFailure, String replacedName)
+	private byte[] doExport(Uri uri, boolean isReplaceSave, boolean preserveOnFailure, String replacedName)
 	{
-		boolean isPng = ExportConfig.FORMAT_PNG.equals(host.getState().getExportConfig().format());
-		boolean srcHadHdr = host.getState().getGainMap() != null
-			&& host.getState().getGainMap().length > 0;
+		boolean isPng = host.getState().getExportConfig().format() == Format.PNG;
+		boolean srcHadHdr = host.getState().getGainMap() != null && host.getState().getGainMap().length > 0;
 
 		byte[] data = encodePhase(isPng, srcHadHdr);
 		if (data == null)
@@ -218,18 +154,15 @@ final class ExportPipeline
 	}
 
 	/**
-	 * Phase 1 — encode. Runs CropExporter on the current state and returns the JPEG /
-	 * PNG bytes, or null when encoding failed (in which case a failure toast is already
-	 * queued).
+	 * Phase 1 — encode. Runs CropExporter on the current state and returns the JPEG / PNG bytes, or null when
+	 * encoding failed (in which case a failure toast is already queued).
 	 *
-	 * Bypass: when the user has applied no transformations (no crop, no rotation, no
-	 * grid bake-in, JPEG-to-JPEG round-trip on a NON-graft source), write
-	 * `state.originalFileBytes` verbatim instead of canvas-encoding. This preserves byte-
-	 * perfect fidelity for re-saves of an unedited file. The bypass is explicitly
-	 * disabled for grafts (canBypassEncode rejects state.isGraftApplied) — graft saves
-	 * need the canvas re-encode to regenerate the gain map from the spliced primary, so
-	 * the HDR boost stays spatially aligned with the edit's pixels. Skipping that for a
-	 * graft would ship source's gain map verbatim over the spliced primary and visibly
+	 * Bypass: when the user has applied no transformations (no crop, no rotation, no grid bake-in, JPEG-to-JPEG
+	 * round-trip on a NON-graft source), write `state.originalFileBytes` verbatim instead of canvas-encoding. This
+	 * preserves byte- perfect fidelity for re-saves of an unedited file. The bypass is explicitly disabled for
+	 * grafts (canBypassEncode rejects state.isGraftApplied) — graft saves need the canvas re-encode to regenerate
+	 * the gain map from the spliced primary, so the HDR boost stays spatially aligned with the edit's pixels.
+	 * Skipping that for a graft would ship source's gain map verbatim over the spliced primary and visibly
 	 * mis-place the boost wherever the edit changed pixels.
 	 */
 	private byte[] encodePhase(boolean isPng, boolean srcHadHdr)
@@ -242,10 +175,8 @@ final class ExportPipeline
 				Log.d(TAG, "Bypassed encode (no transforms applied) — " + data.length + " bytes");
 				return data;
 			}
-			byte[] data = CropExporter.export(
-				host.getState(), host.getActivity().getCacheDir()).data();
-			Log.d(TAG, "Encoded " + data.length + " bytes (srcHdr=" + srcHadHdr
-				+ " isPng=" + isPng + ")");
+			byte[] data = CropExporter.export(host.getState(), host.getActivity().getCacheDir());
+			Log.d(TAG, "Encoded " + data.length + " bytes (srcHdr=" + srcHadHdr + " isPng=" + isPng + ")");
 			return data;
 		}
 		catch (Exception e)
@@ -257,103 +188,139 @@ final class ExportPipeline
 		}
 	}
 
-	/**
-	 * Decide whether the current save is a no-op transformation that lets us write
-	 * `state.originalFileBytes` verbatim instead of canvas-encoding. Conditions:
-	 *   - Output format is JPEG (PNG has its own encode path; can't bypass).
-	 *   - Source format is JPEG (can't bypass-encode a PNG source as JPEG).
-	 *   - The image is NOT a graft. Graft saves need a fresh gain map regenerated by
-	 *     UltraHdrCompat — the splice ships source's gain map verbatim over the edit's
-	 *     primary scan, which is fine for view-only HDR but breaks when the user crops
-	 *     (the gain map's spatial alignment shifts off the features it boosts). Forcing
-	 *     graft saves through the full encode regenerates the gain map from the spliced
-	 *     primary, keeping save-without-crop and save-after-crop both correct.
-	 *   - No rotation applied.
-	 *   - No grid bake-in.
-	 *   - Source bytes available.
-	 *   - Crop is either uninitialised (state.hasCenter() == false) OR is the trivial
-	 *     full-image crop (cropW/cropH match the source bitmap dimensions). The full-
-	 *     image case matters because applying a graft auto-initialises a centered crop
-	 *     during applyStateToUi → ensureCropCenter, even though the user has applied no
-	 *     real edit. Without the full-image carve-out, every graft save would fall into
-	 *     the canvas-encode path even when the user never touched the crop tool.
-	 *     (Now defensive — the graft-applied check above already excludes that case.)
-	 *
-	 * If all hold, the canvas-encoded primary would be a re-encoded near-copy of
-	 * state.originalFileBytes — close to byte-identical but with different DCT/Huffman
-	 * tables and a regenerated EXIF thumbnail. Writing the source bytes verbatim
-	 * preserves structure exactly.
-	 */
-	private static boolean canBypassEncode(CropState state, boolean isPng)
+	private void exportTo(Uri uri, Consumer<byte[]> onSavedBg, boolean preserveOnFailure, String replacedName)
 	{
-		if (isPng)
+		if (host.getState().getSourceImage() == null)
 		{
-			return false;
+			return;
 		}
-		if (!ExportConfig.FORMAT_JPEG.equals(state.getSourceFormat()))
+		if (!host.getBusy().compareAndSet(false, true))
 		{
-			return false;
+			host.showBusyToast();
+			return;
 		}
-		if (state.isGraftApplied())
+		// Between the busy acquire and the runInBackground enqueue, any throw from the UI setup (setBusyUi /
+		// showProgress can hit findViewById / setText during an unusual view-tree state) would otherwise strand
+		// busy=true forever — the background finally never runs because the Runnable was never submitted. Clear
+		// busy + hide UI before propagating so a second Save tap isn't permanently rejected with "Busy — try
+		// again".
+		try
 		{
-			return false;
+			host.setBusyUi(true);
+			host.showProgress("Saving\u2026");
 		}
-		// Honor the same epsilon the renderer uses — sub-epsilon rotation is a no-op there,
-		// so forcing a re-encode for it would burn cycles + add quantization noise to a
-		// visually identical primary. The ruler caps its finest snap step at this same epsilon
-		// so it can never produce a rotation we'd treat as "real" while CropEngine /
-		// ViewportMath / BitmapUtils.drawCropped collapse it to zero.
-		if (Math.abs(state.getRotationDegrees()) >= BitmapUtils.ROTATION_EPSILON)
+		catch (RuntimeException e)
 		{
-			return false;
+			Log.w(TAG, "pre-enqueue UI setup threw; releasing busy flag", e);
+			host.getBusy().set(false);
+			host.setBusyUi(false);
+			host.hideProgress();
+			throw e;
 		}
-		if (state.getGridConfig().includeInExport())
-		{
-			return false;
-		}
-		if (state.getOriginalFileBytes() == null)
-		{
-			return false;
-		}
-		if (state.hasCenter())
-		{
-			Bitmap src = state.getSourceImage();
-			if (src == null)
-			{
-				return false;
-			}
-			if (state.getCropW() != src.getWidth() || state.getCropH() != src.getHeight())
-			{
-				return false;
-			}
-		}
-		return true;
+		boolean isReplaceSave = onSavedBg != null;
+		host.runInBackground(() -> runExportBg(uri, isReplaceSave, preserveOnFailure, replacedName, onSavedBg));
 	}
 
 	/**
-	 * Phase 2 — write. Uses try-with-resources so close() runs after writeReturned=true
-	 * and a close-only failure can't invalidate a successful write. Returns the outcome
-	 * so phase 3 can decide whether to trust it or fall through to a readback.
+	 * Phase 4 — failure report. Toasts the exception message when available; deletes the partially-written SAF doc
+	 * so a failed save doesn't leave a truncated file behind — but ONLY when `preserveOnFailure` is false. When the
+	 * URI pointed at an existing file before the write (provider-confirmed overwrite), deletion would turn the
+	 * verification failure into data loss of the user's original; we leave the (now partial) file on disk and rely
+	 * on the failure toast so the user knows to re-save. Partial-write corruption stays preferable to outright
+	 * deletion of a file the user didn't explicitly tell us to destroy.
 	 */
-	private WriteOutcome writePhase(Uri uri, byte[] data)
+	private void reportFailure(Uri uri, Exception writeException, boolean preserveOnFailure)
 	{
-		boolean writeReturned = false;
-		Exception writeException = null;
-		try (OutputStream os = host.getActivity().getContentResolver().openOutputStream(uri, "w"))
+		final String emsg = writeException != null
+			? "Export failed: " + writeException.getMessage()
+			: "Export failed";
+		host.runOnUiThread(() -> host.toastIfAlive(emsg, Toast.LENGTH_SHORT));
+		if (preserveOnFailure)
 		{
-			if (os == null)
+			Log.w(TAG, "preserving " + uri + " on failure (had prior content)");
+			return;
+		}
+		safFiles.tryDeleteSafDocument(uri);
+	}
+
+	/**
+	 * Phase 4 — overwrite-specific success report. Fires "Replaced <name>" when the caller is the opaque-ID
+	 * overwrite-fallback path that direct-wrote to the target with preserve-on-failure (a real overwrite, not a
+	 * fresh save), and deserves a matching user message. The full Replace flow (with placeholder + swap) does not
+	 * use this path — its success toast is fired by ReplaceStrategy after verifyReplace confirms the final state.
+	 */
+	private void reportReplaced(String name)
+	{
+		final String msg = "Replaced " + name;
+		host.runOnUiThread(() -> host.toastIfAlive(msg, Toast.LENGTH_SHORT));
+	}
+
+	/**
+	 * Phase 4 — success report. "Saved NKB [HDR OK]" / "[HDR dropped]" on a save that dropped an HDR source (only
+	 * for JPEG — PNG can't carry gain maps, which is a format limitation, not a failure, so the suffix is
+	 * suppressed).
+	 */
+	private void reportSuccess(byte[] data, boolean srcHadHdr, boolean isPng)
+	{
+		String hdrSuffix;
+		if (!srcHadHdr || isPng)
+		{
+			hdrSuffix = "";
+		}
+		else if (UltraHdrCompat.containsHdrgm(data))
+		{
+			hdrSuffix = " [HDR OK]";
+		}
+		else
+		{
+			hdrSuffix = " [HDR dropped]";
+		}
+		final String msg = "Saved " + data.length / 1024 + "KB" + hdrSuffix;
+		host.runOnUiThread(() -> host.toastIfAlive(msg, Toast.LENGTH_SHORT));
+	}
+
+	/**
+	 * Background-thread body of exportTo: runs the encode/write/verify pipeline, fires the optional onSavedBg
+	 * callback when the write verifies, and releases the busy flag in finally so a thrown callback doesn't strand
+	 * Save / Open behind a permanent "Busy" toast.
+	 *
+	 * The replace callback owns its own success/failure messaging, so doExport suppresses the "Saved" toast when
+	 * onSavedBg is set. If the callback itself throws before firing its outcome message, that suppression would
+	 * otherwise leave the user with no feedback at all (silent save). Catch + log + post a generic failure toast so
+	 * the user knows something went wrong; the exception detail is in the log.
+	 *
+	 * @param uri               SAF URI to write to
+	 * @param isReplaceSave     true when this export is the placeholder write of a Replace flow
+	 * @param preserveOnFailure when verifyPhase rejects the write, true leaves the partial file on disk
+	 * @param replacedName      when non-null AND isReplaceSave is false, success emits "Replaced <name>"
+	 * @param onSavedBg         optional post-write callback invoked with the verified bytes; null for plain saves
+	 */
+	private void runExportBg(Uri uri, boolean isReplaceSave, boolean preserveOnFailure, String replacedName,
+		Consumer<byte[]> onSavedBg)
+	{
+		try
+		{
+			byte[] data = doExport(uri, isReplaceSave, preserveOnFailure, replacedName);
+			if (data != null && onSavedBg != null)
 			{
-				throw new IOException("openOutputStream returned null");
+				try
+				{
+					onSavedBg.accept(data);
+				}
+				catch (Exception e)
+				{
+					Log.w(TAG, "post-save step threw", e);
+					host.runOnUiThread(() -> host.toastIfAlive(
+						"Save step failed — check log", Toast.LENGTH_LONG));
+				}
 			}
-			os.write(data);
-			writeReturned = true;
 		}
-		catch (Exception e)
+		finally
 		{
-			writeException = e;
-			Log.w(TAG, "Write path threw (may still have persisted)", e);
+			host.getBusy().set(false);
+			host.runOnUiThread(() -> host.setBusyUi(false));
+			host.hideProgress();
 		}
-		return new WriteOutcome(writeException, writeReturned);
 	}
 
 	/**
@@ -404,75 +371,100 @@ final class ExportPipeline
 	}
 
 	/**
-	 * Phase 4 — success report. "Saved NKB [HDR OK]" / "[HDR dropped]" on a save that
-	 * dropped an HDR source (only for JPEG — PNG can't carry gain maps, which is a
-	 * format limitation, not a failure, so the suffix is suppressed).
+	 * Phase 2 — write. Uses try-with-resources so close() runs after writeReturned=true and a close-only failure
+	 * can't invalidate a successful write. Returns the outcome so phase 3 can decide whether to trust it or fall
+	 * through to a readback.
 	 */
-	private void reportSuccess(byte[] data, boolean srcHadHdr, boolean isPng)
+	private WriteOutcome writePhase(Uri uri, byte[] data)
 	{
-		String hdrSuffix;
-		if (!srcHadHdr || isPng)
+		boolean writeReturned = false;
+		Exception writeException = null;
+		try (OutputStream os = host.getActivity().getContentResolver().openOutputStream(uri, "w"))
 		{
-			hdrSuffix = "";
+			if (os == null)
+			{
+				throw new IOException("openOutputStream returned null");
+			}
+			os.write(data);
+			writeReturned = true;
 		}
-		else if (UltraHdrCompat.containsHdrgm(data))
+		catch (Exception e)
 		{
-			hdrSuffix = " [HDR OK]";
+			writeException = e;
+			Log.w(TAG, "Write path threw (may still have persisted)", e);
 		}
-		else
-		{
-			hdrSuffix = " [HDR dropped]";
-		}
-		final String msg = "Saved " + data.length / 1024 + "KB" + hdrSuffix;
-		host.runOnUiThread(() -> host.toastIfAlive(msg, Toast.LENGTH_SHORT));
+		return new WriteOutcome(writeException, writeReturned);
 	}
 
 	/**
-	 * Phase 4 — overwrite-specific success report. Fires "Replaced <name>" when the caller
-	 * is the opaque-ID overwrite-fallback path that direct-wrote to the target with
-	 * preserve-on-failure (a real overwrite, not a fresh save), and deserves a matching
-	 * user message. The full Replace flow (with placeholder + swap) does not use this
-	 * path — its success toast is fired by ReplaceStrategy after verifyReplace confirms
-	 * the final state.
+	 * Decide whether the current save is a no-op transformation that lets us write
+	 * `state.originalFileBytes` verbatim instead of canvas-encoding. Conditions:
+	 *   - Output format is JPEG (PNG has its own encode path; can't bypass).
+	 *   - Source format is JPEG (can't bypass-encode a PNG source as JPEG).
+	 *   - The image is NOT a graft. Graft saves need a fresh gain map regenerated by
+	 *     UltraHdrCompat — the splice ships source's gain map verbatim over the edit's
+	 *     primary scan, which is fine for view-only HDR but breaks when the user crops
+	 *     (the gain map's spatial alignment shifts off the features it boosts). Forcing
+	 *     graft saves through the full encode regenerates the gain map from the spliced
+	 *     primary, keeping save-without-crop and save-after-crop both correct.
+	 *   - No rotation applied.
+	 *   - No grid bake-in.
+	 *   - Source bytes available.
+	 *   - Crop is either uninitialised (state.hasCenter() == false) OR is the trivial
+	 *     full-image crop (cropW/cropH match the source bitmap dimensions). The full-
+	 *     image case matters because applying a graft auto-initialises a centered crop
+	 *     during applyStateToUi → ensureCropCenter, even though the user has applied no
+	 *     real edit. Without the full-image carve-out, every graft save would fall into
+	 *     the canvas-encode path even when the user never touched the crop tool.
+	 *     (Now defensive — the graft-applied check above already excludes that case.)
+	 *
+	 * If all hold, the canvas-encoded primary would be a re-encoded near-copy of state.originalFileBytes — close to
+	 * byte-identical but with different DCT/Huffman tables and a regenerated EXIF thumbnail. Writing the source
+	 * bytes verbatim preserves structure exactly.
 	 */
-	private void reportReplaced(String name)
+	static boolean canBypassEncode(CropState state, boolean isPng)
 	{
-		final String msg = "Replaced " + name;
-		host.runOnUiThread(() -> host.toastIfAlive(msg, Toast.LENGTH_SHORT));
-	}
-
-	/**
-	 * Phase 4 — failure report. Toasts the exception message when available; deletes
-	 * the partially-written SAF doc so a failed save doesn't leave a truncated file
-	 * behind — but ONLY when `preserveOnFailure` is false. When the URI pointed at an
-	 * existing file before the write (provider-confirmed overwrite), deletion would
-	 * turn the verification failure into data loss of the user's original; we leave
-	 * the (now partial) file on disk and rely on the failure toast so the user knows
-	 * to re-save. Partial-write corruption stays preferable to outright deletion of
-	 * a file the user didn't explicitly tell us to destroy.
-	 */
-	private void reportFailure(Uri uri, Exception writeException, boolean preserveOnFailure)
-	{
-		final String emsg = writeException != null
-			? "Export failed: " + writeException.getMessage()
-			: "Export failed";
-		host.runOnUiThread(() -> host.toastIfAlive(emsg, Toast.LENGTH_SHORT));
-		if (preserveOnFailure)
+		if (isPng)
 		{
-			Log.w(TAG, "preserving " + uri + " on failure (had prior content)");
-			return;
+			return false;
 		}
-		safFiles.tryDeleteSafDocument(uri);
-	}
-
-	/**
-	 * Result of phase 2. exception is non-null when openOutputStream / write / close
-	 * threw; writeReturned is true when close() succeeded (close-after-write is the
-	 * final barrier between "written" and "thrown"). Field order follows CLAUDE.md's
-	 * uppercase-type-before-primitive rule.
-	 */
-	private record WriteOutcome(Exception exception, boolean writeReturned)
-	{
+		if (state.getSourceFormat() != Format.JPEG)
+		{
+			return false;
+		}
+		if (state.isGraftApplied())
+		{
+			return false;
+		}
+		// Honor the same epsilon the renderer uses — sub-epsilon rotation is a no-op there, so forcing a
+		// re-encode for it would burn cycles + add quantization noise to a visually identical primary. The
+		// ruler caps its finest snap step at this same epsilon so it can never produce a rotation we'd treat as
+		// "real" while CropEngine / ViewportMath / BitmapUtils.drawCropped collapse it to zero.
+		if (Math.abs(state.getRotationDegrees()) >= BitmapUtils.ROTATION_EPSILON)
+		{
+			return false;
+		}
+		if (state.getGridConfig().includeInExport())
+		{
+			return false;
+		}
+		if (state.getOriginalFileBytes() == null)
+		{
+			return false;
+		}
+		if (state.hasCenter())
+		{
+			Bitmap src = state.getSourceImage();
+			if (src == null)
+			{
+				return false;
+			}
+			if (state.getCropW() != src.getWidth() || state.getCropH() != src.getHeight())
+			{
+				return false;
+			}
+		}
+		return true;
 	}
 
 }

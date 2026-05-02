@@ -10,12 +10,11 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 
 /**
- * Tests for the MPF (Multi-Picture Format) APP2 offset patcher. Every HDR save runs this
- * after the canvas re-encode resizes the primary — without correct patching, Gallery's
- * Revert pre-flight (which validates the MP entries against actual JPEG offsets) rejects
- * the file and the Revert button disappears. The patcher mutates the assembled
- * primary+gainmap bytes in place to point the gain-map entry at the new gain-map offset
- * and update entry[0]'s size to the new primary size.
+ * Tests for the MPF (Multi-Picture Format) APP2 offset patcher. Every HDR save runs this after the canvas re-encode
+ * resizes the primary — without correct patching, Gallery's Revert pre-flight (which validates the MP entries against
+ * actual JPEG offsets) rejects the file and the Revert button disappears. The patcher mutates the assembled
+ * primary+gainmap bytes in place to point the gain-map entry at the new gain-map offset and update entry[0]'s size to
+ * the new primary size.
  *
  * Key behaviours covered:
  *   - Patching the standard 2-image MPF (primary + gain map) — the common case.
@@ -44,20 +43,17 @@ public class MpfPatcherTest
 		assertEquals(newPrimarySize, readU32Le(fx.bytes, fx.entry0Off + 4));
 		// entry[1] size = gainMapSize, offset = newPrimarySize - mpfStart.
 		assertEquals(gainMapSize, readU32Le(fx.bytes, fx.entry0Off + 16 + 4));
-		assertEquals(newPrimarySize - fx.mpfStart,
-			readU32Le(fx.bytes, fx.entry0Off + 16 + 8));
+		assertEquals(newPrimarySize - fx.mpfStart, readU32Le(fx.bytes, fx.entry0Off + 16 + 8));
 	}
 
 	@Test
 	public void patchLeavesEntry2OffsetUntouchedForThreeImageMpf() throws IOException
 	{
-		// numImages = 3 with the gain-map MPType correctly placed at entry[1] (the
-		// Samsung-style layout where the third entry is some other sub-image — depth
-		// map / burst frame / Apple Portrait alternate). Patcher must update entry[0]
-		// and entry[1] but explicitly NOT touch entry[2]. Pin down that the entry[2]
-		// bytes are byte-identical pre/post patch — guards against a regression that
-		// loops over ALL secondary entries and overwrites every one with the gain-map
-		// offset.
+		// numImages = 3 with the gain-map MPType correctly placed at entry[1] (the Samsung-style layout where
+		// the third entry is some other sub-image — depth map / burst frame / Apple Portrait alternate).
+		// Patcher must update entry[0] and entry[1] but explicitly NOT touch entry[2]. Pin down that the
+		// entry[2] bytes are byte-identical pre/post patch — guards against a regression that loops over ALL
+		// secondary entries and overwrites every one with the gain-map offset.
 		int newPrimarySize = 300;
 		int gainMapSize = 80;
 		long[] attrs = {
@@ -79,19 +75,17 @@ public class MpfPatcherTest
 		System.arraycopy(fx.bytes, entry2Off, entry2After, 0, 16);
 		for (int i = 0; i < 16; i++)
 		{
-			assertEquals("entry[2] byte " + i + " mutated by patch",
-				entry2Before[i], entry2After[i]);
+			assertEquals("entry[2] byte " + i + " mutated by patch", entry2Before[i], entry2After[i]);
 		}
 	}
 
 	@Test
 	public void patchRejectsThreeImageMpfWhenNoMpTypeMatch() throws IOException
 	{
-		// 3-image MPF whose attr fields are all bogus / non-gain-map MPTypes — patcher
-		// must refuse rather than blindly patch entry[1] (which could land the gain-map
-		// size into a depth map or thumbnail slot). Falling back to entry[1] is only
-		// safe when numImages == 2, where the Samsung Ultra HDR pattern guarantees the
-		// gain map lives at index 1 even when its MPType field is malformed.
+		// 3-image MPF whose attr fields are all bogus / non-gain-map MPTypes — patcher must refuse rather than
+		// blindly patch entry[1] (which could land the gain-map size into a depth map or thumbnail slot).
+		// Falling back to entry[1] is only safe when numImages == 2, where the Samsung Ultra HDR pattern
+		// guarantees the gain map lives at index 1 even when its MPType field is malformed.
 		int newPrimarySize = 320;
 		int gainMapSize = 80;
 		long[] attrs = {
@@ -106,10 +100,9 @@ public class MpfPatcherTest
 	@Test
 	public void patchFallsBackToEntry1ForTwoImageMpfWithMissingMpType() throws IOException
 	{
-		// numImages == 2 with no MPType match: the empirical Samsung Ultra HDR pattern
-		// ships gain map at index 1 even when MPType is malformed. Patcher should fall
-		// back to entry[1] in this specific case so existing Samsung captures keep
-		// round-tripping correctly.
+		// numImages == 2 with no MPType match: the empirical Samsung Ultra HDR pattern ships gain map at index
+		// 1 even when MPType is malformed. Patcher should fall back to entry[1] in this specific case so
+		// existing Samsung captures keep round-tripping correctly.
 		int newPrimarySize = 220;
 		int gainMapSize = 60;
 		long[] attrs = { 0x20000000L, 0x12345678L };   // bogus attr on entry[1]
@@ -121,8 +114,8 @@ public class MpfPatcherTest
 	@Test
 	public void patchRejectsSingleImageMpf() throws IOException
 	{
-		// numImages < 2: no gain-map slot to patch. Patcher must return false rather
-		// than silently writing entry[1]-shaped data into adjacent memory.
+		// numImages < 2: no gain-map slot to patch. Patcher must return false rather than silently writing
+		// entry[1]-shaped data into adjacent memory.
 		MpfFixture fx = buildMpfFile(100, 30, 1);
 		assertFalse(MpfPatcher.patch(fx.bytes, 100));
 	}
@@ -130,11 +123,10 @@ public class MpfPatcherTest
 	@Test
 	public void patchLocatesGainMapByMpTypeWhenAtIndexTwo() throws IOException
 	{
-		// 3-image MPF where the gain-map MPType (0x010005) is at index 2 — Samsung Ultra
-		// HDR conventionally places it at index 1, but the spec doesn't require that, and
-		// some multi-image producers shuffle the order. The patcher must walk entries to
-		// find the MPType match instead of hardcoding entry[1] — otherwise the gain-map
-		// size lands in a non-gain-map slot and the actual gain-map entry stays stale.
+		// 3-image MPF where the gain-map MPType (0x010005) is at index 2 — Samsung Ultra HDR conventionally
+		// places it at index 1, but the spec doesn't require that, and some multi-image producers shuffle the
+		// order. The patcher must walk entries to find the MPType match instead of hardcoding entry[1] —
+		// otherwise the gain-map size lands in a non-gain-map slot and the actual gain-map entry stays stale.
 		int newPrimarySize = 320;
 		int gainMapSize = 75;
 		long[] attrs = {
@@ -150,23 +142,20 @@ public class MpfPatcherTest
 		assertEquals(gainMapSize, readU32Le(fx.bytes, entry2Off + 4));
 		assertEquals(newPrimarySize - fx.mpfStart, readU32Le(fx.bytes, entry2Off + 8));
 
-		// Entry[1] (the non-gain-map "Large Thumbnail" slot) must be untouched. Capture
-		// its post-patch state and verify it still holds the original fixture values that
-		// buildMpfFile wrote (size 51 = 50 + i for i=1, dataOffset 10099 = 9999 + 100).
+		// Entry[1] (the non-gain-map "Large Thumbnail" slot) must be untouched. Capture its post-patch state
+		// and verify it still holds the original fixture values that buildMpfFile wrote (size 51 = 50 + i for
+		// i=1, dataOffset 10099 = 9999 + 100).
 		int entry1Off = fx.entry0Off + 16;
-		assertEquals("entry[1] size unexpectedly mutated",
-			51L, readU32Le(fx.bytes, entry1Off + 4));
-		assertEquals("entry[1] dataOffset unexpectedly mutated",
-			10099L, readU32Le(fx.bytes, entry1Off + 8));
+		assertEquals("entry[1] size unexpectedly mutated", 51L, readU32Le(fx.bytes, entry1Off + 4));
+		assertEquals("entry[1] dataOffset unexpectedly mutated", 10099L, readU32Le(fx.bytes, entry1Off + 8));
 	}
 
 	@Test
 	public void patchRejectsMismatchedByteOrderField() throws IOException
 	{
-		// MPF MP Endian field must be "II" (0x49 0x49) or "MM" (0x4D 0x4D). A
-		// malformed half-pair like "IM" / "MI" would slip through a single-byte
-		// check and parse subsequent IFD offsets with wrong byte order, producing
-		// nonsense bounds-check passes that land writes on arbitrary positions.
+		// MPF MP Endian field must be "II" (0x49 0x49) or "MM" (0x4D 0x4D). A malformed half-pair like "IM" /
+		// "MI" would slip through a single-byte check and parse subsequent IFD offsets with wrong byte order,
+		// producing nonsense bounds-check passes that land writes on arbitrary positions.
 		int newPrimarySize = 200;
 		int gainMapSize = 60;
 		MpfFixture fx = buildMpfFile(newPrimarySize, gainMapSize, 2);
@@ -176,26 +165,29 @@ public class MpfPatcherTest
 	}
 
 	@Test
-	public void patchAcceptsBigEndianByteOrderField() throws IOException
+	public void patchPassesByteOrderCheckOnBigEndianHeaderButFailsLaterOnMisencodedIfd() throws IOException
 	{
-		// "MM" (big-endian) MPF is legal per spec. Confirm it isn't rejected by the
-		// byte-order validation; the patch may still fail on the IFD offset check
-		// since our fixture uses LE-encoded fields and we'd need a full BE rewrite
-		// to pass — just verify the patch attempt makes it past the byte-order
-		// guard rather than bailing immediately.
+		// "MM" (big-endian) MPF is legal per spec. Confirm the byte-order validation accepts it (i.e. doesn't
+		// fast-bail at the II/MM check the way it would for "IM" / "MI"). Our fixture's subsequent IFD fields
+		// are still LE-encoded, so the patcher reads garbage offsets when interpreting them as BE: with
+		// LE-encoded ifdOff=8 read as BE, ifdOff=0x08000000 — well past data.length — and patch returns false
+		// from the out-of-bounds check. The pin here is that we reach that downstream check at all (vs. early
+		// rejection); the input bytes must also be unmutated by the rejected patch so a regression that wrote
+		// past the byte-order guard then bailed mid-write would corrupt the file.
 		int newPrimarySize = 200;
 		int gainMapSize = 60;
 		MpfFixture fx = buildMpfFile(newPrimarySize, gainMapSize, 2);
-		// Flip "II" to "MM"; subsequent fields are still LE-encoded so the patcher
-		// will read garbage IFD offsets — but it should NOT bail at the byte-order
-		// check. With LE-encoded ifdOff=8 read as BE, ifdOff=0x08000000 which is
-		// well past data.length, so patch returns false (out-of-bounds), not the
-		// byte-order rejection.
 		fx.bytes[fx.mpfStart] = 'M';
 		fx.bytes[fx.mpfStart + 1] = 'M';
-		// Result is false either way; the meaningful assertion is that we don't
-		// throw or hang. assertFalse pins down the (acceptable) reject path.
-		assertFalse(MpfPatcher.patch(fx.bytes, newPrimarySize));
+		byte[] snapshot = fx.bytes.clone();
+		assertFalse("patch should fail on out-of-bounds IFD offset, not byte-order rejection",
+			MpfPatcher.patch(fx.bytes, newPrimarySize));
+		// Pin: a rejected patch must not have touched the bytes after the byte-order field.
+		for (int i = fx.mpfStart + 2; i < fx.bytes.length; i++)
+		{
+			assertEquals("byte " + i + " must be unchanged when patch rejected mid-flow",
+				snapshot[i], fx.bytes[i]);
+		}
 	}
 
 	@Test
@@ -207,16 +199,16 @@ public class MpfPatcherTest
 		// patch rather than write the poison value.
 		int gainMapSize = 60;
 		MpfFixture fx = buildMpfFile(200, gainMapSize, 2);
-		// mpfStart in the fixture sits around offset 10; passing primarySize = 5
-		// drives relativeOffset negative.
+		// mpfStart in the fixture sits around offset 10; passing primarySize = 5 drives relativeOffset
+		// negative.
 		assertFalse(MpfPatcher.patch(fx.bytes, 5));
 	}
 
 	@Test
 	public void patchReturnsFalseWhenNoMpfPresent() throws IOException
 	{
-		// File has only a non-MPF APP2 (e.g. ICC). Walker should reach SOS and return
-		// false without claiming a successful patch.
+		// File has only a non-MPF APP2 (e.g. ICC). Walker should reach SOS and return false without claiming a
+		// successful patch.
 		ByteArrayOutputStream out = new ByteArrayOutputStream();
 		out.write(JpegFixtures.soi());
 		byte[] iccPayload = "ICC_PROFILE\0body".getBytes();
@@ -226,8 +218,8 @@ public class MpfPatcherTest
 	}
 
 	/**
-	 * Build a JPEG byte array with a plausible MPF segment carrying `numImages` entries.
-	 * Returns the bytes plus the offsets the test needs (mpfStart and entry[0] base).
+	 * Build a JPEG byte array with a plausible MPF segment carrying `numImages` entries. Returns the bytes plus the
+	 * offsets the test needs (mpfStart and entry[0] base).
 	 *
 	 * MPF layout (little-endian for portability with the MPF "II" form):
 	 *   FF E2 [segLen:2] "MPF\0"
@@ -236,9 +228,8 @@ public class MpfPatcherTest
 	 *   MP Entries: numImages * 16 bytes (attr, size, dataOff, two reserved)
 	 */
 	/**
-	 * Convenience overload that gives every entry the same placeholder `attr` value. Used
-	 * by tests that don't care which entry carries the gain-map MPType (the patcher's
-	 * fall-through to entry[1] handles that case).
+	 * Convenience overload that gives every entry the same placeholder `attr` value. Used by tests that don't care
+	 * which entry carries the gain-map MPType (the patcher's fall-through to entry[1] handles that case).
 	 */
 	private static MpfFixture buildMpfFile(int primarySize, int gainMapSize, int numImages)
 		throws IOException
@@ -285,10 +276,9 @@ public class MpfPatcherTest
 		// next-IFD offset = 0
 		writeU32Le(payload, 0);
 
-		// MP Entries table: numImages * 16 bytes (attr, size, dataOff, dependents:2).
-		// First entry stub values are immaterial — the patcher overwrites them. Use
-		// recognisable junk for the second entry's pre-patch bytes so we can verify
-		// they got rewritten, and for the third entry use values that should NOT be
+		// MP Entries table: numImages * 16 bytes (attr, size, dataOff, dependents:2). First entry stub values
+		// are immaterial — the patcher overwrites them. Use recognisable junk for the second entry's pre-patch
+		// bytes so we can verify they got rewritten, and for the third entry use values that should NOT be
 		// touched.
 		for (int i = 0; i < numImages; i++)
 		{
@@ -333,9 +323,9 @@ public class MpfPatcherTest
 
 	private static byte[] prefixMpfMagic(byte[] body)
 	{
-		// String literal "MPF\0" through getBytes drops the trailing null, so build the
-		// 4-byte signature explicitly. The function is hardcoded to MPF magic because
-		// every caller in this test file builds an MPF segment.
+		// String literal "MPF\0" through getBytes drops the trailing null, so build the 4-byte signature
+		// explicitly. The function is hardcoded to MPF magic because every caller in this test file builds an
+		// MPF segment.
 		byte[] sig = { 'M', 'P', 'F', 0 };
 		byte[] out = new byte[sig.length + body.length];
 		System.arraycopy(sig, 0, out, 0, sig.length);
@@ -345,10 +335,8 @@ public class MpfPatcherTest
 
 	private static long readU32Le(byte[] bytes, int off)
 	{
-		return ((bytes[off] & 0xFFL))
-			| ((bytes[off + 1] & 0xFFL) << 8)
-			| ((bytes[off + 2] & 0xFFL) << 16)
-			| ((bytes[off + 3] & 0xFFL) << 24);
+		return ((bytes[off] & 0xFFL)) | ((bytes[off + 1] & 0xFFL) << 8)
+			| ((bytes[off + 2] & 0xFFL) << 16) | ((bytes[off + 3] & 0xFFL) << 24);
 	}
 
 	private static void writeU16Le(ByteArrayOutputStream out, int value)

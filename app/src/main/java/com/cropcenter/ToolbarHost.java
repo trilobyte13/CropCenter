@@ -7,9 +7,8 @@ import com.cropcenter.view.CropEditorView;
 import com.cropcenter.view.RotationRulerView;
 
 /**
- * Host surface consumed by ToolbarBinder. Combines view access with the crop-state
- * transition methods the toolbar's onClick lambdas call (ensureCropCenter,
- * recomputeForLockChange, recenterOnSelection) and the feedback helpers the
+ * Host surface consumed by ToolbarBinder. Combines view access with the crop-state transition methods the toolbar's
+ * onClick lambdas call (ensureCropCenter, recomputeForLockChange, recenterOnSelection) and the feedback helpers the
  * auto-rotate / horizon-detect flow uses.
  */
 interface ToolbarHost extends EditorHost
@@ -20,8 +19,8 @@ interface ToolbarHost extends EditorHost
 	void applyLockMode();
 
 	/**
-	 * Seed a crop center at the image midpoint when none exists yet. Called from AR
-	 * spinner / custom AR dialog flows so an aspect-ratio change takes immediate effect.
+	 * Seed a crop center at the image midpoint when none exists yet. Called from AR spinner / custom AR dialog
+	 * flows so an aspect-ratio change takes immediate effect.
 	 */
 	void ensureCropCenter();
 
@@ -36,21 +35,18 @@ interface ToolbarHost extends EditorHost
 	 */
 	void hideProgress();
 
-	boolean isCenterLocked();
-
 	boolean isPanning();
 
 	boolean isRulerUpdating();
 
 	/**
-	 * Move-mode axis switch — re-anchor the crop at the current selection midpoint
-	 * without resizing.
+	 * Move-mode axis switch — re-anchor the crop at the current selection midpoint without resizing.
 	 */
 	void recenterOnSelection();
 
 	/**
-	 * After a lock mode / editor mode / pan toggle, recompute the crop rectangle so the
-	 * new mode's constraints are applied to the existing state.
+	 * After a lock mode / editor mode / pan toggle, recompute the crop rectangle so the new mode's constraints are
+	 * applied to the existing state.
 	 */
 	void recomputeForLockChange();
 
@@ -60,8 +56,7 @@ interface ToolbarHost extends EditorHost
 	void setCurrentPref(CenterMode pref);
 
 	/**
-	 * Show the full-screen progress overlay with a status message. Safe to call from
-	 * any thread.
+	 * Show the full-screen progress overlay with a status message. Safe to call from any thread.
 	 */
 	void showProgress(String msg);
 

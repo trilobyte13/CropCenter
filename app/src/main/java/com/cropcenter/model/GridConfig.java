@@ -1,8 +1,8 @@
 package com.cropcenter.model;
 
 /**
- * Immutable grid + selection-paint settings. Callers mutate via CropState.updateGridConfig,
- * which replaces the current instance with one produced by one or more withXxx transformers.
+ * Immutable grid + selection-paint settings. Callers mutate via CropState.updateGridConfig, which replaces the current
+ * instance with one produced by one or more withXxx transformers.
  *
  * Field meanings:
  *   enabled            — master toggle for the preview grid
@@ -14,36 +14,9 @@ package com.cropcenter.model;
  *   pixelGridColor     — pixel-grid stroke color (default black)
  *   selectionColor     — shared color for selection points, polygon fill, and horizon paint
  */
-public record GridConfig(
-	boolean enabled,
-	boolean includeInExport,
-	boolean showPixelGrid,
-	float lineWidth,
-	int color,
-	int columns,
-	int pixelGridColor,
-	int rows,
-	int selectionColor)
+public record GridConfig(boolean enabled, boolean includeInExport, boolean showPixelGrid, float lineWidth,
+	int color, int columns, int pixelGridColor, int rows, int selectionColor)
 {
-	/**
-	 * Default configuration applied to every freshly-loaded image: grid visible at 4×4,
-	 * pixel grid visible when zoomed past 6×, grid NOT baked into exports, 50%-transparent
-	 * blue selection overlay.
-	 */
-	public static GridConfig defaults()
-	{
-		return new GridConfig(
-			true,          // enabled
-			false,         // includeInExport
-			true,          // showPixelGrid
-			1f,            // lineWidth
-			0xFFFFFFFF,    // color — white
-			4,             // columns
-			0xFF000000,    // pixelGridColor — black
-			4,             // rows
-			0x800000FF);   // selectionColor — 50% transparent blue
-	}
-
 	public GridConfig withColor(int color)
 	{
 		return new GridConfig(enabled, includeInExport, showPixelGrid, lineWidth,
@@ -51,8 +24,7 @@ public record GridConfig(
 	}
 
 	/**
-	 * Replace the column count. Clamped by CropState's update path — this method itself
-	 * does not validate.
+	 * Replace the column count. Clamped by CropState's update path — this method itself does not validate.
 	 */
 	public GridConfig withColumns(int columns)
 	{
@@ -91,8 +63,8 @@ public record GridConfig(
 	}
 
 	/**
-	 * Replace the shared selection color (ARGB) — used by selection points, polygon
-	 * fill, and horizon paint together for visual consistency.
+	 * Replace the shared selection color (ARGB) — used by selection points, polygon fill, and horizon paint
+	 * together for visual consistency.
 	 */
 	public GridConfig withSelectionColor(int selectionColor)
 	{
@@ -107,5 +79,22 @@ public record GridConfig(
 	{
 		return new GridConfig(enabled, includeInExport, showPixelGrid, lineWidth,
 			color, columns, pixelGridColor, rows, selectionColor);
+	}
+
+	/**
+	 * Default configuration applied to every freshly-loaded image: grid visible at 4×4, pixel grid visible when
+	 * zoomed past 6×, grid NOT baked into exports, 50%-transparent blue selection overlay.
+	 */
+	public static GridConfig defaults()
+	{
+		return new GridConfig(true,          // enabled
+			false,         // includeInExport
+			true,          // showPixelGrid
+			1f,            // lineWidth
+			0xFFFFFFFF,    // color — white
+			4,             // columns
+			0xFF000000,    // pixelGridColor — black
+			4,             // rows
+			0x800000FF);   // selectionColor — 50% transparent blue
 	}
 }

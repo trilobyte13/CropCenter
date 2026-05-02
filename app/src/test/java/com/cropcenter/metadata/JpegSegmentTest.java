@@ -10,20 +10,19 @@ import org.junit.Test;
 import java.nio.charset.StandardCharsets;
 
 /**
- * Tests for the JpegSegment record's content-type predicates. Each predicate runs on every
- * loaded JPEG to drive the "format string" the info bar shows and to gate downstream
- * processing (HDR detection, ICC color-space awareness). A regression that mis-classifies
- * a segment would either (a) drop a real EXIF/XMP/ICC/MPF segment from the categorization
- * — surfacing as a missing format tag in the UI — or (b) over-claim a non-conforming
- * APP segment as a known type, which downstream parsers then crash on.
+ * Tests for the JpegSegment record's content-type predicates. Each predicate runs on every loaded JPEG to drive the
+ * "format string" the info bar shows and to gate downstream processing (HDR detection, ICC color-space awareness). A
+ * regression that mis-classifies a segment would either (a) drop a real EXIF/XMP/ICC/MPF segment from the
+ * categorization — surfacing as a missing format tag in the UI — or (b) over-claim a non-conforming APP segment as a
+ * known type, which downstream parsers then crash on.
  */
 public class JpegSegmentTest
 {
 	@Test
 	public void componentAccessorsExposeMarkerAndData()
 	{
-		// Records auto-generate accessors. Pin them down so a renamed component
-		// would surface as a compile error here.
+		// Records auto-generate accessors. Pin them down so a renamed component would surface as a compile
+		// error here.
 		byte[] data = { (byte) 0xFF, (byte) 0xE1, 0x00, 0x06, 0x01, 0x02, 0x03, 0x04 };
 		JpegSegment seg = new JpegSegment(0xE1, data);
 		assertEquals(0xE1, seg.marker());
@@ -33,9 +32,8 @@ public class JpegSegmentTest
 	@Test
 	public void isExifFalseOnTooShortPayload()
 	{
-		// EXIF requires at least 10 bytes (FF E1 + 2-byte len + "Exif\0\0"). Anything
-		// shorter is malformed; predicate returns false rather than throwing on the
-		// out-of-bounds data[4..9] reads.
+		// EXIF requires at least 10 bytes (FF E1 + 2-byte len + "Exif\0\0"). Anything shorter is malformed;
+		// predicate returns false rather than throwing on the out-of-bounds data[4..9] reads.
 		byte[] tooShort = { (byte) 0xFF, (byte) 0xE1, 0x00, 0x05, 'E', 'x', 'i' };
 		assertFalse(new JpegSegment(0xE1, tooShort).isExif());
 	}
@@ -51,8 +49,8 @@ public class JpegSegmentTest
 	@Test
 	public void isExifFalseOnWrongSignature()
 	{
-		// Marker matches APP1 but payload signature isn't "Exif\0\0" (this could be XMP
-		// or some vendor APP1). Predicate must not match.
+		// Marker matches APP1 but payload signature isn't "Exif\0\0" (this could be XMP or some vendor APP1).
+		// Predicate must not match.
 		byte[] xmp = xmpLike();
 		assertFalse(new JpegSegment(0xE1, xmp).isExif());
 	}
@@ -114,10 +112,9 @@ public class JpegSegmentTest
 	@Test
 	public void isXmpFalseOnTooShortPayload()
 	{
-		// XMP signature is "http://ns.adobe.com/xap/1.0/\0" — 29 bytes plus 4-byte
-		// header = 33 minimum. Anything shorter must reject without indexing OOB.
-		byte[] tooShort = { (byte) 0xFF, (byte) 0xE1, 0x00, 0x10,
-			'h', 't', 't', 'p', ':', '/', '/' };
+		// XMP signature is "http://ns.adobe.com/xap/1.0/\0" — 29 bytes plus 4-byte header = 33 minimum.
+		// Anything shorter must reject without indexing OOB.
+		byte[] tooShort = { (byte) 0xFF, (byte) 0xE1, 0x00, 0x10, 'h', 't', 't', 'p', ':', '/', '/' };
 		assertFalse(new JpegSegment(0xE1, tooShort).isXmp());
 	}
 
@@ -131,8 +128,8 @@ public class JpegSegmentTest
 	@Test
 	public void predicatesAreMutuallyExclusiveOnRealSegments()
 	{
-		// A JPEG segment is exactly one type — sanity-check that exact-type matchers
-		// don't false-positive on a sibling type's payload.
+		// A JPEG segment is exactly one type — sanity-check that exact-type matchers don't false-positive on a
+		// sibling type's payload.
 		JpegSegment exif = new JpegSegment(0xE1, exifLike());
 		assertTrue(exif.isExif());
 		assertFalse(exif.isXmp());

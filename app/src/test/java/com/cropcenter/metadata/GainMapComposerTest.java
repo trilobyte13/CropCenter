@@ -23,8 +23,7 @@ public class GainMapComposerTest
 	{
 		byte[] primary = { 1, 2, 3, 4 };
 		byte[] result = GainMapComposer.compose(primary, null);
-		assertSame("null gain map should pass primary through verbatim",
-			primary, result);
+		assertSame("null gain map should pass primary through verbatim", primary, result);
 	}
 
 	@Test
@@ -33,34 +32,29 @@ public class GainMapComposerTest
 		byte[] primary = { 1, 2, 3, 4 };
 		byte[] empty = new byte[0];
 		byte[] result = GainMapComposer.compose(primary, empty);
-		assertSame("empty gain map should pass primary through verbatim",
-			primary, result);
+		assertSame("empty gain map should pass primary through verbatim", primary, result);
 	}
 
 	@Test
 	public void composeReturnsPrimaryUnchangedWhenMpfPatchFails()
 	{
-		// Without a valid MPF segment in primary, MpfPatcher.patch returns false.
-		// compose must DROP the gain map and ship primary verbatim — appending
-		// orphaned gain-map bytes that no MPF entry points at would either crash
-		// strict decoders' Revert pre-flight (Samsung Gallery) or render with the
-		// wrong offset in lenient decoders (which scan for the hdrgm signature).
-		// reportSuccess only checks for the hdrgm marker, so without this fix the
-		// save toast would falsely announce "[HDR OK]" on a broken file.
+		// Without a valid MPF segment in primary, MpfPatcher.patch returns false. compose must DROP the gain
+		// map and ship primary verbatim — appending orphaned gain-map bytes that no MPF entry points at would
+		// either crash strict decoders' Revert pre-flight (Samsung Gallery) or render with the wrong offset in
+		// lenient decoders (which scan for the hdrgm signature). reportSuccess only checks for the hdrgm
+		// marker, so without this fix the save toast would falsely announce "[HDR OK]" on a broken file.
 		byte[] primary = { 0x10, 0x20, 0x30 };
 		byte[] gainMap = { 0x40, 0x50 };
 		byte[] result = GainMapComposer.compose(primary, gainMap);
-		assertSame("MPF patch failure should drop the gain map and return primary",
-			primary, result);
+		assertSame("MPF patch failure should drop the gain map and return primary", primary, result);
 	}
 
 	@Test
 	public void composeReturnsCombinedBytesWhenPatchSucceeds() throws IOException
 	{
-		// Build a minimal Ultra-HDR-shaped primary (SOI + MPF APP2 + minimal scan
-		// + EOI), append a fake gain map, and verify compose returns the combined
-		// bytes (length > primary.length) — i.e., the MPF patch succeeded and
-		// anchored the gain map at the right offset.
+		// Build a minimal Ultra-HDR-shaped primary (SOI + MPF APP2 + minimal scan + EOI), append a fake gain
+		// map, and verify compose returns the combined bytes (length > primary.length) — i.e., the MPF patch
+		// succeeded and anchored the gain map at the right offset.
 		byte[] primary = buildPrimaryWithMpf();
 		byte[] gainMap = new byte[40];
 		for (int i = 0; i < gainMap.length; i++)
@@ -71,9 +65,8 @@ public class GainMapComposerTest
 		byte[] result = GainMapComposer.compose(primary, gainMap);
 		assertEquals("compose should return primary + gainMap concatenated",
 			primary.length + gainMap.length, result.length);
-		// First primary.length bytes should be the primary verbatim (MPF segment
-		// inside has been mutated by patch, but the first bytes of the segment
-		// header / SOI / etc are unchanged).
+		// First primary.length bytes should be the primary verbatim (MPF segment inside has been mutated by
+		// patch, but the first bytes of the segment header / SOI / etc are unchanged).
 		assertEquals((byte) 0xFF, result[0]);
 		assertEquals((byte) 0xD8, result[1]);
 		// Last gainMap.length bytes should be our 0x42 padding.
@@ -87,28 +80,22 @@ public class GainMapComposerTest
 	@Test
 	public void composeReturnsPrimaryWhenMpfMissingEvenWithGainMap() throws IOException
 	{
-		// Variant of the patch-failure test using a real-looking JPEG (SOI + DQT +
-		// minimal scan + EOI) that has NO MPF segment. patch returns false; compose
-		// must drop the gain map. This pin closes the hardest case: a valid SDR
-		// JPEG (not Ultra HDR) being passed to compose — the gain map shouldn't
-		// hitch a ride.
+		// Variant of the patch-failure test using a real-looking JPEG (SOI + DQT + minimal scan + EOI) that has
+		// NO MPF segment. patch returns false; compose must drop the gain map. This pin closes the hardest
+		// case: a valid SDR JPEG (not Ultra HDR) being passed to compose — the gain map shouldn't hitch a ride.
 		byte[] primary = JpegFixtures.concat(
-			JpegFixtures.soi(),
-			new byte[] { (byte) 0xFF, (byte) 0xDB, 0x00, 0x04, 0x00, 0x00 },
+			JpegFixtures.soi(), new byte[] { (byte) 0xFF, (byte) 0xDB, 0x00, 0x04, 0x00, 0x00 },
 			JpegFixtures.minimalScanAndEoi());
 		byte[] gainMap = { 0x42, 0x42, 0x42 };
 		byte[] result = GainMapComposer.compose(primary, gainMap);
-		assertSame("SDR primary with no MPF should ignore gain map",
-			primary, result);
+		assertSame("SDR primary with no MPF should ignore gain map", primary, result);
 	}
 
 	/**
-	 * Build a Ultra-HDR-shaped primary JPEG: SOI + MPF APP2 with a 2-image MP
-	 * Entries table + minimal scan + EOI. The MP Entries table sits inside the
-	 * APP2 segment; primarySize passed to MpfPatcher.patch is set to the total
-	 * primary length so relativeOffset = primarySize - mpfStart is non-negative
-	 * and the gain-map entry can be patched. Mirrors the layout produced by
-	 * MpfPatcherTest.buildMpfFile but condensed to just what compose needs.
+	 * Build a Ultra-HDR-shaped primary JPEG: SOI + MPF APP2 with a 2-image MP Entries table + minimal scan + EOI.
+	 * The MP Entries table sits inside the APP2 segment; primarySize passed to MpfPatcher.patch is set to the total
+	 * primary length so relativeOffset = primarySize - mpfStart is non-negative and the gain-map entry can be
+	 * patched. Mirrors the layout produced by MpfPatcherTest.buildMpfFile but condensed to just what compose needs.
 	 */
 	private static byte[] buildPrimaryWithMpf() throws IOException
 	{
@@ -127,16 +114,15 @@ public class GainMapComposerTest
 		writeU16Le(payload, 7);
 		writeU32Le(payload, 4L);
 		payload.write(new byte[] { '0', '1', '0', '0' });
-		// Entry: tag 0xB002 MPEntries, type UNDEFINED, count = numImages * 16,
-		// dataOffset = 38 (after IFD).
+		// Entry: tag 0xB002 MPEntries, type UNDEFINED, count = numImages * 16, dataOffset = 38 (after IFD).
 		writeU16Le(payload, 0xB002);
 		writeU16Le(payload, 7);
 		writeU32Le(payload, 2L * 16L);
 		writeU32Le(payload, 38L);
 		writeU32Le(payload, 0L); // next IFD
 
-		// MP Entries: entry[0] primary (attr 0x20000000 / size placeholder /
-		// offset 0), entry[1] gain map (attr 0x010005 = Original Preservation).
+		// MP Entries: entry[0] primary (attr 0x20000000 / size placeholder / offset 0), entry[1] gain map (attr
+		// 0x010005 = Original Preservation).
 		writeU32Le(payload, 0x20000000L);
 		writeU32Le(payload, 999L);
 		writeU32Le(payload, 0L);
@@ -155,8 +141,8 @@ public class GainMapComposerTest
 
 	private static byte[] prefixMpfMagic(byte[] body)
 	{
-		// 4-byte MPF magic: 'M','P','F',NUL. String literal getBytes drops the trailing
-		// null, so build the signature byte-by-byte.
+		// 4-byte MPF magic: 'M','P','F',NUL. String literal getBytes drops the trailing null, so build the
+		// signature byte-by-byte.
 		byte[] sig = { 'M', 'P', 'F', 0 };
 		byte[] result = new byte[sig.length + body.length];
 		System.arraycopy(sig, 0, result, 0, sig.length);

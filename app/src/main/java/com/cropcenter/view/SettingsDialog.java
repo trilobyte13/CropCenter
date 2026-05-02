@@ -18,23 +18,33 @@ import android.widget.TextView;
 import com.cropcenter.BuildConfig;
 import com.cropcenter.model.CropState;
 import com.cropcenter.model.GridConfig;
+import com.cropcenter.util.DpToPx;
 import com.cropcenter.util.ThemeColors;
 
 /**
- * Unified settings panel — grid customization, pixel grid customization, and shared
- * selection/paint color. Uses the shared Catppuccin Mocha palette throughout.
+ * Unified settings panel — grid customization, pixel grid customization, and shared selection/paint color. Uses the
+ * shared Catppuccin Mocha palette throughout.
  *
- * All mutations flow through CropState.updateGridConfig so each user action fires the
- * state listener exactly once — callers don't need to pass an invalidate callback.
+ * All mutations flow through CropState.updateGridConfig so each user action fires the state listener exactly once —
+ * callers don't need to pass an invalidate callback.
  */
 public class SettingsDialog
 {
+	/**
+	 * Build and show the settings dialog. Card-style layout: Grid (cols/rows + line color/width), Pixel Grid
+	 * (toggle + color), Selection &amp; Paint (shared color), and a Build info card. Mutates state in place via
+	 * updateGridConfig as the user toggles. Cancel does nothing; OK commits the dimension EditText values that
+	 * weren't already committed via preset chip taps.
+	 *
+	 * @param ctx   Activity context for inflation
+	 * @param state CropState whose gridConfig is mutated as the user interacts
+	 */
 	public static void show(Context ctx, CropState state)
 	{
 		float density = ctx.getResources().getDisplayMetrics().density;
-		int dp4 = (int) (4 * density);
-		int dp8 = (int) (8 * density);
-		int dp16 = (int) (16 * density);
+		int dp4 = DpToPx.toPx(4, density);
+		int dp8 = DpToPx.toPx(8, density);
+		int dp16 = DpToPx.toPx(16, density);
 
 		GridConfig cfg = state.getGridConfig();
 
@@ -45,14 +55,12 @@ public class SettingsDialog
 		scroll.addView(root);
 
 		EditText[] dimensionInputs = new EditText[2];
-		root.addView(buildGridCard(ctx, state, cfg, density, dimensionInputs),
-			DialogCards.topMargin(dp4));
+		root.addView(buildGridCard(ctx, state, cfg, density, dimensionInputs), DialogCards.topMargin(dp4));
 		root.addView(buildPixelGridCard(ctx, state, cfg, density), DialogCards.topMargin(dp8));
 		root.addView(buildSelectionCard(ctx, state, cfg, density), DialogCards.topMargin(dp8));
 		root.addView(buildInfoCard(ctx, density), DialogCards.topMargin(dp8));
 
-		Runnable applyDimensions = () -> applyDimensionInputs(state,
-			dimensionInputs[0], dimensionInputs[1]);
+		Runnable applyDimensions = () -> applyDimensionInputs(state, dimensionInputs[0], dimensionInputs[1]);
 
 		new AlertDialog.Builder(ctx)
 			.setTitle("Settings")
@@ -62,18 +70,34 @@ public class SettingsDialog
 	}
 
 	/**
-	 * Commit the Columns / Rows EditText values to state, clamping each to [1, 50].
-	 * A blank / non-numeric field is silently ignored — this is called on OK, and
-	 * preset-chip taps already synced the inputs back in.
+	 * Commit a freshly-picked color to the swatch + tracked-state box and notify the caller's listener. Extracted
+	 * from colorRow's inner ColorPickerDialog callback to keep the lambda body within CLAUDE.md's 3-line cap.
+	 *
+	 * @param color    new ARGB color
+	 * @param tracked  1-element box holding the current color (mutated)
+	 * @param swatchBg drawable backing the swatch view (color updated in place)
+	 * @param swatch   swatch view to invalidate so the new color renders
+	 * @param onPick   caller-supplied listener invoked with the new color
+	 */
+	private static void applyPickedColor(int color, int[] tracked, GradientDrawable swatchBg,
+		View swatch, ColorPickerDialog.OnColorSelectedListener onPick)
+	{
+		tracked[0] = color;
+		swatchBg.setColor(color);
+		swatch.invalidate();
+		onPick.onColorSelected(color);
+	}
+
+	/**
+	 * Commit the Columns / Rows EditText values to state, clamping each to [1, 50]. A blank / non-numeric field is
+	 * silently ignored — this is called on OK, and preset-chip taps already synced the inputs back in.
 	 */
 	private static void applyDimensionInputs(CropState state, EditText editCols, EditText editRows)
 	{
 		try
 		{
-			int newCols = Math.clamp(
-				Integer.parseInt(editCols.getText().toString().trim()), 1, 50);
-			int newRows = Math.clamp(
-				Integer.parseInt(editRows.getText().toString().trim()), 1, 50);
+			int newCols = Math.clamp(Integer.parseInt(editCols.getText().toString().trim()), 1, 50);
+			int newRows = Math.clamp(Integer.parseInt(editRows.getText().toString().trim()), 1, 50);
 			state.updateGridConfig(g -> g.withColumns(newCols).withRows(newRows));
 		}
 		catch (NumberFormatException ignored)
@@ -82,17 +106,16 @@ public class SettingsDialog
 	}
 
 	/**
-	 * Build the "Grid" card — column / row dimensions, presets, line color, line
-	 * width. Stores the Cols / Rows EditTexts in dimensionInputs so the OK button
-	 * can commit them.
+	 * Build the "Grid" card — column / row dimensions, presets, line color, line width. Stores the Cols / Rows
+	 * EditTexts in dimensionInputs so the OK button can commit them.
 	 */
 	private static LinearLayout buildGridCard(Context ctx, CropState state, GridConfig cfg,
 		float density, EditText[] dimensionInputs)
 	{
-		int dp4 = (int) (4 * density);
-		int dp6 = (int) (6 * density);
-		int dp8 = (int) (8 * density);
-		int dp12 = (int) (12 * density);
+		int dp4 = DpToPx.toPx(4, density);
+		int dp6 = DpToPx.toPx(6, density);
+		int dp8 = DpToPx.toPx(8, density);
+		int dp12 = DpToPx.toPx(12, density);
 
 		LinearLayout card = DialogCards.newCard(ctx, density);
 		DialogCards.addCardTitle(card, "Grid");
@@ -106,7 +129,7 @@ public class SettingsDialog
 
 		addLabel(dimensionsRow, "Columns");
 		LinearLayout.LayoutParams colsLayoutParams = new LinearLayout.LayoutParams(
-			(int) (48 * density), (int) (30 * density));
+			DpToPx.toPx(48, density), DpToPx.toPx(30, density));
 		colsLayoutParams.leftMargin = dp8;
 		dimensionsRow.addView(editCols, colsLayoutParams);
 
@@ -118,13 +141,12 @@ public class SettingsDialog
 
 		addLabel(dimensionsRow, "Rows");
 		LinearLayout.LayoutParams rowsLayoutParams = new LinearLayout.LayoutParams(
-			(int) (48 * density), (int) (30 * density));
+			DpToPx.toPx(48, density), DpToPx.toPx(30, density));
 		rowsLayoutParams.leftMargin = dp8;
 		dimensionsRow.addView(editRows, rowsLayoutParams);
 		card.addView(dimensionsRow, DialogCards.topMargin(dp6));
 
-		card.addView(buildPresetRow(ctx, state, editCols, editRows, density),
-			DialogCards.topMargin(dp8));
+		card.addView(buildPresetRow(ctx, state, editCols, editRows, density), DialogCards.topMargin(dp8));
 
 		card.addView(colorRow(ctx, "Line color", cfg.color(), density, color ->
 			state.updateGridConfig(g -> g.withColor(color))), DialogCards.topMargin(dp12));
@@ -134,14 +156,13 @@ public class SettingsDialog
 	}
 
 	/**
-	 * Build the "Pixel Grid" card — checkbox to toggle the per-pixel overlay + color
-	 * picker for the pixel-grid stroke.
+	 * Build the "Pixel Grid" card — checkbox to toggle the per-pixel overlay + color picker for the pixel-grid
+	 * stroke.
 	 */
-	private static LinearLayout buildPixelGridCard(Context ctx, CropState state, GridConfig cfg,
-		float density)
+	private static LinearLayout buildPixelGridCard(Context ctx, CropState state, GridConfig cfg, float density)
 	{
-		int dp4 = (int) (4 * density);
-		int dp8 = (int) (8 * density);
+		int dp4 = DpToPx.toPx(4, density);
+		int dp8 = DpToPx.toPx(8, density);
 
 		LinearLayout card = DialogCards.newCard(ctx, density);
 		DialogCards.addCardTitle(card, "Pixel Grid");
@@ -162,13 +183,13 @@ public class SettingsDialog
 	}
 
 	/**
-	 * Build the 2×2..8×8 equal-weight preset chip row. Tapping a chip syncs both the
-	 * GridConfig and the Cols / Rows EditTexts (so the user sees the new values).
+	 * Build the 2×2..8×8 equal-weight preset chip row. Tapping a chip syncs both the GridConfig and the Cols / Rows
+	 * EditTexts (so the user sees the new values).
 	 */
 	private static LinearLayout buildPresetRow(Context ctx, CropState state,
 		EditText editCols, EditText editRows, float density)
 	{
-		int dp4 = (int) (4 * density);
+		int dp4 = DpToPx.toPx(4, density);
 		int[][] presets = { { 2, 2 }, { 3, 3 }, { 4, 4 }, { 5, 5 }, { 6, 6 }, { 7, 7 }, { 8, 8 } };
 		LinearLayout presetRow = new LinearLayout(ctx);
 		presetRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -196,14 +217,13 @@ public class SettingsDialog
 	}
 
 	/**
-	 * Build the "Selection & Paint" card — shared color for selection markers,
-	 * polygon fill, and horizon paint strokes.
+	 * Build the "Selection & Paint" card — shared color for selection markers, polygon fill, and horizon paint
+	 * strokes.
 	 */
-	private static LinearLayout buildSelectionCard(Context ctx, CropState state, GridConfig cfg,
-		float density)
+	private static LinearLayout buildSelectionCard(Context ctx, CropState state, GridConfig cfg, float density)
 	{
-		int dp4 = (int) (4 * density);
-		int dp8 = (int) (8 * density);
+		int dp4 = DpToPx.toPx(4, density);
+		int dp8 = DpToPx.toPx(8, density);
 
 		LinearLayout card = DialogCards.newCard(ctx, density);
 		DialogCards.addCardTitle(card, "Selection & Paint");
@@ -221,12 +241,12 @@ public class SettingsDialog
 	}
 
 	/**
-	 * Build the "Build" info card — shows the BUILD_TIME constant from BuildConfig so
-	 * testers can verify which build is running without Logcat.
+	 * Build the "Build" info card — shows the BUILD_TIME constant from BuildConfig so testers can verify which
+	 * build is running without Logcat.
 	 */
 	private static LinearLayout buildInfoCard(Context ctx, float density)
 	{
-		int dp4 = (int) (4 * density);
+		int dp4 = DpToPx.toPx(4, density);
 		LinearLayout card = DialogCards.newCard(ctx, density);
 		DialogCards.addCardTitle(card, "Build");
 
@@ -240,13 +260,12 @@ public class SettingsDialog
 	}
 
 	/**
-	 * Build the "Width" seek-bar row — user drags to pick a grid stroke width (1-20
-	 * image pixels). The zero position clamps up to 1 so the grid never invisible.
+	 * Build the "Width" seek-bar row — user drags to pick a grid stroke width (1-20 image pixels). The zero
+	 * position clamps up to 1 so the grid never invisible.
 	 */
-	private static LinearLayout buildWidthRow(Context ctx, CropState state, GridConfig cfg,
-		float density)
+	private static LinearLayout buildWidthRow(Context ctx, CropState state, GridConfig cfg, float density)
 	{
-		int dp8 = (int) (8 * density);
+		int dp8 = DpToPx.toPx(8, density);
 		LinearLayout widthRow = row(ctx);
 		addLabel(widthRow, "Width");
 
@@ -304,7 +323,7 @@ public class SettingsDialog
 		bg.setColor(ThemeColors.SURFACE1);
 		bg.setCornerRadius(4 * density);
 		btn.setBackground(bg);
-		btn.setPadding(0, (int) (6 * density), 0, (int) (6 * density));
+		btn.setPadding(0, DpToPx.toPx(6, density), 0, DpToPx.toPx(6, density));
 		btn.setSingleLine(true);
 		return btn;
 	}
@@ -318,7 +337,7 @@ public class SettingsDialog
 	private static LinearLayout colorRow(Context ctx, String label, int currentColor,
 		float density, int[] palette, ColorPickerDialog.OnColorSelectedListener onPick)
 	{
-		int swatchSize = (int) (26 * density);
+		int swatchSize = DpToPx.toPx(26, density);
 		final int[] tracked = { currentColor };
 		LinearLayout row = row(ctx);
 		TextView lbl = new TextView(ctx);
@@ -345,22 +364,16 @@ public class SettingsDialog
 		btn.setText("Edit");
 		btn.setTextSize(12);
 		btn.setTextColor(ThemeColors.MAUVE);
-		btn.setPadding((int) (10 * density), (int) (6 * density),
-			(int) (10 * density), (int) (6 * density));
+		btn.setPadding(DpToPx.toPx(10, density), DpToPx.toPx(6, density), DpToPx.toPx(10, density), DpToPx.toPx(6, density));
 		btn.setGravity(Gravity.CENTER);
 		LinearLayout.LayoutParams editBtnLayoutParams = new LinearLayout.LayoutParams(
 			LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-		editBtnLayoutParams.leftMargin = (int) (8 * density);
+		editBtnLayoutParams.leftMargin = DpToPx.toPx(8, density);
 		row.addView(btn, editBtnLayoutParams);
 
 		View.OnClickListener openPicker = view ->
-				ColorPickerDialog.show(ctx, tracked[0], palette, color ->
-				{
-					tracked[0] = color;
-					swatchBg.setColor(color);
-					swatch.invalidate();
-					onPick.onColorSelected(color);
-				});
+				ColorPickerDialog.show(ctx, tracked[0], palette,
+					color -> applyPickedColor(color, tracked, swatchBg, swatch, onPick));
 		btn.setOnClickListener(openPicker);
 		swatch.setOnClickListener(openPicker);
 		return row;
@@ -379,7 +392,7 @@ public class SettingsDialog
 		bg.setColor(ThemeColors.SURFACE1);
 		bg.setCornerRadius(4 * density);
 		edit.setBackground(bg);
-		int pad = (int) (4 * density);
+		int pad = DpToPx.toPx(4, density);
 		edit.setPadding(pad, pad, pad, pad);
 		return edit;
 	}
@@ -402,13 +415,12 @@ public class SettingsDialog
 		tv.setTextSize(12);
 		tv.setTextColor(ThemeColors.MAUVE);
 		tv.setGravity(Gravity.CENTER);
-		tv.setMinWidth((int) (32 * density));
+		tv.setMinWidth(DpToPx.toPx(32, density));
 		GradientDrawable bg = new GradientDrawable();
 		bg.setColor(ThemeColors.SURFACE1);
 		bg.setCornerRadius(4 * density);
 		tv.setBackground(bg);
-		tv.setPadding((int) (6 * density), (int) (3 * density),
-			(int) (6 * density), (int) (3 * density));
+		tv.setPadding(DpToPx.toPx(6, density), DpToPx.toPx(3, density), DpToPx.toPx(6, density), DpToPx.toPx(3, density));
 		return tv;
 	}
 }

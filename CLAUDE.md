@@ -154,6 +154,33 @@ Must succeed with no errors. The trailing deprecation warning from
   public Thing parse(String s)
   ```
 
+- **When Javadoc IS present, every parameter, return value, and declared
+  exception is documented.** Add `@param` for each parameter, `@return` for
+  every non-void return, and `@throws` for each declared / documented checked
+  exception. The tags are not optional — if the method's parameters and
+  return are obvious enough that tags would be tautological, the rule isn't
+  "skip the tags", it's "the method shouldn't have Javadoc at all" (per the
+  optional-omission list above). Tags should convey what the type and name
+  alone don't: bound semantics, null behavior, ownership transfer,
+  side-effects on inputs (e.g. `recycled when rotation produces a new
+  instance`), the meaning of edge-case return values (`null when the EXIF
+  byte-order field is malformed`), and the trigger conditions for each
+  declared exception.
+
+  ```java
+  /**
+   * Apply EXIF orientation to a bitmap, returning a correctly rotated bitmap.
+   *
+   * @param bmp         source bitmap; recycled when rotation produces a new instance
+   * @param orientation EXIF orientation tag value (1..8); values outside that
+   *                    range are treated as identity and the bitmap is returned
+   *                    unchanged
+   * @return correctly rotated bitmap (may be the same reference as bmp when
+   *         orientation == 1 or out of range)
+   */
+  public static Bitmap applyOrientation(Bitmap bmp, int orientation)
+  ```
+
 - **In-method comments use `//`.** Always. Even multi-line ones.
   Don't use `/* ... */` for a one-liner tucked inside a method or branch —
   `// note` not `/* note */`. `/* ... */` has no place inside a method body.
@@ -171,7 +198,18 @@ Must succeed with no errors. The trailing deprecation warning from
 - **Don't state the obvious.** `// increment counter` before `counter++` is
   noise. This rule applies equally to Javadoc — if the only thing the block
   would say is what the signature already says, omit it. Write comments
-  that explain *why*, not *what*.
+  that explain *why*, not *what*. Common patterns to delete on sight:
+  - `// Log before` / `// Log after` above a loop whose body is a `Log.d`
+  - `// Update X: do Y` above a one-liner whose call site already says X = Y
+  - `// Find the X with the most votes` above a max-by-key loop with
+    self-documenting variable names like `bestAngle` / `bestCount`
+  - `// Check if tapping on existing point → remove it` above a loop body
+    that calls `removeSelectionPointAt(...)` after a hit-test
+
+  Counter-examples (keep): comments that name a JPEG-spec literal (`// SOI`
+  before `0xFFD8`), label a magic number with its meaning
+  (`int budget = 60_000;  // JPEG thumbnail cap`), or explain a non-obvious
+  invariant / threading concern / why a defensive guard is in place.
 
 ## Constants
 
@@ -355,6 +393,35 @@ editorView.setOnZoomChangedListener(() -> this.updateZoomBadge()); // avoid
 
 Use a lambda when you need to transform arguments, capture extra state, or
 string multiple calls together.
+
+**Lambda body length: 3 lines maximum.** A lambda whose body would exceed 3
+lines of code should become a named private method (passed via method
+reference, or invoked from a one-line lambda when arity adaptation is
+needed). The reasoning is the same as for any nested anonymous-function
+construct: a 4+ line lambda is hard to read at the call site, hard to debug
+(stack traces show synthetic names), and resists naming — extracting it
+gives the operation a name and a place to attach Javadoc. Imperative loops
+inside a lambda body (and especially nested control flow) are a strong
+signal the body should be a method.
+
+### Streams vs imperative loops
+
+Prefer a stream / collector when:
+- the loop is a simple aggregation (`anyMatch`, `allMatch`, `count`, `sum`,
+  `max`, `min`) over a Collection
+- the loop transforms each element via a one-line lambda or method reference
+  (`stream().map(...).toList()`)
+- the resulting expression fits within the 3-line lambda cap
+
+Stay imperative when:
+- the loop has `break` / `continue` with non-trivial flow control
+- per-iteration side effects span multiple statements
+- the loop is performance-critical (per-pixel image processing, byte-walking
+  metadata parsers, hot-path math) — stream overhead and boxing are not free
+- a primitive-array (`byte[]`, `int[]`) walk would force boxing into a
+  `Stream<Integer>` for no clarity gain
+
+When in doubt, stay imperative. Streams are a clarity tool, not a goal.
 
 ## Scope minimization
 

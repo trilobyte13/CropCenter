@@ -12,13 +12,12 @@ import java.util.Collections;
 import java.util.List;
 
 /**
- * Tests for the malformed-segment guard in JpegMetadataInjector.inject. The injector
- * walks the re-encoded JPEG's APP/COM markers to find where image data starts; an APP
- * segment that claims a segLen extending past EOF means the re-encoded buffer is
- * structurally broken (Skia bug, byte-stream corruption between encode and inject).
- * Older code silently fell back to scanStart = 2, which produced a JPEG with the
- * re-encoder's APP markers AND original's APP markers stacked back to back. The fix
- * throws IOException so the caller's "Export failed" toast surfaces the actual error.
+ * Tests for the malformed-segment guard in JpegMetadataInjector.inject. The injector walks the re-encoded JPEG's
+ * APP/COM markers to find where image data starts; an APP segment that claims a segLen extending past EOF means the
+ * re-encoded buffer is structurally broken (Skia bug, byte-stream corruption between encode and inject). Older code
+ * silently fell back to scanStart = 2, which produced a JPEG with the re-encoder's APP markers AND original's APP
+ * markers stacked back to back. The fix throws IOException so the caller's "Export failed" toast surfaces the actual
+ * error.
  */
 public class JpegMetadataInjectorTest
 {
@@ -41,10 +40,9 @@ public class JpegMetadataInjectorTest
 	@Test
 	public void injectThrowsOnAppSegmentClaimingLengthPastEof() throws IOException
 	{
-		// Re-encoded JPEG where the APP0 segment claims a 65535-byte length but only
-		// 4 bytes follow. Older code silently fell back to scanStart = 2, producing
-		// a stitched output with duplicate APP markers; the fix throws so the
-		// caller's toast matches the actual failure mode.
+		// Re-encoded JPEG where the APP0 segment claims a 65535-byte length but only 4 bytes follow. Older code
+		// silently fell back to scanStart = 2, producing a stitched output with duplicate APP markers; the fix
+		// throws so the caller's toast matches the actual failure mode.
 		byte[] reencoded = {
 			(byte) 0xFF, (byte) 0xD8,                         // SOI
 			(byte) 0xFF, (byte) 0xE0, (byte) 0xFF, (byte) 0xFF, // APP0 with segLen 0xFFFF
@@ -66,13 +64,11 @@ public class JpegMetadataInjectorTest
 	@Test
 	public void injectAcceptsValidReencodedJpegAndPreservesSegmentBytes() throws IOException
 	{
-		// Reencoded = SOI + small APP0 + DQT + SOS + EOI. Original metadata = single
-		// EXIF segment. Output should: start with SOI, contain the EXIF bytes
-		// verbatim, end with EOI, and NOT contain the reencoded APP0 (it's part of
-		// the stripped marker walk).
+		// Reencoded = SOI + small APP0 + DQT + SOS + EOI. Original metadata = single EXIF segment. Output
+		// should: start with SOI, contain the EXIF bytes verbatim, end with EOI, and NOT contain the reencoded
+		// APP0 (it's part of the stripped marker walk).
 		byte[] reencoded = JpegFixtures.concat(
-			JpegFixtures.soi(),
-			JpegFixtures.appSegment(0xE0, new byte[] { 'J', 'F', 'I', 'F', 0 }),
+			JpegFixtures.soi(), JpegFixtures.appSegment(0xE0, new byte[] { 'J', 'F', 'I', 'F', 0 }),
 			new byte[] { (byte) 0xFF, (byte) 0xDB, 0x00, 0x04, 0x00, 0x00 }, // DQT
 			JpegFixtures.minimalScanAndEoi());
 
@@ -118,9 +114,8 @@ public class JpegMetadataInjectorTest
 	@Test
 	public void injectRejectsTruncatedReencodedJpeg()
 	{
-		// Reencoded = just SOI (2 bytes). Length check: < 4, so the up-front "Not a
-		// valid JPEG" guard catches it. Pinned to make sure that guard isn't loosened
-		// in a future refactor.
+		// Reencoded = just SOI (2 bytes). Length check: < 4, so the up-front "Not a valid JPEG" guard catches
+		// it. Pinned to make sure that guard isn't loosened in a future refactor.
 		byte[] reencoded = { (byte) 0xFF, (byte) 0xD8 };
 		try
 		{

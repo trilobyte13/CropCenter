@@ -8,10 +8,9 @@ import android.provider.Settings;
 import android.util.Log;
 
 /**
- * Wraps the MANAGE_EXTERNAL_STORAGE check and the deep-link to its Settings page. The
- * permission is only needed for reliable file-I/O Replace; the prompt is offered from
- * ReplaceStrategy.showReplaceFailureDialog when an actual collision-overwrite hits an
- * SAF-permission failure, never up-front at app start or save-dialog open.
+ * Wraps the MANAGE_EXTERNAL_STORAGE check and the deep-link to its Settings page. The permission is only needed for
+ * reliable file-I/O Replace; the prompt is offered from ReplaceStrategy.showReplaceFailureDialog when an actual
+ * collision-overwrite hits an SAF-permission failure, never up-front at app start or save-dialog open.
  */
 public final class StoragePermissionHelper
 {

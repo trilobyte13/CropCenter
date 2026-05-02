@@ -6,12 +6,11 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Undo/redo stack for the editor's selection-point list. Pure bookkeeping — no coordinate
- * math, no view interaction. SelectionPoint is an immutable record so each snapshot is a
- * shallow copy of the current list.
+ * Undo/redo stack for the editor's selection-point list. Pure bookkeeping — no coordinate math, no view interaction.
+ * SelectionPoint is an immutable record so each snapshot is a shallow copy of the current list.
  *
- * Callers pass the current list when pushing / undoing / redoing; the returned snapshot is
- * what the caller should restore (or null when the target stack is empty).
+ * Callers pass the current list when pushing / undoing / redoing; the returned snapshot is what the caller should
+ * restore (or null when the target stack is empty).
  */
 final class SelectionHistory
 {
@@ -40,8 +39,8 @@ final class SelectionHistory
 	}
 
 	/**
-	 * Push the current state as a new undo frame and clear the redo stack. Trims the oldest
-	 * frame when the stack exceeds MAX_DEPTH.
+	 * Push the current state as a new undo frame and clear the redo stack. Trims the oldest frame when the stack
+	 * exceeds MAX_DEPTH.
 	 */
 	void push(List<SelectionPoint> current)
 	{
@@ -54,8 +53,8 @@ final class SelectionHistory
 	}
 
 	/**
-	 * Pop a redo frame and return its snapshot. Pushes the current state onto undo. Returns
-	 * null when the redo stack is empty.
+	 * Pop a redo frame and return its snapshot. Pushes the current state onto undo. Returns null when the redo
+	 * stack is empty.
 	 */
 	List<SelectionPoint> redo(List<SelectionPoint> current)
 	{
@@ -68,8 +67,8 @@ final class SelectionHistory
 	}
 
 	/**
-	 * Pop an undo frame and return its snapshot. Pushes the current state onto redo. Returns
-	 * null when the undo stack is empty.
+	 * Pop an undo frame and return its snapshot. Pushes the current state onto redo. Returns null when the undo
+	 * stack is empty.
 	 */
 	List<SelectionPoint> undo(List<SelectionPoint> current)
 	{

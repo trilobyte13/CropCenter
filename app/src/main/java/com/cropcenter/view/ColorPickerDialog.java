@@ -16,25 +16,31 @@ import android.widget.LinearLayout;
 import android.widget.SeekBar;
 import android.widget.TextView;
 
+import com.cropcenter.util.DpToPx;
 import com.cropcenter.util.ThemeColors;
 
 import java.util.Locale;
 
 /**
- * Color picker: grid of preset colors, alpha slider, and hex input. The hex field always
- * reflects the current selection and its background acts as the live preview.
+ * Color picker: grid of preset colors, alpha slider, and hex input. The hex field always reflects the current selection
+ * and its background acts as the live preview.
  */
 public class ColorPickerDialog
 {
+	/**
+	 * Fires when the user confirms a color choice (taps OK). Cancellation does not invoke this.
+	 */
 	public interface OnColorSelectedListener
 	{
+		/**
+		 * @param color the chosen color as a packed ARGB int
+		 */
 		void onColorSelected(int color);
 	}
 
 	/**
-	 * Container for the two widgets built by buildAlphaRow that the show() method
-	 * wires up independently — the SeekBar drives the alpha channel, the TextView
-	 * mirrors the current value.
+	 * Container for the two widgets built by buildAlphaRow that the show() method wires up independently — the
+	 * SeekBar drives the alpha channel, the TextView mirrors the current value.
 	 */
 	private record AlphaRow(SeekBar slider, TextView valueText)
 	{
@@ -50,8 +56,8 @@ public class ColorPickerDialog
 			void onTap(int color);
 		}
 
-		// CLAUDE.md field order: `final` tier (alphabetical by type, uppercase types first,
-		// then alphabetical by name within a type) then regular (non-final) tier.
+		// CLAUDE.md field order: `final` tier (alphabetical by type, uppercase types first, then alphabetical
+		// by name within a type) then regular (non-final) tier.
 		private final Paint borderPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 		private final Paint paint = new Paint();
 		private final int cellSize;
@@ -139,12 +145,10 @@ public class ColorPickerDialog
 		}
 
 		/**
-		 * Update the highlighted swatch when the color was changed from outside the grid
-		 * (hex input or alpha slider). Re-invalidates so the mauve ring moves off the
-		 * previously-tapped swatch and onto whichever palette entry matches the new
-		 * color, or off the grid entirely when no swatch matches. Without this, the
-		 * grid's ring goes stale and the user sees a UI that lies about which color is
-		 * active.
+		 * Update the highlighted swatch when the color was changed from outside the grid (hex input or alpha
+		 * slider). Re-invalidates so the mauve ring moves off the previously-tapped swatch and onto whichever
+		 * palette entry matches the new color, or off the grid entirely when no swatch matches. Without this,
+		 * the grid's ring goes stale and the user sees a UI that lies about which color is active.
 		 */
 		void setSelectedColor(int color)
 		{
@@ -170,8 +174,8 @@ public class ColorPickerDialog
 		0x80FFFFFF, 0x80FF0000, 0x80FFFF00, 0x8000FF00, 0x8000FFFF, 0x800000FF, 0x80FF00FF, 0x80000000,
 	};
 
-	// Translucent-first palette for selection / paint overlays. All saturated colors at 50% alpha
-	// so selections don't obscure the image. Bottom row offers opaque fallbacks when needed.
+	// Translucent-first palette for selection / paint overlays. All saturated colors at 50% alpha so selections
+	// don't obscure the image. Bottom row offers opaque fallbacks when needed.
 	public static final int[] PALETTE_TRANSLUCENT = {
 		0x80FF0000, 0x80FF8000, 0x80FFFF00, 0x8000FF00, 0x8000FFFF, 0x800080FF, 0x800000FF, 0x80FF00FF,
 		0x80CC0000, 0x80CC6600, 0x80CCCC00, 0x8000CC00, 0x8000CCCC, 0x800066CC, 0x800000CC, 0x80CC00CC,
@@ -182,13 +186,7 @@ public class ColorPickerDialog
 		0xFF000000, 0xFFFFFFFF, 0xFFFF0000, 0xFF00FF00, 0xFF0000FF, 0xFFFFFF00, 0xFF00FFFF, 0xFFFF00FF,
 	};
 
-	public static void show(Context context, int currentColor, OnColorSelectedListener listener)
-	{
-		show(context, currentColor, PALETTE_OPAQUE, listener);
-	}
-
-	public static void show(Context context, int currentColor, int[] palette,
-		OnColorSelectedListener listener)
+	public static void show(Context context, int currentColor, int[] palette, OnColorSelectedListener listener)
 	{
 		float density = context.getResources().getDisplayMetrics().density;
 
@@ -197,9 +195,10 @@ public class ColorPickerDialog
 
 		LinearLayout root = new LinearLayout(context);
 		root.setOrientation(LinearLayout.VERTICAL);
-		root.setPadding(toPx(12, density), toPx(8, density), toPx(12, density), toPx(4, density));
+		root.setPadding(DpToPx.toPx(12, density), DpToPx.toPx(8, density),
+			DpToPx.toPx(12, density), DpToPx.toPx(4, density));
 
-		int cellSize = Math.round(36 * density);
+		int cellSize = DpToPx.toPx(36, density);
 		ColorGridView grid = new ColorGridView(context, palette, COLS, ROWS, cellSize, currentColor);
 		root.addView(grid, new LinearLayout.LayoutParams(
 			LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
@@ -207,8 +206,7 @@ public class ColorPickerDialog
 		AlphaRow alphaRow = buildAlphaRow(context, root, currentColor, density);
 		EditText hexInput = buildHexInput(context, root, density);
 
-		Runnable syncHexToSelection = () -> syncHexDisplay(hexInput, selected[0], density,
-			suppressHexWatcher);
+		Runnable syncHexToSelection = () -> syncHexDisplay(hexInput, selected[0], density, suppressHexWatcher);
 		syncHexToSelection.run();
 
 		wireGridTap(grid, selected, alphaRow.slider(), syncHexToSelection);
@@ -224,8 +222,8 @@ public class ColorPickerDialog
 	}
 
 	/**
-	 * Paint the hex EditText's background with the current color and pick a contrasting text color
-	 * (ITU-R BT.601 luma: Y' = 0.299R + 0.587G + 0.114B).
+	 * Paint the hex EditText's background with the current color and pick a contrasting text color (ITU-R BT.601
+	 * luma: Y' = 0.299R + 0.587G + 0.114B).
 	 */
 	private static void applySwatchPreview(EditText hexInput, int color, float density)
 	{
@@ -242,12 +240,11 @@ public class ColorPickerDialog
 	}
 
 	/**
-	 * Build and attach the "Opacity" slider row. Returns the SeekBar + value TextView
-	 * together so wiring can address both without reaching into the row's children by
-	 * index — that was fragile against future additions to the row.
+	 * Build and attach the "Opacity" slider row. Returns the SeekBar + value TextView together so wiring can
+	 * address both without reaching into the row's children by index — that was fragile against future additions to
+	 * the row.
 	 */
-	private static AlphaRow buildAlphaRow(Context context, LinearLayout root,
-		int currentColor, float density)
+	private static AlphaRow buildAlphaRow(Context context, LinearLayout root, int currentColor, float density)
 	{
 		LinearLayout alphaRow = new LinearLayout(context);
 		alphaRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -269,13 +266,13 @@ public class ColorPickerDialog
 		alphaValueText.setText(String.valueOf(Color.alpha(currentColor)));
 		alphaValueText.setTextSize(11);
 		alphaValueText.setTextColor(ThemeColors.MAUVE);
-		alphaValueText.setMinWidth(toPx(28, density));
+		alphaValueText.setMinWidth(DpToPx.toPx(28, density));
 		alphaValueText.setGravity(Gravity.END);
 		alphaRow.addView(alphaValueText);
 
 		LinearLayout.LayoutParams alphaRowLayoutParams = new LinearLayout.LayoutParams(
 			LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-		alphaRowLayoutParams.topMargin = toPx(6, density);
+		alphaRowLayoutParams.topMargin = DpToPx.toPx(6, density);
 		root.addView(alphaRow, alphaRowLayoutParams);
 		return new AlphaRow(alphaSeekBar, alphaValueText);
 	}
@@ -290,20 +287,19 @@ public class ColorPickerDialog
 		hexInput.setSingleLine(true);
 		hexInput.setGravity(Gravity.CENTER);
 		hexInput.setHint("#AARRGGBB");
-		hexInput.setPadding(toPx(12, density), toPx(10, density), toPx(12, density), toPx(10, density));
+		hexInput.setPadding(DpToPx.toPx(12, density), DpToPx.toPx(10, density), DpToPx.toPx(12, density), DpToPx.toPx(10, density));
 		LinearLayout.LayoutParams hexInputLayoutParams = new LinearLayout.LayoutParams(
-			LinearLayout.LayoutParams.MATCH_PARENT, toPx(44, density));
-		hexInputLayoutParams.topMargin = toPx(8, density);
+			LinearLayout.LayoutParams.MATCH_PARENT, DpToPx.toPx(44, density));
+		hexInputLayoutParams.topMargin = DpToPx.toPx(8, density);
 		root.addView(hexInput, hexInputLayoutParams);
 		return hexInput;
 	}
 
 	/**
-	 * Push the current selection into the hex EditText + swatch background without
-	 * re-entering the TextWatcher (the suppress flag shields afterTextChanged).
+	 * Push the current selection into the hex EditText + swatch background without re-entering the TextWatcher (the
+	 * suppress flag shields afterTextChanged).
 	 */
-	private static void syncHexDisplay(EditText hexInput, int color, float density,
-		boolean[] suppressHexWatcher)
+	private static void syncHexDisplay(EditText hexInput, int color, float density, boolean[] suppressHexWatcher)
 	{
 		suppressHexWatcher[0] = true;
 		hexInput.setText(String.format(Locale.ROOT, "#%08X", color));
@@ -312,20 +308,8 @@ public class ColorPickerDialog
 	}
 
 	/**
-	 * Convert dp to px for the supplied display density. Math.round (not int truncation)
-	 * so non-integer densities don't collapse small dp values to zero — density 1.5 with
-	 * truncation gave (int)(1.5)=1 and 12 * 1 = 12 px instead of the intended 18 px,
-	 * and density 0.75 gave (int)(0.75)=0 and 12 * 0 = 0 px (the dialog's spacing
-	 * disappeared entirely on those screens).
-	 */
-	private static int toPx(int dp, float density)
-	{
-		return Math.round(dp * density);
-	}
-
-	/**
-	 * Alpha slider → update alpha channel + hex. Split from onStart/onStop which stay
-	 * empty — SeekBar's interface requires all three.
+	 * Alpha slider → update alpha channel + hex. Split from onStart/onStop which stay empty — SeekBar's interface
+	 * requires all three.
 	 */
 	private static void wireAlphaSlider(SeekBar alphaSeekBar, ColorGridView grid, int[] selected,
 		TextView alphaValueText, Runnable syncHexToSelection)
@@ -338,8 +322,8 @@ public class ColorPickerDialog
 				selected[0] = (selected[0] & 0x00FFFFFF) | (progress << 24);
 				alphaValueText.setText(String.valueOf(progress));
 				syncHexToSelection.run();
-				// Alpha change produces a new ARGB value that may or may not still match
-				// a palette entry. Keep the grid's highlighted swatch honest.
+				// Alpha change produces a new ARGB value that may or may not still match a palette
+				// entry. Keep the grid's highlighted swatch honest.
 				grid.setSelectedColor(selected[0]);
 			}
 
@@ -352,9 +336,9 @@ public class ColorPickerDialog
 	}
 
 	/**
-	 * Grid tap → update selection, alpha slider, hex. The alpha listener updates its
-	 * own value label; the explicit syncHex call here covers the case where the tapped
-	 * color's alpha matches the current slider position so the listener wouldn't fire.
+	 * Grid tap → update selection, alpha slider, hex. The alpha listener updates its own value label; the explicit
+	 * syncHex call here covers the case where the tapped color's alpha matches the current slider position so the
+	 * listener wouldn't fire.
 	 */
 	private static void wireGridTap(ColorGridView grid, int[] selected, SeekBar alphaSeekBar,
 		Runnable syncHexToSelection)
@@ -368,8 +352,8 @@ public class ColorPickerDialog
 	}
 
 	/**
-	 * Hex EditText → parse and update selection + alpha slider. The suppress flag
-	 * prevents programmatic setText from re-entering this watcher.
+	 * Hex EditText → parse and update selection + alpha slider. The suppress flag prevents programmatic setText
+	 * from re-entering this watcher.
 	 */
 	private static void wireHexInput(EditText hexInput, ColorGridView grid, int[] selected,
 		SeekBar alphaSeekBar, float density, boolean[] suppressHexWatcher)
@@ -411,10 +395,10 @@ public class ColorPickerDialog
 						}
 						// Preview-only update — don't overwrite what the user is typing.
 						applySwatchPreview(hexInput, parsed, density);
-						// Keep the grid's highlighted swatch in sync with the typed
-						// color. Without this, the mauve ring stays on the last-tapped
-						// palette entry even after the user types a different color —
-						// the grid visually lies about which color is active.
+						// Keep the grid's highlighted swatch in sync with the typed color.
+						// Without this, the mauve ring stays on the last-tapped palette entry
+						// even after the user types a different color — the grid visually lies
+						// about which color is active.
 						grid.setSelectedColor(parsed);
 					}
 				}

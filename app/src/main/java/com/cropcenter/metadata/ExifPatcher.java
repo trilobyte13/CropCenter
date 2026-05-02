@@ -18,9 +18,7 @@ import java.util.List;
 public final class ExifPatcher
 {
 	private static final String TAG = "ExifPatcher";
-	// APP1 segment size constraints (per JPEG spec): the 2-byte length field caps total segment
-	// bytes at 65535 and payload (segment minus the 2-byte length prefix) at 65533.
-	private static final int APP1_MAX_PAYLOAD_BYTES = 65533;
+	// APP1 segment size constraint: the 2-byte length field caps total segment bytes at 65535.
 	private static final int APP1_MAX_SEGMENT_BYTES = 65535;
 	private static final int DEFAULT_THUMB_BUDGET = 20_000; // used when we can't measure the segment
 	private static final int IFD1_ESTIMATED_OVERHEAD = 42; // rough bytes for the IFD1 header we'd add
@@ -29,9 +27,12 @@ public final class ExifPatcher
 	private ExifPatcher() {}
 
 	/**
-	 * Estimate max thumbnail bytes that will fit in the EXIF APP1 segment. Measures the EXIF
-	 * size excluding the existing thumbnail, then returns the remaining space within the
-	 * 65535-byte APP1 limit.
+	 * Estimate max thumbnail bytes that will fit in the EXIF APP1 segment. Measures the EXIF size excluding the
+	 * existing thumbnail, then returns the remaining space within the 65535-byte APP1 limit.
+	 *
+	 * @param segments JPEG metadata as captured by JpegMetadataExtractor
+	 * @return remaining APP1 budget after EXIF overhead, or DEFAULT_THUMB_BUDGET when EXIF
+	 *         is missing / unparseable / the byte-order field is malformed
 	 */
 	public static int maxThumbnailBytes(List<JpegSegment> segments)
 	{
@@ -46,9 +47,9 @@ public final class ExifPatcher
 			{
 				continue;
 			}
-			// TIFF byte-order marker is 2 bytes — "II" (little) or "MM" (big). Validate
-			// both halves; a malformed "IM" / "MI" treated as little-endian would parse
-			// every subsequent u32 with wrong byte order and corrupt offset arithmetic.
+			// TIFF byte-order marker is 2 bytes — "II" (little) or "MM" (big). Validate both halves; a
+			// malformed "IM" / "MI" treated as little-endian would parse every subsequent u32 with wrong
+			// byte order and corrupt offset arithmetic.
 			int byteOrderHi = data[TIFF_HEADER_OFFSET] & 0xFF;
 			int byteOrderLo = data[TIFF_HEADER_OFFSET + 1] & 0xFF;
 			if (!((byteOrderHi == 0x49 && byteOrderLo == 0x49)
@@ -75,10 +76,10 @@ public final class ExifPatcher
 
 			if (ifd1Rel == 0)
 			{
-				// No IFD1: EXIF overhead = current segment + new IFD1 header we'd add.
-				// Clamp at 0 — if the current segment alone nearly fills the APP1 budget,
-				// there's no room for a thumbnail and we should say so honestly rather than
-				// return a negative that relies on the caller to clamp.
+				// No IFD1: EXIF overhead = current segment + new IFD1 header we'd add. Clamp at 0 — if
+				// the current segment alone nearly fills the APP1 budget, there's no room for a
+				// thumbnail and we should say so honestly rather than return a negative that relies on
+				// the caller to clamp.
 				return Math.max(0, APP1_MAX_SEGMENT_BYTES - (data.length + IFD1_ESTIMATED_OVERHEAD));
 			}
 
@@ -104,10 +105,10 @@ public final class ExifPatcher
 					break;
 				}
 			}
-			// Sanity-clamp: corrupt EXIF can report a thumbnail length beyond the segment
-			// itself (or negative after the u32→int cast). Either case produces a negative
-			// exifOverhead which inflates the returned budget above APP1_MAX_SEGMENT_BYTES —
-			// downstream writers then overflow the 65535-byte APP1 cap. Clamp to [0, data.length].
+			// Sanity-clamp: corrupt EXIF can report a thumbnail length beyond the segment itself (or
+			// negative after the u32→int cast). Either case produces a negative exifOverhead which inflates
+			// the returned budget above APP1_MAX_SEGMENT_BYTES — downstream writers then overflow the
+			// 65535-byte APP1 cap. Clamp to [0, data.length].
 			if (oldThumbLen < 0 || oldThumbLen > data.length)
 			{
 				oldThumbLen = 0;
@@ -120,13 +121,18 @@ public final class ExifPatcher
 	}
 
 	/**
-	 * Patch the EXIF dimensions to newW×newH, normalise orientation to 1
-	 * (upright — we bake rotation into the primary JPEG), and optionally replace the thumbnail.
+	 * Patch the EXIF dimensions to newW×newH, normalise orientation to 1 (upright — we bake rotation into the
+	 * primary JPEG), and optionally replace the thumbnail.
 	 *
-	 * @param thumbnail new JPEG thumbnail bytes, or null to keep original
+	 * @param segments  source-file segments; EXIF entries are cloned and mutated, all others
+	 *                  pass through verbatim
+	 * @param newW      post-crop EXIF width
+	 * @param newH      post-crop EXIF height
+	 * @param thumbnail new JPEG thumbnail bytes, or null to keep the original thumbnail
+	 * @return new list with EXIF dimensions / orientation / (optional) thumbnail patched;
+	 *         non-EXIF segments are returned by reference
 	 */
-	public static List<JpegSegment> patch(List<JpegSegment> segments, int newW, int newH,
-		byte[] thumbnail)
+	public static List<JpegSegment> patch(List<JpegSegment> segments, int newW, int newH, byte[] thumbnail)
 	{
 		int orientation = 1; // always upright — rotation is baked into the pixels
 		List<JpegSegment> result = new ArrayList<>(segments.size());
@@ -143,9 +149,9 @@ public final class ExifPatcher
 				result.add(seg);
 				continue;
 			}
-			// TIFF byte-order marker is 2 bytes — "II" (little) or "MM" (big). Validate
-			// both halves; a malformed "IM" / "MI" treated as little-endian would parse
-			// every subsequent u32 with wrong byte order and corrupt offset arithmetic.
+			// TIFF byte-order marker is 2 bytes — "II" (little) or "MM" (big). Validate both halves; a
+			// malformed "IM" / "MI" treated as little-endian would parse every subsequent u32 with wrong
+			// byte order and corrupt offset arithmetic.
 			int byteOrderHi = data[TIFF_HEADER_OFFSET] & 0xFF;
 			int byteOrderLo = data[TIFF_HEADER_OFFSET + 1] & 0xFF;
 			if (!((byteOrderHi == 0x49 && byteOrderLo == 0x49)
@@ -157,11 +163,10 @@ public final class ExifPatcher
 			boolean isLittleEndian = byteOrderHi == 0x49;
 
 			long ifdOffRel = ByteBufferUtils.readU32(data, TIFF_HEADER_OFFSET + 4, isLittleEndian);
-			// Same long-arithmetic guard as scanIfd's SubIFD pointer: ifdOffRel is u32
-			// (range 0..2^32-1) and the addition `TIFF_HEADER_OFFSET + ifdOffRel` can
-			// exceed Integer.MAX_VALUE on adversarial EXIF. Validate the long sum
-			// before casting — a malicious 0xFFFFFFFF would truncate to a small-positive
-			// int that lands inside the buffer, bypassing the bounds check below.
+			// Same long-arithmetic guard as scanIfd's SubIFD pointer: ifdOffRel is u32 (range 0..2^32-1)
+			// and the addition `TIFF_HEADER_OFFSET + ifdOffRel` can exceed Integer.MAX_VALUE on adversarial
+			// EXIF. Validate the long sum before casting — a malicious 0xFFFFFFFF would truncate to a
+			// small-positive int that lands inside the buffer, bypassing the bounds check below.
 			long absIfdOff = TIFF_HEADER_OFFSET + ifdOffRel;
 			if (ifdOffRel < 0 || absIfdOff < TIFF_HEADER_OFFSET || absIfdOff + 2 > data.length)
 			{
@@ -182,19 +187,17 @@ public final class ExifPatcher
 	}
 
 	/**
-	 * Replace the EXIF thumbnail JPEG. Rebuilds the APP1 segment with new thumbnail bytes.
-	 * Finds IFD1's JPEGInterchangeFormat/Length, replaces the old thumbnail data, and updates
-	 * the segment length and tag values.
+	 * Replace the EXIF thumbnail JPEG. Rebuilds the APP1 segment with new thumbnail bytes. Finds IFD1's
+	 * JPEGInterchangeFormat/Length, replaces the old thumbnail data, and updates the segment length and tag values.
 	 */
 	private static byte[] replaceThumbnail(byte[] data, int tiffStart, boolean isLittleEndian, byte[] newThumb)
 	{
 		try
 		{
 			long ifd0Rel = ByteBufferUtils.readU32(data, tiffStart + 4, isLittleEndian);
-			// Long-arithmetic guard before the int cast — see ExifPatcher.patch and
-			// scanIfd for the full rationale. A u32 ifd0Rel of 0xFFFFFFFF would
-			// truncate to a small-positive int that satisfies `>= tiffStart` only by
-			// luck; computing the long sum first rules out the overflow case.
+			// Long-arithmetic guard before the int cast — see ExifPatcher.patch and scanIfd for the full
+			// rationale. A u32 ifd0Rel of 0xFFFFFFFF would truncate to a small-positive int that satisfies
+			// `>= tiffStart` only by luck; computing the long sum first rules out the overflow case.
 			long absIfd0 = tiffStart + ifd0Rel;
 			if (ifd0Rel < 0 || absIfd0 < tiffStart || absIfd0 + 2 > data.length)
 			{
@@ -218,8 +221,7 @@ public final class ExifPatcher
 			{
 				return data;
 			}
-			return spliceExistingThumbnail(data, tiffStart, (int) absIfd1,
-				isLittleEndian, newThumb);
+			return spliceExistingThumbnail(data, tiffStart, (int) absIfd1, isLittleEndian, newThumb);
 		}
 		catch (Exception e)
 		{
@@ -229,10 +231,9 @@ public final class ExifPatcher
 	}
 
 	/**
-	 * IFD1 does not exist — append a minimal one (3 entries: Compression,
-	 * JPEGInterchangeFormat, JPEGInterchangeFormatLength) plus the thumbnail bytes at
-	 * the end of the EXIF payload, updating IFD0's next-IFD pointer and the APP1
-	 * segment length. No-op return (unchanged `data`) when the thumbnail is absent or
+	 * IFD1 does not exist — append a minimal one (3 entries: Compression, JPEGInterchangeFormat,
+	 * JPEGInterchangeFormatLength) plus the thumbnail bytes at the end of the EXIF payload, updating IFD0's
+	 * next-IFD pointer and the APP1 segment length. No-op return (unchanged `data`) when the thumbnail is absent or
 	 * the result would exceed the APP1 payload cap.
 	 */
 	private static byte[] appendFreshIfd1WithThumbnail(byte[] data, int tiffStart,
@@ -257,11 +258,9 @@ public final class ExifPatcher
 			out.write(newThumb);
 
 			byte[] result = out.toByteArray();
-			// newSegLen is the value written into the 2-byte length field, which per JPEG
-			// spec includes the 2 length bytes themselves (so newSegLen == 2 + payload).
-			// Compare against APP1_MAX_SEGMENT_BYTES (65535), not APP1_MAX_PAYLOAD_BYTES
-			// (65533) — the latter is the payload-only cap and would reject 2 legal bytes
-			// at the top of the range that maxThumbnailBytes' budget calculation allows.
+			// newSegLen is the value written into the 2-byte length field, which per JPEG spec includes the
+			// 2 length bytes themselves (so newSegLen == 2 + payload). Cap is 65535 — the maximum value
+			// representable in the 2-byte field.
 			int newSegLen = result.length - 2;
 			if (newSegLen > APP1_MAX_SEGMENT_BYTES)
 			{
@@ -280,12 +279,11 @@ public final class ExifPatcher
 	}
 
 	/**
-	 * Build the 42-byte IFD1 structure: count(2) + 3 entries(12 each) + next-IFD(4).
-	 * Thumbnail data is expected to sit immediately after this structure in the
-	 * assembled EXIF payload; thumbDataOff is computed as ifd1Off + the structure size.
+	 * Build the 42-byte IFD1 structure: count(2) + 3 entries(12 each) + next-IFD(4). Thumbnail data is expected to
+	 * sit immediately after this structure in the assembled EXIF payload; thumbDataOff is computed as ifd1Off + the
+	 * structure size.
 	 */
-	private static byte[] buildFreshIfd1Header(int ifd1Off, int thumbnailBytes,
-		boolean isLittleEndian)
+	private static byte[] buildFreshIfd1Header(int ifd1Off, int thumbnailBytes, boolean isLittleEndian)
 	{
 		byte[] ifd1Buf = new byte[2 + 3 * 12 + 4]; // count + 3 entries + next IFD
 		ByteBufferUtils.writeU16(ifd1Buf, 0, 3, isLittleEndian);
@@ -315,13 +313,11 @@ public final class ExifPatcher
 	}
 
 	/**
-	 * IFD1 exists — locate its JPEGInterchangeFormat / Length tags, splice the new
-	 * thumbnail bytes in place of the old ones, and update the length tag + the APP1
-	 * segment-length header. Returns unchanged `data` in four cases: the IFD1 offset
-	 * falls outside the segment buffer; the thumbnail tags (0x0201 / 0x0202) are
-	 * missing or record a zero offset; the recorded thumbnail offset / length falls
-	 * outside the segment buffer; or the new thumbnail wouldn't fit under
-	 * APP1_MAX_PAYLOAD_BYTES (caller retries with a smaller thumbnail).
+	 * IFD1 exists — locate its JPEGInterchangeFormat / Length tags, splice the new thumbnail bytes in place of the
+	 * old ones, and update the length tag + the APP1 segment-length header. Returns unchanged `data` in four cases:
+	 * the IFD1 offset falls outside the segment buffer; the thumbnail tags (0x0201 / 0x0202) are missing or record
+	 * a zero offset; the recorded thumbnail offset / length falls outside the segment buffer; or the new thumbnail
+	 * wouldn't fit under APP1_MAX_SEGMENT_BYTES (caller retries with a smaller thumbnail).
 	 */
 	private static byte[] spliceExistingThumbnail(byte[] data, int tiffStart, int ifd1,
 		boolean isLittleEndian, byte[] newThumb)
@@ -358,11 +354,9 @@ public final class ExifPatcher
 			System.arraycopy(data, afterStart, newData, absOldOff + newThumb.length, afterLen);
 		}
 
-		// newSegLen is the value written into the 2-byte length field, which per JPEG
-		// spec includes the 2 length bytes themselves (so newSegLen == 2 + payload).
-		// Compare against APP1_MAX_SEGMENT_BYTES (65535), not APP1_MAX_PAYLOAD_BYTES
-		// (65533) — the latter is the payload-only cap and would reject 2 legal bytes
-		// at the top of the range that maxThumbnailBytes' budget calculation allows.
+		// newSegLen is the value written into the 2-byte length field, which per JPEG spec includes the 2
+		// length bytes themselves (so newSegLen == 2 + payload). Cap is 65535 — the maximum value representable
+		// in the 2-byte field.
 		int newSegLen = newData.length - 2;
 		if (newSegLen > APP1_MAX_SEGMENT_BYTES)
 		{
@@ -382,10 +376,9 @@ public final class ExifPatcher
 	}
 
 	/**
-	 * Scan IFD1 for JPEGInterchangeFormat (0x0201) and JPEGInterchangeFormatLength
-	 * (0x0202). Returns {thumbOffTag, thumbLenTag, oldThumbOff, oldThumbLen} or null
-	 * when either tag is missing — also null when oldThumbOff is zero (IFD1 exists
-	 * but no thumbnail is recorded).
+	 * Scan IFD1 for JPEGInterchangeFormat (0x0201) and JPEGInterchangeFormatLength (0x0202). Returns {thumbOffTag,
+	 * thumbLenTag, oldThumbOff, oldThumbLen} or null when either tag is missing — also null when oldThumbOff is
+	 * zero (IFD1 exists but no thumbnail is recorded).
 	 */
 	private static int[] findThumbnailTags(byte[] data, int ifd1, boolean isLittleEndian)
 	{
@@ -406,14 +399,12 @@ public final class ExifPatcher
 			if (tag == 0x0201) // JPEGInterchangeFormat
 			{
 				thumbOffTag = entryOffset;
-				oldThumbOff = (int) ByteBufferUtils.readU32(
-					data, entryOffset + 8, isLittleEndian);
+				oldThumbOff = (int) ByteBufferUtils.readU32(data, entryOffset + 8, isLittleEndian);
 			}
 			else if (tag == 0x0202) // JPEGInterchangeFormatLength
 			{
 				thumbLenTag = entryOffset;
-				oldThumbLen = (int) ByteBufferUtils.readU32(
-					data, entryOffset + 8, isLittleEndian);
+				oldThumbLen = (int) ByteBufferUtils.readU32(data, entryOffset + 8, isLittleEndian);
 			}
 		}
 		if (thumbOffTag < 0 || thumbLenTag < 0 || oldThumbOff == 0)
@@ -426,12 +417,11 @@ public final class ExifPatcher
 	private static void scanIfd(byte[] data, int ifdOff, int tiffStart, boolean isLittleEndian,
 		int newW, int newH, int orientation, int depth)
 	{
-		// Cycle / depth guard. Real-world EXIF has a single ExifSubIFD pointer (0x8769)
-		// from IFD0 → ExifSubIFD; corrupted or adversarial files can chain pointers
-		// in cycles or deeply nested fan-out, both of which would unbounded-recurse and
-		// throw StackOverflowError. Error is uncatchable in our normal Exception catches,
-		// so the bg thread crashes and the whole save/apply pipeline dies silently. Cap
-		// at 4 levels — well above the legitimate IFD0 → ExifSubIFD → InteropIFD chain.
+		// Cycle / depth guard. Real-world EXIF has a single ExifSubIFD pointer (0x8769) from IFD0 → ExifSubIFD;
+		// corrupted or adversarial files can chain pointers in cycles or deeply nested fan-out, both of which
+		// would unbounded-recurse and throw StackOverflowError. Error is uncatchable in our normal Exception
+		// catches, so the bg thread crashes and the whole save/apply pipeline dies silently. Cap at 4 levels —
+		// well above the legitimate IFD0 → ExifSubIFD → InteropIFD chain.
 		if (depth > 4 || ifdOff < 0 || ifdOff + 2 > data.length)
 		{
 			return;
@@ -459,20 +449,19 @@ public final class ExifPatcher
 				case 0x8769 ->
 				{
 					long off = ByteBufferUtils.readU32(data, entryOffset + 8, isLittleEndian);
-					// `off` is u32 (range 0..2^32-1) read into a long, so the addition
-					// `tiffStart + off` can exceed Integer.MAX_VALUE on adversarial
-					// EXIF. Validate the long-arithmetic result FIRST and only cast to
-					// int after we know it fits — without this guard, a malicious off
-					// like 0xFFFFFFFF would cast to a small-positive int that lands
-					// inside the buffer (e.g. (10 + 0xFFFFFFFFL) truncates to 9), which
-					// would re-enter scanIfd reading EXIF header bytes as IFD entries
-					// and writing orientation=1 over arbitrary data.
+					// `off` is u32 (range 0..2^32-1) read into a long, so the addition `tiffStart +
+					// off` can exceed Integer.MAX_VALUE on adversarial EXIF. Validate the
+					// long-arithmetic result FIRST and only cast to int after we know it fits —
+					// without this guard, a malicious off like 0xFFFFFFFF would cast to a
+					// small-positive int that lands inside the buffer (e.g. (10 + 0xFFFFFFFFL)
+					// truncates to 9), which would re-enter scanIfd reading EXIF header bytes as
+					// IFD entries and writing orientation=1 over arbitrary data.
 					long absSubIfd = tiffStart + off;
-					// Require absSubIfd >= tiffStart so a sub-tiffStart pointer (e.g., 4)
-					// can't recurse into the EXIF/TIFF header bytes — otherwise scanIfd
-					// would treat header bytes as IFD entries and write orientation = 1
-					// over the byte-order marker / magic, corrupting the EXIF segment.
-					// Matches the IFD0 guard in patch() and replaceThumbnail.
+					// Require absSubIfd >= tiffStart so a sub-tiffStart pointer (e.g., 4) can't
+					// recurse into the EXIF/TIFF header bytes — otherwise scanIfd would treat
+					// header bytes as IFD entries and write orientation = 1 over the byte-order
+					// marker / magic, corrupting the EXIF segment. Matches the IFD0 guard in
+					// patch() and replaceThumbnail.
 					if (off >= 0 && absSubIfd >= tiffStart && absSubIfd + 2 <= data.length)
 					{
 						scanIfd(data, (int) absSubIfd, tiffStart, isLittleEndian,
@@ -484,9 +473,9 @@ public final class ExifPatcher
 			}
 		}
 
-		// Don't follow the next-IFD link (IFD0 → IFD1).
-		// IFD1 is the thumbnail IFD — its dimension/orientation tags describe the thumbnail,
-		// not the primary. replaceThumbnail() handles the thumbnail data separately.
+		// Don't follow the next-IFD link (IFD0 → IFD1). IFD1 is the thumbnail IFD — its dimension/orientation
+		// tags describe the thumbnail, not the primary. replaceThumbnail() handles the thumbnail data
+		// separately.
 	}
 
 	private static void writeValue(byte[] data, int off, int type, boolean isLittleEndian, int value)

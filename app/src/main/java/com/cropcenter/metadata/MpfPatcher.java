@@ -5,8 +5,8 @@ import android.util.Log;
 import com.cropcenter.util.ByteBufferUtils;
 
 /**
- * Patches MPF (Multi-Picture Format) APP2 offsets in a JPEG byte array. After re-encoding the
- * primary image, the gain map's offset changes.
+ * Patches MPF (Multi-Picture Format) APP2 offsets in a JPEG byte array. After re-encoding the primary image, the gain
+ * map's offset changes.
  *
  * MPF APP2 structure:
  *   FF E2 [len] "MPF\0" [MP Endian II/MM] [TIFF IFD] [MP Entries]
@@ -37,11 +37,12 @@ public final class MpfPatcher
 			}
 			int marker = jpeg[off + 1] & 0xFF;
 
-			if (marker == 0xDA || marker == 0xD9)
+			if (marker == JpegMarker.SOS || marker == JpegMarker.EOI)
 			{
 				break; // SOS or EOI — stop
 			}
-			if (marker == 0x00 || marker == 0x01 || (marker >= 0xD0 && marker <= 0xD7))
+			if (marker == JpegMarker.STUFFING || marker == JpegMarker.TEM
+				|| (marker >= JpegMarker.RST_FIRST && marker <= JpegMarker.RST_LAST))
 			{
 				off += 2;
 				continue;
@@ -50,8 +51,7 @@ public final class MpfPatcher
 			int segLen = ByteBufferUtils.readU16BE(jpeg, off + 2);
 
 			// Check for MPF APP2: FF E2 + "MPF\0"
-			if (marker == 0xE2 && segLen > 8
-				&& jpeg[off + 4] == 'M' && jpeg[off + 5] == 'P'
+			if (marker == 0xE2 && segLen > 8 && jpeg[off + 4] == 'M' && jpeg[off + 5] == 'P'
 				&& jpeg[off + 6] == 'F' && jpeg[off + 7] == 0)
 			{
 				int mpfStart = off + 8; // position of MP Endian field
@@ -59,11 +59,10 @@ public final class MpfPatcher
 				{
 					return false;
 				}
-				// MP Endian field is 2 bytes per spec — "II" (0x49 0x49) for little-endian or
-				// "MM" (0x4D 0x4D) for big-endian. Only checking jpeg[mpfStart] would treat
-				// a malformed "IM" / "MI" as little-endian and parse subsequent IFD offsets
-				// with the wrong byte order, producing nonsensical bounds-check passes that
-				// land writes on arbitrary positions.
+				// MP Endian field is 2 bytes per spec — "II" (0x49 0x49) for little-endian or "MM"
+				// (0x4D 0x4D) for big-endian. Only checking jpeg[mpfStart] would treat a malformed "IM"
+				// / "MI" as little-endian and parse subsequent IFD offsets with the wrong byte order,
+				// producing nonsensical bounds-check passes that land writes on arbitrary positions.
 				int hi = jpeg[mpfStart] & 0xFF;
 				int lo = jpeg[mpfStart + 1] & 0xFF;
 				boolean isLittleEndian = hi == 0x49 && lo == 0x49;
@@ -111,9 +110,9 @@ public final class MpfPatcher
 		int entryTagOff, boolean isLittleEndian)
 	{
 		long byteCount = ByteBufferUtils.readU32(jpeg, entryTagOff + 4, isLittleEndian);
-		// Guard against a malformed table claiming thousands of entries. A sane MPF carries
-		// a handful of images (primary + gain map + optional burst/portrait layers); anything
-		// past 64 is almost certainly corrupt and would also make the int cast below suspect.
+		// Guard against a malformed table claiming thousands of entries. A sane MPF carries a handful of images
+		// (primary + gain map + optional burst/portrait layers); anything past 64 is almost certainly corrupt
+		// and would also make the int cast below suspect.
 		if (byteCount < 0 || byteCount > 64L * 16L)
 		{
 			Log.w(TAG, "MPF byteCount out of range: " + byteCount);
@@ -123,14 +122,11 @@ public final class MpfPatcher
 		long entryOffRel = ByteBufferUtils.readU32(jpeg, entryTagOff + 8, isLittleEndian);
 		int entryOff = (int) (mpfStart + entryOffRel);
 
-		// Validate entryOff — a malformed MPF with a huge/negative
-		// relative offset would otherwise throw out of writeU32.
-		// numImages < 2 means the MPF table can't accommodate a gain-map
-		// slot (entry[0] is primary, entry[1] is the gain map); patching
-		// only entry[0] in a single-image table would leave the caller's
+		// Validate entryOff — a malformed MPF with a huge/negative relative offset would otherwise throw out of
+		// writeU32. numImages < 2 means the MPF table can't accommodate a gain-map slot (entry[0] is primary,
+		// entry[1] is the gain map); patching only entry[0] in a single-image table would leave the caller's
 		// appended gain map desynced from the MPF index.
-		if (entryOff < mpfStart || numImages < 2
-			|| (long) entryOff + (long) numImages * 16L > jpeg.length)
+		if (entryOff < mpfStart || numImages < 2 || (long) entryOff + (long) numImages * 16L > jpeg.length)
 		{
 			Log.w(TAG, "MPF entry offset out of bounds or single-image: entryOff=" + entryOff
 				+ " numImages=" + numImages + " fileLen=" + jpeg.length);
@@ -139,10 +135,9 @@ public final class MpfPatcher
 
 		int gainMapSize = jpeg.length - primarySize;
 		int relativeOffset = primarySize - mpfStart;
-		// On a malformed MPF where the segment is positioned later in the file than the
-		// gain map start, relativeOffset is negative and writeU32 reinterprets it as a
-		// huge u32 — emitting a corrupt MP entry that decoders treat as an offset past
-		// EOF. Refuse to patch rather than write a poison value.
+		// On a malformed MPF where the segment is positioned later in the file than the gain map start,
+		// relativeOffset is negative and writeU32 reinterprets it as a huge u32 — emitting a corrupt MP entry
+		// that decoders treat as an offset past EOF. Refuse to patch rather than write a poison value.
 		if (relativeOffset < 0)
 		{
 			Log.w(TAG, "MPF relativeOffset negative (primarySize=" + primarySize
@@ -152,7 +147,6 @@ public final class MpfPatcher
 
 		Log.d(TAG, numImages + " images, mpfStart=" + mpfStart);
 
-		// Log before
 		for (int img = 0; img < numImages; img++)
 		{
 			int base = entryOff + img * 16;
@@ -163,23 +157,19 @@ public final class MpfPatcher
 				+ " size=" + size + " offset=" + dataOffset);
 		}
 
-		// Update entry[0] (primary): update size
 		ByteBufferUtils.writeU32(jpeg, entryOff + 4, primarySize, isLittleEndian);
 		Log.d(TAG, "entry[0] size → " + primarySize);
 
-		// Locate the gain-map entry. Per the MPF spec, the entry's lower 24 bits of
-		// `attr` carry the MPType (0x010005 = "Original Preservation" / gain map).
-		// Samsung Ultra HDR files always place the gain map at index 1, but multi-
-		// image MPFs (depth maps, burst frames, Apple Portrait layers) can shuffle
-		// it elsewhere — patching entry[1] unconditionally would write the gain-map
-		// size into the wrong slot and leave the actual gain-map entry stale, which
-		// strict-MPF decoders then reject. Walk all entries; if no MPType match is
-		// found, fall back to entry[1] ONLY when numImages == 2 (the empirical
-		// Samsung Ultra HDR pattern, which sometimes ships a malformed MPType field
-		// but reliably keeps the gain map at index 1). For numImages >= 3 with no
-		// MPType match, refuse the patch — writing entry[1] in that case can land
-		// the gain-map size on a depth map, burst frame, or thumbnail entry and
-		// leave the real gain-map entry stale.
+		// Locate the gain-map entry. Per the MPF spec, the entry's lower 24 bits of `attr` carry the MPType
+		// (0x010005 = "Original Preservation" / gain map). Samsung Ultra HDR files always place the gain map at
+		// index 1, but multi- image MPFs (depth maps, burst frames, Apple Portrait layers) can shuffle it
+		// elsewhere — patching entry[1] unconditionally would write the gain-map size into the wrong slot and
+		// leave the actual gain-map entry stale, which strict-MPF decoders then reject. Walk all entries; if no
+		// MPType match is found, fall back to entry[1] ONLY when numImages == 2 (the empirical Samsung Ultra
+		// HDR pattern, which sometimes ships a malformed MPType field but reliably keeps the gain map at index
+		// 1). For numImages >= 3 with no MPType match, refuse the patch — writing entry[1] in that case can
+		// land the gain-map size on a depth map, burst frame, or thumbnail entry and leave the real gain-map
+		// entry stale.
 		int gainMapEntryBase = -1;
 		for (int img = 1; img < numImages; img++)
 		{
@@ -206,7 +196,6 @@ public final class MpfPatcher
 		Log.d(TAG, "gain-map entry @ +" + (gainMapEntryBase - entryOff) / 16
 			+ " offset → " + relativeOffset + " size → " + gainMapSize);
 
-		// Log after
 		for (int img = 0; img < numImages; img++)
 		{
 			int base = entryOff + img * 16;

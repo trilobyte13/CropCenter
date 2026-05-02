@@ -7,13 +7,12 @@ import com.cropcenter.util.BitmapUtils;
 import com.cropcenter.util.RotationMath;
 
 /**
- * Viewport coordinate transforms + zoom/pan state for CropEditorView. Owns the baseScale,
- * viewport origin (viewportX / viewportY), and zoom factor. All conversions assume the image is centered
- * in the view at the viewport origin; screenToImagePixel additionally un-rotates for
- * CropState's rotation so callers can tap-select inside a rotated image.
+ * Viewport coordinate transforms + zoom/pan state for CropEditorView. Owns the baseScale, viewport origin (viewportX /
+ * viewportY), and zoom factor. All conversions assume the image is centered in the view at the viewport origin;
+ * screenToImagePixel additionally un-rotates for CropState's rotation so callers can tap-select inside a rotated image.
  *
- * No rendering, no gestures — just math. The hosting View is referenced only for its width
- * and height (the dimensions the math is relative to).
+ * No rendering, no gestures — just math. The hosting View is referenced only for its width and height (the dimensions
+ * the math is relative to).
  */
 final class ViewportMath
 {
@@ -33,8 +32,8 @@ final class ViewportMath
 	}
 
 	/**
-	 * Clamp viewportX / viewportY so the viewport stays inside the image bounds. If the image is smaller
-	 * than the visible window on an axis, that axis is centered.
+	 * Clamp viewportX / viewportY so the viewport stays inside the image bounds. If the image is smaller than the
+	 * visible window on an axis, that axis is centered.
 	 */
 	void clampViewport(CropState state)
 	{
@@ -68,8 +67,8 @@ final class ViewportMath
 	}
 
 	/**
-	 * Reset zoom to 1, recompute baseScale to fit the full image in the view, and center the
-	 * viewport on the image. Called on image load and on double-tap (outside Select mode).
+	 * Reset zoom to 1, recompute baseScale to fit the full image in the view, and center the viewport on the image.
+	 * Called on image load and on double-tap (outside Select mode).
 	 */
 	void fitToView(CropState state)
 	{
@@ -102,27 +101,25 @@ final class ViewportMath
 	}
 
 	/**
-	 * Convert image (ix, iy) to its rotated screen position — applies the same rotation
-	 * around the image center that the editor's onDraw applies to the bitmap. Use this for
-	 * overlays (selection points, polygon vertices) whose visual position must track image
-	 * content as the user rotates. For overlays defined in image-coord axis-aligned space
-	 * (the crop rectangle, dim regions), use imageToScreenX/Y directly.
+	 * Convert image (ix, iy) to its rotated screen position — applies the same rotation around the image center
+	 * that the editor's onDraw applies to the bitmap. Use this for overlays (selection points, polygon vertices)
+	 * whose visual position must track image content as the user rotates. For overlays defined in image-coord
+	 * axis-aligned space (the crop rectangle, dim regions), use imageToScreenX/Y directly.
 	 */
 	float[] imageToScreenRotated(float ix, float iy, CropState state)
 	{
 		float scrX = imageToScreenX(ix);
 		float scrY = imageToScreenY(iy);
 		float rotation = (state == null) ? 0f : state.getRotationDegrees();
-		// Collapse sub-epsilon rotations to the identity branch so tap mapping and
-		// rendering agree about whether the image is "really" rotated.
+		// Collapse sub-epsilon rotations to the identity branch so tap mapping and rendering agree about
+		// whether the image is "really" rotated.
 		if (Math.abs(rotation) < BitmapUtils.ROTATION_EPSILON)
 		{
 			return new float[] { scrX, scrY };
 		}
 		float imageScreenCenterX = imageToScreenX(state.getImageWidth() / 2f);
 		float imageScreenCenterY = imageToScreenY(state.getImageHeight() / 2f);
-		return RotationMath.rotate(scrX, scrY,
-			imageScreenCenterX, imageScreenCenterY, rotation, new float[2]);
+		return RotationMath.rotate(scrX, scrY, imageScreenCenterX, imageScreenCenterY, rotation, new float[2]);
 	}
 
 	/**
@@ -144,8 +141,7 @@ final class ViewportMath
 	}
 
 	/**
-	 * Pan the viewport by a SCREEN-space delta. Converts to image pixels via the current
-	 * zoom, then clamps.
+	 * Pan the viewport by a SCREEN-space delta. Converts to image pixels via the current zoom, then clamps.
 	 */
 	void panViewport(float dx, float dy, CropState state)
 	{
@@ -156,17 +152,16 @@ final class ViewportMath
 	}
 
 	/**
-	 * Convert a SCREEN point to IMAGE pixel coordinates, accounting for the CropState
-	 * rotation applied at draw time. Returns a float[2] of image pixels (possibly outside
-	 * image bounds — caller checks).
+	 * Convert a SCREEN point to IMAGE pixel coordinates, accounting for the CropState rotation applied at draw
+	 * time. Returns a float[2] of image pixels (possibly outside image bounds — caller checks).
 	 */
 	float[] screenToImagePixel(float screenX, float screenY, CropState state)
 	{
 		float rotation = (state == null) ? 0f : state.getRotationDegrees();
-		// Collapse sub-epsilon rotations to the identity branch. The renderer treats
-		// abs(rotation) < ROTATION_EPSILON as unrotated; input mapping must agree or a
-		// tiny residual angle skews tap hit-testing, long-press removal, horizon paint
-		// mapping, and isInsideRotatedImage while the image is being drawn straight.
+		// Collapse sub-epsilon rotations to the identity branch. The renderer treats abs(rotation) <
+		// ROTATION_EPSILON as unrotated; input mapping must agree or a tiny residual angle skews tap
+		// hit-testing, long-press removal, horizon paint mapping, and isInsideRotatedImage while the image is
+		// being drawn straight.
 		if (Math.abs(rotation) < BitmapUtils.ROTATION_EPSILON)
 		{
 			return new float[] { screenToImageX(screenX), screenToImageY(screenY) };
@@ -176,14 +171,13 @@ final class ViewportMath
 		float[] unrotated = RotationMath.inverse(screenX, screenY,
 			screenCenterX, screenCenterY, rotation, new float[2]);
 		return new float[] {
-			screenToImageX(unrotated[0]),
-			screenToImageY(unrotated[1])
+			screenToImageX(unrotated[0]), screenToImageY(unrotated[1])
 		};
 	}
 
 	/**
-	 * Convert screen X back to image X (no rotation compensation). Callers that need to
-	 * handle a rotated image use screenToImagePixel instead.
+	 * Convert screen X back to image X (no rotation compensation). Callers that need to handle a rotated image use
+	 * screenToImagePixel instead.
 	 */
 	float screenToImageX(float sx)
 	{
@@ -201,8 +195,8 @@ final class ViewportMath
 	}
 
 	/**
-	 * Zoom at a screen-space focus point, keeping that point stationary under the finger.
-	 * Clamps zoom to [1, 256] and re-clamps the viewport against the new scale.
+	 * Zoom at a screen-space focus point, keeping that point stationary under the finger. Clamps zoom to [1, 256]
+	 * and re-clamps the viewport against the new scale.
 	 */
 	void zoomAt(float scaleFactor, float focusX, float focusY, CropState state)
 	{

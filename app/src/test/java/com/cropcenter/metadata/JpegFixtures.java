@@ -4,24 +4,21 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 
 /**
- * Builders for synthetic JPEG byte sequences used by the metadata-extractor / patcher
- * tests. Produces minimal-valid layouts that exercise the parsers' marker walks without
- * needing real-photo fixtures (which are user-supplied and not committed). Each helper
- * returns the assembled byte array; callers compose them as needed.
+ * Builders for synthetic JPEG byte sequences used by the metadata-extractor / patcher tests. Produces minimal-valid
+ * layouts that exercise the parsers' marker walks without needing real-photo fixtures (which are user-supplied and not
+ * committed). Each helper returns the assembled byte array; callers compose them as needed.
  *
- * Not a runtime helper — lives only in the test source set. Public so all test classes
- * (including those outside com.cropcenter.metadata, like BitmapUtilsTest in com.cropcenter
- * .util) can share builders without copy-paste.
+ * Not a runtime helper — lives only in the test source set. Public so all test classes (including those outside
+ * com.cropcenter.metadata, like BitmapUtilsTest in com.cropcenter .util) can share builders without copy-paste.
  */
 public final class JpegFixtures
 {
 	private JpegFixtures() {}
 
 	/**
-	 * Append `payload` as the body of an APPn (or COM) segment with the given marker.
-	 * Adds the FF marker, the 2-byte big-endian length field, and the payload bytes.
-	 * `marker` is the second byte of the marker pair (e.g., 0xE0 for APP0, 0xE1 for APP1,
-	 * 0xFE for COM); the leading FF is implied.
+	 * Append `payload` as the body of an APPn (or COM) segment with the given marker. Adds the FF marker, the
+	 * 2-byte big-endian length field, and the payload bytes. `marker` is the second byte of the marker pair (e.g.,
+	 * 0xE0 for APP0, 0xE1 for APP1, 0xFE for COM); the leading FF is implied.
 	 */
 	public static byte[] appSegment(int marker, byte[] payload) throws IOException
 	{
@@ -37,8 +34,8 @@ public final class JpegFixtures
 	}
 
 	/**
-	 * Concatenate an arbitrary number of byte arrays in order. Lets each test express
-	 * "SOI + APP0 + APP1 + SOS body + EOI" as a single composition.
+	 * Concatenate an arbitrary number of byte arrays in order. Lets each test express "SOI + APP0 + APP1 + SOS body
+	 * + EOI" as a single composition.
 	 */
 	public static byte[] concat(byte[]... parts) throws IOException
 	{
@@ -59,8 +56,8 @@ public final class JpegFixtures
 	}
 
 	/**
-	 * Build a minimal-valid EXIF APP1 segment: "Exif\0\0" + a stub TIFF header and
-	 * single-entry IFD. Sufficient for JpegSegment.isExif() to return true.
+	 * Build a minimal-valid EXIF APP1 segment: "Exif\0\0" + a stub TIFF header and single-entry IFD. Sufficient for
+	 * JpegSegment.isExif() to return true.
 	 */
 	public static byte[] exifAppPayload()
 	{
@@ -83,9 +80,9 @@ public final class JpegFixtures
 	}
 
 	/**
-	 * Minimal SOS segment + entropy-coded scan + EOI. The scan body is just a few
-	 * sample-data bytes followed by the EOI marker. SOS length = 6 (the minimum
-	 * legal value for 1-component scans, even though the marker walk doesn't care).
+	 * Minimal SOS segment + entropy-coded scan + EOI. The scan body is just a few sample-data bytes followed by the
+	 * EOI marker. SOS length = 6 (the minimum legal value for 1-component scans, even though the marker walk
+	 * doesn't care).
 	 */
 	public static byte[] minimalScanAndEoi() throws IOException
 	{

@@ -7,28 +7,31 @@ import android.graphics.Paint;
 import android.graphics.Rect;
 
 /**
- * Reads EXIF orientation from raw JPEG bytes and rotates the bitmap accordingly.
- * BitmapFactory.decodeByteArray() does NOT auto-apply EXIF rotation.
+ * Reads EXIF orientation from raw JPEG bytes and rotates the bitmap accordingly. BitmapFactory.decodeByteArray() does
+ * NOT auto-apply EXIF rotation.
  */
 public final class BitmapUtils
 {
-	// Rotation values with magnitude below this threshold (degrees) are treated as
-	// 0 for rendering purposes. The ruler exposes 0.01° as its finest tick step
-	// (and the horizon detector / precise-rotation dialog round to 0.01° too), so
-	// the threshold sits a half-step below that — anything ≥ 0.005° is honored
-	// end-to-end (renderer rotates, readout shows, ExportPipeline can't bypass);
-	// anything below is below user control and would just burn a bilinear pass for
-	// no visible benefit. On a 4000-px-wide image, 0.01° corresponds to a corner
-	// shift of ~0.7 px, which is observable on fine vertical/horizontal lines.
+	// Rotation values with magnitude below this threshold (degrees) are treated as 0 for rendering purposes. The
+	// ruler exposes 0.01° as its finest tick step (and the horizon detector / precise-rotation dialog round to
+	// 0.01° too), so the threshold sits a half-step below that — anything ≥ 0.005° is honored end-to-end (renderer
+	// rotates, readout shows, ExportPipeline can't bypass); anything below is below user control and would just
+	// burn a bilinear pass for no visible benefit. On a 4000-px-wide image, 0.01° corresponds to a corner shift of
+	// ~0.7 px, which is observable on fine vertical/horizontal lines.
 	public static final float ROTATION_EPSILON = 0.005f;
 
 	private BitmapUtils() {}
 
 	/**
-	 * Apply EXIF orientation to a bitmap, returning a correctly rotated bitmap.
-	 * The input bitmap may be recycled if rotation was needed. EXIF orientations
-	 * are pure mirror / 90° / 180° transforms — lossless integer-pixel remaps —
-	 * so createBitmap uses filter=false to guarantee no bilinear softening.
+	 * Apply EXIF orientation to a bitmap, returning a correctly rotated bitmap. The input bitmap may be recycled if
+	 * rotation was needed. EXIF orientations are pure mirror / 90° / 180° transforms — lossless integer-pixel
+	 * remaps — so createBitmap uses filter=false to guarantee no bilinear softening.
+	 *
+	 * @param bmp         source bitmap; recycled when rotation produces a new instance
+	 * @param orientation EXIF orientation tag value (1..8); values outside that range
+	 *                    are treated as identity and the bitmap is returned unchanged
+	 * @return correctly rotated bitmap (may be the same reference as bmp when
+	 *         orientation == 1 or out of range)
 	 */
 	public static Bitmap applyOrientation(Bitmap bmp, int orientation)
 	{
@@ -46,16 +49,14 @@ public final class BitmapUtils
 	}
 
 	/**
-	 * Draw a source bitmap onto a canvas representing the crop window, with optional rotation
-	 * around the image center. Used by both CropExporter and UltraHdrCompat to ensure identical
-	 * rendering.
+	 * Draw a source bitmap onto a canvas representing the crop window, with optional rotation around the image
+	 * center. Used by both CropExporter and UltraHdrCompat to ensure identical rendering.
 	 *
-	 * srcX / srcY are continuous-float image coordinates (= centerX − cropW/2f etc.). When
-	 * they are integer-exact, the zero-rotation path takes an integer Rect-to-Rect blit that
-	 * bypasses any filter-bitmap softening. When they are fractional (rotated selection, fine
-	 * rotation drag) the zero-rotation path falls back to a float-offset drawBitmap which
-	 * bilinear-samples sub-pixel positions — matching what the rotated path does. The rotated
-	 * path always uses the float offset, so it handles fractional input natively.
+	 * srcX / srcY are continuous-float image coordinates (= centerX − cropW/2f etc.). When they are integer-exact,
+	 * the zero-rotation path takes an integer Rect-to-Rect blit that bypasses any filter-bitmap softening. When
+	 * they are fractional (rotated selection, fine rotation drag) the zero-rotation path falls back to a
+	 * float-offset drawBitmap which bilinear-samples sub-pixel positions — matching what the rotated path does. The
+	 * rotated path always uses the float offset, so it handles fractional input natively.
 	 *
 	 * @param canvas   output canvas (cropW x cropH)
 	 * @param src      source bitmap in display orientation
@@ -64,25 +65,21 @@ public final class BitmapUtils
 	 * @param rotation rotation in degrees (0 = no rotation)
 	 * @param paint    paint for bitmap drawing (FILTER_BITMAP_FLAG controls sub-pixel sampling)
 	 */
-	public static void drawCropped(Canvas canvas, Bitmap src, float srcX, float srcY,
-		float rotation, Paint paint)
+	public static void drawCropped(Canvas canvas, Bitmap src, float srcX, float srcY, float rotation, Paint paint)
 	{
 		float drawX = -srcX;
 		float drawY = -srcY;
 		if (Math.abs(rotation) >= ROTATION_EPSILON)
 		{
 			canvas.save();
-			canvas.rotate(rotation,
-				drawX + src.getWidth() / 2f,
-				drawY + src.getHeight() / 2f);
+			canvas.rotate(rotation, drawX + src.getWidth() / 2f, drawY + src.getHeight() / 2f);
 
-			// Cardinal rotations (±90°, 180°, ±270°) are pure integer-pixel remaps ONLY when
-			// srcX / srcY are also integer-aligned — in that case, disable bilinear filtering
-			// so nearest-neighbor sampling inherits source pixels verbatim. Fractional srcX /
-			// srcY mean dst pixels end up at sub-pixel positions relative to the canvas grid,
-			// so we need bilinear to match the preview (which draws at the same fractional
-			// offset). Non-cardinal rotations always bilinear-sample — interpolation is
-			// inherent to the geometry.
+			// Cardinal rotations (±90°, 180°, ±270°) are pure integer-pixel remaps ONLY when srcX / srcY
+			// are also integer-aligned — in that case, disable bilinear filtering so nearest-neighbor
+			// sampling inherits source pixels verbatim. Fractional srcX / srcY mean dst pixels end up at
+			// sub-pixel positions relative to the canvas grid, so we need bilinear to match the preview
+			// (which draws at the same fractional offset). Non-cardinal rotations always bilinear-sample —
+			// interpolation is inherent to the geometry.
 			boolean integerAligned = srcX == Math.floor(srcX) && srcY == Math.floor(srcY);
 			if (isCardinalRotation(rotation) && integerAligned)
 			{
@@ -98,9 +95,9 @@ public final class BitmapUtils
 		}
 		else if (srcX == Math.floor(srcX) && srcY == Math.floor(srcY))
 		{
-			// Integer-aligned: Rect-to-Rect blit produces a lossless pixel copy regardless of
-			// the paint's filter flag. Used when the crop has snapped to pixel boundaries
-			// (fit-to-view, rotation = 0 on a cardinal-placed selection, etc.).
+			// Integer-aligned: Rect-to-Rect blit produces a lossless pixel copy regardless of the paint's
+			// filter flag. Used when the crop has snapped to pixel boundaries (fit-to-view, rotation = 0 on
+			// a cardinal-placed selection, etc.).
 			int cropW = canvas.getWidth();
 			int cropH = canvas.getHeight();
 			int intSrcX = (int) srcX;
@@ -119,36 +116,40 @@ public final class BitmapUtils
 		}
 		else
 		{
-			// Fractional srcX / srcY (continuous-float crop origin during rotation or
-			// rotated-selection placement). Draw at the float offset so Android's renderer
-			// bilinear-samples at sub-pixel positions — matches the rotated path above and
-			// matches what the editor preview renders via the same crop origin.
+			// Fractional srcX / srcY (continuous-float crop origin during rotation or rotated-selection
+			// placement). Draw at the float offset so Android's renderer bilinear-samples at sub-pixel
+			// positions — matches the rotated path above and matches what the editor preview renders via
+			// the same crop origin.
 			canvas.drawBitmap(src, drawX, drawY, paint);
 		}
 	}
 
 	/**
-	 * True when `rotation` is within ROTATION_EPSILON of ±90°, 180°, or ±270°
-	 * (mod 360). Cardinal rotations map integer source pixels to integer
-	 * destination pixels and are therefore losslessly expressible with
+	 * True when `rotation` is within ROTATION_EPSILON of ±90°, 180°, or ±270° (mod 360). Cardinal rotations map
+	 * integer source pixels to integer destination pixels and are therefore losslessly expressible with
 	 * nearest-neighbor sampling. Non-cardinal rotations require bilinear filtering.
 	 *
-	 * 0° (and ±360°, ±720°, …) is explicitly NOT cardinal here — drawCropped's
-	 * cardinal branch is the rotated path, and 0° already goes through the
-	 * unrotated fast path higher up that gates on
-	 * Math.abs(rotation) >= ROTATION_EPSILON. Including 0 would route an
-	 * already-handled case through a strictly-worse code path.
+	 * 0° (and ±360°, ±720°, …) is explicitly NOT cardinal here — drawCropped's cardinal branch is the rotated path,
+	 * and 0° already goes through the unrotated fast path higher up that gates on Math.abs(rotation) >=
+	 * ROTATION_EPSILON. Including 0 would route an already-handled case through a strictly-worse code path.
+	 *
+	 * @param rotation rotation in degrees; sign / magnitude / mod-360 all handled
+	 * @return true when the angle is within ROTATION_EPSILON of ±90° / 180° / ±270°
 	 */
 	public static boolean isCardinalRotation(float rotation)
 	{
 		float normalized = ((rotation % 360f) + 360f) % 360f;
-		return Math.abs(normalized - 90f) < ROTATION_EPSILON
-			|| Math.abs(normalized - 180f) < ROTATION_EPSILON
+		return Math.abs(normalized - 90f) < ROTATION_EPSILON || Math.abs(normalized - 180f) < ROTATION_EPSILON
 			|| Math.abs(normalized - 270f) < ROTATION_EPSILON;
 	}
 
 	/**
 	 * Build a Matrix for the given EXIF orientation value (1-8).
+	 *
+	 * @param orientation EXIF orientation tag (1..8); values outside that range
+	 *                    return an identity matrix
+	 * @return transformation matrix that, when applied, brings stored pixels to
+	 *         display orientation
 	 */
 	public static Matrix orientationMatrix(int orientation)
 	{
@@ -175,8 +176,11 @@ public final class BitmapUtils
 	}
 
 	/**
-	 * Read EXIF orientation tag from raw JPEG bytes. Returns orientation value (1-8), or 1 if
-	 * not found.
+	 * Read EXIF orientation tag from raw JPEG bytes.
+	 *
+	 * @param jpeg full JPEG file bytes
+	 * @return EXIF orientation 1..8, or 1 when the tag is absent, the bytes aren't a
+	 *         JPEG, or the EXIF byte-order field is malformed
 	 */
 	public static int readExifOrientation(byte[] jpeg)
 	{
@@ -184,8 +188,11 @@ public final class BitmapUtils
 		{
 			return readExifOrientationInternal(jpeg);
 		}
-		catch (Exception e)
+		catch (Exception ignored)
 		{
+			// Per the documented contract, malformed EXIF returns 1 (upright) — the same fallback as a
+			// missing tag. The exception is genuinely intentional to swallow: corrupted EXIF bytes are
+			// common in third-party-edited JPEGs and we don't want to spam the log on every load.
 			return 1;
 		}
 	}
@@ -221,8 +228,7 @@ public final class BitmapUtils
 			int segLen = ByteBufferUtils.readU16BE(jpeg, off + 2);
 
 			// APP1 with Exif header
-			if (marker == 0xE1 && segLen > 14
-				&& jpeg[off + 4] == 'E' && jpeg[off + 5] == 'x'
+			if (marker == 0xE1 && segLen > 14 && jpeg[off + 4] == 'E' && jpeg[off + 5] == 'x'
 				&& jpeg[off + 6] == 'i' && jpeg[off + 7] == 'f'
 				&& jpeg[off + 8] == 0 && jpeg[off + 9] == 0)
 			{
@@ -231,9 +237,9 @@ public final class BitmapUtils
 				{
 					return 1;
 				}
-				// TIFF byte-order marker is 2 bytes — "II" (little) or "MM" (big). A
-				// malformed mismatched pair would silently be treated as little-endian
-				// and produce nonsense u32 reads downstream.
+				// TIFF byte-order marker is 2 bytes — "II" (little) or "MM" (big). A malformed
+				// mismatched pair would silently be treated as little-endian and produce nonsense u32
+				// reads downstream.
 				int byteOrderHi = jpeg[tiffStart] & 0xFF;
 				int byteOrderLo = jpeg[tiffStart + 1] & 0xFF;
 				if (!((byteOrderHi == 0x49 && byteOrderLo == 0x49)

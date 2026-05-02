@@ -6,12 +6,10 @@ import static org.junit.Assert.fail;
 import org.junit.Test;
 
 /**
- * Tests for ByteBufferUtils' read/write helpers and the round-6 overflow-safe bounds
- * checks. The bounds checks are private but exercised through every public read/write
- * variant — driving them via the public API gives realistic call-shape coverage and
- * pins down the exact-fit boundary, the one-past-end rejection, the negative-offset
- * rejection, and the wraparound rejection at offsets near Integer.MAX_VALUE that the
- * round-6 fix made impossible.
+ * Tests for ByteBufferUtils' read/write helpers and the round-6 overflow-safe bounds checks. The bounds checks are
+ * private but exercised through every public read/write variant — driving them via the public API gives realistic
+ * call-shape coverage and pins down the exact-fit boundary, the one-past-end rejection, the negative-offset rejection,
+ * and the wraparound rejection at offsets near Integer.MAX_VALUE that the round-6 fix made impossible.
  */
 public class ByteBufferUtilsTest
 {
@@ -142,12 +140,11 @@ public class ByteBufferUtilsTest
 	@Test
 	public void readU16AtMaxIntOffsetThrows()
 	{
-		// Round-6 fix target. Under the old `offset + length > data.length` form,
-		// `Integer.MAX_VALUE + 2` wraps to a negative int that fails the bounds
-		// check by being < data.length, silently passing — and then the array
-		// access at data[Integer.MAX_VALUE] AIOOBEs anyway, but with a less
-		// useful trace. Subtraction-based check (`offset > data.length - length`)
-		// rejects up-front: MAX_VALUE > (8 - 2) = 6 → throws.
+		// Round-6 fix target. Under the old `offset + length > data.length` form, `Integer.MAX_VALUE + 2` wraps
+		// to a negative int that fails the bounds check by being < data.length, silently passing — and then the
+		// array access at data[Integer.MAX_VALUE] AIOOBEs anyway, but with a less useful trace.
+		// Subtraction-based check (`offset > data.length - length`) rejects up-front: MAX_VALUE > (8 - 2) = 6 →
+		// throws.
 		byte[] data = new byte[8];
 		try
 		{
@@ -189,9 +186,8 @@ public class ByteBufferUtilsTest
 	@Test
 	public void readU32EndianDispatchPicksLittleEndianForTrueFlag()
 	{
-		// readU32 is the endian-dispatched wrapper used at every metadata-pipeline
-		// call site; pin down that the boolean dispatches to the correct native
-		// reader rather than always going through one path.
+		// readU32 is the endian-dispatched wrapper used at every metadata-pipeline call site; pin down that the
+		// boolean dispatches to the correct native reader rather than always going through one path.
 		byte[] data = { 0x12, 0x34, 0x56, 0x78 };
 		assertEquals(0x78563412L, ByteBufferUtils.readU32(data, 0, true));
 		assertEquals(0x12345678L, ByteBufferUtils.readU32(data, 0, false));

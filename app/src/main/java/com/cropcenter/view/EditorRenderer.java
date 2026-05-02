@@ -16,10 +16,9 @@ import com.cropcenter.util.ThemeColors;
 import java.util.List;
 
 /**
- * onDraw body for CropEditorView, extracted so the host view can focus on lifecycle and
- * gesture routing. Owns every Paint used during rendering plus the GridRenderer; reads
- * current transforms from a ViewportMath, current state from CropState, and delegates the
- * auto-rotate overlay to a HorizonPaintOverlay.
+ * onDraw body for CropEditorView, extracted so the host view can focus on lifecycle and gesture routing. Owns every
+ * Paint used during rendering plus the GridRenderer; reads current transforms from a ViewportMath, current state from
+ * CropState, and delegates the auto-rotate overlay to a HorizonPaintOverlay.
  *
  * No mutation of CropState happens here — this is a pure read-and-draw pass.
  */
@@ -64,13 +63,22 @@ final class EditorRenderer
 		infoPaint.setTextSize(24f);
 	}
 
+	/**
+	 * Top-level frame draw. Renders (in order): background fill, source bitmap with rotation, optional pixel grid,
+	 * optional crop overlay (dim outside + grid lines + crosshair), selection points/polygon/labels, horizon paint
+	 * overlay. Snapshots `state.getSourceImage()` once at entry to avoid races with the bg-thread loadImage path
+	 * nulling the field mid-frame.
+	 *
+	 * @param canvas  destination canvas (the View's onDraw canvas)
+	 * @param state   editor state — source image, crop rect, rotation, selection, grid config
+	 * @param horizon overlay that draws the painted horizon-region polygon
+	 */
 	void draw(Canvas canvas, CropState state, HorizonPaintOverlay horizon)
 	{
-		// Snapshot once: sourceImage can be nulled on the background executor during
-		// loadImage's reset() while this draw is mid-flight. A null check followed by a
-		// second read can race — the check passes on the previous bitmap and the second
-		// read returns null, NPE'ing the subsequent bmp.getWidth(). One local read is
-		// consistent for the whole frame regardless of concurrent writes.
+		// Snapshot once: sourceImage can be nulled on the background executor during loadImage's reset() while
+		// this draw is mid-flight. A null check followed by a second read can race — the check passes on the
+		// previous bitmap and the second read returns null, NPE'ing the subsequent bmp.getWidth(). One local
+		// read is consistent for the whole frame regardless of concurrent writes.
 		Bitmap bmp = state == null ? null : state.getSourceImage();
 		if (bmp == null)
 		{
@@ -87,13 +95,12 @@ final class EditorRenderer
 		float left = viewport.imageToScreenX(0);
 		float top = viewport.imageToScreenY(0);
 		float rotation = state.getRotationDegrees();
-		// setScale initialises the matrix to a pure scale — overwrites any prior state, so
-		// we can reuse bitmapMatrix across frames without an explicit reset().
+		// setScale initialises the matrix to a pure scale — overwrites any prior state, so we can reuse
+		// bitmapMatrix across frames without an explicit reset().
 		bitmapMatrix.setScale(scale, scale);
 		bitmapMatrix.postTranslate(left, top);
-		// Treat sub-UI-resolution residues as exactly zero — skipping postRotate keeps
-		// the identity transform path (crisper preview) when the user has returned the
-		// ruler to "0" but a tiny float residue remains.
+		// Treat sub-UI-resolution residues as exactly zero — skipping postRotate keeps the identity transform
+		// path (crisper preview) when the user has returned the ruler to "0" but a tiny float residue remains.
 		if (Math.abs(rotation) >= BitmapUtils.ROTATION_EPSILON)
 		{
 			float imageScreenCenterX = left + bmp.getWidth() * scale / 2f;
@@ -112,8 +119,8 @@ final class EditorRenderer
 		{
 			int cropW = state.getCropW();
 			int cropH = state.getCropH();
-			// Use the continuous-float crop origin for rendering so smooth rotation produces
-			// smooth crop motion. The exporter's integer getCropImageX absorbs the sub-pixel.
+			// Use the continuous-float crop origin for rendering so smooth rotation produces smooth crop
+			// motion. The exporter's integer getCropImageX absorbs the sub-pixel.
 			gridImgX = state.getCropImageXFloat();
 			gridImgY = state.getCropImageYFloat();
 			gridW = cropW;
@@ -144,6 +151,11 @@ final class EditorRenderer
 		}
 	}
 
+	/**
+	 * Draw the crop-rectangle overlay: 4 dim rectangles outside the crop, the grid lines inside, and the
+	 * center-of-crop crosshair. Crop coordinates arrive in image-space; converted to screen-space via the viewport
+	 * before drawing.
+	 */
 	private void drawCropOverlay(Canvas canvas, CropState state,
 		float gridImgX, float gridImgY, int cropW, int cropH)
 	{
@@ -186,6 +198,12 @@ final class EditorRenderer
 			view.getWidth() / 2f, view.getHeight() / 2f, infoPaint);
 	}
 
+	/**
+	 * Draw a 1-pixel-per-image-pixel grid when the GridConfig flag is on AND the viewport is zoomed past 6×. Below
+	 * the threshold the grid lines would be sub-pixel and unreadable. Computes a rotation-aware axis-aligned
+	 * bounding box of the visible image area and only draws lines inside that AABB to avoid the O(W * H) full-image
+	 * walk.
+	 */
 	private void drawPixelGridIfZoomed(Canvas canvas, CropState state, Bitmap bmp, float scale)
 	{
 		if (!state.getGridConfig().showPixelGrid() || scale < 6f)
@@ -195,8 +213,8 @@ final class EditorRenderer
 		pixelGridPaint.setColor(state.getGridConfig().pixelGridColor());
 		pixelGridPaint.setStrokeWidth(1f);
 
-		// The grid must follow the rotated bitmap. Draw in the rotated canvas so the
-		// pixel lines stay aligned with the actual pixel boundaries the user sees.
+		// The grid must follow the rotated bitmap. Draw in the rotated canvas so the pixel lines stay aligned
+		// with the actual pixel boundaries the user sees.
 		float rotation = state.getRotationDegrees();
 		boolean rotated = Math.abs(rotation) >= BitmapUtils.ROTATION_EPSILON;
 		if (rotated)
@@ -207,13 +225,11 @@ final class EditorRenderer
 			canvas.rotate(rotation, imageScreenCenterX, imageScreenCenterY);
 		}
 
-		// Cull to the rotated viewport's AABB in image space. Un-rotating the four screen
-		// corners gives the image coords that could possibly be visible under the current
-		// rotation + viewport; any pixel line outside that AABB is guaranteed off-screen.
-		// For a 10000×10000 bitmap zoomed to ~6× on a 1080p view we go from ~20 000 lines
-		// drawn to a few hundred — the difference shows up in onDraw time on lower-end
-		// devices. Add a one-pixel margin so the border lines of the visible region always
-		// draw.
+		// Cull to the rotated viewport's AABB in image space. Un-rotating the four screen corners gives the
+		// image coords that could possibly be visible under the current rotation + viewport; any pixel line
+		// outside that AABB is guaranteed off-screen. For a 10000×10000 bitmap zoomed to ~6× on a 1080p view we
+		// go from ~20 000 lines drawn to a few hundred — the difference shows up in onDraw time on lower-end
+		// devices. Add a one-pixel margin so the border lines of the visible region always draw.
 		int imgW = bmp.getWidth();
 		int imgH = bmp.getHeight();
 		int[] bounds = visibleImageBoundsAabb(state, imgW, imgH);
@@ -244,13 +260,11 @@ final class EditorRenderer
 	}
 
 	/**
-	 * Draw the numeric index label next to each selection point. Labels are drawn
-	 * axis-aligned (upright) at the rotated screen position of each point so the digits
-	 * stay legible under rotation. This runs in the un-rotated canvas — caller must
-	 * have already restored out of the rotated canvas before calling.
+	 * Draw the numeric index label next to each selection point. Labels are drawn axis-aligned (upright) at the
+	 * rotated screen position of each point so the digits stay legible under rotation. This runs in the un-rotated
+	 * canvas — caller must have already restored out of the rotated canvas before calling.
 	 */
-	private void drawSelectionLabels(Canvas canvas, CropState state,
-		List<SelectionPoint> points, float scale)
+	private void drawSelectionLabels(Canvas canvas, CropState state, List<SelectionPoint> points, float scale)
 	{
 		float pixelSize = scale;
 		int labelIndex = 0;
@@ -261,8 +275,7 @@ final class EditorRenderer
 			{
 				int pixelX = (int) Math.floor(point.x());
 				int pixelY = (int) Math.floor(point.y());
-				float[] center = viewport.imageToScreenRotated(
-					pixelX + 0.5f, pixelY + 0.5f, state);
+				float[] center = viewport.imageToScreenRotated(pixelX + 0.5f, pixelY + 0.5f, state);
 				infoPaint.setTextAlign(Paint.Align.CENTER);
 				infoPaint.setTextSize(Math.min(pixelSize * 0.6f, 14f * density));
 				infoPaint.setColor(POINT_LABEL_COLOR);
@@ -276,17 +289,15 @@ final class EditorRenderer
 				infoPaint.setTextAlign(Paint.Align.CENTER);
 				infoPaint.setTextSize(9f * density);
 				infoPaint.setColor(POINT_LABEL_COLOR);
-				canvas.drawText(String.valueOf(labelIndex),
-					center[0], center[1] + 4, infoPaint);
+				canvas.drawText(String.valueOf(labelIndex), center[0], center[1] + 4, infoPaint);
 			}
 		}
 	}
 
 	/**
-	 * Draw the per-selection-point marker. Filled image-pixel square when zoomed past
-	 * 6× screen-pixel per image-pixel (marker visibly follows the rotated pixel grid,
-	 * becoming a rotated quadrilateral at non-cardinal angles); a 10-px circle when
-	 * zoomed out (single pixel is too small to see).
+	 * Draw the per-selection-point marker. Filled image-pixel square when zoomed past 6× screen-pixel per
+	 * image-pixel (marker visibly follows the rotated pixel grid, becoming a rotated quadrilateral at non-cardinal
+	 * angles); a 10-px circle when zoomed out (single pixel is too small to see).
 	 */
 	private void drawSelectionMarkers(Canvas canvas, List<SelectionPoint> points, float scale)
 	{
@@ -312,6 +323,11 @@ final class EditorRenderer
 		}
 	}
 
+	/**
+	 * Draw selection markers + connecting polygon + labels for state.getSelectionPoints(). Wraps the marker draws
+	 * in a canvas save/rotate/restore when the editor is rotated, so markers stay axis-aligned in image-space
+	 * (visually rotating with the image) rather than appearing to slide as the image rotates underneath.
+	 */
 	private void drawSelectionPoints(Canvas canvas, CropState state, float scale)
 	{
 		List<SelectionPoint> points = state.getSelectionPoints();
@@ -321,10 +337,9 @@ final class EditorRenderer
 		pointPaint.setColor(selColor);
 		polygonPaint.setColor(selColor);
 
-		// Markers + polygon track image content under rotation by drawing inside a canvas
-		// rotated the same way the bitmap was — a point placed on the sun stays on the sun
-		// after rotation. Text labels are drawn afterwards (axis-aligned) at the rotated
-		// position so the digits stay upright.
+		// Markers + polygon track image content under rotation by drawing inside a canvas rotated the same way
+		// the bitmap was — a point placed on the sun stays on the sun after rotation. Text labels are drawn
+		// afterwards (axis-aligned) at the rotated position so the digits stay upright.
 		float rotation = state.getRotationDegrees();
 		boolean rotated = Math.abs(rotation) >= BitmapUtils.ROTATION_EPSILON;
 		if (rotated)
@@ -347,9 +362,9 @@ final class EditorRenderer
 	}
 
 	/**
-	 * Draw the translucent polygon connecting selection points. Only rendered when 3+
-	 * points are placed (fewer don't form a closed region). Runs inside the caller's
-	 * rotated canvas so the polygon follows the image under rotation.
+	 * Draw the translucent polygon connecting selection points. Only rendered when 3+ points are placed (fewer
+	 * don't form a closed region). Runs inside the caller's rotated canvas so the polygon follows the image under
+	 * rotation.
 	 */
 	private void drawSelectionPolygon(Canvas canvas, List<SelectionPoint> points)
 	{
@@ -378,10 +393,9 @@ final class EditorRenderer
 	}
 
 	/**
-	 * Return [startX, startY, endX, endY] — the integer AABB of image coords visible
-	 * under the current viewport + rotation, clamped to the bitmap's bounds. Computed
-	 * by un-rotating each of the four screen-viewport corners into image space and
-	 * taking the axis-aligned bbox of those points.
+	 * Return [startX, startY, endX, endY] — the integer AABB of image coords visible under the current viewport +
+	 * rotation, clamped to the bitmap's bounds. Computed by un-rotating each of the four screen-viewport corners
+	 * into image space and taking the axis-aligned bbox of those points.
 	 */
 	private int[] visibleImageBoundsAabb(CropState state, int imgW, int imgH)
 	{

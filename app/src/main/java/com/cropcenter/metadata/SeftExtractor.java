@@ -3,9 +3,8 @@ package com.cropcenter.metadata;
 import android.util.Log;
 
 /**
- * Extracts the Samsung SEFT trailer from a JPEG file. The SEFT trailer is appended after the last
- * JPEG EOI (after gain map if present). Layout: [SEFT data blocks][SEFH directory][4-byte size
- * LE][4-byte "SEFT" magic]
+ * Extracts the Samsung SEFT trailer from a JPEG file. The SEFT trailer is appended after the last JPEG EOI (after gain
+ * map if present). Layout: [SEFT data blocks][SEFH directory][4-byte size LE][4-byte "SEFT" magic]
  */
 public final class SeftExtractor
 {
@@ -16,7 +15,8 @@ public final class SeftExtractor
 	/**
 	 * Extract raw SEFT trailer bytes from the file.
 	 *
-	 * @return SEFT trailer bytes, or null if not present.
+	 * @param file raw bytes of the full Samsung-edited JPEG
+	 * @return SEFT trailer bytes, or null if not present
 	 */
 	public static byte[] extract(byte[] file)
 	{
@@ -27,14 +27,13 @@ public final class SeftExtractor
 		int len = file.length;
 
 		// Check for "SEFT" magic at end
-		if (file[len - 4] != 'S' || file[len - 3] != 'E'
-			|| file[len - 2] != 'F' || file[len - 1] != 'T')
+		if (file[len - 4] != 'S' || file[len - 3] != 'E' || file[len - 2] != 'F' || file[len - 1] != 'T')
 		{
 			return null;
 		}
 
-		// Find the start of the SEFT trailer by scanning backwards for the last FFD9
-		// (which is the gain map's or primary's EOI)
+		// Find the start of the SEFT trailer by scanning backwards for the last FFD9 (which is the gain map's
+		// or primary's EOI)
 		int trailerStart = -1;
 		for (int i = len - 9; i >= 2; i--)
 		{

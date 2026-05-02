@@ -9,8 +9,8 @@ import java.io.IOException;
 import java.util.List;
 
 /**
- * Injects original metadata segments into a re-encoded JPEG. Strips the re-encoder's own APP/COM
- * markers (JFIF, sRGB ICC, etc.) and replaces them with the original segments from the source file.
+ * Injects original metadata segments into a re-encoded JPEG. Strips the re-encoder's own APP/COM markers (JFIF, sRGB
+ * ICC, etc.) and replaces them with the original segments from the source file.
  */
 public final class JpegMetadataInjector
 {
@@ -24,12 +24,13 @@ public final class JpegMetadataInjector
 	 * @param reencoded  JPEG bytes from Bitmap.compress() (has its own APP markers)
 	 * @param segments   original metadata segments to inject
 	 * @return new JPEG bytes with original metadata
+	 * @throws IOException when reencoded fails JPEG validation (missing SOI, or an APP
+	 *                     segment claims a length extending past EOF — Skia bug or
+	 *                     byte-stream corruption between encode and inject)
 	 */
 	public static byte[] inject(byte[] reencoded, List<JpegSegment> segments) throws IOException
 	{
-		if (reencoded.length < 4
-			|| (reencoded[0] & 0xFF) != 0xFF
-			|| (reencoded[1] & 0xFF) != 0xD8)
+		if (reencoded.length < 4 || (reencoded[0] & 0xFF) != 0xFF || (reencoded[1] & 0xFF) != 0xD8)
 		{
 			throw new IOException("Not a valid JPEG");
 		}
@@ -53,16 +54,14 @@ public final class JpegMetadataInjector
 			{
 				break; // malformed segment
 			}
-			// A lying segLen claiming to extend past EOF means the re-encoded buffer is
-			// genuinely malformed (Skia produced a corrupt JPEG, or the byte stream got
-			// damaged between encode and injector). Earlier versions silently fell back
-			// to `scanStart = 2`, which then wrote a verbatim copy of the entire re-
-			// encoded image AFTER the SOI as the "primary scan" — that included the
-			// re-encoder's own APP markers (JFIF, sRGB ICC) duplicated alongside
-			// original's, exactly the situation this function is supposed to avoid.
-			// Throw instead so the caller (ExportPipeline.encodePhase) surfaces a real
-			// "Export failed" toast rather than silently shipping a JPEG with
-			// duplicate APP segments.
+			// A lying segLen claiming to extend past EOF means the re-encoded buffer is genuinely malformed
+			// (Skia produced a corrupt JPEG, or the byte stream got damaged between encode and injector).
+			// Earlier versions silently fell back to `scanStart = 2`, which then wrote a verbatim copy of
+			// the entire re- encoded image AFTER the SOI as the "primary scan" — that included the
+			// re-encoder's own APP markers (JFIF, sRGB ICC) duplicated alongside original's, exactly the
+			// situation this function is supposed to avoid. Throw instead so the caller
+			// (ExportPipeline.encodePhase) surfaces a real "Export failed" toast rather than silently
+			// shipping a JPEG with duplicate APP segments.
 			if (scanStart + 2L + segLen > reencoded.length)
 			{
 				throw new IOException("Re-encoded APP segment at " + scanStart

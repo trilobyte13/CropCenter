@@ -1,10 +1,9 @@
 package com.cropcenter.model;
 
 /**
- * Immutable aspect-ratio specification for the crop box. Dimensions are arbitrary unit —
- * only their ratio is used; `(16, 9)` and `(160, 90)` mean the same thing. The FREE
- * constant (dimensions ≤ 0) signals "no constraint" and lets CropEngine use the maximum
- * available extent on each axis.
+ * Immutable aspect-ratio specification for the crop box. Dimensions are arbitrary unit — only their ratio is used;
+ * `(16, 9)` and `(160, 90)` mean the same thing. The FREE constant (dimensions ≤ 0) signals "no constraint" and lets
+ * CropEngine use the maximum available extent on each axis.
  */
 public record AspectRatio(float width, float height)
 {
@@ -20,10 +19,9 @@ public record AspectRatio(float width, float height)
 	public static final AspectRatio R9_16 = new AspectRatio(9, 16);
 
 	/**
-	 * Any non-positive dimension means "no constraint" — catches both the canonical FREE
-	 * (0, 0) and malformed external constructions like (4, 0) or (-1, -1) that would
-	 * otherwise produce ratio() == 0 and poison CropEngine's Math.round(cropW / ratio)
-	 * with Integer.MAX_VALUE.
+	 * Any non-positive dimension means "no constraint" — catches both the canonical FREE (0, 0) and malformed
+	 * external constructions like (4, 0) or (-1, -1) that would otherwise produce ratio() == 0 and poison
+	 * CropEngine's Math.round(cropW / ratio) with Integer.MAX_VALUE.
 	 */
 	public boolean isFree()
 	{
@@ -31,8 +29,7 @@ public record AspectRatio(float width, float height)
 	}
 
 	/**
-	 * width / height, or 0 when free. Callers must check isFree() before dividing by the
-	 * return value.
+	 * width / height, or 0 when free. Callers must check isFree() before dividing by the return value.
 	 */
 	public float ratio()
 	{

@@ -1,10 +1,9 @@
 package com.cropcenter.model;
 
 /**
- * Top-level interaction mode of the editor. MOVE lets the user drag the crop box around;
- * SELECT_FEATURE lets the user tap to place selection points that drive auto-centering
- * of the crop on the selected feature. The mode is toggled by the Move / Select buttons
- * in the toolbar below the editor view.
+ * Top-level interaction mode of the editor. MOVE lets the user drag the crop box around; SELECT_FEATURE lets the user
+ * tap to place selection points that drive auto-centering of the crop on the selected feature. The mode is toggled by
+ * the Move / Select buttons in the toolbar below the editor view.
  */
 public enum EditorMode
 {

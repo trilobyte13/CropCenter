@@ -9,12 +9,10 @@ import java.io.IOException;
 import java.util.List;
 
 /**
- * Tests for the JPEG marker walker that drives identity-metadata preservation. Every load
- * runs this against the source bytes; the resulting JpegSegment list feeds CropExporter's
- * post-encode injection step (which re-attaches original's APPs onto the canvas-encoded
- * output). A regression that drops a real APP segment, walks past EOF, or accepts a
- * malformed segment length would manifest as missing EXIF on saved files or hard crashes
- * on truncated inputs.
+ * Tests for the JPEG marker walker that drives identity-metadata preservation. Every load runs this against the source
+ * bytes; the resulting JpegSegment list feeds CropExporter's post-encode injection step (which re-attaches original's
+ * APPs onto the canvas-encoded output). A regression that drops a real APP segment, walks past EOF, or accepts a
+ * malformed segment length would manifest as missing EXIF on saved files or hard crashes on truncated inputs.
  */
 public class JpegMetadataExtractorTest
 {
@@ -30,11 +28,8 @@ public class JpegMetadataExtractorTest
 	{
 		byte[] exif = JpegFixtures.exifAppPayload();
 		byte[] iccPayload = "ICC_PROFILE\0body".getBytes();
-		byte[] jpeg = JpegFixtures.concat(
-			JpegFixtures.soi(),
-			JpegFixtures.appSegment(0xE1, exif),
-			JpegFixtures.appSegment(0xE2, iccPayload),
-			JpegFixtures.minimalScanAndEoi());
+		byte[] jpeg = JpegFixtures.concat(JpegFixtures.soi(), JpegFixtures.appSegment(0xE1, exif),
+			JpegFixtures.appSegment(0xE2, iccPayload), JpegFixtures.minimalScanAndEoi());
 
 		List<JpegSegment> segs = JpegMetadataExtractor.extract(jpeg);
 		assertEquals(2, segs.size());
@@ -49,9 +44,7 @@ public class JpegMetadataExtractorTest
 	{
 		// COM (FFFE) is the one non-APPn marker the extractor keeps.
 		byte[] commentPayload = "comment text".getBytes();
-		byte[] jpeg = JpegFixtures.concat(
-			JpegFixtures.soi(),
-			JpegFixtures.appSegment(0xFE, commentPayload),
+		byte[] jpeg = JpegFixtures.concat(JpegFixtures.soi(), JpegFixtures.appSegment(0xFE, commentPayload),
 			JpegFixtures.minimalScanAndEoi());
 
 		List<JpegSegment> segs = JpegMetadataExtractor.extract(jpeg);
@@ -62,10 +55,9 @@ public class JpegMetadataExtractorTest
 	@Test
 	public void malformedSegmentLengthHaltsParsing() throws IOException
 	{
-		// Segment length of 1 is corrupt (must be ≥ 2 to include the length bytes).
-		// Parser should bail rather than treat as a bogus 2-byte segment.
-		byte[] jpeg = JpegFixtures.concat(
-			JpegFixtures.soi(),
+		// Segment length of 1 is corrupt (must be ≥ 2 to include the length bytes). Parser should bail rather
+		// than treat as a bogus 2-byte segment.
+		byte[] jpeg = JpegFixtures.concat(JpegFixtures.soi(),
 			new byte[]{ (byte) 0xFF, (byte) 0xE1, 0x00, 0x01 });   // segLen = 1, malformed
 		List<JpegSegment> segs = JpegMetadataExtractor.extract(jpeg);
 		assertTrue("malformed segment should not be added", segs.isEmpty());
@@ -74,9 +66,8 @@ public class JpegMetadataExtractorTest
 	@Test
 	public void noSoiReturnsEmptyList()
 	{
-		// Anything not starting with FF D8 isn't a JPEG — return empty rather than
-		// trying to parse from byte 0. (Some callers feed PNG bytes here when the
-		// image format is uncertain at the call site.)
+		// Anything not starting with FF D8 isn't a JPEG — return empty rather than trying to parse from byte 0.
+		// (Some callers feed PNG bytes here when the image format is uncertain at the call site.)
 		byte[] notJpegBytes = { 0x12, 0x34, 0x56, 0x78, (byte) 0xFF, (byte) 0xD8 };
 		assertTrue(JpegMetadataExtractor.extract(notJpegBytes).isEmpty());
 	}
@@ -84,15 +75,12 @@ public class JpegMetadataExtractorTest
 	@Test
 	public void preservesRawSegmentBytesIncludingMarkerAndLength() throws IOException
 	{
-		// The "data" field of a returned JpegSegment includes the FF marker and the 2-byte
-		// length field, not just the payload — JpegMetadataInjector needs the segment
-		// verbatim to write it back into the output. Verify the full 4-byte header is
-		// preserved.
+		// The "data" field of a returned JpegSegment includes the FF marker and the 2-byte length field, not
+		// just the payload — JpegMetadataInjector needs the segment verbatim to write it back into the output.
+		// Verify the full 4-byte header is preserved.
 		byte[] body = { 0x10, 0x20, 0x30 };
 		byte[] jpeg = JpegFixtures.concat(
-			JpegFixtures.soi(),
-			JpegFixtures.appSegment(0xE3, body),
-			JpegFixtures.minimalScanAndEoi());
+			JpegFixtures.soi(), JpegFixtures.appSegment(0xE3, body), JpegFixtures.minimalScanAndEoi());
 		List<JpegSegment> segs = JpegMetadataExtractor.extract(jpeg);
 		assertEquals(1, segs.size());
 		byte[] data = segs.get(0).data();
@@ -108,13 +96,11 @@ public class JpegMetadataExtractorTest
 	@Test
 	public void rstMarkersAreSkippedNotCollected() throws IOException
 	{
-		// Restart markers (FF D0..D7) are standalone and don't carry segment data.
-		// Walker should advance past them without trying to read a length.
-		byte[] jpeg = JpegFixtures.concat(
-			JpegFixtures.soi(),
+		// Restart markers (FF D0..D7) are standalone and don't carry segment data. Walker should advance past
+		// them without trying to read a length.
+		byte[] jpeg = JpegFixtures.concat(JpegFixtures.soi(),
 			new byte[]{ (byte) 0xFF, (byte) 0xD0 },                  // RST0 — should skip
-			JpegFixtures.appSegment(0xE1, JpegFixtures.exifAppPayload()),
-			JpegFixtures.minimalScanAndEoi());
+			JpegFixtures.appSegment(0xE1, JpegFixtures.exifAppPayload()), JpegFixtures.minimalScanAndEoi());
 		List<JpegSegment> segs = JpegMetadataExtractor.extract(jpeg);
 		assertEquals(1, segs.size());
 		assertTrue(segs.get(0).isExif());
@@ -123,12 +109,10 @@ public class JpegMetadataExtractorTest
 	@Test
 	public void stopsAtSosMarker() throws IOException
 	{
-		// SOS terminates segment-collection. APP segments after SOS (rare, but
-		// theoretically present in some embedded thumbnails) are not collected by
-		// the primary-image extractor.
+		// SOS terminates segment-collection. APP segments after SOS (rare, but theoretically present in some
+		// embedded thumbnails) are not collected by the primary-image extractor.
 		byte[] jpeg = JpegFixtures.concat(
-			JpegFixtures.soi(),
-			JpegFixtures.appSegment(0xE1, JpegFixtures.exifAppPayload()),
+			JpegFixtures.soi(), JpegFixtures.appSegment(0xE1, JpegFixtures.exifAppPayload()),
 			JpegFixtures.minimalScanAndEoi());
 		List<JpegSegment> segs = JpegMetadataExtractor.extract(jpeg);
 		assertEquals(1, segs.size());
@@ -138,12 +122,10 @@ public class JpegMetadataExtractorTest
 	@Test
 	public void truncatedSegmentIsSkippedNotIncluded() throws IOException
 	{
-		// Segment claims length = 100 but file ends after 10 bytes of segment body.
-		// The extractor's bounds check (off + totalLen <= jpeg.length) rejects this
-		// entry; nothing should be added for it.
+		// Segment claims length = 100 but file ends after 10 bytes of segment body. The extractor's bounds
+		// check (off + totalLen <= jpeg.length) rejects this entry; nothing should be added for it.
 		byte[] jpeg = JpegFixtures.concat(
-			JpegFixtures.soi(),
-			new byte[]{ (byte) 0xFF, (byte) 0xE1, 0x00, 0x64,        // segLen = 100
+			JpegFixtures.soi(), new byte[]{ (byte) 0xFF, (byte) 0xE1, 0x00, 0x64,        // segLen = 100
 				0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08 });   // only 8 body bytes
 		List<JpegSegment> segs = JpegMetadataExtractor.extract(jpeg);
 		assertTrue("truncated segment should not be added", segs.isEmpty());

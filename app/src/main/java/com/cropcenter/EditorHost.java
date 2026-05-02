@@ -19,8 +19,8 @@ interface EditorHost
 	<T extends View> T findViewById(int id);
 
 	/**
-	 * The hosting Activity instance — used where a Context / Activity is needed for
-	 * dialogs, toasts, SAF calls, and MediaScanner.
+	 * The hosting Activity instance — used where a Context / Activity is needed for dialogs, toasts, SAF calls, and
+	 * MediaScanner.
 	 */
 	Activity getActivity();
 
@@ -35,10 +35,9 @@ interface EditorHost
 	boolean isDestroyed();
 
 	/**
-	 * Submit a task to the shared single-thread background executor. Replaces ad-hoc
-	 * `new Thread(...).start()` at call sites so concurrency policy and thread lifecycle
-	 * live in one place. Tasks execute serially in submission order; UI posting uses
-	 * runOnUiThread as usual.
+	 * Submit a task to the shared single-thread background executor. Replaces ad-hoc `new Thread(...).start()` at
+	 * call sites so concurrency policy and thread lifecycle live in one place. Tasks execute serially in submission
+	 * order; UI posting uses runOnUiThread as usual.
 	 */
 	void runInBackground(Runnable task);
 

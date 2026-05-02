@@ -1,40 +1,25 @@
 package com.cropcenter.model;
 
 /**
- * Immutable export settings. Callers mutate via CropState.updateExportConfig, which
- * replaces the current instance with a new one produced by a withXxx transformer. The
- * FORMAT_* / *_MIME / *_EXT constants are the single source of truth for strings that
- * SAF pickers, the save pipeline, and MIME-type routing all need to agree on.
+ * Immutable export settings. Callers mutate via CropState.updateExportConfig, which replaces the current instance with
+ * a new one produced by a withXxx transformer.
  */
-public record ExportConfig(String format)
+public record ExportConfig(Format format)
 {
-	// Internal format tags stored in ExportConfig.format.
-	public static final String FORMAT_JPEG = "jpeg";
-	public static final String FORMAT_PNG = "png";
-	// JPEG_EXT/PNG_EXT — file extensions (leading dot included) passed to SAF filename
-	// builders. JPEG_MIME/PNG_MIME — MIME types passed to ContentResolver / SAF picker
-	// intents. Constants are listed alphabetically rather than grouped by purpose to
-	// match the project-wide field-ordering rule.
-	public static final String JPEG_EXT = ".jpg";
-	public static final String JPEG_MIME = "image/jpeg";
-	public static final String PNG_EXT = ".png";
-	public static final String PNG_MIME = "image/png";
-
 	/**
-	 * Default export config applied when a fresh image loads — JPEG. Users override via
-	 * the SaveDialog format toggle before each export.
+	 * Replace the format. Returns a new ExportConfig with the supplied format; the receiver is unchanged.
 	 */
-	public static ExportConfig defaults()
+	public ExportConfig withFormat(Format format)
 	{
-		return new ExportConfig(FORMAT_JPEG);
+		return new ExportConfig(format);
 	}
 
 	/**
-	 * Replace the format tag. Accepts FORMAT_JPEG or FORMAT_PNG; other values flow
-	 * through but will fall into the default branch of the exporter's switch.
+	 * Default export config applied when a fresh image loads — JPEG. Users override via the SaveDialog format
+	 * toggle before each export.
 	 */
-	public ExportConfig withFormat(String format)
+	public static ExportConfig defaults()
 	{
-		return new ExportConfig(format);
+		return new ExportConfig(Format.JPEG);
 	}
 }

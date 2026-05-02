@@ -22,6 +22,12 @@ import java.util.regex.Pattern;
 public final class HorizonDetector
 {
 	private static final String TAG = "HorizonDetector";
+	private static final float COARSE_HOUGH_STEP_DEGREES = 0.1f;
+	private static final float FINE_HOUGH_STEP_DEGREES = 0.01f;
+	private static final float FINE_SEARCH_WINDOW_DEGREES = 2f;
+	private static final float LINE_FIT_INLIER_DISTANCE_PX = 2f;
+	private static final float MAX_LINE_FIT_DELTA_DEGREES = 0.25f;
+	private static final int MIN_LINE_FIT_INLIERS = 30;
 
 	private HorizonDetector() {}
 
@@ -45,10 +51,9 @@ public final class HorizonDetector
 				continue;
 			}
 
-			// XMP data starts after "http://ns.adobe.com/xap/1.0/\0" (29 bytes) + APP1 header (4 bytes)
-			// seg.data() = FF E1 LL LL [XMP identifier] [XML...]
-			String xmpId = "http://ns.adobe.com/xap/1.0/\0";
-			int xmlStart = 4 + xmpId.length();
+			// XMP data starts after JpegSegment.XMP_HEADER (29 bytes) + APP1 header (4 bytes). seg.data() =
+			// FF E1 LL LL [XMP identifier] [XML...]
+			int xmlStart = 4 + JpegSegment.XMP_HEADER.length();
 			byte[] segData = seg.data();
 			if (segData.length <= xmlStart)
 			{
@@ -57,9 +62,8 @@ public final class HorizonDetector
 
 			String xml = new String(segData, xmlStart, segData.length - xmlStart);
 
-			// Search for roll angle in common XMP properties. Different cameras use different
-			// namespaces: GCamera:Roll, Device:Roll, samsung:LensRoll, exif:Roll, or generic
-			// Roll/Tilt attributes.
+			// Search for roll angle in common XMP properties. Different cameras use different namespaces:
+			// GCamera:Roll, Device:Roll, samsung:LensRoll, exif:Roll, or generic Roll/Tilt attributes.
 			float roll = findXmpFloat(xml, "Roll");
 			if (!Float.isNaN(roll))
 			{
@@ -98,6 +102,15 @@ public final class HorizonDetector
 				Log.d(TAG, "Found Roll in APP1: " + roll + "°");
 				return normalizeMetadataAngle(roll);
 			}
+			// Pre-filter above accepts Roll/roll/Tilt-bearing segments; the previous version only looked up
+			// Roll here, so a segment that matched the pre-filter solely because of a Tilt attribute
+			// returned NaN. Mirror the primary loop's Roll-then-Tilt fallback.
+			float tilt = findXmpFloat(raw, "Tilt");
+			if (!Float.isNaN(tilt))
+			{
+				Log.d(TAG, "Found Tilt in APP1: " + tilt + "°");
+				return normalizeMetadataAngle(tilt);
+			}
 		}
 
 		return Float.NaN;
@@ -122,17 +135,15 @@ public final class HorizonDetector
 	}
 
 	/**
-	 * Detect horizon angle using only edges within a user-painted region.
-	 * The painted points define a brush stroke; only edge pixels near this stroke are used for
-	 * the Hough line detection.
+	 * Detect horizon angle using only edges within a user-painted region. The painted points define a brush stroke;
+	 * only edge pixels near this stroke are used for the Hough line detection.
 	 *
 	 * @param src         source bitmap
 	 * @param paintPoints list of (x,y) image-coordinate points from the paint stroke
 	 * @param brushRadius radius in image pixels around each paint point
 	 * @return correction angle in degrees, or NaN if not detected
 	 */
-	public static float detectFromPaintedRegion(Bitmap src, List<float[]> paintPoints,
-		float brushRadius)
+	public static float detectFromPaintedRegion(Bitmap src, List<float[]> paintPoints, float brushRadius)
 	{
 		if (src == null || src.getWidth() < 10 || src.getHeight() < 10
 			|| paintPoints == null || paintPoints.size() < 2)
@@ -194,8 +205,7 @@ public final class HorizonDetector
 		return maxVal * 0.5f;
 	}
 
-	private static float detectPaintedInternal(Bitmap src, List<float[]> paintPoints,
-		float brushRadius)
+	private static float detectPaintedInternal(Bitmap src, List<float[]> paintPoints, float brushRadius)
 	{
 		int width = src.getWidth();
 		int height = src.getHeight();
@@ -206,11 +216,10 @@ public final class HorizonDetector
 		float[] edges = buildEdgeMap(src, width, height);
 
 		int[][] edgeCoords = gatherMaskedEdges(edges, mask, width, height, maskWidth, maskHeight);
-		// Release the large intermediates before the coarse+fine Hough pass — on a large
-		// source `edges` alone can be 100 MB of floats. Holding them alive through the
-		// Hough loops was a memory regression introduced when this method was
-		// decomposed; keeping the scope tight avoids a mid-detection OOM on mid-range
-		// devices that would not have fired before the refactor.
+		// Release the large intermediates before the coarse+fine Hough pass — on a large source `edges` alone
+		// can be 100 MB of floats. Holding them alive through the Hough loops was a memory regression
+		// introduced when this method was decomposed; keeping the scope tight avoids a mid-detection OOM on
+		// mid-range devices that would not have fired before the refactor.
 		edges = null;
 		mask = null;
 		if (edgeCoords == null)
@@ -226,9 +235,9 @@ public final class HorizonDetector
 	}
 
 	/**
-	 * Stroke-to-mask rasterization. The paint stroke is rasterized at 1/4 source
-	 * resolution into a boolean grid — enough precision to localize which source
-	 * pixels belong to the horizon region, 16× cheaper in memory than a full-res mask.
+	 * Stroke-to-mask rasterization. The paint stroke is rasterized at 1/4 source resolution into a boolean grid —
+	 * enough precision to localize which source pixels belong to the horizon region, 16× cheaper in memory than a
+	 * full-res mask.
 	 */
 	private static boolean[] rasterizePaintMask(List<float[]> paintPoints,
 		int maskWidth, int maskHeight, float brushRadius)
@@ -282,8 +291,7 @@ public final class HorizonDetector
 		for (int i = 0; i < pixels.length; i++)
 		{
 			int pixel = pixels[i];
-			luminance[i] = 0.299f * Color.red(pixel)
-				+ 0.587f * Color.green(pixel)
+			luminance[i] = 0.299f * Color.red(pixel) + 0.587f * Color.green(pixel)
 				+ 0.114f * Color.blue(pixel);
 		}
 		pixels = null;
@@ -315,10 +323,9 @@ public final class HorizonDetector
 	}
 
 	/**
-	 * Collect the coordinates of edge pixels that survive the strength threshold AND
-	 * lie within the painted mask. Returns {edgeX[], edgeY[]} packed as a 2-element
-	 * array, or null when fewer than 30 pixels qualify (not enough signal for the
-	 * Hough pass to produce a trustworthy angle).
+	 * Collect the coordinates of edge pixels that survive the strength threshold AND lie within the painted mask.
+	 * Returns {edgeX[], edgeY[]} packed as a 2-element array, or null when fewer than 30 pixels qualify (not enough
+	 * signal for the Hough pass to produce a trustworthy angle).
 	 */
 	private static int[][] gatherMaskedEdges(float[] edges, boolean[] mask,
 		int width, int height, int maskWidth, int maskHeight)
@@ -366,27 +373,35 @@ public final class HorizonDetector
 	}
 
 	/**
-	 * Two-pass Hough transform on the masked edge pixels (coarse 80–100° at 0.1°
-	 * steps, then fine ±2° around the coarse peak at 0.01° steps), converted to a
-	 * rotation angle the editor can apply directly. Returns NaN when the tilt is
-	 * beyond ±30° (the detector is too unreliable at larger angles), 0 when the tilt
-	 * is effectively zero, or the rounded-to-0.01° rotation otherwise.
+	 * Two-pass Hough transform on the masked edge pixels (coarse 80–100° at 0.1° steps, then fine ±2° around the
+	 * coarse peak at 0.01° steps), converted to a rotation angle the editor can apply directly. Returns NaN when
+	 * the tilt is beyond ±30° (the detector is too unreliable at larger angles), 0 when the tilt is effectively
+	 * zero, or the rounded-to-0.01° rotation otherwise.
 	 */
 	private static float runHoughAndConvertToRotation(int[] edgeX, int[] edgeY,
 		int edgeCount, int width, int height)
 	{
-		float coarseAngle = houghPass(edgeX, edgeY, edgeCount, width, height, 80f, 100f, 0.1f);
+		float coarseAngle = houghPass(edgeX, edgeY, edgeCount, width, height,
+			80f, 100f, COARSE_HOUGH_STEP_DEGREES);
 		if (Float.isNaN(coarseAngle))
 		{
 			return Float.NaN;
 		}
 
 		float fineAngle = houghPass(edgeX, edgeY, edgeCount, width, height,
-			Math.max(80f, coarseAngle - 2f),
-			Math.min(100f, coarseAngle + 2f), 0.01f);
+			Math.max(80f, coarseAngle - FINE_SEARCH_WINDOW_DEGREES),
+			Math.min(100f, coarseAngle + FINE_SEARCH_WINDOW_DEGREES), FINE_HOUGH_STEP_DEGREES);
 		if (Float.isNaN(fineAngle))
 		{
 			fineAngle = coarseAngle;
+		}
+		else
+		{
+			float refinedAngle = refineLineFitAngle(edgeX, edgeY, edgeCount, width, height, fineAngle);
+			if (!Float.isNaN(refinedAngle))
+			{
+				fineAngle = refinedAngle;
+			}
 		}
 
 		float tilt = fineAngle - 90f;
@@ -404,17 +419,16 @@ public final class HorizonDetector
 	}
 
 	/**
-	 * Search XMP XML for a float attribute whose name is exactly attrSuffix, optionally with a
-	 * namespace prefix. Handles patterns like: namespace:Roll="1.23" or Roll="1.23".
-	 * The earlier version used "\\w*:?Suffix" which greedy-matched unrelated names like
-	 * CameraRoll or GyroRoll — any attribute whose name ends in the literal suffix — and
-	 * silently returned their value as the horizon angle.
+	 * Search XMP XML for a float attribute whose name is exactly attrSuffix, optionally with a namespace prefix.
+	 * Handles patterns like: namespace:Roll="1.23" or Roll="1.23". The earlier version used "\\w*:?Suffix" which
+	 * greedy-matched unrelated names like CameraRoll or GyroRoll — any attribute whose name ends in the literal
+	 * suffix — and silently returned their value as the horizon angle.
 	 */
 	private static float findXmpFloat(String xml, String attrSuffix)
 	{
-		// Require either the start of a token (non-word char) or start of string, then an
-		// optional namespace prefix that ends in ':', then the exact suffix followed by
-		// whitespace or '='. This rules out AbcRoll, CameraRoll, GyroRoll, etc.
+		// Require either the start of a token (non-word char) or start of string, then an optional namespace
+		// prefix that ends in ':', then the exact suffix followed by whitespace or '='. This rules out AbcRoll,
+		// CameraRoll, GyroRoll, etc.
 		Pattern pattern = Pattern.compile(
 			"(?:^|[^\\w:])(?:\\w+:)?" + Pattern.quote(attrSuffix) + "\\s*=\\s*\"([^\"]+)\"",
 			Pattern.CASE_INSENSITIVE);
@@ -430,6 +444,99 @@ public final class HorizonDetector
 			}
 		}
 		return Float.NaN;
+	}
+
+	/**
+	 * Refine the Hough winner with a least-squares fit over the edge pixels that sit on the winning line.
+	 *
+	 * The Hough pass votes into integer-distance bins, so a real-world horizon can sit between bins and still land
+	 * one or two ruler ticks off. Once Hough has chosen the correct line, fitting the actual inlier coordinates
+	 * recovers the sub-bin slope while retaining Hough's outlier rejection. Returns NaN when the fit is too weak or
+	 * disagrees too much with the Hough seed, in which case the caller keeps the original Hough angle.
+	 *
+	 * @param edgeX         edge pixel X coordinates
+	 * @param edgeY         edge pixel Y coordinates
+	 * @param edgeCount     number of valid coordinates in edgeX / edgeY
+	 * @param width         source bitmap width, used for the minimum inlier threshold
+	 * @param height        source bitmap height, used to reproduce the Hough distance-bin geometry
+	 * @param houghAngleDeg Hough normal angle in degrees
+	 * @return refined Hough normal angle in degrees, or NaN when the fit should be ignored
+	 */
+	static float refineLineFitAngle(int[] edgeX, int[] edgeY, int edgeCount,
+		int width, int height, float houghAngleDeg)
+	{
+		double rad = Math.toRadians(houghAngleDeg);
+		double cos = Math.cos(rad);
+		double sin = Math.sin(rad);
+		float diagonal = (float) Math.hypot(width, height);
+		int numBins = (int) (2 * diagonal) + 1;
+		int distanceOffset = (int) diagonal;
+		int[] histogram = new int[numBins];
+
+		for (int i = 0; i < edgeCount; i++)
+		{
+			int bin = (int) (edgeX[i] * cos + edgeY[i] * sin) + distanceOffset;
+			if (bin >= 0 && bin < numBins)
+			{
+				histogram[bin]++;
+			}
+		}
+
+		int bestBin = 0;
+		int bestCount = 0;
+		for (int bin = 0; bin < numBins; bin++)
+		{
+			if (histogram[bin] > bestCount)
+			{
+				bestCount = histogram[bin];
+				bestBin = bin;
+			}
+		}
+
+		int minInliers = Math.max(MIN_LINE_FIT_INLIERS, width * 3 / 100);
+		if (bestCount < minInliers)
+		{
+			return Float.NaN;
+		}
+
+		double rhoCenter = bestBin - distanceOffset + 0.5;
+		double sumX = 0;
+		double sumY = 0;
+		double sumXX = 0;
+		double sumXY = 0;
+		int inliers = 0;
+		for (int i = 0; i < edgeCount; i++)
+		{
+			double rho = edgeX[i] * cos + edgeY[i] * sin;
+			if (Math.abs(rho - rhoCenter) > LINE_FIT_INLIER_DISTANCE_PX)
+			{
+				continue;
+			}
+			double x = edgeX[i];
+			double y = edgeY[i];
+			sumX += x;
+			sumY += y;
+			sumXX += x * x;
+			sumXY += x * y;
+			inliers++;
+		}
+		if (inliers < minInliers)
+		{
+			return Float.NaN;
+		}
+
+		double denom = sumXX - sumX * sumX / inliers;
+		if (denom <= 1e-6)
+		{
+			return Float.NaN;
+		}
+		double slope = (sumXY - sumX * sumY / inliers) / denom;
+		float refinedAngle = 90f + (float) Math.toDegrees(Math.atan(slope));
+		if (Math.abs(refinedAngle - houghAngleDeg) > MAX_LINE_FIT_DELTA_DEGREES)
+		{
+			return Float.NaN;
+		}
+		return Math.clamp(refinedAngle, 80f, 100f);
 	}
 
 	private static float[] gaussianBlur5x5(float[] src, int width, int height)
@@ -463,8 +570,8 @@ public final class HorizonDetector
 	}
 
 	/**
-	 * Hough transform: find the angle of the single strongest near-horizontal line. Uses
-	 * max-single-bin (longest line wins) rather than sum-of-squares (all edges).
+	 * Hough transform: find the angle of the single strongest near-horizontal line. Uses max-single-bin (longest
+	 * line wins) rather than sum-of-squares (all edges).
 	 */
 	private static float houghPass(int[] edgeX, int[] edgeY, int edgeCount,
 		int width, int height, float minDeg, float maxDeg, float stepDeg)
@@ -510,7 +617,6 @@ public final class HorizonDetector
 			peakPerAngle[angleIdx] = maxBin;
 		}
 
-		// Find the angle whose strongest single line has the most votes
 		int bestAngleIdx = 0;
 		int bestPeak = 0;
 		for (int angleIdx = 0; angleIdx < numAngles; angleIdx++)
@@ -594,8 +700,7 @@ public final class HorizonDetector
 		return out;
 	}
 
-	private static void sobelGradient(float[] src, int width, int height,
-		float[] magnitude, float[] direction)
+	private static void sobelGradient(float[] src, int width, int height, float[] magnitude, float[] direction)
 	{
 		for (int y = 1; y < height - 1; y++)
 		{

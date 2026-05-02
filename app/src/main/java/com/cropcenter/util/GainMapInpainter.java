@@ -9,53 +9,50 @@ import java.nio.ByteBuffer;
 import java.util.Arrays;
 
 /**
- * Patch a gain-map bitmap at the AI-modified region by replacing each masked pixel's
- * boost value with the average of its surrounding unmasked pixels. The source's gain
- * map was calibrated against the original primary; where Photoshop's Generative
- * Fill / Remove changed pixels, the original boost is mis-targeted (it boosts
- * highlights / shadows that no longer exist). Inpainting from the AI region's
- * boundary inward gives the fill the same HDR boost as its surroundings, which
- * matches what Generative Remove visually intends ("this region should look like
- * its neighbors").
+ * Patch a gain-map bitmap at the AI-modified region by replacing each masked pixel's boost value with the average of
+ * its surrounding unmasked pixels. The source's gain map was calibrated against the original primary; where Photoshop's
+ * Generative Fill / Remove changed pixels, the original boost is mis-targeted (it boosts highlights / shadows that no
+ * longer exist). Inpainting from the AI region's boundary inward gives the fill the same HDR boost as its surroundings,
+ * which matches what Generative Remove visually intends ("this region should look like its neighbors").
  *
- * Algorithm: frontier-tracked grow-from-boundary. Each pass processes only the
- * "frontier" — masked pixels adjacent to at least one unmasked pixel — instead of
- * scanning the whole gain map. Total work is O(AI region area), not O(W * H * radius).
+ * Algorithm: frontier-tracked grow-from-boundary. Each pass processes only the "frontier" — masked pixels adjacent to
+ * at least one unmasked pixel — instead of scanning the whole gain map. Total work is O(AI region area), not O(W * H *
+ * radius).
  *
- * Operates in place on the bitmap so the caller (UltraHdrCompat) can apply the patch
- * after Android's UHDR-aware decode has produced a gain-map Bitmap in source's native
- * format (typically ALPHA_8 single channel for Samsung sources). Re-encoding
- * ourselves via Bitmap.compress would force YCbCr 4:2:0 3-channel output regardless
- * of input config, and the resulting structural mismatch with source's 1-channel
- * gain map causes Android's UHDR decoder downstream to drop HDR entirely (saved file
- * renders as SDR, looking dark).
+ * Operates in place on the bitmap so the caller (UltraHdrCompat) can apply the patch after Android's UHDR-aware decode
+ * has produced a gain-map Bitmap in source's native format (typically ALPHA_8 single channel for Samsung sources).
+ * Re-encoding ourselves via Bitmap.compress would force YCbCr 4:2:0 3-channel output regardless of input config, and
+ * the resulting structural mismatch with source's 1-channel gain map causes Android's UHDR decoder downstream to drop
+ * HDR entirely (saved file renders as SDR, looking dark).
  */
 public final class GainMapInpainter
 {
 	private static final String TAG = "GainMapInpainter";
 
-	// Dilate the scaled mask by this many pixels in gain-map coords before inpainting.
-	// Catches the AI region's boundary where pixel diffs fade just below the detector's
-	// threshold but the gain map at those coords is still mis-targeted.
+	// Dilate the scaled mask by this many pixels in gain-map coords before inpainting. Catches the AI region's
+	// boundary where pixel diffs fade just below the detector's threshold but the gain map at those coords is still
+	// mis-targeted.
 	private static final int DILATE_RADIUS = 2;
 
-	// Hard cap on grow-from-boundary passes. Defensive runaway guard rather than a
-	// tuned limit — the largest realistic AI fill (~200 px half-width in gain-map
-	// coords) needs a few hundred passes.
+	// Hard cap on grow-from-boundary passes. Defensive runaway guard rather than a tuned limit — the largest
+	// realistic AI fill (~200 px half-width in gain-map coords) needs a few hundred passes.
 	private static final int MAX_PASSES = 10_000;
 
 	private GainMapInpainter() {}
 
 	/**
-	 * Inpaint the masked region of a gain-map bitmap in place. Handles both single-
-	 * channel ALPHA_8 (Samsung's typical gain-map format) and multi-channel ARGB_8888
-	 * (Adobe's variant). For ALPHA_8 the alpha byte holds the boost value; for
-	 * ARGB_8888 each RGB channel is inpainted independently. No-op when the bitmap
-	 * isn't mutable (defensive — returns silently rather than throwing) or when the
-	 * mask has no pixels flagged.
+	 * Inpaint the masked region of a gain-map bitmap in place. Handles both single- channel ALPHA_8 (Samsung's
+	 * typical gain-map format) and multi-channel ARGB_8888 (Adobe's variant). For ALPHA_8 the alpha byte holds the
+	 * boost value; for ARGB_8888 each RGB channel is inpainted independently. No-op when the bitmap isn't mutable
+	 * (defensive — returns silently rather than throwing) or when the mask has no pixels flagged.
 	 *
-	 * The mask is scaled nearest-neighbor to the bitmap's dimensions and dilated by
-	 * DILATE_RADIUS pixels before inpainting begins.
+	 * The mask is scaled nearest-neighbor to the bitmap's dimensions and dilated by DILATE_RADIUS pixels before
+	 * inpainting begins.
+	 *
+	 * @param bmp    gain-map bitmap; mutated in place. Must be mutable, ALPHA_8 or
+	 *               ARGB_8888 — other configs no-op silently
+	 * @param aiMask AI-modified region mask in arbitrary coordinates (scaled to bmp's
+	 *               dimensions internally), or null to no-op
 	 */
 	public static void inpaintBitmap(Bitmap bmp, AiMask aiMask)
 	{
@@ -85,10 +82,9 @@ public final class GainMapInpainter
 	}
 
 	/**
-	 * In-place 8-connected mask dilation by `radius` pixels. Each iteration marks any
-	 * unmasked pixel whose 8-neighborhood contains a masked pixel. Uses a snapshot per
-	 * iteration so dilation grows by exactly one ring per pass (vs reading the same
-	 * array we're writing, which would race growth across the mask within a pass).
+	 * In-place 8-connected mask dilation by `radius` pixels. Each iteration marks any unmasked pixel whose
+	 * 8-neighborhood contains a masked pixel. Uses a snapshot per iteration so dilation grows by exactly one ring
+	 * per pass (vs reading the same array we're writing, which would race growth across the mask within a pass).
 	 */
 	private static void dilateMask(boolean[] mask, int width, int height, int radius)
 	{
@@ -146,10 +142,9 @@ public final class GainMapInpainter
 	}
 
 	/**
-	 * Quick check: does (x, y) have at least one 8-neighbor whose mask bit is false?
-	 * Used to seed the initial frontier for inpaintIterative — a pixel is on the
-	 * frontier if it's masked AND at least one neighbor is already unmasked. Short-
-	 * circuits on the first hit.
+	 * Quick check: does (x, y) have at least one 8-neighbor whose mask bit is false? Used to seed the initial
+	 * frontier for inpaintIterative — a pixel is on the frontier if it's masked AND at least one neighbor is
+	 * already unmasked. Short- circuits on the first hit.
 	 */
 	private static boolean hasUnmaskedNeighbor(boolean[] mask, int x, int y, int width, int height)
 	{
@@ -181,15 +176,13 @@ public final class GainMapInpainter
 	}
 
 	/**
-	 * Single-channel inpaint for ALPHA_8 bitmaps. ALPHA_8 stores one byte per pixel
-	 * (the alpha value); for Samsung's grayscale gain map, that byte IS the boost
-	 * value. copyPixelsToBuffer / copyPixelsFromBuffer are the only safe accessors —
-	 * getPixels would return ARGB ints with alpha in the high byte and zeros in RGB.
+	 * Single-channel inpaint for ALPHA_8 bitmaps. ALPHA_8 stores one byte per pixel (the alpha value); for
+	 * Samsung's grayscale gain map, that byte IS the boost value. copyPixelsToBuffer / copyPixelsFromBuffer are the
+	 * only safe accessors — getPixels would return ARGB ints with alpha in the high byte and zeros in RGB.
 	 *
-	 * Buffer sizing uses bmp.getByteCount() (not width * height) and pixel access
-	 * uses bmp.getRowBytes() (not width) so this works correctly for bitmaps where
-	 * Skia adds row-stride padding for memory alignment — copyPixelsToBuffer requires
-	 * the buffer to hold getByteCount() bytes, and indexing as if row stride equals
+	 * Buffer sizing uses bmp.getByteCount() (not width * height) and pixel access uses bmp.getRowBytes() (not
+	 * width) so this works correctly for bitmaps where Skia adds row-stride padding for memory alignment —
+	 * copyPixelsToBuffer requires the buffer to hold getByteCount() bytes, and indexing as if row stride equals
 	 * width would write inpainted values into padding bytes for stridden bitmaps.
 	 */
 	private static void inpaintAlpha8(Bitmap bmp, boolean[] mask, int width, int height)
@@ -225,13 +218,11 @@ public final class GainMapInpainter
 	}
 
 	/**
-	 * Multi-channel inpaint for ARGB_8888 bitmaps. Each RGB channel runs its own
-	 * grow-from-boundary pass with a fresh mask copy (the iteration mutates the
-	 * mask, so the first two passes clone; the last reuses the original since it
-	 * has no successor). Alpha is preserved verbatim. Pass counts are typically
-	 * within 1 of each other for grayscale-like (R == G == B) sources but the log
-	 * reports the per-channel max so non-grayscale (Adobe variant) sources don't
-	 * silently hide a channel that took longer to converge.
+	 * Multi-channel inpaint for ARGB_8888 bitmaps. Each RGB channel runs its own grow-from-boundary pass with a
+	 * fresh mask copy (the iteration mutates the mask, so the first two passes clone; the last reuses the original
+	 * since it has no successor). Alpha is preserved verbatim. Pass counts are typically within 1 of each other for
+	 * grayscale-like (R == G == B) sources but the log reports the per-channel max so non-grayscale (Adobe variant)
+	 * sources don't silently hide a channel that took longer to converge.
 	 */
 	private static void inpaintArgb(Bitmap bmp, boolean[] mask, int width, int height)
 	{
@@ -254,15 +245,13 @@ public final class GainMapInpainter
 	}
 
 	/**
-	 * Frontier-tracked grow-from-boundary inpaint on a single channel of values.
-	 * Each pass processes only masked pixels adjacent to at least one unmasked
-	 * pixel; resolved pixels join the unmasked set for the next pass's averaging.
-	 * Initial frontier seed is O(W * H) (single pass over the mask); subsequent
-	 * passes are O(frontier size), so total work is O(W * H + AI region area)
-	 * rather than O(W * H * radius).
+	 * Frontier-tracked grow-from-boundary inpaint on a single channel of values. Each pass processes only masked
+	 * pixels adjacent to at least one unmasked pixel; resolved pixels join the unmasked set for the next pass's
+	 * averaging. Initial frontier seed is O(W * H) (single pass over the mask); subsequent passes are O(frontier
+	 * size), so total work is O(W * H + AI region area) rather than O(W * H * radius).
 	 *
-	 * The mask is mutated. Isolated masked pixels (no path to any unmasked pixel)
-	 * keep their original value when the loop exits with empty frontier.
+	 * The mask is mutated. Isolated masked pixels (no path to any unmasked pixel) keep their original value when
+	 * the loop exits with empty frontier.
 	 */
 	private static int inpaintIterative(int[] values, boolean[] mask, int width, int height)
 	{
@@ -381,9 +370,8 @@ public final class GainMapInpainter
 	}
 
 	/**
-	 * Nearest-neighbor mask scale to (targetWidth, targetHeight). Long arithmetic for
-	 * the index multiply so 8000 x 6000 sources don't overflow int when (y * srcH)
-	 * grows past 4.8e7.
+	 * Nearest-neighbor mask scale to (targetWidth, targetHeight). Long arithmetic for the index multiply so 8000 x
+	 * 6000 sources don't overflow int when (y * srcH) grows past 4.8e7.
 	 */
 	private static boolean[] scaleMask(AiMask aiMask, int targetWidth, int targetHeight)
 	{

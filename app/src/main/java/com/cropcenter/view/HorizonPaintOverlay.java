@@ -8,10 +8,9 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Self-contained state + rendering for the auto-rotate "paint over the horizon" overlay.
- * The host view drives touch routing (it owns the MotionEvent stream) and calls begin /
- * extend / end to update the stroke; this class just stores points in image space, builds
- * a screen-space Path for display, and renders the stroke + placeholder hint.
+ * Self-contained state + rendering for the auto-rotate "paint over the horizon" overlay. The host view drives touch
+ * routing (it owns the MotionEvent stream) and calls begin / extend / end to update the stroke; this class just stores
+ * points in image space, builds a screen-space Path for display, and renders the stroke + placeholder hint.
  *
  * No viewport / rotation math lives here — callers pass already-converted image points.
  */
@@ -32,8 +31,8 @@ final class HorizonPaintOverlay
 	}
 
 	/**
-	 * Record the first touch of a stroke. screenX/screenY go into the displayed path;
-	 * imagePoint is the already-un-rotated image-pixel coordinate for the detector.
+	 * Record the first touch of a stroke. screenX/screenY go into the displayed path; imagePoint is the
+	 * already-un-rotated image-pixel coordinate for the detector.
 	 */
 	void begin(float screenX, float screenY, float[] imagePoint)
 	{
@@ -44,8 +43,19 @@ final class HorizonPaintOverlay
 		drawing = true;
 	}
 
-	void draw(Canvas canvas, int viewWidth, int viewHeight, int selColor, Paint infoPaint,
-		float density)
+	/**
+	 * Render the painted-region polygon and a hint label. No-op when neither active (user has finished painting and
+	 * the region is being processed) nor drawing (user is mid-stroke). The polygon uses the shared selection color
+	 * from GridConfig so markers, polygon, and horizon paint stay visually consistent.
+	 *
+	 * @param canvas     destination canvas
+	 * @param viewWidth  view width in screen px (for centering the hint label)
+	 * @param viewHeight view height in screen px
+	 * @param selColor   shared selection color (ARGB)
+	 * @param infoPaint  pre-configured paint for the hint label text
+	 * @param density    display density for stroke width / text size scaling
+	 */
+	void draw(Canvas canvas, int viewWidth, int viewHeight, int selColor, Paint infoPaint, float density)
 	{
 		if (!active && !drawing)
 		{
@@ -69,15 +79,14 @@ final class HorizonPaintOverlay
 			infoPaint.setTextAlign(Paint.Align.CENTER);
 			infoPaint.setTextSize(14f * density);
 			infoPaint.setColor(selColor);
-			canvas.drawText("Paint over the horizon",
-				viewWidth / 2f, viewHeight / 2f, infoPaint);
+			canvas.drawText("Paint over the horizon", viewWidth / 2f, viewHeight / 2f, infoPaint);
 		}
 	}
 
 	/**
-	 * Record the final touch (image-space only; the screen-space path isn't extended for the
-	 * ACTION_UP point) and exit paint mode. The caller's onDrawn callback runs; the overlay
-	 * stays non-active until the next setActive(true, ...) call.
+	 * Record the final touch (image-space only; the screen-space path isn't extended for the ACTION_UP point) and
+	 * exit paint mode. The caller's onDrawn callback runs; the overlay stays non-active until the next
+	 * setActive(true, ...) call.
 	 */
 	void end(float[] imagePoint)
 	{
@@ -91,8 +100,7 @@ final class HorizonPaintOverlay
 	}
 
 	/**
-	 * Append a mid-stroke touch — updates the displayed path and appends another image
-	 * coordinate for the detector.
+	 * Append a mid-stroke touch — updates the displayed path and appends another image coordinate for the detector.
 	 */
 	void extend(float screenX, float screenY, float[] imagePoint)
 	{
@@ -125,8 +133,8 @@ final class HorizonPaintOverlay
 	}
 
 	/**
-	 * Enter or exit paint mode. Entering clears any previous stroke. Exiting (on=false) also
-	 * clears; the caller's previous onDrawn is replaced.
+	 * Enter or exit paint mode. Entering clears any previous stroke. Exiting (on=false) also clears; the caller's
+	 * previous onDrawn is replaced.
 	 */
 	void setActive(boolean on, Runnable onDrawnCallback)
 	{

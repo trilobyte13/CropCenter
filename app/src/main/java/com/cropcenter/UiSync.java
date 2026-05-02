@@ -11,9 +11,9 @@ import com.google.android.material.button.MaterialButton;
 import java.util.Locale;
 
 /**
- * Centralised UI state sync: update* / sync* methods that reflect CropState changes into the
- * toolbar and info bar. All methods run on the UI thread. Every CropState-driven UI refresh in
- * the activity's state listener fans out through here.
+ * Centralised UI state sync: update* / sync* methods that reflect CropState changes into the toolbar and info bar. All
+ * methods run on the UI thread. Every CropState-driven UI refresh in the activity's state listener fans out through
+ * here.
  */
 final class UiSync
 {
@@ -37,19 +37,17 @@ final class UiSync
 		host.setRulerUpdating(false);
 		host.getRotationRuler().setRulerEnabled(hasImage);
 
-		// Show the readout only when there's an image AND a non-zero rotation. Per spec
-		// (REQUIREMENTS.md §4 "Rotation"), the degree readout is visible only when
-		// rotation != 0 — a stale "0°" against an unrotated image is noise. Sub-epsilon
-		// rotations are drawn / exported as zero by the rest of the pipeline, so use the
-		// same threshold here for consistent behaviour with what the user sees.
+		// Show the readout only when there's an image AND a non-zero rotation. Per spec (REQUIREMENTS.md §4
+		// "Rotation"), the degree readout is visible only when rotation != 0 — a stale "0°" against an
+		// unrotated image is noise. Sub-epsilon rotations are drawn / exported as zero by the rest of the
+		// pipeline, so use the same threshold here for consistent behaviour with what the user sees.
 		boolean shouldShowDegrees = hasImage && Math.abs(deg) >= BitmapUtils.ROTATION_EPSILON;
 		host.getRotDegreesTextView().setText(shouldShowDegrees ? TextFormat.degrees(deg) : "");
 	}
 
 	/**
-	 * Show / hide the (now-hidden) Auto rotate button based on whether an image is
-	 * loaded. The button is hidden in production but the visibility plumbing is kept
-	 * so it can be re-enabled via XML without touching code.
+	 * Show / hide the (now-hidden) Auto rotate button based on whether an image is loaded. The button is hidden in
+	 * production but the visibility plumbing is kept so it can be re-enabled via XML without touching code.
 	 */
 	void updateAutoRotateVisibility()
 	{
@@ -58,8 +56,8 @@ final class UiSync
 	}
 
 	/**
-	 * Update the info bar's "cropped size" readout (or "Full" when no crop is placed
-	 * and an image is loaded, or blank before any image).
+	 * Update the info bar's "cropped size" readout (or "Full" when no crop is placed and an image is loaded, or
+	 * blank before any image).
 	 */
 	void updateCropInfo()
 	{
@@ -84,8 +82,8 @@ final class UiSync
 	}
 
 	/**
-	 * Highlight the active lock-mode button (Both / H / V) in mauve and the others
-	 * in surface2. Reflects the current CenterMode preference.
+	 * Highlight the active lock-mode button (Both / H / V) in mauve and the others in surface2. Reflects the
+	 * current CenterMode preference.
 	 */
 	void updateLockHighlight()
 	{
@@ -101,10 +99,9 @@ final class UiSync
 	}
 
 	/**
-	 * Highlight the active mode button (Move or Select) in mauve. Also toggles the
-	 * visibility of the Both / Undo / Redo / Clear buttons, which are Select-only.
-	 * Falls the move-lock preference back to Vertical when leaving Select mode if it
-	 * was Both (a Select-only option).
+	 * Highlight the active mode button (Move or Select) in mauve. Also toggles the visibility of the Both / Undo /
+	 * Redo / Clear buttons, which are Select-only. Falls the move-lock preference back to Vertical when leaving
+	 * Select mode if it was Both (a Select-only option).
 	 */
 	void updateModeHighlight()
 	{
@@ -134,8 +131,8 @@ final class UiSync
 	}
 
 	/**
-	 * Refresh the enabled / disabled state and tint of the Undo / Redo / Clear buttons
-	 * based on what the editor view's selection history can do right now.
+	 * Refresh the enabled / disabled state and tint of the Undo / Redo / Clear buttons based on what the editor
+	 * view's selection history can do right now.
 	 */
 	void updatePointButtonStates()
 	{
@@ -159,8 +156,8 @@ final class UiSync
 	}
 
 	/**
-	 * Show / hide the zoom-level badge in the info bar. Hidden at zoom ≈ 1 (within
-	 * the ≤1.01 dead zone) so the badge doesn't clutter fit-to-view state.
+	 * Show / hide the zoom-level badge in the info bar. Hidden at zoom ≈ 1 (within the ≤1.01 dead zone) so the
+	 * badge doesn't clutter fit-to-view state.
 	 */
 	void updateZoomBadge()
 	{

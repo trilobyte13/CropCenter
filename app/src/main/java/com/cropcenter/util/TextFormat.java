@@ -13,8 +13,7 @@ public final class TextFormat
 	 *   one-decimal values render as "5.1°"
 	 *   finer values render as "5.12°"
 	 *
-	 * Used by both the rotation-ruler tick labels and the rotation readout, which must stay
-	 * visually consistent.
+	 * Used by both the rotation-ruler tick labels and the rotation readout, which must stay visually consistent.
 	 */
 	public static String degrees(float deg)
 	{
