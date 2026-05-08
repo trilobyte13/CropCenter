@@ -26,7 +26,7 @@ import java.util.List;
  *
  * Per spec, multiple GUID groups may coexist (rare — typically one per file). Each GUID's chunks are
  * sorted by offset and concatenated; different GUIDs land contiguously after each other in GUID-string
- * order. The offset is decoded as unsigned (offsets are file positions and always &gt;= 0; spec disallows
+ * order. The offset is decoded as unsigned (offsets are file positions and always >= 0; spec disallows
  * negative values, but a corrupted top-bit-set offset would otherwise sort BEFORE the legitimate offset
  * 0 under signed int comparison — Codex round-22 logic F3).
  */

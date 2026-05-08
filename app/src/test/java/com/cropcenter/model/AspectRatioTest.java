@@ -1,5 +1,6 @@
 package com.cropcenter.model;
 
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
@@ -7,10 +8,13 @@ import static org.junit.Assert.assertTrue;
 import org.junit.Test;
 
 /**
- * Tests for the AspectRatio poison-value contract. `isFree()` is documented as a defense against malformed
- * external constructions (Custom AR dialog, future deserialisation paths) — non-positive / non-finite inputs
- * must collapse to "no constraint" so `ratio()` returns 0 and downstream `Math.round(cropW / ratio)` doesn't
- * poison the crop with Integer.MAX_VALUE. The test pins each documented poison case.
+ * Tests for the AspectRatio poison-value contract and the snap helper. `isFree()` is documented as a defense
+ * against malformed external constructions (Custom AR dialog, future deserialisation paths) — non-positive /
+ * non-finite inputs must collapse to "no constraint" so `ratio()` returns 0 and downstream
+ * `Math.round(cropW / ratio)` doesn't poison the crop with Integer.MAX_VALUE. snap() is the integer-pixel
+ * exact-AR helper used by CropEngine to eliminate the per-axis ½-pixel drift that produced 0.79989 instead
+ * of 0.80000 on locked 4:5 exports — pin its FREE no-op, GCD reduction, optimal k selection, image-bounds
+ * cap, and 4-pixel floor here.
  */
 public final class AspectRatioTest
 {
@@ -76,4 +80,115 @@ public final class AspectRatioTest
 		assertTrue(new AspectRatio(1, Float.POSITIVE_INFINITY).isFree());
 		assertTrue(new AspectRatio(Float.NEGATIVE_INFINITY, 1).isFree());
 	}
+
+	@Test
+	public void snapFreeReturnsInputUnchanged()
+	{
+		// FREE has no AR to snap to — the helper is a no-op so callers can invoke it unconditionally
+		// without first checking isFree().
+		assertArrayEquals(new int[] { 2990, 3738 },
+			AspectRatio.FREE.snap(2990, 3738, 3000, 4000));
+		assertArrayEquals(new int[] { 1, 1 },
+			AspectRatio.FREE.snap(1, 1, 1000, 1000));
+	}
+
+	@Test
+	public void snapFractionalArReturnsInputUnchanged()
+	{
+		// Non-integer dims (Custom AR with 4.5 / 5) can't yield exact-integer-pixel snapping — fall back
+		// to the caller's per-axis round, which is the best available match.
+		AspectRatio fractional = new AspectRatio(4.5f, 5f);
+		assertArrayEquals(new int[] { 2990, 3738 },
+			fractional.snap(2990, 3738, 3000, 4000));
+	}
+
+	@Test
+	public void snapUpToOptimumKWhenImageBoundsAllow()
+	{
+		// Image-bounds cap exposes the optimal-k snap: 4:5 lock with input (2990, 3738), bounds
+		// (3000, 4000). Independent Math.round on each axis would leave AR=0.79989; the snap pulls both
+		// axes to (4·748, 5·748) = (2992, 3740), AR=0.80000 exact. CropEngine itself uses no-grow bounds
+		// to avoid silently drifting a locked center (see snapNoGrowModeForbidsUpscale below); this test
+		// pins the snap method's snap-up behaviour for callers that genuinely need it (none today, but
+		// the public API supports it).
+		int[] snapped = AspectRatio.R4_5.snap(2990, 3738, 3000, 4000);
+		assertArrayEquals(new int[] { 2992, 3740 }, snapped);
+		assertEquals(0.8f, snapped[0] / (float) snapped[1], 1e-7f);
+	}
+
+	@Test
+	public void snapAlreadyExactArIsIdempotent()
+	{
+		// (1920, 1080) is exactly 16:9 with k=120 — snap shouldn't move it. Idempotency matters because
+		// recomputeCrop runs the snap on every interaction; a snap that perturbs already-exact dims
+		// would oscillate the crop on every rotation tick.
+		assertArrayEquals(new int[] { 1920, 1080 },
+			AspectRatio.R16_9.snap(1920, 1080, 1920, 1080));
+	}
+
+	@Test
+	public void snap16To9ChoosesNearestK()
+	{
+		// (1919, 1080) is one pixel off exact 16:9; nearest k = 120 → (1920, 1080).
+		assertArrayEquals(new int[] { 1920, 1080 },
+			AspectRatio.R16_9.snap(1919, 1080, 3000, 3000));
+	}
+
+	@Test
+	public void snapReducesNonCanonicalArToLowestTerms()
+	{
+		// (16, 10) is 8:5 in lowest terms; snap should reduce first so k-steps are (8, 5) not (16, 10),
+		// giving finer-grained snapping than the unreduced form would. (1599, 1000) → (1600, 1000) at k=200
+		// using reduced (8, 5).
+		AspectRatio ar16to10 = new AspectRatio(16, 10);
+		int[] snapped = ar16to10.snap(1599, 1000, 3000, 3000);
+		assertArrayEquals(new int[] { 1600, 1000 }, snapped);
+		assertEquals(1.6f, snapped[0] / (float) snapped[1], 1e-6f);
+	}
+
+	@Test
+	public void snapCapsAtMaxWhenOptimumWouldExceedBounds()
+	{
+		// 16:9 lock on a 3000-wide image fitting horizontally: float crop is (3000, 1687.5) → rounded
+		// (3000, 1688). Optimum k = round((16·3000 + 9·1688) / 337) = 188 → (3008, 1692), but 3008 > 3000.
+		// Cap at kMax = floor(3000/16) = 187 → (2992, 1683). Stays inside the image.
+		int[] snapped = AspectRatio.R16_9.snap(3000, 1688, 3000, 4000);
+		assertEquals(2992, snapped[0]);
+		assertEquals(1683, snapped[1]);
+		assertTrue("snapped width must not exceed maxW=3000", snapped[0] <= 3000);
+		assertTrue("snapped height must not exceed maxH=4000", snapped[1] <= 4000);
+	}
+
+	@Test
+	public void snap1To1FloorsBelow4Pixels()
+	{
+		// 1:1 lock with input (3, 3): kMin = ceil(4/1) = 4, so the snap floors to k=4 → (4, 4) rather than
+		// honouring the optimum k=3 that would collapse to (3, 3) below the 4-pixel minimum CropEngine
+		// enforces elsewhere.
+		int[] snapped = AspectRatio.R1_1.snap(3, 3, 1000, 1000);
+		assertArrayEquals(new int[] { 4, 4 }, snapped);
+	}
+
+	@Test
+	public void snapBailsWhenArCannotFitMaxBounds()
+	{
+		// 16:9 lock on a 8×8 image: kMax = min(8/16, 8/9) = 0; AR can't physically realise inside the
+		// bounds at any positive k. The helper falls back to the caller's pre-snap dims rather than
+		// triggering Math.clamp's min > max contract violation.
+		assertArrayEquals(new int[] { 8, 5 },
+			AspectRatio.R16_9.snap(8, 5, 8, 8));
+	}
+
+	@Test
+	public void snapNoGrowModeForbidsUpscale()
+	{
+		// recheckRotationFit calls snap with (cropW, cropH) as the max bounds — forbids growth so the
+		// snap can't re-violate the rotation fit. Optimum k for (2990, 3738) at 4:5 is 748 → (2992, 3740),
+		// but no-grow forces k = floor(min(2990/4, 3738/5)) = floor(min(747, 747)) = 747 → (2988, 3735).
+		int[] snapped = AspectRatio.R4_5.snap(2990, 3738, 2990, 3738);
+		assertArrayEquals(new int[] { 2988, 3735 }, snapped);
+		assertTrue("snapped width must not grow past max=2990", snapped[0] <= 2990);
+		assertTrue("snapped height must not grow past max=3738", snapped[1] <= 3738);
+	}
+
 }

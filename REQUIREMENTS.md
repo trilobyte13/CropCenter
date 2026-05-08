@@ -11,7 +11,7 @@ a Gallery-edited file keeps its Revert chain across CropCenter re-edits).
 **Target/Compile SDK**: 36
 **Language**: Java 21
 **Build**: AGP 9.1.1, Gradle 9.3.1
-**LSLOC**: ~16,210 total (~10,510 main + ~5,700 test) — UCC-style logical SLOC via `scripts/count_lsloc.py` (counts
+**LSLOC**: ~17,065 total (~10,857 main + ~6,208 test) — UCC-style logical SLOC via `scripts/count_lsloc.py` (counts
 `;`-terminated statements, control-flow openers, type declarations, and method signatures; excludes blanks, comments,
 and bare brace lines). The numbers grow modestly each round — refresh via `python scripts/count_lsloc.py app/src/main`
 and `python scripts/count_lsloc.py app/src/test` when they drift past the 5% "~" tolerance.
@@ -100,7 +100,8 @@ ordinary Save As flows don't require it. `ACCESS_MEDIA_LOCATION` is NOT declared
 | `metadata/TiffTag` | Single-source-of-truth constants for EXIF / TIFF tag IDs (`ORIENTATION`, `IMAGE_WIDTH`, `IMAGE_LENGTH`, `PIXEL_X_DIMENSION`, `PIXEL_Y_DIMENSION`, `EXIF_SUB_IFD`, `JPEG_INTERCHANGE_FORMAT[_LENGTH]`, `MP_ENTRY`) and entry-type codes (`TYPE_SHORT`, `TYPE_LONG`). Consumed by `ExifPatcher`, `BitmapUtils`, `PngMetadataExtractor`, and `MpfPatcher` so a future spec change (new tag, type widening) lands in one file rather than a multi-site bare-literal hunt |
 | `metadata/GraftWriter` | In-memory byte splice for "Apply External Edit" — assembles the grafted JPEG per `SWAP_*` constants (original metadata + edit primary scan + original gain map + original SEFT) |
 | `metadata/HdrSignature` | XMP "hdrgm" namespace marker scanner. Two entry points: `hasHdrgmInXmp(List<JpegSegment>)` walks ONLY parsed XMP APP1 bodies (standard + extended) for the load + graft HDR-source gate, then falls back to the reassembled Extended XMP buffer to catch markers straddling chunk boundaries (a stray "hdrgm" outside XMP doesn't false-positive — Codex round-19 F1, round-20 F3, round-22 logic F2); `isHdrSource(byte[])` is a full-file scanner reserved for `UltraHdrCompat`'s post-`Bitmap.compress` diagnostic where the freshly-emitted JPEG is well-formed. Pure Java, no Android deps. |
-| `metadata/ExtendedXmpReassembler` | Reassemble Adobe Extended XMP chunks (`http://ns.adobe.com/xmp/extension/`) by 32-byte GUID + 4-byte unsigned offset into a single concatenated byte buffer. Used by both `HorizonDetector.detectFromMetadata` (Roll / Tilt scanning across chunk boundaries — Codex round-21 F1) and `HdrSignature.hasHdrgmInXmp` (hdrgm marker — Codex round-22 logic F2) so the reassembly logic is one chokepoint. Pure Java, no Android deps. |
+| `metadata/ExtendedXmpReassembler` | Reassemble Adobe Extended XMP chunks (`http://ns.adobe.com/xmp/extension/`) by 32-byte GUID + 4-byte unsigned offset into a single concatenated byte buffer. Used by `HorizonDetector.detectFromMetadata` (Roll / Tilt scanning across chunk boundaries — Codex round-21 F1), `HdrSignature.hasHdrgmInXmp` (hdrgm marker — Codex round-22 logic F2), and `XmpItemLengthPatcher` (Item:Length straddle detection — Codex round-26 F1) so the reassembly logic is one chokepoint. Pure Java, no Android deps. |
+| `metadata/XmpItemLengthPatcher` | Rewrites the GContainer `Item:Length` attribute in the primary's XMP packet to match the actual gain-map byte size after re-encode. The Ultra HDR pipeline preserves source XMP byte-identically, so the source's pre-edit gain-map length attribute goes stale — strict GContainer decoders (Google's libUltraHdr) slice the gain map by `Item:Length` and would decode a truncated stream, silently dropping HDR boost. Patches in-place when the attribute lives in the standard XMP packet; **fail-closes** (returns null) when (a) the attribute lives in an Extended XMP chunk, (b) the per-chunk Extended XMP scan misses but the reassembled-bytes scan hits a straddling occurrence, OR (c) the attribute lives in standard XMP but the segment is unpatchable — patched segLen would exceed the APP1 u16 cap, the value is non-quoted, the digit run is empty / unterminated, or the closing quote doesn't match (Codex round-27 F2). Walks ALL standard XMP APP1 segments (legacy non-Adobe splitters can emit two — Codex round-28 F1). `GainMapComposer.compose` checks for null and drops HDR rather than ship stale `Item:Length`. Uses a private tagged record `SegmentPatchResult` (factories `failClosed()` / `notPresent()` / `patched(byte[])`) to distinguish "attribute not in this segment" (caller scans the next segment / falls through to Extended XMP) from "attribute here but unpatchable" (caller fails closed). Pure Java, no Android deps. |
 
 ### Utilities
 
@@ -288,6 +289,20 @@ restores it to the position it sat at before Custom was tapped.
 
 **Auto-crop**: Changing AR auto-creates a crop at image center if none exists.
 
+**Locked-AR exact-integer realisation** (`AspectRatio.snap`): when an integer-valued AR is locked, `CropEngine`
+snaps the rounded crop dimensions to the nearest `(Wᵣ·k, Hᵣ·k)` realisation where `(Wᵣ, Hᵣ)` is the AR reduced to
+lowest terms via GCD and `k` is the integer minimising squared distance from the requested crop. This eliminates
+the ~½-pixel-per-axis drift that independent `Math.round` on each dimension produces — a 4:5 lock that previously
+landed on AR=0.79989 now lands on exact 0.80000. Both `recomputeCrop` and `recheckRotationFit` pass the
+pre-snap rounded dims as the snap's max-bound (no-grow) so the snap can never grow past what fits at the user's
+locked center, preserving the anchor — `setCenter`'s edge-clamp would otherwise silently drift the locked center
+inward (Codex round-24 F1). The gain map stays at its natural rounded quarter-resolution dims — **not**
+snapped — so the sampled source region matches the primary's full extent (Codex round-27 F1; snapping the
+gain map would shrink the sampled region by up to (Wᵣ-1, Hᵣ-1) pixels, reintroducing spatial HDR misalignment
+on high-contrast crop edges, and the ≤ 2e-04 AR drift between primary and gain map is imperceptible after the
+decoder scales the gain map over the primary). No-op for `FREE` and fractional ARs (Custom AR with non-integer
+inputs).
+
 ### 5. Rotation
 
 **Galaxy-style scrollable ruler** (persistent, below point controls):
@@ -394,7 +409,9 @@ Viewport clamped to prevent panning image off screen. Bitmap filtering disabled 
   the only case where preview diverges from export by 0.5 px
 - Line width scales by image-to-screen ratio (preview matches export)
 - Pixel grid at 6x+ zoom (separate toggle + configurable color in Settings)
-- Selection points and polygon use grid color
+- Selection points, polygon fill, and horizon paint use the shared selection / paint color
+  (`GridConfig.selectionColor`, configurable in the Settings card per §11) — kept separate from grid
+  color so the paint surface stays visible against the grid overlay
 - Optional bake-in to exported image (`includeInExport`); grid + HDR supported. Reset on new image load — bake-in is a
   per-save choice, not a persistent preference
 
@@ -458,8 +475,15 @@ are allowed through (SAF MIME stays valid, encoder bytes match).
 Original JPEG -> decode with gainmap -> render primary on cropW x cropH canvas
   (same rotation/positioning as preview: rotate around image center)
 -> apply identical transform to gainmap bitmap at gainmap resolution
+   (gainmap dims stay at the natural rounded quarter-resolution — NOT AspectRatio.snap'd —
+    so the sampled source-gainmap region matches the primary's full extent; the ≤ 2e-04 AR
+    drift between primary and gainmap is imperceptible after the decoder scales the gainmap
+    over the primary, and is the lesser evil vs spatial HDR misalignment on edge content
+    that snapping would introduce — Codex round-27 F1)
 -> attach gainmap to output bitmap -> Bitmap.compress -> Ultra HDR JPEG
 -> extract gain map portion -> compose with canvas-rendered primary
+-> patch GContainer Item:Length to match new gain-map byte size (XmpItemLengthPatcher;
+   fail-closed null return -> drop HDR per round-25 F1 / round-26 F1)
 -> inject original EXIF (patched) -> re-append existing SEFT trailer verbatim (if any)
 ```
 
@@ -603,6 +627,12 @@ kept and the recovery path runs from `ReplaceStrategy` rather than deleting a fi
   scan is safe and avoids re-parsing segments for a log line.
 - Re-generated via canvas-based gainmap transform matching the primary
 - Composed with primary via `GainMapComposer` + `MpfPatcher` for MPF offset correction
+- **Fail-closed on Item:Length-in-Extended-XMP**: when `XmpItemLengthPatcher.patch` returns null because the
+  GContainer `Item:Length` attribute lives in an Adobe Extended XMP chunk (or straddles a chunk boundary that
+  the per-chunk scan would miss, but the reassembled-bytes scan catches — Codex round-26 F1), patching across
+  the per-chunk reassembly headers is beyond the patcher's scope. `GainMapComposer.compose` checks for null and
+  drops HDR rather than ship a file with stale `Item:Length` that strict decoders would interpret as a
+  truncated gain map. Same metadata-strip path as the MPF-failure branch follows (see below).
 - **Fail-closed on MPF anchor failure**: when `MpfPatcher.patch` returns false (no MPF segment, malformed/unsupported
   MPF, byte-order mismatch, 3+ image MPF without MPType match, **multi-gain-map MPF where >1 entry has MPType
   `0x010005`** — the spec-legal composite depth + Original Preservation case — negative relative offset, etc.),
@@ -887,7 +917,8 @@ trivial and noise is invisible below ~5 cycles.
 ## Java 21 Features Used
 
 - **Records**: `model/AspectRatio`, `model/ExportConfig`, `model/GridConfig`, `model/SelectionPoint`, `model/Graft`,
-  `metadata/JpegSegment`, `metadata/ExtendedXmpReassembler.ExtendedXmpChunk`, `crop/CropFitContext`,
+  `metadata/JpegSegment`, `metadata/ExtendedXmpReassembler.ExtendedXmpChunk`,
+  `metadata/XmpItemLengthPatcher.SegmentPatchResult`, `crop/CropFitContext`,
   `crop/CropRender`, `crop/ExportResult`, `util/AiRegionDetector.AiMask`, `view/RotationRulerView.TickConfig`,
   `graft/EditAligner.Result`, `GraftController.SourceSnapshot`, `ReplaceStrategy.VerifyFailure`,
   `ExportPipeline.WriteOutcome`, `SaveController.PriorSaveSnapshot`, `ImageLoadController.MetadataExtraction` —
@@ -926,8 +957,10 @@ depends on:
   Ctrl-F-scannable.
 - **Constructors are above the access tiers**: they don't participate in the static-vs-instance ordering rule.
 - **Canonical helpers are single chokepoints**: `util/DpToPx`, `util/RotationMath`, `metadata/JpegMarker`,
-  `metadata/JpegMarkerWalker`, `metadata/JpegSegment.XMP_HEADER`, `model/Format`, `model/StateBus`,
-  `crop/CropFitContext`, `crop/CropRender`, `util/SafPaths`. Reach for the helper rather than re-rolling.
+  `metadata/JpegMarkerWalker`, `metadata/JpegSegment.XMP_HEADER`, `metadata/ExtendedXmpReassembler`,
+  `metadata/HdrSignature`, `metadata/TiffTag`, `metadata/XmpItemLengthPatcher`, `model/AspectRatio.snap`,
+  `model/Format`, `model/StateBus`, `crop/CropFitContext`, `crop/CropRender`, `util/SafPaths`,
+  `view/DialogStrings`. Reach for the helper rather than re-rolling.
 
 Self-audit scripts in `CLAUDE.md` cover these mechanically — `scripts/audit_static_first.py` enforces the
 static-before-instance rule, the awk one-liners catch double-indents / over-width lines / inline FQNs / HTML entities /

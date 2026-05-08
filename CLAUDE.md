@@ -14,13 +14,24 @@ Sections are ordered alphabetically. Subsections inside each section are also al
   parsing). Use the system locale only for user-facing display.
 - **String equality:** use `.equals()` or `.equalsIgnoreCase()`, never `==`.
 - **try-with-resources** for anything `Closeable` / `AutoCloseable`. Don't hand-roll close-in-finally.
-- **Intentionally empty catch** uses the parameter name `ignored`:
+- **Intentionally swallowed exceptions** use the parameter name `ignored`, and the catch body must contain a `//`
+  comment explaining *why* the throw is safe to drop. The reader needs to see at a glance which throws are expected
+  by design (user mid-keystroke input not yet parseable, EXIF tag missing on a non-camera image, optional MediaStore
+  column absent on this OEM) versus which were silently swallowed bugs. The rule applies whether the catch body is
+  empty or carries fallback logic (`return defaultValue`):
   ```java
   catch (NumberFormatException ignored)
   {
+      // EditText fires the watcher on every keystroke; partial input ("12.", "-") is expected.
+  }
+
+  catch (NumberFormatException ignored)
+  {
+      // Caller passed the default; bad numeric strings are routine for user-typed fields.
+      return def;
   }
   ```
-  If the `Exception` deserves a log line, log it instead of naming it `ignored`.
+  If the `Exception` actually deserves a log line, log it (`Log.w(TAG, "...", e)`) instead of naming it `ignored`.
 - **Toast-from-background-thread helpers** go through a UI-thread-safe path (`runOnUiThread` + `isDestroyed()` guard).
   The `toastIfAlive` helper in `MainActivity` is the canonical pattern.
 - **`final` on local variables** is required only when a lambda or anonymous class captures them. Don't sprinkle `final`
@@ -498,6 +509,14 @@ grep -rnE '/\*[^*\n/][^\n]*\*/' app/src/main/java
 # class, access tier, and the offending method names + line numbers. Empty
 # output = clean.
 python scripts/audit_static_first.py app/src/main/java app/src/test/java
+
+# Catches that swallow an exception without explaining why. Flags any catch
+# whose parameter is named `ignored` or whose body is empty AND that has no
+# // comment line in the body. Mirrors the "Intentionally swallowed
+# exceptions" rule under Android / Java idioms — a reader should see at a
+# glance which throws are expected by design (mid-keystroke parse failure,
+# missing optional EXIF tag) versus accidentally lost. Empty output = clean.
+python scripts/audit_ignored_catches.py app/src/main/java app/src/test/java
 
 # Concrete classes that should be `final` per Effective Java item 19. The
 # scanner flags any class that is not abstract, not already final, and not

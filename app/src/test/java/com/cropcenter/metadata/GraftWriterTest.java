@@ -138,6 +138,40 @@ public final class GraftWriterTest
 	}
 
 	@Test
+	public void graftSkipsGainMapForSdrSourceWithEmbeddedFfd8PostEoi() throws IOException
+	{
+		// Codex round-26 T2 — pin GraftWriter's HDR per-side AND-gate (`origHasMpf && hasHdrgmInXmp`).
+		// Build an SDR original with NO MPF segment and NO hdrgm in XMP, but post-primary-EOI bytes
+		// that structurally look like a JPEG (`FF D8 ... FF D9` mimicking a SEFT-block embedded
+		// thumbnail). Without the AND-gate, a regression that gated only on hasMpf — or only on
+		// hasHdrgmInXmp — would mis-walk those bytes as a synthesised gain map and append them as
+		// HDR-claiming output. With the gate intact, GainMapExtractor refuses to inspect post-EOI
+		// bytes and the graft output carries no gain map. (Round-19 F19-1 follow-up; mirrors the
+		// HdrSignature load-time gate but on the graft path.)
+		ByteArrayOutputStream origOut = new ByteArrayOutputStream();
+		origOut.write(JpegFixtures.soi());
+		origOut.write(DQT_STUB);
+		origOut.write(JpegFixtures.minimalScanAndEoi());
+		// Post-EOI bytes: a structurally-valid mini-JPEG (FF D8 + DQT + SOS + FF D9) that a regressed
+		// GainMapExtractor would happily walk. No "SEFT" footer so SeftExtractor refuses to claim it
+		// as a trailer either — these bytes should be entirely ignored by graft.
+		origOut.write(JpegFixtures.soi());
+		origOut.write(DQT_STUB);
+		origOut.write(JpegFixtures.minimalScanAndEoi());
+		byte[] orig = origOut.toByteArray();
+
+		byte[] edit = JpegFixtures.concat(JpegFixtures.soi(), DQT_STUB, JpegFixtures.minimalScanAndEoi());
+
+		byte[] result = GraftWriter.graft(orig, edit);
+
+		// Find the primary EOI in the result. Anything past it would be a (mis-)appended gain map or
+		// a SEFT trailer. Neither should be present for SDR-with-no-SEFT input.
+		int primaryEoi = JpegMarkerWalker.findPrimaryEoi(result, result.length);
+		assertEquals("graft of SDR sources must produce a clean primary with nothing appended",
+			result.length, primaryEoi);
+	}
+
+	@Test
 	public void graftReAppendsSourceSeftTrailerVerbatim() throws IOException
 	{
 		// Source has a SEFT trailer; edit doesn't. Output must end with source's SEFT trailer (Samsung Revert

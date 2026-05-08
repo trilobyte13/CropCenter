@@ -1,5 +1,8 @@
 package com.cropcenter.metadata;
 
+import static com.cropcenter.metadata.PngFixtures.PNG_SIGNATURE;
+import static com.cropcenter.metadata.PngFixtures.buildChunk;
+import static com.cropcenter.metadata.PngFixtures.buildIhdrChunk;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
@@ -9,7 +12,6 @@ import org.junit.Test;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.util.List;
-import java.util.zip.CRC32;
 
 /**
  * Tests for the PNG eXIf chunk parser. The load → save round-trip for PNGs that carry EXIF (orientation, GPS)
@@ -20,48 +22,12 @@ import java.util.zip.CRC32;
  * `FF E1 LL LL "Exif\0\0" [TIFF...]` layout that JpegSegment.isExif accepts and CropExporter.injectPngExif can
  * unwrap. PNGs without eXIf return an empty list. Malformed inputs (truncated, wrong signature, oversize chunk
  * length) return an empty list rather than throwing.
+ *
+ * Chunk-builder helpers (PNG signature, length+CRC envelope, minimal IHDR) live in PngFixtures so the same
+ * fixture surface is shared with ImageLoadControllerExtractMetadataTest.
  */
 public final class PngMetadataExtractorTest
 {
-	private static final byte[] PNG_SIGNATURE = {
-		(byte) 0x89, 'P', 'N', 'G', (byte) 0x0D, (byte) 0x0A, (byte) 0x1A, (byte) 0x0A
-	};
-
-	private static byte[] buildChunk(String type, byte[] data) throws IOException
-	{
-		byte[] typeBytes = type.getBytes("US-ASCII");
-		ByteArrayOutputStream out = new ByteArrayOutputStream();
-		int len = data.length;
-		out.write((len >> 24) & 0xFF);
-		out.write((len >> 16) & 0xFF);
-		out.write((len >> 8) & 0xFF);
-		out.write(len & 0xFF);
-		out.write(typeBytes);
-		out.write(data);
-		CRC32 crc = new CRC32();
-		crc.update(typeBytes);
-		crc.update(data);
-		long c = crc.getValue();
-		out.write((int) ((c >> 24) & 0xFF));
-		out.write((int) ((c >> 16) & 0xFF));
-		out.write((int) ((c >> 8) & 0xFF));
-		out.write((int) (c & 0xFF));
-		return out.toByteArray();
-	}
-
-	private static byte[] buildIhdrChunk()
-	{
-		try
-		{
-			byte[] data = { 0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0 };
-			return buildChunk("IHDR", data);
-		}
-		catch (IOException e)
-		{
-			throw new AssertionError(e);
-		}
-	}
-
 	private static byte[] concat(byte[]... parts) throws IOException
 	{
 		ByteArrayOutputStream out = new ByteArrayOutputStream();

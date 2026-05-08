@@ -40,14 +40,32 @@ public final class GainMapComposer
 			Log.d(TAG, "Compose skipped: gain map absent");
 			return primary;
 		}
-		int primarySize = primary.length;
+		// Patch the GContainer Item:Length attribute in primary's XMP to match the actual gain-map size
+		// BEFORE assembly so MpfPatcher's primarySize calculation reflects the post-patch primary length.
+		// Without this, strict GContainer-respecting decoders (Google's libUltraHdr is one) slice the gain
+		// map by Item:Length and decode a truncated stream — silent HDR-boost drop on a file that's
+		// otherwise correct (Codex round-23 follow-up). MpfPatcher's primarySize cascade is preserved
+		// because we re-bind primarySize to patched.length below.
+		//
+		// Null return means Item:Length lives in Extended XMP (the >64 KB packet form) and we can't
+		// safely patch across the per-chunk reassembly headers. Drop HDR rather than ship stale
+		// Item:Length — strict decoders would decode a truncated gain map and silently kill HDR boost
+		// (Codex round-25 F1).
+		byte[] patched = XmpItemLengthPatcher.patch(primary, gainMap.length);
+		if (patched == null)
+		{
+			Log.w(TAG, "Compose dropped gain map: Item:Length lives in Extended XMP and can't be safely "
+				+ "patched. Returning primary verbatim to avoid shipping stale Item:Length.");
+			return primary;
+		}
+		int primarySize = patched.length;
 
 		byte[] combined = new byte[primarySize + gainMap.length];
-		System.arraycopy(primary, 0, combined, 0, primarySize);
+		System.arraycopy(patched, 0, combined, 0, primarySize);
 		System.arraycopy(gainMap, 0, combined, primarySize, gainMap.length);
 
-		boolean patched = MpfPatcher.patch(combined, primarySize);
-		if (!patched)
+		boolean mpfPatched = MpfPatcher.patch(combined, primarySize);
+		if (!mpfPatched)
 		{
 			Log.w(TAG, "Compose dropped gain map: MPF patch failed (no MPF segment, "
 				+ "or malformed/unsupported MPF). Returning primary verbatim to avoid "

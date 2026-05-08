@@ -149,7 +149,6 @@ public final class CropExporter
 			}
 		}
 	}
-
 	/**
 	 * Re-append an existing SEFT trailer verbatim, or return the JPEG unchanged when none was captured at load.
 	 * CropCenter does not generate fresh SEFTs — Samsung Gallery's Revert validates a backup path the SEFT claims,
@@ -170,6 +169,94 @@ public final class CropExporter
 		System.arraycopy(jpeg, 0, result, 0, jpeg.length);
 		System.arraycopy(existingSeft, 0, result, jpeg.length, existingSeft.length);
 		return result;
+	}
+
+	/**
+	 * For HDR sources, render a cropped Ultra HDR JPEG via UltraHdrCompat and extract the gain-map bytes from its
+	 * tail. The primary-image bytes still come from the canvas rendering above; this only harvests the gain map,
+	 * which must be spatially aligned to the same crop / rotation as the primary. Returns null when the source
+	 * isn't HDR or when UltraHdrCompat couldn't produce a valid output.
+	 */
+	private static byte[] buildCroppedGainMap(CropState state, int cropW, int cropH, File cacheDir, int quality)
+	{
+		byte[] originalBytes = state.getOriginalFileBytes();
+		// Match the gain-map presence check at the top of export() — a zero-length gain-map array means
+		// extraction succeeded structurally but produced no usable bytes (rare but observed after malformed
+		// extraction). UltraHdrCompat would silently fall back to SDR; flag here so the caller's null check
+		// drops the HDR path explicitly rather than letting a degraded HDR encode go through.
+		boolean hasHdr = state.getGainMap() != null && state.getGainMap().length > 0 && originalBytes != null;
+		if (!hasHdr)
+		{
+			return null;
+		}
+
+		float centerX = state.hasCenter() ? state.getCenterX() : state.getImageWidth() / 2f;
+		float centerY = state.hasCenter() ? state.getCenterY() : state.getImageHeight() / 2f;
+		int exifOrient = BitmapUtils.readExifOrientation(originalBytes);
+		CropRender render = CropRender.of(centerX, centerY, cropW, cropH,
+			state.getImageWidth(), state.getImageHeight(), state.getRotationDegrees());
+		byte[] hdrResult = UltraHdrCompat.compressWithGainmap(
+			originalBytes, quality, cacheDir, render, exifOrient, state.getAiMask());
+		if (hdrResult == null)
+		{
+			Log.d(TAG, "HDR generation failed, falling back to non-HDR");
+			return null;
+		}
+
+		int primaryEnd = JpegMarkerWalker.findPrimaryEoi(hdrResult, hdrResult.length);
+		if (primaryEnd <= 0 || primaryEnd >= hdrResult.length)
+		{
+			return null;
+		}
+		byte[] gainMap = new byte[hdrResult.length - primaryEnd];
+		System.arraycopy(hdrResult, primaryEnd, gainMap, 0, gainMap.length);
+		Log.d(TAG, "Extracted gain map: " + gainMap.length + " bytes");
+		return gainMap;
+	}
+
+	/**
+	 * Generate the embedded EXIF thumbnail sized to fit the available APP1 budget. Using the full remaining APP1
+	 * budget (minus IFD overhead) gives a thumbnail that matches camera-native resolution instead of being
+	 * artificially shrunk. Returns null when the budget is too small for a meaningful thumbnail — replaceThumbnail
+	 * preserves the existing one in that case.
+	 */
+	private static byte[] buildEmbeddedThumbnail(CropState state, Bitmap bmp)
+	{
+		// JPEG thumbnail cap. APP1 segment limit is 65535 bytes total; this leaves room for the IFD0/IFD1
+		// metadata before the thumbnail bytes. Used both as the no-source-meta fallback budget AND as the
+		// upper clamp on the measured budget below — a corrupted source EXIF could report an arbitrarily
+		// large "remaining APP1 space", and clamping here keeps the encoded thumbnail under the segment cap.
+		final int maxThumbnailBudget = 60_000;
+		// Margin against the measured EXIF-segment budget to absorb IFD bookkeeping changes that the patcher
+		// adds when it injects the new thumbnail entries.
+		final int thumbnailMarginBytes = 200;
+		final int thumbnailMaxDim = 1024;
+		List<JpegSegment> metaForThumb = state.getJpegMeta();
+		int thumbBudget = (metaForThumb != null && !metaForThumb.isEmpty())
+			? ExifPatcher.maxThumbnailBytes(metaForThumb) - thumbnailMarginBytes
+			: maxThumbnailBudget;
+		thumbBudget = Math.clamp(thumbBudget, 0, maxThumbnailBudget);
+		return generateThumbnail(bmp, thumbnailMaxDim, thumbBudget);
+	}
+
+	/**
+	 * Append the cropped gain map to the primary JPEG when HDR extraction succeeded. The original
+	 * state.getGainMap() is aligned to the UNCROPPED / UNROTATED source, so we refuse to ship it onto a cropped /
+	 * rotated primary — that would put gain-map blobs off the features they were meant to highlight. Better to drop
+	 * HDR than ship a broken file; doExport's toast reports "[HDR dropped]" in that case.
+	 */
+	private static byte[] composeGainMap(byte[] jpegBytes, CropState state, byte[] croppedGainMap)
+	{
+		if (croppedGainMap != null && croppedGainMap.length > 0)
+		{
+			Log.d(TAG, "Appending cropped gain map: " + croppedGainMap.length + " bytes");
+			return GainMapComposer.compose(jpegBytes, croppedGainMap);
+		}
+		if (state.getGainMap() != null && state.getGainMap().length > 0)
+		{
+			Log.d(TAG, "compressWithGainmap failed — dropping HDR to avoid misalignment");
+		}
+		return jpegBytes;
 	}
 
 	/**
@@ -228,29 +315,6 @@ public final class CropExporter
 			}
 			bmp.setPixels(horizBand, 0, width, 0, top, width, actualHeight);
 		}
-	}
-
-	/**
-	 * Pixel index for grid line i of a count-N grid along one axis of the exported crop. Matches the
-	 * continuous-float positions GridRenderer.linePos emits for the preview, rounded to the nearest output pixel.
-	 * Second-half lines mirror the first half around dim / 2 so (i, count − i) pairs stay symmetric — Java's
-	 * Math.round rounds half-up, which would break symmetry at half-integer positions (e.g. count=4, dim=10
-	 * produces raw values 2.5 and 7.5; rounding both half-up gives 3 and 8 instead of the symmetric 3 and 7).
-	 *
-	 * Known half-pixel divergence from the preview: for odd `dim` with `i * 2 == count` (the middle line), the
-	 * preview draws at the fractional coord `dim / 2f` and anti-aliases across the two adjacent pixels. This
-	 * exporter must pick one integer pixel index, so the middle line in the baked export sits on `ceil(dim / 2f)`
-	 * while the preview's visual centre of mass is 0.5 px to its left. Acceptable because the preview is
-	 * anti-aliased and the eye reads its centre, not its origin.
-	 */
-	private static int gridLinePixel(int i, int count, int dim)
-	{
-		if (i * 2 > count)
-		{
-			int mirror = (int) Math.round((double) dim * (count - i) / count);
-			return dim - mirror;
-		}
-		return (int) Math.round((double) dim * i / count);
 	}
 
 	private static ExportResult exportJpeg(CropState state, Bitmap bmp, int cropW, int cropH,
@@ -319,154 +383,6 @@ public final class CropExporter
 		// appended; the same array means HDR was dropped (and stripHdrSegments has already removed the
 		// HDR-claiming segments above).
 		return new ExportResult(jpegBytes, hdrAttached);
-	}
-
-	/**
-	 * Generate the embedded EXIF thumbnail sized to fit the available APP1 budget. Using the full remaining APP1
-	 * budget (minus IFD overhead) gives a thumbnail that matches camera-native resolution instead of being
-	 * artificially shrunk. Returns null when the budget is too small for a meaningful thumbnail — replaceThumbnail
-	 * preserves the existing one in that case.
-	 */
-	private static byte[] buildEmbeddedThumbnail(CropState state, Bitmap bmp)
-	{
-		// JPEG thumbnail cap. APP1 segment limit is 65535 bytes total; this leaves room for the IFD0/IFD1
-		// metadata before the thumbnail bytes. Used both as the no-source-meta fallback budget AND as the
-		// upper clamp on the measured budget below — a corrupted source EXIF could report an arbitrarily
-		// large "remaining APP1 space", and clamping here keeps the encoded thumbnail under the segment cap.
-		final int maxThumbnailBudget = 60_000;
-		// Margin against the measured EXIF-segment budget to absorb IFD bookkeeping changes that the patcher
-		// adds when it injects the new thumbnail entries.
-		final int thumbnailMarginBytes = 200;
-		final int thumbnailMaxDim = 1024;
-		List<JpegSegment> metaForThumb = state.getJpegMeta();
-		int thumbBudget = (metaForThumb != null && !metaForThumb.isEmpty())
-			? ExifPatcher.maxThumbnailBytes(metaForThumb) - thumbnailMarginBytes
-			: maxThumbnailBudget;
-		thumbBudget = Math.clamp(thumbBudget, 0, maxThumbnailBudget);
-		return generateThumbnail(bmp, thumbnailMaxDim, thumbBudget);
-	}
-
-	/**
-	 * For HDR sources, render a cropped Ultra HDR JPEG via UltraHdrCompat and extract the gain-map bytes from its
-	 * tail. The primary-image bytes still come from the canvas rendering above; this only harvests the gain map,
-	 * which must be spatially aligned to the same crop / rotation as the primary. Returns null when the source
-	 * isn't HDR or when UltraHdrCompat couldn't produce a valid output.
-	 */
-	private static byte[] buildCroppedGainMap(CropState state, int cropW, int cropH, File cacheDir, int quality)
-	{
-		byte[] originalBytes = state.getOriginalFileBytes();
-		// Match the gain-map presence check at the top of export() — a zero-length gain-map array means
-		// extraction succeeded structurally but produced no usable bytes (rare but observed after malformed
-		// extraction). UltraHdrCompat would silently fall back to SDR; flag here so the caller's null check
-		// drops the HDR path explicitly rather than letting a degraded HDR encode go through.
-		boolean hasHdr = state.getGainMap() != null && state.getGainMap().length > 0 && originalBytes != null;
-		if (!hasHdr)
-		{
-			return null;
-		}
-
-		float centerX = state.hasCenter() ? state.getCenterX() : state.getImageWidth() / 2f;
-		float centerY = state.hasCenter() ? state.getCenterY() : state.getImageHeight() / 2f;
-		int exifOrient = BitmapUtils.readExifOrientation(originalBytes);
-		CropRender render = CropRender.of(centerX, centerY, cropW, cropH,
-			state.getImageWidth(), state.getImageHeight(), state.getRotationDegrees());
-		byte[] hdrResult = UltraHdrCompat.compressWithGainmap(
-			originalBytes, quality, cacheDir, render, exifOrient, state.getAiMask());
-		if (hdrResult == null)
-		{
-			Log.d(TAG, "HDR generation failed, falling back to non-HDR");
-			return null;
-		}
-
-		int primaryEnd = JpegMarkerWalker.findPrimaryEoi(hdrResult, hdrResult.length);
-		if (primaryEnd <= 0 || primaryEnd >= hdrResult.length)
-		{
-			return null;
-		}
-		byte[] gainMap = new byte[hdrResult.length - primaryEnd];
-		System.arraycopy(hdrResult, primaryEnd, gainMap, 0, gainMap.length);
-		Log.d(TAG, "Extracted gain map: " + gainMap.length + " bytes");
-		return gainMap;
-	}
-
-	/**
-	 * Patch the JPEG's EXIF metadata with new crop dimensions and the freshly-generated thumbnail, re-injecting
-	 * the patched segments into the output bytes. No-op when the source carried no JPEG segment list. Caller
-	 * chooses the meta list (full vs HDR-stripped) so the same primary-JPEG bytes can be re-injected on the
-	 * rare HDR-drop path without re-compressing the bitmap.
-	 *
-	 * @param jpegBytes raw JPEG bytes (output of bmp.compress) — must still carry Skia's APP markers
-	 * @param meta      original metadata segments; null / empty short-circuits the inject
-	 * @param cropW     cropped width to write into IFD0/SubIFD dimension tags
-	 * @param cropH     cropped height to write into IFD0/SubIFD dimension tags
-	 * @param thumbnail freshly-generated thumbnail JPEG bytes, or null to leave any existing IFD1 thumbnail
-	 * @return JPEG bytes with metadata replaced
-	 */
-	private static byte[] injectExifMetadata(byte[] jpegBytes, List<JpegSegment> meta,
-		int cropW, int cropH, byte[] thumbnail) throws IOException
-	{
-		if (meta == null || meta.isEmpty())
-		{
-			return jpegBytes;
-		}
-		List<JpegSegment> patched = ExifPatcher.patch(meta, cropW, cropH, thumbnail);
-		return JpegMetadataInjector.inject(jpegBytes, patched);
-	}
-
-	/**
-	 * Drop HDR-specific segments — XMP segments containing the `hdrgm` namespace marker (standard OR
-	 * Extended XMP), and APP2/MPF segments pointing at the gain map. Used on the HDR-drop path so the
-	 * saved JPEG's metadata doesn't claim HDR that the output file doesn't actually carry.
-	 *
-	 * Drops the WHOLE XMP segment when it contains hdrgm rather than surgically rewriting the XML — most camera
-	 * vendors split XMP into multiple APP1 segments anyway, so any non-hdrgm XMP typically lives in a separate
-	 * segment. The corner case (a single XMP segment carrying hdrgm + non-hdrgm metadata) loses the non-hdrgm
-	 * tags too, but that beats lying to ExportPipeline.reportSuccess about HDR presence.
-	 *
-	 * Delegates to HdrSignature.isHdrgmXmpSegment so the standard-plus-extended-XMP detection stays in
-	 * lockstep with the load-time hasHdrgmInXmp gate — without that, an HDR-drop output of a source whose
-	 * hdrgm declaration was in Extended XMP would leak the HDR signature past the gain-map removal
-	 * (Codex round-20 F1).
-	 *
-	 * @param meta source JPEG segment list
-	 * @return new list with HDR-specific segments removed; non-HDR segments preserved verbatim
-	 */
-	private static List<JpegSegment> stripHdrSegments(List<JpegSegment> meta)
-	{
-		List<JpegSegment> filtered = new ArrayList<>(meta.size());
-		for (JpegSegment seg : meta)
-		{
-			if (seg.isMpf())
-			{
-				continue;
-			}
-			if (HdrSignature.isHdrgmXmpSegment(seg))
-			{
-				continue;
-			}
-			filtered.add(seg);
-		}
-		return filtered;
-	}
-
-	/**
-	 * Append the cropped gain map to the primary JPEG when HDR extraction succeeded. The original
-	 * state.getGainMap() is aligned to the UNCROPPED / UNROTATED source, so we refuse to ship it onto a cropped /
-	 * rotated primary — that would put gain-map blobs off the features they were meant to highlight. Better to drop
-	 * HDR than ship a broken file; doExport's toast reports "[HDR dropped]" in that case.
-	 */
-	private static byte[] composeGainMap(byte[] jpegBytes, CropState state, byte[] croppedGainMap)
-	{
-		if (croppedGainMap != null && croppedGainMap.length > 0)
-		{
-			Log.d(TAG, "Appending cropped gain map: " + croppedGainMap.length + " bytes");
-			return GainMapComposer.compose(jpegBytes, croppedGainMap);
-		}
-		if (state.getGainMap() != null && state.getGainMap().length > 0)
-		{
-			Log.d(TAG, "compressWithGainmap failed — dropping HDR to avoid misalignment");
-		}
-		return jpegBytes;
 	}
 
 	private static byte[] exportPng(CropState state, Bitmap bmp, int cropW, int cropH)
@@ -620,33 +536,50 @@ public final class CropExporter
 	}
 
 	/**
-	 * Render `src` into a fresh sRGB ARGB_8888 bitmap at the requested dimensions using a bilinear-filtered Canvas
-	 * draw. The output is guaranteed to compress to a plain baseline JPEG with no ICC profile APP2 segment,
-	 * regardless of `src`'s color space.
+	 * Pixel index for grid line i of a count-N grid along one axis of the exported crop. Matches the
+	 * continuous-float positions GridRenderer.linePos emits for the preview, rounded to the nearest output pixel.
+	 * Second-half lines mirror the first half around dim / 2 so (i, count − i) pairs stay symmetric — Java's
+	 * Math.round rounds half-up, which would break symmetry at half-integer positions (e.g. count=4, dim=10
+	 * produces raw values 2.5 and 7.5; rounding both half-up gives 3 and 8 instead of the symmetric 3 and 7).
 	 *
-	 * Recycles `out` and rethrows on any Canvas / Paint / drawBitmap failure (RuntimeException) or
-	 * OutOfMemoryError. Without the wrap, `out`'s native pixel buffer would orphan to the GC finalizer
-	 * under the same allocation pressure that triggered the OOM. Mirrors UltraHdrCompat.renderPrimary's
-	 * recycle-and-rethrow shape (R17-5).
+	 * Known half-pixel divergence from the preview: for odd `dim` with `i * 2 == count` (the middle line), the
+	 * preview draws at the fractional coord `dim / 2f` and anti-aliases across the two adjacent pixels. This
+	 * exporter must pick one integer pixel index, so the middle line in the baked export sits on `ceil(dim / 2f)`
+	 * while the preview's visual centre of mass is 0.5 px to its left. Acceptable because the preview is
+	 * anti-aliased and the eye reads its centre, not its origin.
 	 */
-	private static Bitmap renderSrgbThumb(Bitmap src, int width, int height)
+	private static int gridLinePixel(int i, int count, int dim)
 	{
-		Bitmap out = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888, true,
-			ColorSpace.get(ColorSpace.Named.SRGB));
-		try
+		if (i * 2 > count)
 		{
-			Canvas canvas = new Canvas(out);
-			Rect srcRect = new Rect(0, 0, src.getWidth(), src.getHeight());
-			Rect dstRect = new Rect(0, 0, width, height);
-			Paint paint = new Paint(Paint.FILTER_BITMAP_FLAG);
-			canvas.drawBitmap(src, srcRect, dstRect, paint);
-			return out;
+			int mirror = (int) Math.round((double) dim * (count - i) / count);
+			return dim - mirror;
 		}
-		catch (RuntimeException | OutOfMemoryError e)
+		return (int) Math.round((double) dim * i / count);
+	}
+
+	/**
+	 * Patch the JPEG's EXIF metadata with new crop dimensions and the freshly-generated thumbnail, re-injecting
+	 * the patched segments into the output bytes. No-op when the source carried no JPEG segment list. Caller
+	 * chooses the meta list (full vs HDR-stripped) so the same primary-JPEG bytes can be re-injected on the
+	 * rare HDR-drop path without re-compressing the bitmap.
+	 *
+	 * @param jpegBytes raw JPEG bytes (output of bmp.compress) — must still carry Skia's APP markers
+	 * @param meta      original metadata segments; null / empty short-circuits the inject
+	 * @param cropW     cropped width to write into IFD0/SubIFD dimension tags
+	 * @param cropH     cropped height to write into IFD0/SubIFD dimension tags
+	 * @param thumbnail freshly-generated thumbnail JPEG bytes, or null to leave any existing IFD1 thumbnail
+	 * @return JPEG bytes with metadata replaced
+	 */
+	private static byte[] injectExifMetadata(byte[] jpegBytes, List<JpegSegment> meta,
+		int cropW, int cropH, byte[] thumbnail) throws IOException
+	{
+		if (meta == null || meta.isEmpty())
 		{
-			out.recycle();
-			throw e;
+			return jpegBytes;
 		}
+		List<JpegSegment> patched = ExifPatcher.patch(meta, cropW, cropH, thumbnail);
+		return JpegMetadataInjector.inject(jpegBytes, patched);
 	}
 
 	/**
@@ -772,5 +705,71 @@ public final class CropExporter
 			}
 		}
 		return null;
+	}
+
+	/**
+	 * Render `src` into a fresh sRGB ARGB_8888 bitmap at the requested dimensions using a bilinear-filtered Canvas
+	 * draw. The output is guaranteed to compress to a plain baseline JPEG with no ICC profile APP2 segment,
+	 * regardless of `src`'s color space.
+	 *
+	 * Recycles `out` and rethrows on any Canvas / Paint / drawBitmap failure (RuntimeException) or
+	 * OutOfMemoryError. Without the wrap, `out`'s native pixel buffer would orphan to the GC finalizer
+	 * under the same allocation pressure that triggered the OOM. Mirrors UltraHdrCompat.renderPrimary's
+	 * recycle-and-rethrow shape (R17-5).
+	 */
+	private static Bitmap renderSrgbThumb(Bitmap src, int width, int height)
+	{
+		Bitmap out = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888, true,
+			ColorSpace.get(ColorSpace.Named.SRGB));
+		try
+		{
+			Canvas canvas = new Canvas(out);
+			Rect srcRect = new Rect(0, 0, src.getWidth(), src.getHeight());
+			Rect dstRect = new Rect(0, 0, width, height);
+			Paint paint = new Paint(Paint.FILTER_BITMAP_FLAG);
+			canvas.drawBitmap(src, srcRect, dstRect, paint);
+			return out;
+		}
+		catch (RuntimeException | OutOfMemoryError e)
+		{
+			out.recycle();
+			throw e;
+		}
+	}
+
+	/**
+	 * Drop HDR-specific segments — XMP segments containing the `hdrgm` namespace marker (standard OR
+	 * Extended XMP), and APP2/MPF segments pointing at the gain map. Used on the HDR-drop path so the
+	 * saved JPEG's metadata doesn't claim HDR that the output file doesn't actually carry.
+	 *
+	 * Drops the WHOLE XMP segment when it contains hdrgm rather than surgically rewriting the XML — most camera
+	 * vendors split XMP into multiple APP1 segments anyway, so any non-hdrgm XMP typically lives in a separate
+	 * segment. The corner case (a single XMP segment carrying hdrgm + non-hdrgm metadata) loses the non-hdrgm
+	 * tags too, but that beats lying to ExportPipeline.reportSuccess about HDR presence.
+	 *
+	 * Delegates to HdrSignature.isHdrgmXmpSegment so the standard-plus-extended-XMP detection stays in
+	 * lockstep with the load-time hasHdrgmInXmp gate — without that, an HDR-drop output of a source whose
+	 * hdrgm declaration was in Extended XMP would leak the HDR signature past the gain-map removal
+	 * (Codex round-20 F1).
+	 *
+	 * @param meta source JPEG segment list
+	 * @return new list with HDR-specific segments removed; non-HDR segments preserved verbatim
+	 */
+	private static List<JpegSegment> stripHdrSegments(List<JpegSegment> meta)
+	{
+		List<JpegSegment> filtered = new ArrayList<>(meta.size());
+		for (JpegSegment seg : meta)
+		{
+			if (seg.isMpf())
+			{
+				continue;
+			}
+			if (HdrSignature.isHdrgmXmpSegment(seg))
+			{
+				continue;
+			}
+			filtered.add(seg);
+		}
+		return filtered;
 	}
 }

@@ -7,6 +7,7 @@ import org.junit.Test;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 
 /**
  * Tests for GainMapComposer.compose covering the three documented return classes:
@@ -83,6 +84,35 @@ public final class GainMapComposerTest
 	}
 
 	@Test
+	public void composeReturnsPrimaryWhenItemLengthInExtendedXmp() throws IOException
+	{
+		// Codex round-26 T1 — when XmpItemLengthPatcher.patch returns null (Item:Length lives in Extended
+		// XMP, which can't be safely patched in-place across the per-chunk reassembly headers), compose
+		// must drop the gain map and ship primary verbatim. Without this null-handling integration, the
+		// composer would either NPE on the null `patched` array or ship a file with stale Item:Length —
+		// silent HDR-boost loss in strict GContainer-respecting decoders. Build a primary with valid MPF
+		// (so MPF patching would succeed if reached) and Extended XMP carrying Item:Length, verify the
+		// patcher's null short-circuits before MpfPatcher runs.
+		byte[] standardXmp = (JpegSegment.XMP_HEADER + "<x:xmpmeta><hdrgm:Version>1.0</hdrgm:Version>"
+			+ "</x:xmpmeta>").getBytes(StandardCharsets.US_ASCII);
+		// Extended XMP chunk: namespace prefix (35 bytes) + 32-byte GUID + 4-byte total-length + 4-byte
+		// offset + body containing Item:Length=. The patcher's reassembly fallback OR the per-chunk scan
+		// will detect Item:Length= and return null.
+		byte[] extXmp = buildExtendedXmpChunk(
+			"<rdf:Description Item:Length=\"43099\" Item:Mime=\"image/jpeg\"/>");
+		byte[] primary = buildPrimaryWithMpfAndExtraXmp(standardXmp, extXmp);
+		byte[] gainMap = new byte[40];
+		for (int i = 0; i < gainMap.length; i++)
+		{
+			gainMap[i] = 0x42;
+		}
+
+		byte[] result = GainMapComposer.compose(primary, gainMap);
+		assertSame("Item:Length-in-Extended-XMP must drop the gain map (patcher null return)",
+			primary, result);
+	}
+
+	@Test
 	public void composeReturnsPrimaryWhenMpfMissingEvenWithGainMap() throws IOException
 	{
 		// Variant of the patch-failure test using a real-looking JPEG (SOI + DQT + minimal scan + EOI) that has
@@ -94,6 +124,17 @@ public final class GainMapComposerTest
 		byte[] gainMap = { 0x42, 0x42, 0x42 };
 		byte[] result = GainMapComposer.compose(primary, gainMap);
 		assertSame("SDR primary with no MPF should ignore gain map", primary, result);
+	}
+
+	private static byte[] buildExtendedXmpChunk(String inner) throws IOException
+	{
+		ByteArrayOutputStream body = new ByteArrayOutputStream();
+		body.write("http://ns.adobe.com/xmp/extension/\0".getBytes(StandardCharsets.US_ASCII));
+		body.write("0123456789abcdef0123456789abcdef".getBytes(StandardCharsets.US_ASCII));
+		body.write(new byte[] { 0, 0, 0x10, 0 });
+		body.write(new byte[] { 0, 0, 0, 0 });
+		body.write(inner.getBytes(StandardCharsets.US_ASCII));
+		return body.toByteArray();
 	}
 
 	/**
@@ -139,6 +180,43 @@ public final class GainMapComposerTest
 
 		ByteArrayOutputStream out = new ByteArrayOutputStream();
 		out.write(JpegFixtures.soi());
+		out.write(JpegFixtures.appSegment(0xE2, prefixMpfMagic(payload.toByteArray())));
+		out.write(JpegFixtures.minimalScanAndEoi());
+		return out.toByteArray();
+	}
+
+	private static byte[] buildPrimaryWithMpfAndExtraXmp(byte[] standardXmp, byte[] extXmp)
+		throws IOException
+	{
+		// Same shape as buildPrimaryWithMpf but interleaves a standard XMP APP1 + Extended XMP APP1
+		// before the MPF segment, so the patcher exercises its standard-XMP-miss → Extended-XMP path
+		// and returns null.
+		ByteArrayOutputStream payload = new ByteArrayOutputStream();
+		payload.write('I'); payload.write('I'); payload.write('*'); payload.write(0);
+		writeU32Le(payload, 8L);
+		writeU16Le(payload, 2);
+		writeU16Le(payload, 0xB000);
+		writeU16Le(payload, 7);
+		writeU32Le(payload, 4L);
+		payload.write(new byte[] { '0', '1', '0', '0' });
+		writeU16Le(payload, 0xB002);
+		writeU16Le(payload, 7);
+		writeU32Le(payload, 2L * 16L);
+		writeU32Le(payload, 38L);
+		writeU32Le(payload, 0L);
+		writeU32Le(payload, 0x20000000L);
+		writeU32Le(payload, 999L);
+		writeU32Le(payload, 0L);
+		writeU32Le(payload, 0L);
+		writeU32Le(payload, 0x00010005L);
+		writeU32Le(payload, 0L);
+		writeU32Le(payload, 0L);
+		writeU32Le(payload, 0L);
+
+		ByteArrayOutputStream out = new ByteArrayOutputStream();
+		out.write(JpegFixtures.soi());
+		out.write(JpegFixtures.appSegment(0xE1, standardXmp));
+		out.write(JpegFixtures.appSegment(0xE1, extXmp));
 		out.write(JpegFixtures.appSegment(0xE2, prefixMpfMagic(payload.toByteArray())));
 		out.write(JpegFixtures.minimalScanAndEoi());
 		return out.toByteArray();

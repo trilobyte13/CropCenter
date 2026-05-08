@@ -10,6 +10,11 @@ import org.junit.Test;
  * private but exercised through every public read/write variant — driving them via the public API gives realistic
  * call-shape coverage and pins down the exact-fit boundary, the one-past-end rejection, the negative-offset rejection,
  * and the wraparound rejection at offsets near Integer.MAX_VALUE that the round-6 fix made impossible.
+ *
+ * The negative-throw tests use the JUnit 4 try / fail / catch idiom: the call under test runs inside try, fail()
+ * trips if no exception is thrown, and the catch body is empty because reaching the catch IS the assertion. The
+ * comment in each catch block documents that intent so an auditor reading the empty body doesn't mistake it for a
+ * silently swallowed exception.
  */
 public final class ByteBufferUtilsTest
 {
@@ -78,6 +83,7 @@ public final class ByteBufferUtilsTest
 		}
 		catch (IndexOutOfBoundsException ignored)
 		{
+			// Reaching the catch IS the assertion; the fail() above trips if no throw arrives.
 		}
 	}
 
@@ -92,6 +98,7 @@ public final class ByteBufferUtilsTest
 		}
 		catch (IndexOutOfBoundsException ignored)
 		{
+			// Reaching the catch IS the assertion; the fail() above trips if no throw arrives.
 		}
 	}
 
@@ -106,6 +113,7 @@ public final class ByteBufferUtilsTest
 		}
 		catch (IndexOutOfBoundsException ignored)
 		{
+			// Reaching the catch IS the assertion; the fail() above trips if no throw arrives.
 		}
 	}
 
@@ -120,6 +128,7 @@ public final class ByteBufferUtilsTest
 		}
 		catch (IndexOutOfBoundsException ignored)
 		{
+			// Reaching the catch IS the assertion; the fail() above trips if no throw arrives.
 		}
 	}
 
@@ -134,6 +143,7 @@ public final class ByteBufferUtilsTest
 		}
 		catch (IndexOutOfBoundsException ignored)
 		{
+			// Reaching the catch IS the assertion; the fail() above trips if no throw arrives.
 		}
 	}
 
@@ -153,6 +163,7 @@ public final class ByteBufferUtilsTest
 		}
 		catch (IndexOutOfBoundsException ignored)
 		{
+			// Reaching the catch IS the assertion; the fail() above trips if no throw arrives.
 		}
 	}
 
@@ -167,6 +178,7 @@ public final class ByteBufferUtilsTest
 		}
 		catch (IndexOutOfBoundsException ignored)
 		{
+			// Reaching the catch IS the assertion; the fail() above trips if no throw arrives.
 		}
 	}
 
@@ -180,6 +192,7 @@ public final class ByteBufferUtilsTest
 		}
 		catch (IndexOutOfBoundsException ignored)
 		{
+			// Reaching the catch IS the assertion; the fail() above trips if no throw arrives.
 		}
 	}
 

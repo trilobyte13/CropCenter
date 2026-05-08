@@ -3,19 +3,19 @@ plugins {
 }
 
 android {
-    namespace 'com.cropcenter'
-    compileSdk 36
+    namespace = 'com.cropcenter'
+    compileSdk = 36
 
     buildFeatures {
-        buildConfig true
+        buildConfig = true
     }
 
     defaultConfig {
-        applicationId "com.cropcenter"
-        minSdk 35
-        targetSdk 36
-        versionCode 1
-        versionName "1.0"
+        applicationId = "com.cropcenter"
+        minSdk = 35
+        targetSdk = 36
+        versionCode = 1
+        versionName = "1.0"
 
         // Expose the build timestamp so the Settings dialog can show which APK is installed.
         // Uses a human-readable form; wrapping in escaped quotes since buildConfigField
@@ -26,14 +26,14 @@ android {
 
     buildTypes {
         release {
-            minifyEnabled true
+            minifyEnabled = true
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
     }
 
     compileOptions {
-        sourceCompatibility JavaVersion.VERSION_21
-        targetCompatibility JavaVersion.VERSION_21
+        sourceCompatibility = JavaVersion.VERSION_21
+        targetCompatibility = JavaVersion.VERSION_21
     }
 
     testOptions {

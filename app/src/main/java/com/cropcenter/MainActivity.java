@@ -5,6 +5,7 @@ import android.app.AlertDialog;
 import android.content.Context;
 import android.content.Intent;
 import android.graphics.Bitmap;
+import android.net.Uri;
 import android.os.Bundle;
 import android.util.Log;
 import android.view.View;
@@ -447,37 +448,10 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 					}
 					return intent;
 				}
-			}, uri ->
-			{
-				// SAF result: URI (file picked) or null (cancelled). Clear the pending-save flag either
-				// way so the Save button re-enables.
-				if (uri != null)
-				{
-					// Persistable permission lets Replace's SAF fallbacks reopen the same document
-					// later (re-read, re-rename). SAF grants write on creation but the grant
-					// expires at process death without this; file-I/O fallback still works when
-					// MANAGE_EXTERNAL_STORAGE is held, so failure is non-fatal but worth warning
-					// about.
-					imageLoader.tryTakePersistable(uri, "(save)", true);
-					saveController.handleSaveAsResult(uri);
-				}
-				else
-				{
-					saveController.onSaveCancelled();
-				}
-			});
+			}, this::onSaveAsLauncherResult);
 
-		graftPickerLauncher = registerForActivityResult(new ActivityResultContracts.OpenDocument(), uri ->
-			{
-				if (uri != null)
-				{
-					graftController.onEditPicked(uri);
-				}
-				else
-				{
-					graftController.onEditPickerCancelled();
-				}
-			});
+		graftPickerLauncher = registerForActivityResult(new ActivityResultContracts.OpenDocument(),
+			this::onGraftPickerResult);
 
 		View btnOpen = findViewById(R.id.btnOpen);
 		btnOpen.setOnClickListener(view ->
@@ -690,6 +664,50 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 			return;
 		}
 		findViewById(R.id.progressOverlay).setVisibility(View.GONE);
+	}
+
+	/**
+	 * Result handler for the long-press graft picker. Extracted from the registerForActivityResult
+	 * call-site lambda — the body's null / non-null branch dispatch exceeds CLAUDE.md's 3-line lambda
+	 * cap and benefits from a name in stack traces.
+	 *
+	 * @param uri SAF document URI returned by the picker; null when the user cancelled
+	 */
+	private void onGraftPickerResult(Uri uri)
+	{
+		if (uri != null)
+		{
+			graftController.onEditPicked(uri);
+		}
+		else
+		{
+			graftController.onEditPickerCancelled();
+		}
+	}
+
+	/**
+	 * Result handler for the Save As SAF picker. Extracted from the registerForActivityResult call-site
+	 * lambda for the same reason as onGraftPickerResult — exceeded the 3-line cap, plus the success
+	 * path must run tryTakePersistable BEFORE handleSaveAsResult so a busy-thrown SAF re-read of the
+	 * just-created document can succeed (R17-3 contract).
+	 *
+	 * @param uri SAF document URI committed by the user; null when the picker was cancelled
+	 */
+	private void onSaveAsLauncherResult(Uri uri)
+	{
+		if (uri != null)
+		{
+			// Persistable permission lets Replace's SAF fallbacks reopen the same document later
+			// (re-read, re-rename). SAF grants write on creation but the grant expires at process
+			// death without this; file-I/O fallback still works when MANAGE_EXTERNAL_STORAGE is
+			// held, so failure is non-fatal but worth warning about.
+			imageLoader.tryTakePersistable(uri, "(save)", true);
+			saveController.handleSaveAsResult(uri);
+		}
+		else
+		{
+			saveController.onSaveCancelled();
+		}
 	}
 
 	/**

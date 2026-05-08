@@ -104,18 +104,9 @@ final class ViewportMath
 	 * Convert image (ix, iy) to its rotated screen position — applies the same rotation around the image center
 	 * that the editor's onDraw applies to the bitmap. Use this for overlays (selection points, polygon vertices)
 	 * whose visual position must track image content as the user rotates. For overlays defined in image-coord
-	 * axis-aligned space (the crop rectangle, dim regions), use imageToScreenX/Y directly. Allocates a fresh
-	 * `float[2]` per call — for hot per-frame loops use `imageToScreenRotatedInto` instead.
-	 */
-	float[] imageToScreenRotated(float ix, float iy, CropState state)
-	{
-		return imageToScreenRotatedInto(ix, iy, state, new float[2]);
-	}
-
-	/**
-	 * Out-buffer overload of imageToScreenRotated. Writes the rotated screen coordinates into `out[0]` /
-	 * `out[1]` and returns `out`. Used by the renderer's hot per-frame paths (selection-marker labels) so
-	 * onDraw doesn't allocate a fresh `float[2]` per point.
+	 * axis-aligned space (the crop rectangle, dim regions), use imageToScreenX/Y directly. Writes the rotated
+	 * screen coordinates into `out[0]` / `out[1]` and returns `out`; callers in onDraw reuse a per-renderer
+	 * scratch buffer so the per-frame path does no allocation.
 	 *
 	 * @param ix    image X coordinate
 	 * @param iy    image Y coordinate

@@ -522,6 +522,8 @@ public final class HorizonDetector
 			}
 			catch (NumberFormatException ignored)
 			{
+				// Some namespaces store the attribute name as a non-float (CDATA fragment, enum
+				// token, IETF locale) — skip and try the next match; a later occurrence may parse.
 			}
 		}
 		return Float.NaN;

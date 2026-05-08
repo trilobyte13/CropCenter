@@ -534,12 +534,14 @@ public final class CropState
 		gainMap = null;
 		pngExifTiff = null;
 		seftTrailer = null;
-		// Order matters: clear aiMask BEFORE graftApplied so a concurrent UI read mid-reset never observes
-		// the inconsistent (graftApplied=false, aiMask=stale-non-null) intermediate state. With this order,
-		// any read that sees graftApplied=true also sees the still-installed aiMask; any read that sees
-		// graftApplied=false sees aiMask=null (or, briefly, the old aiMask paired with old graftApplied=true,
-		// which is also self-consistent). UltraHdrCompat.compressWithGainmap reads aiMask only when
-		// graftApplied is true, so the consistent pairing matters.
+		// Order matters: clear aiMask BEFORE graftApplied so a concurrent UI read mid-reset never
+		// observes the inconsistent (graftApplied=false, aiMask=stale-non-null) intermediate state.
+		// The reverse intermediate (graftApplied=true, aiMask=null) IS briefly observable but is
+		// benign — UltraHdrCompat.compressWithGainmap's inpaint gate handles null aiMask as a no-op,
+		// so a reader that catches the transient pair just skips inpaint (which is also what an
+		// already-reset state produces). Reference reads are atomic per JLS §17.7, so aiMask is
+		// either the old reference or null — never torn — and the inpaint code never dereferences a
+		// half-cleared object.
 		aiMask = null;
 		graftApplied = false;
 	}

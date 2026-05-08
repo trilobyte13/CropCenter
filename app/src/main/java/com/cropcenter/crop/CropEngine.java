@@ -124,7 +124,16 @@ public final class CropEngine
 
 		int roundedCropW = Math.max(4, Math.round(Math.max(4, cropW)));
 		int roundedCropH = Math.max(4, Math.round(Math.max(4, cropH)));
-		state.setCropSizeSilent(roundedCropW, roundedCropH);
+		// Snap to exact-integer aspect ratio — eliminates the per-axis ½-pixel drift that produced
+		// 0.79989 instead of 0.80000 on locked 4:5 (round(2990.4)=2990, round(3737.5)=3738; the pair
+		// drifts off the locked AR even though the float dims were exact). Pass the rounded dims as
+		// the snap bounds (no-grow) — computeMaxCropSize already produced the largest crop that fits
+		// at the locked center, so allowing snap-up against imgW / imgH would let the snap exceed
+		// what fits at the user's anchored center, and the subsequent setCenter clamp would silently
+		// drift the locked center inward (Codex round-24 F1). No-op for FREE / fractional ARs.
+		int[] snapped = state.getAspectRatio().snap(roundedCropW, roundedCropH,
+			roundedCropW, roundedCropH);
+		state.setCropSizeSilent(snapped[0], snapped[1]);
 		state.setCropSizeDirty(false);
 		state.setCenter(centerX, centerY);
 
@@ -338,7 +347,11 @@ public final class CropEngine
 		float cropH = state.getCropH() * recheck;
 		int refinedCropW = Math.max(4, Math.round(cropW));
 		int refinedCropH = Math.max(4, Math.round(cropH));
-		state.setCropSizeSilent(refinedCropW, refinedCropH);
+		// Snap to exact-integer AR while forbidding growth — pass refinedCropW / refinedCropH as the
+		// max bounds so the snap rounds DOWN to the nearest (Wr·k, Hr·k) that fits the just-shrunk
+		// dims. Up-snapping here would re-violate the rotation fit this method exists to enforce.
+		int[] snapped = state.getAspectRatio().snap(refinedCropW, refinedCropH, refinedCropW, refinedCropH);
+		state.setCropSizeSilent(snapped[0], snapped[1]);
 		state.setCenter(finalCenterX, finalCenterY);
 	}
 

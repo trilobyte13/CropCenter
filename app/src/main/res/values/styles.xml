@@ -13,24 +13,4 @@
         <item name="android:statusBarColor">@color/mantle</item>
         <item name="android:navigationBarColor">@color/crust</item>
     </style>
-
-    <style name="SectionTitle">
-        <item name="android:textSize">11sp</item>
-        <item name="android:textColor">@color/mauve</item>
-        <item name="android:textStyle">bold</item>
-        <item name="android:textAllCaps">true</item>
-        <item name="android:letterSpacing">0.12</item>
-        <item name="android:paddingBottom">6dp</item>
-    </style>
-
-    <style name="ArButton" parent="Widget.MaterialComponents.Button.OutlinedButton">
-        <item name="android:textSize">12sp</item>
-        <item name="android:minHeight">32dp</item>
-        <item name="android:paddingStart">10dp</item>
-        <item name="android:paddingEnd">10dp</item>
-        <item name="strokeColor">@color/surface1</item>
-        <item name="android:textColor">@color/subtext0</item>
-        <item name="backgroundTint">@color/surface0</item>
-        <item name="cornerRadius">4dp</item>
-    </style>
 </resources>

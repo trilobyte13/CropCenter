@@ -186,6 +186,70 @@ final class SaveController
 			}
 		}
 	}
+	/**
+	 * SAF picker was cancelled — clear pending flags so Save re-enables.
+	 */
+	void onSaveCancelled()
+	{
+		savePending = false;
+		pendingSaveName = null;
+		// Roll back the format / grid-include selections SaveDialog committed before launching the picker.
+		// Without this, a user who picked PNG + Export Grid in the dialog and then cancelled the SAF picker
+		// would find PNG + Export Grid as the next default — silently changing the next save's encoding
+		// based on a save the user explicitly abandoned.
+		restorePriorSaveSettings();
+	}
+
+	/**
+	 * Save button handler. Runs SaveDialog (format + grid-bake options); on its "Continue" the SAF picker opens
+	 * with the correct extension pre-filled. Replace/Keep confirmation is handled downstream in
+	 * handleSaveAsResult(); that's also where MANAGE_EXTERNAL_STORAGE is prompted if the user actually hits a
+	 * collision — ordinary Save As flows no longer carry the overwrite-oriented permission UX.
+	 */
+	void showSaveDialog()
+	{
+		if (host.getState().getSourceImage() == null)
+		{
+			return;
+		}
+		if (host.getBusy().get() || savePending)
+		{
+			host.showBusyToast();
+			return;
+		}
+		openSaveOptionsDialog();
+	}
+
+	/**
+	 * Pick encoder based on the extension the user typed in the SAF picker.
+	 */
+	private void applyFormatFromFilename(String name)
+	{
+		if (name == null)
+		{
+			return;
+		}
+		Format derived = Format.fromExtension(name);
+		if (derived != null)
+		{
+			host.getState().updateExportConfig(c -> c.withFormat(derived));
+		}
+		// Unknown extension leaves the format unchanged (source default).
+	}
+
+	/**
+	 * Cancel-time hook for SaveDialog: clear priorSnapshot when the dialog dismisses without Continue
+	 * (user Cancel, back-press, outside-touch, or forced dismissTransientDialogs from a parallel load).
+	 * The snapshot's sourceImage field holds a strong reference to the source Bitmap; without this clear,
+	 * an abandoned dialog would pin the bitmap until the next openSaveOptionsDialog overwrites the field
+	 * or the Activity tears down (Codex round-17 F4). The Continue path deliberately does NOT call this —
+	 * handleSaveAsResultBody / onSaveCancelled / the launcher-exception path still own the snapshot
+	 * rollback contract for a save that's reached SAF and then abandoned.
+	 */
+	private void clearPriorSnapshotOnCancel()
+	{
+		priorSnapshot = null;
+	}
 
 	/**
 	 * Body of handleSaveAsResult — extracted so the public wrapper can manage the savePending lifecycle in
@@ -318,71 +382,6 @@ final class SaveController
 	}
 
 	/**
-	 * SAF picker was cancelled — clear pending flags so Save re-enables.
-	 */
-	void onSaveCancelled()
-	{
-		savePending = false;
-		pendingSaveName = null;
-		// Roll back the format / grid-include selections SaveDialog committed before launching the picker.
-		// Without this, a user who picked PNG + Export Grid in the dialog and then cancelled the SAF picker
-		// would find PNG + Export Grid as the next default — silently changing the next save's encoding
-		// based on a save the user explicitly abandoned.
-		restorePriorSaveSettings();
-	}
-
-	/**
-	 * Save button handler. Runs SaveDialog (format + grid-bake options); on its "Continue" the SAF picker opens
-	 * with the correct extension pre-filled. Replace/Keep confirmation is handled downstream in
-	 * handleSaveAsResult(); that's also where MANAGE_EXTERNAL_STORAGE is prompted if the user actually hits a
-	 * collision — ordinary Save As flows no longer carry the overwrite-oriented permission UX.
-	 */
-	void showSaveDialog()
-	{
-		if (host.getState().getSourceImage() == null)
-		{
-			return;
-		}
-		if (host.getBusy().get() || savePending)
-		{
-			host.showBusyToast();
-			return;
-		}
-		openSaveOptionsDialog();
-	}
-
-	/**
-	 * Pick encoder based on the extension the user typed in the SAF picker.
-	 */
-	private void applyFormatFromFilename(String name)
-	{
-		if (name == null)
-		{
-			return;
-		}
-		Format derived = Format.fromExtension(name);
-		if (derived != null)
-		{
-			host.getState().updateExportConfig(c -> c.withFormat(derived));
-		}
-		// Unknown extension leaves the format unchanged (source default).
-	}
-
-	/**
-	 * Cancel-time hook for SaveDialog: clear priorSnapshot when the dialog dismisses without Continue
-	 * (user Cancel, back-press, outside-touch, or forced dismissTransientDialogs from a parallel load).
-	 * The snapshot's sourceImage field holds a strong reference to the source Bitmap; without this clear,
-	 * an abandoned dialog would pin the bitmap until the next openSaveOptionsDialog overwrites the field
-	 * or the Activity tears down (Codex round-17 F4). The Continue path deliberately does NOT call this —
-	 * handleSaveAsResultBody / onSaveCancelled / the launcher-exception path still own the snapshot
-	 * rollback contract for a save that's reached SAF and then abandoned.
-	 */
-	private void clearPriorSnapshotOnCancel()
-	{
-		priorSnapshot = null;
-	}
-
-	/**
 	 * Handle the Replace dialog's positive "Replace" button: full Replace semantics (write-then-swap +
 	 * "Replaced" toast). Busy-rejection cleanup: when a parallel bg op (e.g. a Share/View intent's load
 	 * that arrived while the user deliberated) holds busy, replaceColliding's downstream busy gate would
@@ -480,6 +479,22 @@ final class SaveController
 		}
 	}
 
+	/**
+	 * Drive the Save Options sub-dialog (format / grid-include picker) before the SAF picker. Snapshots
+	 * the current export config + source bitmap into priorSnapshot BEFORE showing — SaveDialog mutates
+	 * state directly on its Continue tap, and a subsequent SAF cancellation triggers
+	 * restorePriorSaveSettings to unwind those mutations. Three failure paths the snapshot must clear
+	 * to avoid leaking the source bitmap reference:
+	 *   - the user Cancels / back-presses the dialog (clearPriorSnapshotOnCancel via the registered
+	 *     transient-dialog tracker)
+	 *   - a parallel load forces dismissTransientDialogs (same callback as user cancel)
+	 *   - the dialog itself fails to show (BadTokenException from a config-change race) — the catch
+	 *     below clears priorSnapshot directly because the OnCancelListener never registers (R17 F4)
+	 *
+	 * isDestroyed pre-check is the first line of defense against the config-change race; the
+	 * try/catch around .show is the second (the race window between the check and the actual show is
+	 * still open). Mirrors the pattern in showReplaceDialog and showExtensionMismatchDialog.
+	 */
 	private void openSaveOptionsDialog()
 	{
 		// BadTokenException guard — if onDestroy ran between the user's Save tap and this call (rare but

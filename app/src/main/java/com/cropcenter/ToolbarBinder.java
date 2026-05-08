@@ -105,6 +105,8 @@ final class ToolbarBinder
 		}
 		catch (NumberFormatException ignored)
 		{
+			// Blank / non-numeric text is a routine state for the EditText this drives — caller already
+			// supplied the fallback to return on parse failure.
 			return def;
 		}
 	}
@@ -186,6 +188,8 @@ final class ToolbarBinder
 		}
 		catch (NumberFormatException ignored)
 		{
+			// Per Javadoc: silently no-op so the user's existing rotation is preserved when Apply is tapped
+			// on an unparseable field. The dialog stays open, letting the user fix and retry.
 		}
 	}
 

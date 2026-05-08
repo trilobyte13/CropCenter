@@ -251,9 +251,26 @@ public final class RotationRulerView extends View
 		{
 			case MotionEvent.ACTION_DOWN -> handleTouchDown(event);
 			case MotionEvent.ACTION_MOVE -> handleTouchMove(event);
-			case MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> handleTouchRelease(event);
+			case MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL ->
+			{
+				handleTouchRelease(event);
+				// Standard accessibility hook — any view consuming touch must route ACTION_UP
+				// through performClick so a11y services can replicate the gesture programmatically.
+				// ACTION_CANCEL also lands here because the user's release intent was real even when
+				// the OS / parent gesture handler intercepted before the up event reached us.
+				performClick();
+			}
 		}
 		return true;
+	}
+
+	@Override
+	public boolean performClick()
+	{
+		// Required by the View / accessibility contract for any view that overrides onTouchEvent — the
+		// rotation drag itself is committed via handleTouchMove + handleTouchRelease above; this hook
+		// just delegates to super for the standard click sound + accessibility events.
+		return super.performClick();
 	}
 
 	/**

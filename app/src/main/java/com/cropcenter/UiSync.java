@@ -8,6 +8,8 @@ import com.cropcenter.util.BitmapUtils;
 import com.cropcenter.util.TextFormat;
 import com.google.android.material.button.MaterialButton;
 
+import java.util.Locale;
+
 /**
  * Centralised UI state sync: update* / sync* methods that reflect CropState changes into the toolbar and info bar. All
  * methods run on the UI thread. Every CropState-driven UI refresh in the activity's state listener fans out through
@@ -171,9 +173,10 @@ final class UiSync
 		// Compact format: "2.5x", "26x" — avoids huge "25600%". The %.1f format uses the system locale's
 		// decimal separator (e.g. "2,5x" on de-DE) per CLAUDE.md's "system locale only for user-facing
 		// display" rule — Locale.ROOT here would force a "." even where the user's OS expects ",", which
-		// is the exact mismatch the rule exists to prevent for visible UI text.
+		// is the exact mismatch the rule exists to prevent for visible UI text. Explicit
+		// Locale.getDefault() so the locale choice is auditable rather than implicit (Codex round-24 F3).
 		host.getZoomBadgeTextView().setText(zoom < 10f
-			? String.format("%.1fx", zoom)
+			? String.format(Locale.getDefault(), "%.1fx", zoom)
 			: Math.round(zoom) + "x");
 	}
 }

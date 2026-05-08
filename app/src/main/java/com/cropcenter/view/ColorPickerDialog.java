@@ -102,10 +102,23 @@ public final class ColorPickerDialog
 						listener.onTap(colors[idx]);
 					}
 					invalidate();
+					// Route through performClick so accessibility services see the swatch tap and
+					// any OnClickListener can replicate the selection programmatically.
+					performClick();
 				}
 				return true;
 			}
 			return super.onTouchEvent(event);
+		}
+
+		@Override
+		public boolean performClick()
+		{
+			// Defer to super for the standard click sound + accessibility events; the swatch selection
+			// itself is performed at ACTION_DOWN above. Required by the View / accessibility contract:
+			// any view that handles touch events must also expose a programmatic click path so a11y
+			// services can replicate the touch interaction.
+			return super.performClick();
 		}
 
 		@Override
@@ -454,6 +467,8 @@ public final class ColorPickerDialog
 				}
 				catch (NumberFormatException ignored)
 				{
+					// afterTextChanged fires per keystroke; partial states ("F", "FF", "#1Z") are
+					// expected — wait for a full 6- or 8-digit hex before reflecting any change.
 				}
 			}
 		});

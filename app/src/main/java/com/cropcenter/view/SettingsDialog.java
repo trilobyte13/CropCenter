@@ -106,6 +106,15 @@ public final class SettingsDialog
 			.show();
 	}
 
+	private static void addLabel(LinearLayout parent, String text)
+	{
+		TextView tv = new TextView(parent.getContext());
+		tv.setText(text);
+		tv.setTextSize(13);
+		tv.setTextColor(ThemeColors.SUBTEXT0);
+		parent.addView(tv);
+	}
+
 	/**
 	 * Commit the Columns / Rows EditText values to state, clamping each to [1, 50]. A blank / non-numeric field is
 	 * silently ignored — this is called on OK, and preset-chip taps already synced the inputs back in.
@@ -120,6 +129,8 @@ public final class SettingsDialog
 		}
 		catch (NumberFormatException ignored)
 		{
+			// Per Javadoc: blank / non-numeric input keeps the prior dimensions. Preset chip taps already
+			// synced the EditTexts back, so dropping the OK action on bad text is the documented contract.
 		}
 	}
 
@@ -332,17 +343,6 @@ public final class SettingsDialog
 		widthRow.addView(widthSeekBar, seekBarLayoutParams);
 		widthRow.addView(widthValueText);
 		return widthRow;
-	}
-
-	// ── UI building helpers ──
-
-	private static void addLabel(LinearLayout parent, String text)
-	{
-		TextView tv = new TextView(parent.getContext());
-		tv.setText(text);
-		tv.setTextSize(13);
-		tv.setTextColor(ThemeColors.SUBTEXT0);
-		parent.addView(tv);
 	}
 
 	/**

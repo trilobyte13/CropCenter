@@ -1,5 +1,8 @@
 package com.cropcenter;
 
+import static com.cropcenter.metadata.PngFixtures.PNG_SIGNATURE;
+import static com.cropcenter.metadata.PngFixtures.buildChunk;
+import static com.cropcenter.metadata.PngFixtures.buildIhdrChunk;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
@@ -14,7 +17,6 @@ import org.junit.Test;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.util.zip.CRC32;
 
 /**
  * Tests for ImageLoadController.extractMetadata — the format-routing seam between the SAF byte-load and the per-format
@@ -22,43 +24,13 @@ import java.util.zip.CRC32;
  * and the sourceFormat field gates downstream JPEG vs PNG export decisions, so the routing has to land the right format
  * for every JPEG/PNG path. Pin the JPEG-vs-PNG fork, plus the EXIF-detection edge: a PNG eXIf chunk must surface as
  * "PNG+EXIF" and produce a non-null pngExifTiff payload; a PNG without eXIf surfaces as "PNG" with null pngExifTiff.
+ *
+ * PNG chunk-builder helpers live in PngFixtures so the same fixture surface is shared with PngMetadataExtractorTest.
  */
 public final class ImageLoadControllerExtractMetadataTest
 {
 	private static final byte[] JPEG_SOI = { (byte) 0xFF, (byte) 0xD8 };
 	private static final byte[] JPEG_EOI = { (byte) 0xFF, (byte) 0xD9 };
-	private static final byte[] PNG_SIGNATURE = {
-		(byte) 0x89, 'P', 'N', 'G', (byte) 0x0D, (byte) 0x0A, (byte) 0x1A, (byte) 0x0A
-	};
-
-	private static byte[] buildIhdrChunk() throws IOException
-	{
-		// Minimal valid IHDR: 1×1 pixel, 8-bit RGB.
-		byte[] data = { 0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0 };
-		return buildPngChunk("IHDR", data);
-	}
-
-	private static byte[] buildPngChunk(String type, byte[] data) throws IOException
-	{
-		byte[] typeBytes = type.getBytes("US-ASCII");
-		ByteArrayOutputStream out = new ByteArrayOutputStream();
-		int len = data.length;
-		out.write((len >> 24) & 0xFF);
-		out.write((len >> 16) & 0xFF);
-		out.write((len >> 8) & 0xFF);
-		out.write(len & 0xFF);
-		out.write(typeBytes);
-		out.write(data);
-		CRC32 crc = new CRC32();
-		crc.update(typeBytes);
-		crc.update(data);
-		long c = crc.getValue();
-		out.write((int) ((c >> 24) & 0xFF));
-		out.write((int) ((c >> 16) & 0xFF));
-		out.write((int) ((c >> 8) & 0xFF));
-		out.write((int) (c & 0xFF));
-		return out.toByteArray();
-	}
 
 	private static byte[] concat(byte[]... parts) throws IOException
 	{
@@ -109,7 +81,7 @@ public final class ImageLoadControllerExtractMetadataTest
 			'I', 'I', 0x2A, 0x00,           // little-endian TIFF magic
 			0x08, 0x00, 0x00, 0x00          // IFD0 offset = 8
 		};
-		byte[] png = concat(PNG_SIGNATURE, buildIhdrChunk(), buildPngChunk("eXIf", tiff));
+		byte[] png = concat(PNG_SIGNATURE, buildIhdrChunk(), buildChunk("eXIf", tiff));
 		var extracted = ImageLoadController.extractMetadata(png);
 		assertEquals(Format.PNG, extracted.sourceFormat());
 		assertEquals("PNG+EXIF", extracted.displayString());

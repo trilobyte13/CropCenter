@@ -244,6 +244,30 @@ public final class CropStateTest
 	}
 
 	@Test
+	public void setSourceFormatSeedsExportConfig()
+	{
+		// Codex round-26 T4 — `setSourceFormat(PNG)` must seed `exportConfig.format()` to PNG so the
+		// SaveDialog's format toggle defaults to "save as PNG" for PNG sources without an intervening
+		// `updateExportConfig` call. A regression that drops the seed (only stores `sourceFormat` and
+		// forgets the `withFormat`) would silently change the user's save format from PNG to JPEG —
+		// alpha loss + format conversion on save.
+		CropState state = new CropState();
+		assertEquals("default exportConfig is JPEG", Format.JPEG, state.getExportConfig().format());
+		state.setSourceFormat(Format.PNG);
+		assertEquals("PNG source seeds exportConfig to PNG immediately",
+			Format.PNG, state.getExportConfig().format());
+		// JPEG seed pin (the spec calls out JPEG specifically as the override case after a PNG load).
+		state.setSourceFormat(Format.JPEG);
+		assertEquals("subsequent JPEG source updates the seed",
+			Format.JPEG, state.getExportConfig().format());
+		// Null source format is a no-op — happens when ImageLoadController's format detection bails on a
+		// loaded blob that's neither JPEG nor PNG; exportConfig must NOT regress.
+		state.setSourceFormat(null);
+		assertEquals("null source format must not clobber prior exportConfig",
+			Format.JPEG, state.getExportConfig().format());
+	}
+
+	@Test
 	public void resetReturnsExportConfigToDefaults()
 	{
 		// Save-time format choice is transient — the next image starts at JPEG (the documented default).

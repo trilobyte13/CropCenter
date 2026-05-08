@@ -156,7 +156,12 @@ public final class UltraHdrCompat
 	 */
 	private static Bitmap applyExifOrientation(Bitmap current, int exifOrientation)
 	{
-		if (exifOrientation <= 1)
+		// Mirror BitmapUtils.applyOrientation's guard: orientations outside [2, 8] are treated as
+		// identity. Without the upper bound a malformed value (e.g., 99 from a future caller that
+		// bypasses readExifOrientation's [1, 8] clamp) builds an identity matrix via
+		// orientationMatrix's default branch, then Bitmap.createBitmap allocates a fresh copy and
+		// recycles `current` for nothing. Reject early so the matrix path is genuinely needed.
+		if (exifOrientation <= 1 || exifOrientation > 8)
 		{
 			return current;
 		}
@@ -302,6 +307,14 @@ public final class UltraHdrCompat
 		float gainmapScaleY = (float) gainmapBitmap.getHeight() / primaryH;
 		int gainmapOutputW = Math.max(1, Math.round(cropW * gainmapScaleX));
 		int gainmapOutputH = Math.max(1, Math.round(cropH * gainmapScaleY));
+		// Natural rounded gain-map dims — do NOT snap to (Wᵣ·k, Hᵣ·k) here even though the primary did.
+		// Snapping shrinks the sampled source region (16:9 quarter-res 1000×563 → 992×558 loses 8 cols
+		// + 5 rows of source gain-map data on the right / bottom edges), and Android's HDR decoder
+		// scales the gain map over the primary's full extent — so a shrunk gain map effectively
+		// "stretches" the remaining source region to cover pixels it was never meant to. The 0.0002
+		// AR drift between primary (exact (Wᵣ·k, Hᵣ·k)) and gain map (round-of-quarter) is
+		// imperceptible after the decoder's scale-to-fit, and is the lesser evil vs spatial HDR
+		// misalignment on high-contrast crop edges (Codex round-27 F1 reverts the round-24 snap).
 
 		Bitmap.Config gainmapConfig = gainmapBitmap.getConfig() != null
 			? gainmapBitmap.getConfig()

@@ -357,6 +357,9 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 					// Genuine stroke completion — feed the final point and trigger detection.
 					horizon.end(viewport.screenToImagePixel(screenX, screenY, state));
 					invalidate();
+					// Standard accessibility hook — route the gesture release through performClick
+					// so a11y services can replicate the horizon-paint interaction.
+					performClick();
 				}
 				case MotionEvent.ACTION_CANCEL ->
 				{
@@ -368,6 +371,16 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 			return true;
 		}
 		return gestureHandler.onTouchEvent(event);
+	}
+
+	@Override
+	public boolean performClick()
+	{
+		// Required by the View / accessibility contract for any view that overrides onTouchEvent —
+		// the editor's primary interactions (selection-point taps, drag-to-pan, pinch-zoom, horizon
+		// paint) are dispatched via gestureHandler / horizon above; this hook just delegates to super
+		// for the standard click sound + accessibility events.
+		return super.performClick();
 	}
 
 	@Override

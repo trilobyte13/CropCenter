@@ -34,7 +34,7 @@ final class EditorRenderer
 	private final Matrix bitmapMatrix = new Matrix();
 	// Single shared 2-float scratch used by the visible-bounds AABB walk (4 corner reads, sequentially used
 	// for min/max — single buffer is safe because we don't need to keep all 4 corners alive at once) and the
-	// selection-label imageToScreenRotated calls in drawSelectionLabels (single label position consumed
+	// selection-label imageToScreenRotatedInto calls in drawSelectionLabels (single label position consumed
 	// immediately by drawText). Both paths run on the UI thread and don't overlap with each other within a
 	// single draw call.
 	private final float[] coordScratch = new float[2];

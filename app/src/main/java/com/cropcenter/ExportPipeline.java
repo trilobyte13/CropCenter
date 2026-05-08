@@ -292,7 +292,7 @@ final class ExportPipeline
 		try
 		{
 			host.setBusyUi(true);
-			host.showProgress("Saving\u2026");
+			host.showProgress("Saving…");
 			host.runInBackground(() ->
 				runExportBg(uri, isReplaceSave, preserveOnFailure, replacedName, onSavedBg));
 		}
