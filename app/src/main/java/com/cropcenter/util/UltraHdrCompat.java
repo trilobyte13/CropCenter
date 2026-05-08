@@ -11,6 +11,7 @@ import android.os.Process;
 import android.util.Log;
 
 import com.cropcenter.crop.CropRender;
+import com.cropcenter.metadata.HdrSignature;
 import com.cropcenter.util.AiRegionDetector.AiMask;
 
 import java.io.ByteArrayOutputStream;
@@ -132,31 +133,17 @@ public final class UltraHdrCompat
 	}
 
 	/**
-	 * Scan data for the XMP "hdrgm" namespace marker — the signature of an Ultra HDR gain map. Scans the full byte
-	 * array (not a prefix window): a maxed-out EXIF thumbnail can push the XMP segment past any fixed offset.
-	 * Linear but cheap (~5ms for 20MB on modern hardware) and runs at most once per export.
+	 * Scan data for the XMP "hdrgm" namespace marker — the signature of an Ultra HDR gain map. Delegates to
+	 * the metadata-package HdrSignature helper so the pure-Java scan can be reused by GainMapExtractor and
+	 * SeftExtractor (both in the metadata package) without dragging in this class's Android Bitmap / Gainmap
+	 * surface.
 	 *
 	 * @param data full file bytes to scan
 	 * @return true when the XMP "hdrgm" namespace marker is present anywhere in data
 	 */
 	public static boolean containsHdrgm(byte[] data)
 	{
-		if (data == null)
-		{
-			return false;
-		}
-		// For a 5-byte pattern, last valid start index is (length - 5), so the exclusive loop bound is (length
-		// - 4).
-		int limit = data.length - 4;
-		for (int i = 0; i < limit; i++)
-		{
-			if (data[i] == 'h' && data[i + 1] == 'd' && data[i + 2] == 'r'
-				&& data[i + 3] == 'g' && data[i + 4] == 'm')
-			{
-				return true;
-			}
-		}
-		return false;
+		return HdrSignature.isHdrSource(data);
 	}
 
 	/**
@@ -213,7 +200,7 @@ public final class UltraHdrCompat
 	 */
 	private static Bitmap decodeHdrBitmap(byte[] originalBytes, File cacheDir) throws IOException
 	{
-		// Unique filename so concurrent exports never collide on the cache path. Single- threaded today; suffix
+		// Unique filename so concurrent exports never collide on the cache path. Single-threaded today; suffix
 		// is cheap insurance against future parallelism.
 		File hdrSourceCache = new File(cacheDir,
 			"hdr_src_" + Process.myPid() + "_" + System.nanoTime() + ".jpg");
@@ -320,25 +307,35 @@ public final class UltraHdrCompat
 			? gainmapBitmap.getConfig()
 			: Bitmap.Config.ARGB_8888;
 		Bitmap gainmapOutput = Bitmap.createBitmap(gainmapOutputW, gainmapOutputH, gainmapConfig);
-		Canvas gainmapCanvas = new Canvas(gainmapOutput);
-		Paint gainmapPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
-
-		float gainmapDrawX = -srcX * gainmapScaleX;
-		float gainmapDrawY = -srcY * gainmapScaleY;
-
-		if (Math.abs(userRotation) >= BitmapUtils.ROTATION_EPSILON)
+		// Mirror renderPrimary's recycle-on-throw guard: a Canvas-init / drawBitmap OOM mid-method would
+		// strand `gainmapOutput` and defer native reclaim to the GC bitmap finalizer. Catch and recycle.
+		try
 		{
-			drawGainmapRotated(gainmapCanvas, gainmapBitmap, gainmapDrawX, gainmapDrawY,
-				userRotation, gainmapPaint);
-		}
-		else
-		{
-			gainmapCanvas.drawBitmap(gainmapBitmap, gainmapDrawX, gainmapDrawY, gainmapPaint);
-		}
+			Canvas gainmapCanvas = new Canvas(gainmapOutput);
+			Paint gainmapPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
 
-		Log.d(TAG, "Gainmap rendered: " + gainmapOutputW + "x" + gainmapOutputH
-			+ " (scale " + gainmapScaleX + "x" + gainmapScaleY + ")");
-		return gainmapOutput;
+			float gainmapDrawX = -srcX * gainmapScaleX;
+			float gainmapDrawY = -srcY * gainmapScaleY;
+
+			if (Math.abs(userRotation) >= BitmapUtils.ROTATION_EPSILON)
+			{
+				drawGainmapRotated(gainmapCanvas, gainmapBitmap, gainmapDrawX, gainmapDrawY,
+					userRotation, gainmapPaint);
+			}
+			else
+			{
+				gainmapCanvas.drawBitmap(gainmapBitmap, gainmapDrawX, gainmapDrawY, gainmapPaint);
+			}
+
+			Log.d(TAG, "Gainmap rendered: " + gainmapOutputW + "x" + gainmapOutputH
+				+ " (scale " + gainmapScaleX + "x" + gainmapScaleY + ")");
+			return gainmapOutput;
+		}
+		catch (RuntimeException | OutOfMemoryError e)
+		{
+			gainmapOutput.recycle();
+			throw e;
+		}
 	}
 
 	/**
@@ -351,9 +348,23 @@ public final class UltraHdrCompat
 	{
 		Bitmap output = Bitmap.createBitmap(cropW, cropH, Bitmap.Config.ARGB_8888, true,
 			ColorSpace.get(ColorSpace.Named.DISPLAY_P3));
-		Canvas canvas = new Canvas(output);
-		Paint paint = new Paint(Paint.FILTER_BITMAP_FLAG);
-		BitmapUtils.drawCropped(canvas, current, srcX, srcY, userRotation, paint);
-		return output;
+		// Recycle `output` if any subsequent step throws — without this, an OOM during Canvas init or
+		// drawCropped strands the partial allocation, deferring native pixel-buffer reclaim to the GC
+		// finalizer at the exact moment we need immediate reclaim. The compressWithGainmap-level finally
+		// would have recycled `output` only if the assignment had completed, but a throw before return
+		// means the caller's `output` field is still null. Catch Exception | OutOfMemoryError (Error, not
+		// Exception, must be caught explicitly) and rethrow after recycling.
+		try
+		{
+			Canvas canvas = new Canvas(output);
+			Paint paint = new Paint(Paint.FILTER_BITMAP_FLAG);
+			BitmapUtils.drawCropped(canvas, current, srcX, srcY, userRotation, paint);
+			return output;
+		}
+		catch (RuntimeException | OutOfMemoryError e)
+		{
+			output.recycle();
+			throw e;
+		}
 	}
 }

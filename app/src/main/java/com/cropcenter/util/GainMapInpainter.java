@@ -41,7 +41,7 @@ public final class GainMapInpainter
 	private GainMapInpainter() {}
 
 	/**
-	 * Inpaint the masked region of a gain-map bitmap in place. Handles both single- channel ALPHA_8 (Samsung's
+	 * Inpaint the masked region of a gain-map bitmap in place. Handles both single-channel ALPHA_8 (Samsung's
 	 * typical gain-map format) and multi-channel ARGB_8888 (Adobe's variant). For ALPHA_8 the alpha byte holds the
 	 * boost value; for ARGB_8888 each RGB channel is inpainted independently. No-op when the bitmap isn't mutable
 	 * (defensive — returns silently rather than throwing) or when the mask has no pixels flagged.
@@ -67,6 +67,22 @@ public final class GainMapInpainter
 		}
 		int width = bmp.getWidth();
 		int height = bmp.getHeight();
+		// Guard the int multiplication before any of the three downstream `new int[width*height]` /
+		// `new boolean[width*height]` allocations (in scaleMask, inpaintAlpha8, inpaintArgb). A 50000×50000
+		// gain-map bitmap is impossible from BitmapFactory in current usage but the same overflow-guard
+		// pattern that AiRegionDetector.detect uses (Math.multiplyExact bailing on ArithmeticException)
+		// matters for defensive consistency — without it, a width*height that wraps negative would throw
+		// NegativeArraySizeException out of the inpaint and into UltraHdrCompat's caller.
+		try
+		{
+			Math.multiplyExact(width, height);
+		}
+		catch (ArithmeticException e)
+		{
+			Log.w(TAG, "Gain-map dimensions overflow int (" + width + "x" + height
+				+ "); skipping inpaint to avoid NegativeArraySizeException");
+			return;
+		}
 		boolean[] mask = scaleMask(aiMask, width, height);
 		dilateMask(mask, width, height, DILATE_RADIUS);
 
@@ -75,9 +91,23 @@ public final class GainMapInpainter
 		{
 			inpaintAlpha8(bmp, mask, width, height);
 		}
-		else
+		else if (config == Bitmap.Config.ARGB_8888)
 		{
 			inpaintArgb(bmp, mask, width, height);
+		}
+		else
+		{
+			// Javadoc contract: "ALPHA_8 or ARGB_8888 — other configs no-op silently". Without this
+			// explicit guard the previous else-branch sent every non-ALPHA_8 bitmap through inpaintArgb,
+			// which would quantize an RGB_565 / RGBA_F16 gain map's pixels through 8-bit getPixels /
+			// setPixels and corrupt them. (HARDWARE is also unsupported but is caught earlier by the
+			// !bmp.isMutable() guard at line 63 — HARDWARE bitmaps are always immutable, so the check
+			// above this branch fires first.) The Samsung / Adobe gain-map formats we see in practice
+			// are always one of the two supported configs; hitting this branch indicates a future
+			// Android version returning an unfamiliar config and the right response is "skip inpainting;
+			// ship the original gain map untouched", not "silently downsample the pixels to 8-bit".
+			Log.w(TAG, "Gain-map bitmap config " + config + " is not ALPHA_8 or ARGB_8888; "
+				+ "skipping inpaint to avoid quantization of unsupported pixel format");
 		}
 	}
 
@@ -86,7 +116,8 @@ public final class GainMapInpainter
 	 * 8-neighborhood contains a masked pixel. Uses a snapshot per iteration so dilation grows by exactly one ring
 	 * per pass (vs reading the same array we're writing, which would race growth across the mask within a pass).
 	 */
-	private static void dilateMask(boolean[] mask, int width, int height, int radius)
+	// Package-visible for unit tests — see inpaintIterative.
+	static void dilateMask(boolean[] mask, int width, int height, int radius)
 	{
 		for (int ring = 0; ring < radius; ring++)
 		{
@@ -131,6 +162,137 @@ public final class GainMapInpainter
 		}
 	}
 
+	/**
+	 * Frontier-tracked grow-from-boundary inpaint on a single channel of values. Each pass processes only masked
+	 * pixels adjacent to at least one unmasked pixel; resolved pixels join the unmasked set for the next pass's
+	 * averaging. Initial frontier seed is O(W * H) (single pass over the mask); subsequent passes are O(frontier
+	 * size), so total work is O(W * H + AI region area) rather than O(W * H * radius).
+	 *
+	 * The mask is mutated. Isolated masked pixels (no path to any unmasked pixel) keep their original value when
+	 * the loop exits with empty frontier.
+	 */
+	// Package-visible for unit tests — the algorithm is pure (int[] values, boolean[] mask) and the only way to
+	// pin the rounding-bias regression (round-half-up vs floor-toward-zero) without an Android Bitmap. The Bitmap-
+	// dispatch entry point inpaintBitmap remains the production API.
+	static int inpaintIterative(int[] values, boolean[] mask, int width, int height)
+	{
+		int[] frontier = new int[mask.length];
+		int[] nextFrontier = new int[mask.length];
+		int[] newValues = new int[mask.length];
+		boolean[] inNextFrontier = new boolean[mask.length];
+		int frontierSize = 0;
+
+		for (int y = 0; y < height; y++)
+		{
+			for (int x = 0; x < width; x++)
+			{
+				int idx = y * width + x;
+				if (mask[idx] && hasUnmaskedNeighbor(mask, x, y, width, height))
+				{
+					frontier[frontierSize++] = idx;
+				}
+			}
+		}
+
+		int passes = 0;
+		while (frontierSize > 0)
+		{
+			passes++;
+			for (int i = 0; i < frontierSize; i++)
+			{
+				int idx = frontier[i];
+				int x = idx % width;
+				int y = idx / width;
+				int sum = 0;
+				int count = 0;
+				for (int dy = -1; dy <= 1; dy++)
+				{
+					int ny = y + dy;
+					if (ny < 0 || ny >= height)
+					{
+						continue;
+					}
+					for (int dx = -1; dx <= 1; dx++)
+					{
+						if (dx == 0 && dy == 0)
+						{
+							continue;
+						}
+						int nx = x + dx;
+						if (nx < 0 || nx >= width)
+						{
+							continue;
+						}
+						int neighbor = ny * width + nx;
+						if (!mask[neighbor])
+						{
+							sum += values[neighbor];
+							count++;
+						}
+					}
+				}
+				// Nearest-int rounding (sum + count/2) / count, not floor — repeated truncating divide
+				// would bias the inpainted region 0.5 LSB darker per pass, accumulating to a visibly
+				// darker patch in the HDR boost over hundreds of grow iterations on a Samsung gain map.
+				newValues[idx] = (count > 0) ? (sum + count / 2) / count : values[idx];
+			}
+
+			for (int i = 0; i < frontierSize; i++)
+			{
+				int idx = frontier[i];
+				values[idx] = newValues[idx];
+				mask[idx] = false;
+			}
+
+			int nextSize = 0;
+			Arrays.fill(inNextFrontier, false);
+			for (int i = 0; i < frontierSize; i++)
+			{
+				int idx = frontier[i];
+				int x = idx % width;
+				int y = idx / width;
+				for (int dy = -1; dy <= 1; dy++)
+				{
+					int ny = y + dy;
+					if (ny < 0 || ny >= height)
+					{
+						continue;
+					}
+					for (int dx = -1; dx <= 1; dx++)
+					{
+						if (dx == 0 && dy == 0)
+						{
+							continue;
+						}
+						int nx = x + dx;
+						if (nx < 0 || nx >= width)
+						{
+							continue;
+						}
+						int neighbor = ny * width + nx;
+						if (mask[neighbor] && !inNextFrontier[neighbor])
+						{
+							inNextFrontier[neighbor] = true;
+							nextFrontier[nextSize++] = neighbor;
+						}
+					}
+				}
+			}
+
+			int[] swap = frontier;
+			frontier = nextFrontier;
+			nextFrontier = swap;
+			frontierSize = nextSize;
+
+			if (passes >= MAX_PASSES)
+			{
+				Log.w(TAG, "Inpaint exceeded MAX_PASSES; remaining masked pixels keep original values");
+				break;
+			}
+		}
+		return passes;
+	}
+
 	private static int[] extractChannel(int[] pixels, int shift)
 	{
 		int[] channel = new int[pixels.length];
@@ -144,7 +306,7 @@ public final class GainMapInpainter
 	/**
 	 * Quick check: does (x, y) have at least one 8-neighbor whose mask bit is false? Used to seed the initial
 	 * frontier for inpaintIterative — a pixel is on the frontier if it's masked AND at least one neighbor is
-	 * already unmasked. Short- circuits on the first hit.
+	 * already unmasked. Short-circuits on the first hit.
 	 */
 	private static boolean hasUnmaskedNeighbor(boolean[] mask, int x, int y, int width, int height)
 	{
@@ -242,131 +404,6 @@ public final class GainMapInpainter
 		bmp.setPixels(pixels, 0, width, 0, 0, width, height);
 		Log.d(TAG, "Inpainted ARGB gain-map " + width + "x" + height + " in passes R=" + passesR
 			+ " G=" + passesG + " B=" + passesB);
-	}
-
-	/**
-	 * Frontier-tracked grow-from-boundary inpaint on a single channel of values. Each pass processes only masked
-	 * pixels adjacent to at least one unmasked pixel; resolved pixels join the unmasked set for the next pass's
-	 * averaging. Initial frontier seed is O(W * H) (single pass over the mask); subsequent passes are O(frontier
-	 * size), so total work is O(W * H + AI region area) rather than O(W * H * radius).
-	 *
-	 * The mask is mutated. Isolated masked pixels (no path to any unmasked pixel) keep their original value when
-	 * the loop exits with empty frontier.
-	 */
-	private static int inpaintIterative(int[] values, boolean[] mask, int width, int height)
-	{
-		int[] frontier = new int[mask.length];
-		int[] nextFrontier = new int[mask.length];
-		int[] newValues = new int[mask.length];
-		boolean[] inNextFrontier = new boolean[mask.length];
-		int frontierSize = 0;
-
-		for (int y = 0; y < height; y++)
-		{
-			for (int x = 0; x < width; x++)
-			{
-				int idx = y * width + x;
-				if (mask[idx] && hasUnmaskedNeighbor(mask, x, y, width, height))
-				{
-					frontier[frontierSize++] = idx;
-				}
-			}
-		}
-
-		int passes = 0;
-		while (frontierSize > 0)
-		{
-			passes++;
-			for (int i = 0; i < frontierSize; i++)
-			{
-				int idx = frontier[i];
-				int x = idx % width;
-				int y = idx / width;
-				int sum = 0;
-				int count = 0;
-				for (int dy = -1; dy <= 1; dy++)
-				{
-					int ny = y + dy;
-					if (ny < 0 || ny >= height)
-					{
-						continue;
-					}
-					for (int dx = -1; dx <= 1; dx++)
-					{
-						if (dx == 0 && dy == 0)
-						{
-							continue;
-						}
-						int nx = x + dx;
-						if (nx < 0 || nx >= width)
-						{
-							continue;
-						}
-						int neighbor = ny * width + nx;
-						if (!mask[neighbor])
-						{
-							sum += values[neighbor];
-							count++;
-						}
-					}
-				}
-				newValues[idx] = (count > 0) ? sum / count : values[idx];
-			}
-
-			for (int i = 0; i < frontierSize; i++)
-			{
-				int idx = frontier[i];
-				values[idx] = newValues[idx];
-				mask[idx] = false;
-			}
-
-			int nextSize = 0;
-			Arrays.fill(inNextFrontier, false);
-			for (int i = 0; i < frontierSize; i++)
-			{
-				int idx = frontier[i];
-				int x = idx % width;
-				int y = idx / width;
-				for (int dy = -1; dy <= 1; dy++)
-				{
-					int ny = y + dy;
-					if (ny < 0 || ny >= height)
-					{
-						continue;
-					}
-					for (int dx = -1; dx <= 1; dx++)
-					{
-						if (dx == 0 && dy == 0)
-						{
-							continue;
-						}
-						int nx = x + dx;
-						if (nx < 0 || nx >= width)
-						{
-							continue;
-						}
-						int neighbor = ny * width + nx;
-						if (mask[neighbor] && !inNextFrontier[neighbor])
-						{
-							inNextFrontier[neighbor] = true;
-							nextFrontier[nextSize++] = neighbor;
-						}
-					}
-				}
-			}
-
-			int[] swap = frontier;
-			frontier = nextFrontier;
-			nextFrontier = swap;
-			frontierSize = nextSize;
-
-			if (passes >= MAX_PASSES)
-			{
-				Log.w(TAG, "Inpaint exceeded MAX_PASSES; remaining masked pixels keep original values");
-				break;
-			}
-		}
-		return passes;
 	}
 
 	/**

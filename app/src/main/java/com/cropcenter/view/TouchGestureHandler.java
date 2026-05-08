@@ -12,7 +12,7 @@ import android.view.ScaleGestureDetector;
  *  - Double tap: fit image to view
  *  - Long press: remove point in select mode
  */
-public class TouchGestureHandler
+public final class TouchGestureHandler
 {
 	/**
 	 * Receives the high-level gesture events recognized by the handler. The view that owns the handler implements

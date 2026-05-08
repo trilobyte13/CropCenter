@@ -24,7 +24,7 @@ import com.cropcenter.util.ThemeColors;
  * step (0.01°) sits above BitmapUtils.ROTATION_EPSILON so the renderer, readout, and ExportPipeline.canBypassEncode all
  * honor every tick the ruler can produce.
  */
-public class RotationRulerView extends View
+public final class RotationRulerView extends View
 {
 	/**
 	 * Receives rotation-degree updates as the user drags / flings / pinches the ruler. The view fires this on every
@@ -51,6 +51,23 @@ public class RotationRulerView extends View
 		new TickConfig(0.5f,  1f), new TickConfig(0.1f,  0.5f),
 		new TickConfig(0.05f, 0.1f), new TickConfig(0.01f, 0.1f),
 	};
+	// Sticky detent values — release-snap pulls a near-detent rotation onto the exact value within the
+	// per-zoom detent threshold (see snapToDetentOrTick) so the user can land cleanly on 0°, ±45°, ±90°,
+	// ±180° without fighting finer ticks. Listed sorted ascending; the snap walks the list and picks the
+	// first within threshold.
+	private static final float[] DETENTS = { -180f, -90f, -45f, 0f, 45f, 90f, 180f };
+	// Hard ceiling on the detent snap window (used at coarse zoom where minor ticks are wide and detent
+	// values like ±45° aren't part of the tick grid). At fine zoom the window shrinks proportionally to
+	// the minor tick — a fixed 0.8° window at max zoom (0.01° ticks) creates a 1.6° dead zone around every
+	// detent and swallows legitimate fine adjustments like 0.01°-0.79°. The cap matters most at minor=10°
+	// where 45° isn't a tick and the user needs the detent to land there at all.
+	private static final float DETENT_SNAP_MAX_DEGREES = 0.8f;
+	// Multiplier applied to the current minor tick to compute the per-snap detent window. 0.5× makes the
+	// window exactly half a tick — the detent then acts as a tie-breaker between two adjacent ticks at
+	// fine zoom (which plain rounding already does), so the user can hit ANY fine tick. At coarse zoom
+	// the cap above kicks in and the detent reverts to its sticky "land on 45° even though only 40°/50°
+	// are real ticks" role.
+	private static final float DETENT_SNAP_MINOR_FACTOR = 0.5f;
 	private static final float FLING_VELOCITY_THRESHOLD = 200f; // px/s — below this, snap instead
 	private static final float MAX_DEG = 180f;
 	private static final float MAX_PPD_FACTOR = 120f; // enough to show 0.01° ticks
@@ -194,7 +211,7 @@ public class RotationRulerView extends View
 					if (scroller.isFinished())
 					{
 						flingActive = false;
-						snapAndNotify();
+						commitSnappedDegrees(currentDegrees);
 					}
 					// Re-check flingActive before reposting: notifyChanged above ultimately calls
 					// back into setDegrees via the state listener, and a future caller invoking
@@ -282,6 +299,12 @@ public class RotationRulerView extends View
 	 */
 	public void zoomBy(float scaleFactor)
 	{
+		// Stop any in-flight fling before mutating pixelsPerDegree. flingFrameCallback decodes
+		// scroller.getCurrX() back to degrees by dividing by `pixelsPerDegree * SCROLL_SUBPIXEL_SCALE`,
+		// where the dividend was scaled by the OLD pixelsPerDegree at fling start; changing the divisor
+		// mid-coast makes the same scroller position decode to a different angle and the displayed
+		// rotation visibly jumps. setDegrees applies the same guard at line 273.
+		stopFling();
 		pixelsPerDegree = Math.clamp(pixelsPerDegree * scaleFactor,
 			basePixelsPerDegree * MIN_PPD_FACTOR, basePixelsPerDegree * MAX_PPD_FACTOR);
 		invalidate();
@@ -293,6 +316,8 @@ public class RotationRulerView extends View
 	 */
 	public void zoomToMax()
 	{
+		// Same fling-divisor invariant as zoomBy — see comment there.
+		stopFling();
 		pixelsPerDegree = basePixelsPerDegree * MAX_PPD_FACTOR;
 		invalidate();
 	}
@@ -397,6 +422,52 @@ public class RotationRulerView extends View
 	}
 
 	/**
+	 * Choose tick intervals based on how many degrees are visible on screen. Walks TICK_THRESHOLDS in order; the
+	 * first threshold strictly below degreesVisible picks that index's TickConfig. The last threshold is 0 so the
+	 * loop always terminates.
+	 */
+	private static TickConfig chooseTickConfig(float degreesVisible)
+	{
+		for (int i = 0; i < TICK_THRESHOLDS.length; i++)
+		{
+			if (degreesVisible > TICK_THRESHOLDS[i])
+			{
+				return TICK_CONFIGS[i];
+			}
+		}
+		return TICK_CONFIGS[TICK_CONFIGS.length - 1];
+	}
+
+	private static float snapTo(float val, float step)
+	{
+		return Math.round(val / step) * step;
+	}
+
+	/**
+	 * Snap the given target degree value to the nearest detent / minor tick, clamp to the ruler range, and
+	 * commit it as the new currentDegrees — notifying the listener and invalidating only when the result
+	 * differs from the existing currentDegrees. Both the tap and the drag/fling release paths feed through
+	 * here so the listener sees a coherent post-gesture value regardless of mid-gesture state.
+	 *
+	 * The earlier shape — "currentDegrees = tappedDeg; snapAndNotify();" — silently swallowed the notify
+	 * when the tap landed exactly on a tick / detent because snapAndNotify compared the snap to the
+	 * just-overwritten currentDegrees rather than the pre-tap value. Taking the target as a parameter and
+	 * comparing the snapped result against the current (still pre-update) currentDegrees fixes that hole.
+	 *
+	 * @param targetDeg desired new rotation in degrees (gesture-tapped or drag-end value)
+	 */
+	private void commitSnappedDegrees(float targetDeg)
+	{
+		float snapped = Math.clamp(snapToDetentOrTick(targetDeg), MIN_DEG, MAX_DEG);
+		if (snapped != currentDegrees)
+		{
+			currentDegrees = snapped;
+			notifyChanged();
+			invalidate();
+		}
+	}
+
+	/**
 	 * ACTION_DOWN: stop any in-flight fling, reset per-gesture accumulators, and ask the parent not to intercept
 	 * subsequent moves (the rotation dial owns horizontal drag inside its bounds). getParent() is null between
 	 * detach and re-attach during config changes — skip the request rather than NPE.
@@ -439,22 +510,48 @@ public class RotationRulerView extends View
 	/**
 	 * ACTION_UP / ACTION_CANCEL: classify the gesture as tap / drag-release-slow / drag-release-fast and dispatch
 	 * accordingly. Recycles the velocity tracker on every exit so the next gesture starts fresh.
+	 *
+	 * ACTION_CANCEL takes the cleanup-only path — Android dispatches CANCEL when the OS / a parent view
+	 * claims the gesture (system back, multi-touch disambiguation, scroll-container intercept), which is
+	 * NOT a user-completed release. Treating CANCEL as if it were ACTION_UP would commit a fling or
+	 * snap-and-notify rotation the user never intended (Codex round-16).
 	 */
 	private void handleTouchRelease(MotionEvent event)
 	{
+		// Defensive null guard — onDetachedFromWindow recycles + nulls velocityTracker, and onTouchEvent's
+		// lazy creation only fires on ACTION_DOWN. Today the lifecycle ordering keeps these in sync (Android
+		// serializes touch dispatch and detach on the UI thread), but any future view-tree manipulation that
+		// delivers ACTION_UP after a detach (e.g., a fragment library moving the view between containers
+		// mid-gesture) would NPE the dereferences below. Cheap to guard; saves a UI-thread crash.
+		if (velocityTracker == null)
+		{
+			return;
+		}
+		if (event.getActionMasked() == MotionEvent.ACTION_CANCEL)
+		{
+			// Cleanup only — recycle the tracker and bail. No fling, no snap, no notify: any of the three
+			// would apply unintended rotation off an interrupted gesture.
+			velocityTracker.recycle();
+			velocityTracker = null;
+			return;
+		}
 		// If a pinch-zoom occurred during this gesture, skip the angle fling / snap entirely. onScaleEnd fires
 		// before ACTION_UP so isScaling is already false here — but scalingOccurred stays true for the full
 		// gesture lifetime, and without this check the VelocityTracker's x-velocity (populated by the pinch
 		// focus-point motion) would trigger a spurious rotation change on release.
 		if (!isScaling && !scalingOccurred)
 		{
-			// Tap: total movement below the slop.
+			// Tap: total movement below the slop. Compute the tapped angle and feed it to the shared
+			// snap-and-commit helper so the comparison happens against the PRE-tap currentDegrees rather
+			// than the just-tapped value. The previous "currentDegrees = tappedDeg; snapAndNotify()"
+			// shape silently dropped the notify when the tap landed exactly on a tick / detent — the
+			// snapped value matched the just-overwritten currentDegrees, and the listener never heard
+			// about the tap.
 			if (totalDragDx <= TAP_SLOP && event.getActionMasked() == MotionEvent.ACTION_UP)
 			{
 				float centerX = getWidth() / 2f;
 				float tappedDeg = currentDegrees + (downX - centerX) / pixelsPerDegree;
-				currentDegrees = Math.clamp(tappedDeg, MIN_DEG, MAX_DEG);
-				snapAndNotify();
+				commitSnappedDegrees(tappedDeg);
 				velocityTracker.recycle();
 				velocityTracker = null;
 				return;
@@ -468,7 +565,7 @@ public class RotationRulerView extends View
 			}
 			else
 			{
-				snapAndNotify();
+				commitSnappedDegrees(currentDegrees);
 			}
 		}
 		velocityTracker.recycle();
@@ -483,25 +580,36 @@ public class RotationRulerView extends View
 		}
 	}
 
-	private void snapAndNotify()
-	{
-		float snapped = Math.clamp(snapToTick(currentDegrees), MIN_DEG, MAX_DEG);
-		if (snapped != currentDegrees)
-		{
-			currentDegrees = snapped;
-			notifyChanged();
-			invalidate();
-		}
-	}
-
 	/**
-	 * Snap a degree value to the nearest minor tick for the current zoom.
+	 * Snap a degree value to the nearest documented detent (0, ±45, ±90, ±180) when within the per-zoom detent
+	 * threshold (min(minor * 0.5, 0.8°)), otherwise fall back to the current zoom's minor-tick snap. The
+	 * threshold scales with the visible minor-tick spacing so the detent stays sticky enough at coarse zoom
+	 * (where the cap kicks in and detent values like ±45° aren't on the tick grid) without swallowing
+	 * legitimate fine-tune values at max zoom (where every fine tick is selectable).
+	 *
+	 * Concrete behaviour at different zoom levels:
+	 *   minor=10°   → threshold=0.8°: 44.95° → 45° even though only 40°/50° are real ticks.
+	 *   minor=1°    → threshold=0.5°: 44.95° → 45° (already a tick at this zoom; detent agrees).
+	 *   minor=0.1°  → threshold=0.05°: 0.05° → 0° (boundary), 0.06° → 0.1° (visible tick).
+	 *   minor=0.01° → threshold=0.005°: 0.01° → 0.01° (reachable), 0.50° → 0.50° (reachable).
+	 *
+	 * @param deg ruler reading at gesture release
+	 * @return detent value when within threshold; nearest minor tick otherwise
 	 */
-	private float snapToTick(float deg)
+	private float snapToDetentOrTick(float deg)
 	{
 		float degreesVisible = getWidth() > 0 ? getWidth() / pixelsPerDegree : 30f;
 		TickConfig tickConfig = chooseTickConfig(degreesVisible);
-		return snapTo(deg, tickConfig.minor);
+		float detentThreshold = Math.min(tickConfig.minor() * DETENT_SNAP_MINOR_FACTOR,
+			DETENT_SNAP_MAX_DEGREES);
+		for (float detent : DETENTS)
+		{
+			if (Math.abs(deg - detent) <= detentThreshold)
+			{
+				return detent;
+			}
+		}
+		return snapTo(deg, tickConfig.minor());
 	}
 
 	/**
@@ -529,27 +637,5 @@ public class RotationRulerView extends View
 		flingActive = false;
 		scroller.forceFinished(true);
 		Choreographer.getInstance().removeFrameCallback(flingFrameCallback);
-	}
-
-	/**
-	 * Choose tick intervals based on how many degrees are visible on screen. Walks TICK_THRESHOLDS in order; the
-	 * first threshold strictly below degreesVisible picks that index's TickConfig. The last threshold is 0 so the
-	 * loop always terminates.
-	 */
-	private static TickConfig chooseTickConfig(float degreesVisible)
-	{
-		for (int i = 0; i < TICK_THRESHOLDS.length; i++)
-		{
-			if (degreesVisible > TICK_THRESHOLDS[i])
-			{
-				return TICK_CONFIGS[i];
-			}
-		}
-		return TICK_CONFIGS[TICK_CONFIGS.length - 1];
-	}
-
-	private static float snapTo(float val, float step)
-	{
-		return Math.round(val / step) * step;
 	}
 }

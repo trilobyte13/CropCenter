@@ -31,6 +31,22 @@ final class HorizonPaintOverlay
 	}
 
 	/**
+	 * Discard the in-progress stroke without exiting paint mode and without invoking the detection callback.
+	 * Used for `MotionEvent.ACTION_CANCEL` — Android dispatches that when the OS or a parent view claims
+	 * the gesture (e.g. system back, multi-touch disambiguation, scroll container intercept), which is
+	 * NOT a user-initiated stroke completion. Treating ACTION_CANCEL as if it were ACTION_UP would feed a
+	 * truncated point list into `HorizonDetector.detectFromPaintedRegion` and produce a wrong-angle
+	 * auto-rotate the user never asked for. Active stays true so the user can try painting again without
+	 * re-tapping Auto.
+	 */
+	void cancelStroke()
+	{
+		drawing = false;
+		imagePoints.clear();
+		screenPath.reset();
+	}
+
+	/**
 	 * Record the first touch of a stroke. screenX/screenY go into the displayed path; imagePoint is the
 	 * already-un-rotated image-pixel coordinate for the detector.
 	 */

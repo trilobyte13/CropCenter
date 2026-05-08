@@ -18,7 +18,7 @@ import java.util.List;
  * flow that lays the crop on a user-painted selection. A regression in the bbox math, the rotation application order,
  * or the single-point pixel-snap would mis-place the crop center away from the user-marked feature.
  */
-public class CropEngineTest
+public final class CropEngineTest
 {
 	private static final float TOL = 1e-3f;
 

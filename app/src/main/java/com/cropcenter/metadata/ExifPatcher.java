@@ -20,8 +20,6 @@ public final class ExifPatcher
 	private static final String TAG = "ExifPatcher";
 	// APP1 segment size constraint: the 2-byte length field caps total segment bytes at 65535.
 	private static final int APP1_MAX_SEGMENT_BYTES = 65535;
-	private static final int DEFAULT_THUMB_BUDGET = 20_000; // used when we can't measure the segment
-	private static final int IFD1_ESTIMATED_OVERHEAD = 42; // rough bytes for the IFD1 header we'd add
 	private static final int TIFF_HEADER_OFFSET = 10; // bytes from start of APP1 data to the TIFF header
 
 	private ExifPatcher() {}
@@ -36,6 +34,15 @@ public final class ExifPatcher
 	 */
 	public static int maxThumbnailBytes(List<JpegSegment> segments)
 	{
+		// defaultThumbBudget — fallback when we can't measure the EXIF segment (no EXIF present, malformed
+		// byte-order, IFD-offset math fails). 20KB is conservative: most camera thumbnails are 5-15KB and the
+		// caller (CropExporter.buildEmbeddedThumbnail) re-checks the actual encoded size against the APP1 cap
+		// before injection.
+		final int defaultThumbBudget = 20_000;
+		// ifd1EstimatedOverhead — rough byte cost of synthesising an IFD1 header (entry count + 2 entries for
+		// JPEGInterchangeFormat / Length + 4-byte next-IFD pointer + the 2 length bytes). Used when EXIF
+		// exists but has no IFD1, so we'll add one alongside the new thumbnail.
+		final int ifd1EstimatedOverhead = 42;
 		for (JpegSegment seg : segments)
 		{
 			if (!seg.isExif())
@@ -59,18 +66,21 @@ public final class ExifPatcher
 			}
 			boolean isLittleEndian = byteOrderHi == 0x49;
 
-			// Find IFD1 to locate existing thumbnail
+			// IFD0 → IFD1 walk to locate the existing thumbnail entry. On any parse failure here we
+			// fall back to defaultThumbBudget rather than zero — corrupt-IFD source EXIF is still
+			// preserve-worthy at load / save round-trip, and a non-zero budget keeps the embedded-
+			// thumbnail injection from silently dropping just because we couldn't measure it.
 			long ifd0Rel = ByteBufferUtils.readU32(data, TIFF_HEADER_OFFSET + 4, isLittleEndian);
 			int ifd0 = (int) (TIFF_HEADER_OFFSET + ifd0Rel);
 			if (ifd0 < TIFF_HEADER_OFFSET || ifd0 + 2 > data.length)
 			{
-				return DEFAULT_THUMB_BUDGET; // can't parse, use default
+				return defaultThumbBudget;
 			}
 			int ifd0EntryCount = ByteBufferUtils.readU16(data, ifd0, isLittleEndian);
 			int nextIfdPointer = ifd0 + 2 + ifd0EntryCount * 12;
 			if (nextIfdPointer + 4 > data.length)
 			{
-				return DEFAULT_THUMB_BUDGET;
+				return defaultThumbBudget;
 			}
 			long ifd1Rel = ByteBufferUtils.readU32(data, nextIfdPointer, isLittleEndian);
 
@@ -80,13 +90,13 @@ public final class ExifPatcher
 				// the current segment alone nearly fills the APP1 budget, there's no room for a
 				// thumbnail and we should say so honestly rather than return a negative that relies on
 				// the caller to clamp.
-				return Math.max(0, APP1_MAX_SEGMENT_BYTES - (data.length + IFD1_ESTIMATED_OVERHEAD));
+				return Math.max(0, APP1_MAX_SEGMENT_BYTES - (data.length + ifd1EstimatedOverhead));
 			}
 
 			int ifd1 = (int) (TIFF_HEADER_OFFSET + ifd1Rel);
 			if (ifd1 < TIFF_HEADER_OFFSET || ifd1 + 2 > data.length)
 			{
-				return DEFAULT_THUMB_BUDGET;
+				return defaultThumbBudget;
 			}
 			int ifd1EntryCount = ByteBufferUtils.readU16(data, ifd1, isLittleEndian);
 			int oldThumbLen = 0;
@@ -98,7 +108,7 @@ public final class ExifPatcher
 					break;
 				}
 				int tag = ByteBufferUtils.readU16(data, entryOffset, isLittleEndian);
-				if (tag == 0x0202) // JPEGInterchangeFormatLength
+				if (tag == TiffTag.JPEG_INTERCHANGE_FORMAT_LENGTH)
 				{
 					oldThumbLen = (int) ByteBufferUtils.readU32(
 						data, entryOffset + 8, isLittleEndian);
@@ -117,7 +127,7 @@ public final class ExifPatcher
 			int exifOverhead = data.length - oldThumbLen;
 			return Math.max(0, APP1_MAX_SEGMENT_BYTES - exifOverhead);
 		}
-		return DEFAULT_THUMB_BUDGET; // no EXIF segment found, use default
+		return defaultThumbBudget; // no EXIF segment found
 	}
 
 	/**
@@ -290,20 +300,20 @@ public final class ExifPatcher
 
 		// Tag 0x0103: Compression = 6 (JPEG)
 		ByteBufferUtils.writeU16(ifd1Buf, 2, 0x0103, isLittleEndian);
-		ByteBufferUtils.writeU16(ifd1Buf, 4, 3, isLittleEndian); // SHORT
+		ByteBufferUtils.writeU16(ifd1Buf, 4, TiffTag.TYPE_SHORT, isLittleEndian);
 		ByteBufferUtils.writeU32(ifd1Buf, 6, 1, isLittleEndian);
 		ByteBufferUtils.writeU16(ifd1Buf, 10, 6, isLittleEndian); // JPEG compression
 
-		// Tag 0x0201: JPEGInterchangeFormat (offset to thumbnail bytes)
+		// JPEGInterchangeFormat (offset to thumbnail bytes)
 		int thumbDataOff = ifd1Off + ifd1Buf.length;
-		ByteBufferUtils.writeU16(ifd1Buf, 14, 0x0201, isLittleEndian);
-		ByteBufferUtils.writeU16(ifd1Buf, 16, 4, isLittleEndian); // LONG
+		ByteBufferUtils.writeU16(ifd1Buf, 14, TiffTag.JPEG_INTERCHANGE_FORMAT, isLittleEndian);
+		ByteBufferUtils.writeU16(ifd1Buf, 16, TiffTag.TYPE_LONG, isLittleEndian);
 		ByteBufferUtils.writeU32(ifd1Buf, 18, 1, isLittleEndian);
 		ByteBufferUtils.writeU32(ifd1Buf, 22, thumbDataOff, isLittleEndian);
 
-		// Tag 0x0202: JPEGInterchangeFormatLength
-		ByteBufferUtils.writeU16(ifd1Buf, 26, 0x0202, isLittleEndian);
-		ByteBufferUtils.writeU16(ifd1Buf, 28, 4, isLittleEndian); // LONG
+		// JPEGInterchangeFormatLength
+		ByteBufferUtils.writeU16(ifd1Buf, 26, TiffTag.JPEG_INTERCHANGE_FORMAT_LENGTH, isLittleEndian);
+		ByteBufferUtils.writeU16(ifd1Buf, 28, TiffTag.TYPE_LONG, isLittleEndian);
 		ByteBufferUtils.writeU32(ifd1Buf, 30, 1, isLittleEndian);
 		ByteBufferUtils.writeU32(ifd1Buf, 34, thumbnailBytes, isLittleEndian);
 
@@ -396,12 +406,12 @@ public final class ExifPatcher
 				break;
 			}
 			int tag = ByteBufferUtils.readU16(data, entryOffset, isLittleEndian);
-			if (tag == 0x0201) // JPEGInterchangeFormat
+			if (tag == TiffTag.JPEG_INTERCHANGE_FORMAT)
 			{
 				thumbOffTag = entryOffset;
 				oldThumbOff = (int) ByteBufferUtils.readU32(data, entryOffset + 8, isLittleEndian);
 			}
-			else if (tag == 0x0202) // JPEGInterchangeFormatLength
+			else if (tag == TiffTag.JPEG_INTERCHANGE_FORMAT_LENGTH)
 			{
 				thumbLenTag = entryOffset;
 				oldThumbLen = (int) ByteBufferUtils.readU32(data, entryOffset + 8, isLittleEndian);
@@ -438,15 +448,20 @@ public final class ExifPatcher
 			int tag = ByteBufferUtils.readU16(data, entryOffset, isLittleEndian);
 			int type = ByteBufferUtils.readU16(data, entryOffset + 2, isLittleEndian);
 
+			int valueOff = entryOffset + 8;
 			switch (tag)
 			{
-				case 0x0112 ->
-					ByteBufferUtils.writeU16(data, entryOffset + 8, orientation, isLittleEndian);
-				case 0x0100 -> writeValue(data, entryOffset + 8, type, isLittleEndian, newW);
-				case 0x0101 -> writeValue(data, entryOffset + 8, type, isLittleEndian, newH);
-				case 0xA002 -> writeValue(data, entryOffset + 8, type, isLittleEndian, newW);
-				case 0xA003 -> writeValue(data, entryOffset + 8, type, isLittleEndian, newH);
-				case 0x8769 ->
+				case TiffTag.ORIENTATION ->
+					ByteBufferUtils.writeU16(data, valueOff, orientation, isLittleEndian);
+				case TiffTag.IMAGE_WIDTH ->
+					writeValue(data, valueOff, type, isLittleEndian, newW);
+				case TiffTag.IMAGE_LENGTH ->
+					writeValue(data, valueOff, type, isLittleEndian, newH);
+				case TiffTag.PIXEL_X_DIMENSION ->
+					writeValue(data, valueOff, type, isLittleEndian, newW);
+				case TiffTag.PIXEL_Y_DIMENSION ->
+					writeValue(data, valueOff, type, isLittleEndian, newH);
+				case TiffTag.EXIF_SUB_IFD ->
 				{
 					long off = ByteBufferUtils.readU32(data, entryOffset + 8, isLittleEndian);
 					// `off` is u32 (range 0..2^32-1) read into a long, so the addition `tiffStart +
@@ -480,7 +495,7 @@ public final class ExifPatcher
 
 	private static void writeValue(byte[] data, int off, int type, boolean isLittleEndian, int value)
 	{
-		if (type == 3)
+		if (type == TiffTag.TYPE_SHORT)
 		{
 			ByteBufferUtils.writeU16(data, off, value, isLittleEndian);
 		}

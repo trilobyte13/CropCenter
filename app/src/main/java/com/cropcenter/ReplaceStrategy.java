@@ -9,6 +9,7 @@ import android.widget.Toast;
 
 import com.cropcenter.util.SafFileHelper;
 import com.cropcenter.util.StoragePermissionHelper;
+import com.cropcenter.view.DialogStrings;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -21,7 +22,7 @@ import java.nio.file.StandardCopyOption;
  * most reliable when MANAGE_EXTERNAL_STORAGE is granted), then SAF direct overwrite, then SAF delete-then-rename.
  * Verifies the end state and surfaces a failure dialog when disk doesn't match the intent.
  *
- * Existing SEFT trailers on the source survive untouched: CropExporter re-appends the byte- for-byte trailer captured
+ * Existing SEFT trailers on the source survive untouched: CropExporter re-appends the byte-for-byte trailer captured
  * at load, so a Gallery-edited file re-edited by CropCenter keeps its working Revert chain. CropCenter does not
  * generate fresh SEFT trailers for new edits — Gallery's Revert validates the backup path against Samsung-blessed
  * locations our writes can't reach.
@@ -30,6 +31,13 @@ import java.nio.file.StandardCopyOption;
  */
 final class ReplaceStrategy
 {
+	/**
+	 * One failure outcome of verifyReplace — a (title, message) pair that the caller logs and surfaces in a dialog.
+	 * Built by per-case factory methods (truncated, twoFiles, etc.) that own the wording for each
+	 * branch; verifyReplace itself becomes a clean router from "what's on disk" to a factory call.
+	 */
+	private record VerifyFailure(String title, String message) {}
+
 	private static final String TAG = "ReplaceStrategy";
 	// Smart-quoted "All files access" — the exact wording Android's Settings UI uses for the
 	// MANAGE_EXTERNAL_STORAGE permission. Centralised here because 5 different verifyReplace failure messages
@@ -83,6 +91,168 @@ final class ReplaceStrategy
 			data -> writeReplacementPayload(newUri, requestedName, wasOverwrite, verifyUriBox, data));
 	}
 
+	// ── VerifyFailure factory methods ── One factory per failure case. Wording is the only difference;
+	// centralising it here lets a translator or copy editor change one site without re-walking the verifyReplace
+	// if/else ladder. Sorted alphabetically per CLAUDE.md method ordering.
+
+	private static VerifyFailure bothMissing(String requestedName, String placeholderName)
+	{
+		return new VerifyFailure("Save may have failed", "Neither " + requestedName + " nor " + placeholderName
+			+ " is on disk. Check your save directory and try again.");
+	}
+
+	/**
+	 * Best-effort delete of a partial / wrong-length target file. Logs at WARN on failure but doesn't propagate —
+	 * the caller is in the failure path already; failing to also clean up the corrupt file is recoverable (the user
+	 * will see a stale file in the Files app at worst).
+	 */
+	private static void deleteCorruptTarget(File target)
+	{
+		if (!target.delete())
+		{
+			Log.w(TAG, "verifyReplace: failed to remove corrupt target " + target);
+		}
+	}
+
+	private static VerifyFailure missingAfterRename(String requestedName)
+	{
+		return new VerifyFailure("Save may have failed",
+			requestedName + " is not on disk after Replace. Check your save directory and try again.");
+	}
+
+	private static VerifyFailure placeholderOnly(String requestedName, String placeholderName)
+	{
+		return new VerifyFailure("Couldn't replace " + requestedName,
+			"Your crop was saved as " + placeholderName + ". The original " + requestedName
+				+ " is owned by a previous install of CropCenter and can't be replaced by this build."
+				+ " Grant " + ALL_FILES_ACCESS + " and save again, or delete the original from the"
+				+ " Files app.");
+	}
+
+	private static VerifyFailure safAutoRenamed(String requestedName, String finalName)
+	{
+		return new VerifyFailure("Couldn't replace " + requestedName,
+			"Your crop was saved as " + finalName + ". Grant " + ALL_FILES_ACCESS
+				+ " so Replace can overwrite the existing file, or delete the original from the Files"
+				+ " app and save again.");
+	}
+
+	private static VerifyFailure safUnverifiable(String requestedName)
+	{
+		return new VerifyFailure("Couldn't verify replace",
+			"Save may not have completed. Check your save directory for a " + requestedName
+				+ " or auto-renamed copy.");
+	}
+
+	/**
+	 * Single factory for both truncated-write outcomes — the user-facing message and title are identical
+	 * regardless of whether the placeholder lingers or got cleaned up. The two distinct call sites pin down
+	 * different states of the swap-then-verify dance, but the failure dialog says the same thing in either
+	 * case (re-save and consider granting MANAGE_EXTERNAL_STORAGE).
+	 */
+	private static VerifyFailure truncated(String requestedName, long actualLen, int expectedLen)
+	{
+		return new VerifyFailure("Replace produced an incomplete file",
+			requestedName + " was " + actualLen + " bytes instead of the expected " + expectedLen
+				+ " and has been removed. Re-save, and if it keeps happening, grant "
+				+ ALL_FILES_ACCESS + " or move the save target to a folder you own.");
+	}
+
+	private static VerifyFailure twoFiles(String requestedName, String placeholderName)
+	{
+		return new VerifyFailure("Replace left two files",
+			"Both " + requestedName + " and " + placeholderName + " now exist on disk. Grant "
+				+ ALL_FILES_ACCESS + " so Replace can clean up automatically, or delete one manually"
+				+ " from the Files app.");
+	}
+
+	/**
+	 * Filesystem-authoritative classifier. Handles two structural cases: Strategy-C rename (placeholder == target
+	 * on disk) and the general two-files / one-missing fan-out. Deletes the corrupt target on truncation paths so
+	 * the user isn't offered "Replace" on a bad file next save.
+	 */
+	private VerifyFailure classifyFilesystemOutcome(File placeholder, String requestedName, int expectedLength)
+	{
+		File parent = placeholder.getParentFile();
+		File target = (parent != null) ? new File(parent, requestedName) : null;
+		// Strategy C path: rename moved placeholder onto target's path. placeholder == target on disk.
+		if (target != null && placeholder.getName().equals(target.getName()))
+		{
+			if (target.exists() && target.length() == expectedLength)
+			{
+				return null; // clean replace via Strategy C rename
+			}
+			if (target.exists())
+			{
+				long targetLen = target.length();
+				deleteCorruptTarget(target);
+				return truncated(requestedName, targetLen, expectedLength);
+			}
+			return missingAfterRename(requestedName);
+		}
+		boolean placeholderExists = placeholder.exists();
+		boolean targetOk = target != null && target.exists() && target.length() == expectedLength;
+		if (targetOk && !placeholderExists)
+		{
+			return null; // clean replace
+		}
+		boolean targetExists = target != null && target.exists();
+		long targetLen = targetExists ? target.length() : -1;
+		if (targetExists && !placeholderExists)
+		{
+			deleteCorruptTarget(target);
+			return truncated(requestedName, targetLen, expectedLength);
+		}
+		if (placeholderExists && targetExists)
+		{
+			return twoFiles(requestedName, placeholder.getName());
+		}
+		if (placeholderExists)
+		{
+			return placeholderOnly(requestedName, placeholder.getName());
+		}
+		return bothMissing(requestedName, placeholder.getName());
+	}
+
+	/**
+	 * SAF-only fallback when no filesystem path is available (cloud / SAF-only providers without
+	 * MANAGE_EXTERNAL_STORAGE). Uses the placeholder URI's SAF display name to detect auto-rename.
+	 */
+	private VerifyFailure classifySafFallbackOutcome(Uri placeholderUri, String requestedName)
+	{
+		String finalName = safFiles.getDisplayName(placeholderUri);
+		if (finalName != null && requestedName.equalsIgnoreCase(finalName))
+		{
+			return null; // clean replace per SAF
+		}
+		if (finalName != null)
+		{
+			return safAutoRenamed(requestedName, finalName);
+		}
+		return safUnverifiable(requestedName);
+	}
+
+	/**
+	 * Classify the post-Replace disk state into a clean-success (null return) or a typed failure with pre-built
+	 * dialog title + message. Side effect: deletes the corrupt target file when a truncation case is detected so
+	 * the next Save attempt doesn't re-find the bad file. Filesystem checks run when MANAGE_EXTERNAL_STORAGE is
+	 * granted (authoritative); falls back to a SAF display-name query otherwise.
+	 *
+	 * @param placeholderUri SAF URI of the just-written placeholder (may have been renamed onto target)
+	 * @param requestedName  the user's requested target filename
+	 * @param expectedLength the byte count the placeholder was written with
+	 * @return null on clean replace, or a VerifyFailure carrying the dialog text for the detected case
+	 */
+	private VerifyFailure classifyVerifyOutcome(Uri placeholderUri, String requestedName, int expectedLength)
+	{
+		File placeholder = safFiles.fileFromSafUri(placeholderUri);
+		if (placeholder != null)
+		{
+			return classifyFilesystemOutcome(placeholder, requestedName, expectedLength);
+		}
+		return classifySafFallbackOutcome(placeholderUri, requestedName);
+	}
+
 	/**
 	 * UI-thread body of showReplaceFailureDialog. Skips the show when the Activity is destroyed (BadTokenException
 	 * guard) and adds a "Grant access" neutral button when MANAGE_EXTERNAL_STORAGE isn't held — that's the
@@ -101,13 +271,25 @@ final class ReplaceStrategy
 		AlertDialog.Builder builder = new AlertDialog.Builder(host.getActivity())
 			.setTitle(title)
 			.setMessage(message)
-			.setPositiveButton("OK", null);
+			.setPositiveButton(DialogStrings.OK, null);
 		if (!permissions.hasStoragePermission())
 		{
 			builder.setNeutralButton("Grant access",
 				(dialog, which) -> permissions.openStoragePermissionSettings());
 		}
-		builder.show();
+		try
+		{
+			// BadTokenException guard mirrors openSaveOptionsDialog / showReplaceDialog /
+			// showExtensionMismatchDialog / GraftController.confirmOversizedThenApply — config-change
+			// races can land between the isDestroyed pre-check and the actual show() call (the Activity
+			// finishes after the pre-check but before WindowManager accepts the dialog). The catch keeps
+			// the warning best-effort instead of crashing the UI thread (Codex round-20 F1).
+			builder.show();
+		}
+		catch (RuntimeException e)
+		{
+			Log.w(TAG, "replace-failure dialog failed to show", e);
+		}
 	}
 
 	/**
@@ -270,124 +452,13 @@ final class ReplaceStrategy
 	 */
 	private boolean verifyReplace(Uri placeholderUri, String requestedName, int expectedLength)
 	{
-		File placeholder = safFiles.fileFromSafUri(placeholderUri);
-		// Prefer filesystem checks — authoritative when MANAGE_EXTERNAL_STORAGE is granted.
-		if (placeholder != null)
+		VerifyFailure failure = classifyVerifyOutcome(placeholderUri, requestedName, expectedLength);
+		if (failure == null)
 		{
-			File parent = placeholder.getParentFile();
-			File target = (parent != null) ? new File(parent, requestedName) : null;
-			// Strategy C path: rename moved placeholder onto target's path. placeholder == target on disk.
-			// Treat as clean replace iff the file exists at target name with the expected length — there's
-			// only one file, no "two files" reconciliation needed.
-			if (target != null && placeholder.getName().equals(target.getName()))
-			{
-				if (target.exists() && target.length() == expectedLength)
-				{
-					return true; // clean replace via Strategy C rename
-				}
-				// Same-name but wrong content/missing — there's still only one file (placeholder ==
-				// target after rename), so a "two files" report would be misleading. Fire a truncation-
-				// or missing-file dialog so the user is told the save didn't land, rather than the
-				// silent return-false that earlier versions produced here.
-				String title;
-				String message;
-				if (target.exists())
-				{
-					long targetLen = target.length();
-					if (!target.delete())
-					{
-						Log.w(TAG, "verifyReplace: failed to remove corrupt target " + target);
-					}
-					title = "Replace produced an incomplete file";
-					message = requestedName + " was " + targetLen + " bytes instead of the"
-						+ " expected " + expectedLength + " and has been removed. Re-save,"
-						+ " and if it keeps happening, grant " + ALL_FILES_ACCESS + " or"
-						+ " move the save target to a folder you own.";
-				}
-				else
-				{
-					title = "Save may have failed";
-					message = requestedName + " is not on disk after Replace. Check your save"
-						+ " directory and try again.";
-				}
-				Log.w(TAG, "verifyReplace (same-name): " + title + " — " + message);
-				showReplaceFailureDialog(title, message);
-				return false;
-			}
-			boolean placeholderExists = placeholder.exists();
-			boolean targetOk = target != null && target.exists() && target.length() == expectedLength;
-			if (targetOk && !placeholderExists)
-			{
-				return true; // clean replace
-			}
-			boolean targetExists = target != null && target.exists();
-			long targetLen = targetExists ? target.length() : -1;
-			String title;
-			String message;
-			if (targetExists && !placeholderExists)
-			{
-				// Target exists but wrong length — the write silently truncated or corrupted. Delete
-				// the partial file so the next Save isn't offered "Replace" on a bad file and the user
-				// doesn't unknowingly keep re-hitting the same failure. The user is told explicitly in
-				// the dialog and can re-save.
-				if (target != null && !target.delete())
-				{
-					Log.w(TAG, "verifyReplace: failed to remove corrupt target " + target);
-				}
-				title = "Replace produced an incomplete file";
-				message = requestedName + " was " + targetLen + " bytes instead of the expected "
-					+ expectedLength + " and has been removed. Re-save, and if it keeps "
-					+ "happening, grant " + ALL_FILES_ACCESS + " or move the save target "
-					+ "to a folder you own.";
-			}
-			else if (placeholderExists && targetExists)
-			{
-				title = "Replace left two files";
-				message = "Both " + requestedName + " and " + placeholder.getName()
-					+ " now exist on disk. Grant " + ALL_FILES_ACCESS + " so Replace can "
-					+ "clean up automatically, or delete one manually from the Files app.";
-			}
-			else if (placeholderExists)
-			{
-				title = "Couldn't replace " + requestedName;
-				message = "Your crop was saved as " + placeholder.getName()
-					+ ". The original " + requestedName + " is owned by a previous install of "
-					+ "CropCenter and can't be replaced by this build. Grant " + ALL_FILES_ACCESS
-					+ " and save again, or delete the original from the Files app.";
-			}
-			else
-			{
-				title = "Save may have failed";
-				message = "Neither " + requestedName + " nor " + placeholder.getName()
-					+ " is on disk. Check your save directory and try again.";
-			}
-			Log.w(TAG, "verifyReplace: " + title + " — " + message);
-			showReplaceFailureDialog(title, message);
-			return false;
+			return true; // clean replace
 		}
-		// No filesystem access — fall back to SAF query on the placeholder URI.
-		String finalName = safFiles.getDisplayName(placeholderUri);
-		if (finalName != null && requestedName.equalsIgnoreCase(finalName))
-		{
-			return true; // clean replace per SAF
-		}
-		String title;
-		String message;
-		if (finalName != null)
-		{
-			title = "Couldn't replace " + requestedName;
-			message = "Your crop was saved as " + finalName + ". Grant " + ALL_FILES_ACCESS
-				+ "so Replace can overwrite the existing file, or delete the original from the "
-				+ "Files app and save again.";
-		}
-		else
-		{
-			title = "Couldn't verify replace";
-			message = "Save may not have completed. Check your save directory for a "
-				+ requestedName + " or auto-renamed copy.";
-		}
-		Log.w(TAG, "verifyReplace: " + title + " — " + message);
-		showReplaceFailureDialog(title, message);
+		Log.w(TAG, "verifyReplace: " + failure.title() + " — " + failure.message());
+		showReplaceFailureDialog(failure.title(), failure.message());
 		return false;
 	}
 
@@ -396,8 +467,8 @@ final class ReplaceStrategy
 	 *
 	 *   A. File I/O. Writes the encoded bytes directly from `data` — avoids re-reading the placeholder through
 	 *      FUSE/MediaStore layers that may not be in sync yet. Verifies the target's on-disk length matches before
-	 *      reporting success. When this path succeeds, skip SAF paths entirely — running them on the already-correct
-	 *      target could delete it.
+	 *      reporting success. When this path succeeds, skip SAF paths entirely — running them on the
+	 *      already-correct target could delete it.
 	 *   B. SAF direct overwrite. Verifies the colliding target byte-for-byte against `data` before deleting the
 	 *      verified placeholder. If verification fails, leaves the placeholder in place so the user still has their
 	 *      verified save at the auto-suffixed name and verifyReplace's "two files" branch surfaces the situation.

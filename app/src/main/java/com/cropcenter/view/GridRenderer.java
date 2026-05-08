@@ -22,7 +22,7 @@ import com.cropcenter.model.GridConfig;
  * positions can jump by one pixel at cropW parity boundaries. The rotation ruler moves in discrete ticks so this
  * happens at tick rate, not per-frame — acceptable trade for preview-matches-export fidelity.
  */
-public class GridRenderer
+public final class GridRenderer
 {
 	/**
 	 * Functional interface for coordinate mapping.

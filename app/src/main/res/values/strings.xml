@@ -1,18 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- Only app_name is consumed (by AndroidManifest android:label). All user-facing toasts and dialog
+         strings are hardcoded as Java literals at the call site — that's the project convention; see e.g.
+         the toast text pinned in EditAlignerTest, MpfPatcherTest, and HorizonDetectorTest. The previous
+         16 entries here (open_image, save_as, etc.) had no consumers and were removed in round 12 to
+         stop new readers from assuming they're load-bearing. -->
     <string name="app_name">CropCenter</string>
-    <string name="open_image">Open Image</string>
-    <string name="save_as">Save As</string>
-    <string name="resave">Re-save</string>
-    <string name="share">Share</string>
-    <string name="aspect_ratio">Aspect Ratio</string>
-    <string name="center_mode">Center Mode</string>
-    <string name="grid_overlay">Grid Overlay</string>
-    <string name="export">Export</string>
-    <string name="quality">Quality</string>
-    <string name="format">Format</string>
-    <string name="filename">Filename</string>
-    <string name="editor_mode">Editor Mode</string>
-    <string name="crop_size">Crop Size</string>
-    <string name="no_image">Tap to open an image</string>
 </resources>

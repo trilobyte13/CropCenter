@@ -17,6 +17,23 @@ package com.cropcenter.model;
 public record GridConfig(boolean enabled, boolean includeInExport, boolean showPixelGrid, float lineWidth,
 	int color, int columns, int pixelGridColor, int rows, int selectionColor)
 {
+	/**
+	 * Default configuration applied to every freshly-loaded image: grid visible at 4×4, pixel grid visible when
+	 * zoomed past 6×, grid NOT baked into exports, 50%-transparent blue selection overlay.
+	 */
+	public static GridConfig defaults()
+	{
+		return new GridConfig(true,          // enabled
+			false,         // includeInExport
+			true,          // showPixelGrid
+			1f,            // lineWidth
+			0xFFFFFFFF,    // color — white
+			4,             // columns
+			0xFF000000,    // pixelGridColor — black
+			4,             // rows
+			0x800000FF);   // selectionColor — 50% transparent blue
+	}
+
 	public GridConfig withColor(int color)
 	{
 		return new GridConfig(enabled, includeInExport, showPixelGrid, lineWidth,
@@ -79,22 +96,5 @@ public record GridConfig(boolean enabled, boolean includeInExport, boolean showP
 	{
 		return new GridConfig(enabled, includeInExport, showPixelGrid, lineWidth,
 			color, columns, pixelGridColor, rows, selectionColor);
-	}
-
-	/**
-	 * Default configuration applied to every freshly-loaded image: grid visible at 4×4, pixel grid visible when
-	 * zoomed past 6×, grid NOT baked into exports, 50%-transparent blue selection overlay.
-	 */
-	public static GridConfig defaults()
-	{
-		return new GridConfig(true,          // enabled
-			false,         // includeInExport
-			true,          // showPixelGrid
-			1f,            // lineWidth
-			0xFFFFFFFF,    // color — white
-			4,             // columns
-			0xFF000000,    // pixelGridColor — black
-			4,             // rows
-			0x800000FF);   // selectionColor — 50% transparent blue
 	}
 }

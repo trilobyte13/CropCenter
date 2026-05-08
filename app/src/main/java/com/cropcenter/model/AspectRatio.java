@@ -19,13 +19,15 @@ public record AspectRatio(float width, float height)
 	public static final AspectRatio R9_16 = new AspectRatio(9, 16);
 
 	/**
-	 * Any non-positive dimension means "no constraint" — catches both the canonical FREE (0, 0) and malformed
-	 * external constructions like (4, 0) or (-1, -1) that would otherwise produce ratio() == 0 and poison
-	 * CropEngine's Math.round(cropW / ratio) with Integer.MAX_VALUE.
+	 * Any non-positive or non-finite dimension means "no constraint" — catches both the canonical FREE (0, 0)
+	 * and malformed external constructions like (4, 0) or (-1, -1) that would otherwise produce ratio() == 0
+	 * and poison CropEngine's Math.round(cropW / ratio) with Integer.MAX_VALUE. The non-finite check (NaN /
+	 * Infinity) prevents ratio() returning NaN or Infinity when the user types "NaN" / "Infinity" into the
+	 * Custom AR dialog and ToolbarBinder.parseIntOr falls back to a poisoned value.
 	 */
 	public boolean isFree()
 	{
-		return width <= 0 || height <= 0;
+		return width <= 0 || height <= 0 || !Float.isFinite(width) || !Float.isFinite(height);
 	}
 
 	/**

@@ -103,7 +103,7 @@ public final class SafFileHelper
 	 * Build a sibling document URI by swapping the last segment of src's document ID for siblingName. Works on
 	 * providers that encode paths in their document IDs (notably ExternalStorageProvider). Handles files at the
 	 * provider root by treating the volume `:` as the segment separator ("primary:foo.jpg" → "primary:siblingName")
-	 * so root- level documents get the same sibling-derivation as nested ones. Returns null for opaque-ID providers
+	 * so root-level documents get the same sibling-derivation as nested ones. Returns null for opaque-ID providers
 	 * or providers that don't expose a document ID.
 	 */
 	public Uri deriveSiblingUri(Uri src, String siblingName)
@@ -488,7 +488,7 @@ public final class SafFileHelper
 	 * to a local file first bypasses that.
 	 *
 	 * Throws IOException when the input exceeds MAX_READ_BYTES — the byte[] allocation in the second phase would
-	 * otherwise risk OutOfMemoryError on mid-range devices and a negative- size allocation if fileLen exceeded
+	 * otherwise risk OutOfMemoryError on mid-range devices and a negative-size allocation if fileLen exceeded
 	 * Integer.MAX_VALUE.
 	 */
 	public byte[] readUriBytes(Uri uri) throws IOException
@@ -580,16 +580,21 @@ public final class SafFileHelper
 				return DocumentsContract.deleteDocument(ctx.getContentResolver(), uri);
 			}
 		}
-		catch (Exception ignored)
+		catch (Exception e)
 		{
+			// Provider that doesn't implement deleteDocument (UnsupportedOperationException), or a
+			// permission issue (SecurityException). Log at debug — useful for diagnosing why a Replace
+			// cleanup left an orphan file behind without spamming the log on every save.
+			Log.d(TAG, "deleteDocument fallback path: " + e.getClass().getSimpleName());
 		}
 		try
 		{
 			int rows = ctx.getContentResolver().delete(uri, null, null);
 			return rows > 0;
 		}
-		catch (Exception ignored)
+		catch (Exception e)
 		{
+			Log.d(TAG, "ContentResolver.delete fallback path: " + e.getClass().getSimpleName());
 		}
 		return false;
 	}
@@ -643,21 +648,13 @@ public final class SafFileHelper
 		}
 		try (FileInputStream fis = new FileInputStream(file))
 		{
-			byte[] bytes = new byte[(int) len];
-			int read = 0;
-			while (read < bytes.length)
+			// readNBytes is the modern replacement for the manual read-loop pattern — same semantics
+			// (returns when len bytes are read or EOF), matches readUriBytes' existing usage.
+			byte[] bytes = fis.readNBytes((int) len);
+			if (bytes.length != len)
 			{
-				int n = fis.read(bytes, read, bytes.length - read);
-				if (n < 0)
-				{
-					break;
-				}
-				read += n;
-			}
-			if (read != bytes.length)
-			{
-				Log.w(TAG, "direct-read: short read " + read + "/" + bytes.length
-					+ " on " + pathAndId[0]);
+				Log.w(TAG, "direct-read: short read "
+					+ bytes.length + "/" + len + " on " + pathAndId[0]);
 				return null;
 			}
 			if (!SafPaths.hasImageSignature(bytes))
@@ -679,5 +676,4 @@ public final class SafFileHelper
 			return null;
 		}
 	}
-
 }

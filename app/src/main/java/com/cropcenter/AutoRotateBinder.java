@@ -6,8 +6,11 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import com.cropcenter.util.HorizonDetector;
+import com.cropcenter.util.RotationMath;
 import com.cropcenter.util.TextFormat;
+import com.cropcenter.view.DialogStrings;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -41,6 +44,30 @@ final class AutoRotateBinder
 	}
 
 	/**
+	 * Externally-driven exit from horizon paint mode. Used by MainActivity.installImageOnUi when a new image
+	 * loads while paint mode is active — without this hook, the new image would route the user's first touch
+	 * to horizon painting on the freshly-loaded source instead of the expected Select / Move behavior, plus
+	 * the Auto button would stay stuck on its "Cancel" label / red color from the previous load.
+	 *
+	 * No-op when paint mode isn't active. Doesn't touch the busy flag — paint mode never holds it
+	 * (acquisition happens later in onHorizonPaintComplete after the user commits the stroke), so there's
+	 * nothing to release.
+	 */
+	void cancelHorizonPaintMode()
+	{
+		if (!host.getEditorView().isHorizonMode())
+		{
+			return;
+		}
+		host.getEditorView().setHorizonMode(false, null);
+		// Direct deref matches bind() at line 42 and UiSync.java:54 — both look up R.id.btnAutoRotate the
+		// same way and trust the lookup. The view is statically declared in activity_main.xml and the call
+		// is always reached after onCreate's setContentView; a hypothetical null here would be a deeper
+		// inflation bug that a defensive guard would only mask.
+		resetAutoRotateButton(host.findViewById(R.id.btnAutoRotate));
+	}
+
+	/**
 	 * Apply a detected rotation and zoom the ruler so the user can fine-tune within ~0.01° immediately. Shared
 	 * between the metadata-fast path and the painted-horizon background path.
 	 *
@@ -51,7 +78,7 @@ final class AutoRotateBinder
 	{
 		host.getState().setRotationDegrees(degrees);
 		host.getRotationRuler().zoomToMax();
-		Toast.makeText(host.getActivity(), toastText, Toast.LENGTH_SHORT).show();
+		host.toastIfAlive(toastText, Toast.LENGTH_SHORT);
 	}
 
 	/**
@@ -67,10 +94,20 @@ final class AutoRotateBinder
 		{
 			return;
 		}
+		// Cancel-paint-mode is allowed even when busy is held (the bg horizon detector is what holds it, and
+		// the cancel just exits the paint state without touching the bg work). Every other path enters or
+		// queries detection state, so reject during busy: a tap that lands while bg detection is in flight
+		// would otherwise (a) clear imagePoints via setHorizonMode(true,...) while the bg thread iterates
+		// the same list (CME), or (b) overwrite the rotation result the in-flight detector is about to apply.
 		if (host.getEditorView().isHorizonMode())
 		{
 			host.getEditorView().setHorizonMode(false, null);
 			resetAutoRotateButton(btn);
+			return;
+		}
+		if (host.getBusy().get())
+		{
+			host.showBusyToast();
 			return;
 		}
 
@@ -81,39 +118,61 @@ final class AutoRotateBinder
 			return;
 		}
 
-		btn.setText("Cancel");
+		btn.setText(DialogStrings.CANCEL);
 		btn.setTextColor(host.getActivity().getResources().getColor(R.color.red, null));
 		host.getEditorView().setHorizonMode(true, () -> onHorizonPaintComplete(btn));
 	}
 
 	/**
-	 * UI-thread handler for the detection result. Rounds to 0.01° precision for display smoothness, then hands off
-	 * to setRotationDegrees which snaps sub-epsilon magnitudes to exactly 0 (so a horizon detected at e.g. 0.03°
-	 * stores as 0 rather than as a value the rest of the pipeline silently treats as zero). Toasts the rounded
-	 * result — or a "no line detected" message when the detector returns NaN.
+	 * UI-thread handler for the detection result. Releases the busy flag held since onHorizonPaintComplete (so a
+	 * load tap that came in during detection can now proceed), hides the progress overlay, then applies the
+	 * rotation. Rounds to 0.01° precision for display smoothness; setRotationDegrees only snaps magnitudes below
+	 * BitmapUtils.ROTATION_EPSILON (0.005°) to exactly 0, so the post-round 0.01° / 0.02° / 0.03° / 0.04° values
+	 * the detector and ruler can produce all survive end-to-end (renderer rotates, readout shows, ExportPipeline
+	 * doesn't bypass). Toasts the rounded result — or a "no line detected" message when the detector returns NaN.
+	 *
+	 * Busy stays held until this point — not released in runHorizonDetectionInBackground's finally — so a load
+	 * tap racing the detection result can't apply our rotation to the new image's state. The brief window
+	 * between busy release and the next load tap is fine because applyDetectedRotation has already returned by
+	 * then.
 	 *
 	 * @param detected the detector's reported angle, or NaN when no line was found
 	 */
 	private void onHorizonDetectionResult(float detected)
 	{
-		if (host.isDestroyed())
+		try
 		{
-			return;
+			if (host.isDestroyed())
+			{
+				return;
+			}
+			host.setBusyUi(false);
+			host.hideProgress();
+			if (Float.isNaN(detected))
+			{
+				host.toastIfAlive("No line detected in painted area", Toast.LENGTH_SHORT);
+				return;
+			}
+			float newRot = RotationMath.snapToHundredth(detected);
+			applyDetectedRotation(newRot, TextFormat.degrees(newRot));
 		}
-		host.hideProgress();
-		if (Float.isNaN(detected))
+		finally
 		{
-			Toast.makeText(host.getActivity(), "No line detected in painted area",
-				Toast.LENGTH_SHORT).show();
-			return;
+			host.getBusy().set(false);
 		}
-		float newRot = Math.round(detected * 100f) / 100f;
-		applyDetectedRotation(newRot, TextFormat.degrees(newRot));
 	}
 
 	/**
-	 * Horizon-paint callback: reset the button, grab the painted points, and dispatch the detection pipeline on the
-	 * background executor. Empty / too-short paints surface a toast and return immediately.
+	 * Horizon-paint callback: reset the button, grab the painted points, claim the busy flag, and dispatch the
+	 * detection pipeline on the background executor. Empty / too-short paints surface a toast and return
+	 * immediately. A busy-rejected tap (another bg op already running) shows the busy toast and bails.
+	 *
+	 * Busy is acquired here — not just the touch-blocking progress overlay — because a Share/View intent that
+	 * arrives mid-detection bypasses UI taps entirely and would race the detection result: the load's "Loading…"
+	 * overlay would be dismissed early when onHorizonDetectionResult hides progress, and the detected rotation
+	 * could be applied to the newly loading image's state. Holding busy makes the load wait (or get rejected
+	 * with the busy toast if the user taps Save/Open during paint+detect). Released in onHorizonDetectionResult
+	 * after rotation is applied.
 	 *
 	 * @param btn the auto-rotate button (reset to its resting state regardless of the
 	 *            detection outcome — the paint phase has ended)
@@ -121,18 +180,44 @@ final class AutoRotateBinder
 	private void onHorizonPaintComplete(TextView btn)
 	{
 		resetAutoRotateButton(btn);
-		var points = host.getEditorView().getHorizonPoints();
+		// Snapshot the live points list before dispatching to the bg detector. HorizonPaintOverlay.getPoints()
+		// returns the in-progress imagePoints ArrayList; a subsequent setHorizonMode(true, ...) (entered if a
+		// new tap reaches handleAutoRotateTap before the busy gate took effect, e.g. through a future code
+		// path that bypasses busy) would clear imagePoints while the bg detector is iterating it — CME on bg.
+		// The copy is small (typically a few hundred 2-element float arrays) and is the only correct fix
+		// because the bg detector deliberately reads outside the busy-held UI thread.
+		List<float[]> points = new ArrayList<>(host.getEditorView().getHorizonPoints());
 		float brushRadius = host.getEditorView().getHorizonBrushRadius();
 		Bitmap src = host.getState().getSourceImage();
 
 		if (points.size() < 2 || src == null)
 		{
-			Toast.makeText(host.getActivity(), "Paint was too short", Toast.LENGTH_SHORT).show();
+			host.toastIfAlive("Paint was too short", Toast.LENGTH_SHORT);
 			return;
 		}
 
-		host.showProgress("Detecting horizon…");
-		host.runInBackground(() -> runHorizonDetectionInBackground(src, points, brushRadius));
+		if (!host.getBusy().compareAndSet(false, true))
+		{
+			host.showBusyToast();
+			return;
+		}
+		// Pre-enqueue cleanup guard — any throw from setBusyUi / showProgress / runInBackground would otherwise
+		// strand busy=true (runHorizonDetectionInBackground's failure path only runs if the Runnable was
+		// accepted). Mirrors ImageLoadController.load and ExportPipeline.exportTo.
+		try
+		{
+			host.setBusyUi(true);
+			host.showProgress("Detecting horizon…");
+			host.runInBackground(() -> runHorizonDetectionInBackground(src, points, brushRadius));
+		}
+		catch (RuntimeException e)
+		{
+			Log.w(TAG, "pre-enqueue UI/dispatch threw; releasing busy flag", e);
+			host.getBusy().set(false);
+			host.setBusyUi(false);
+			host.hideProgress();
+			throw e;
+		}
 	}
 
 	/**
@@ -149,7 +234,11 @@ final class AutoRotateBinder
 	/**
 	 * Background detection job. Runs on the single-thread executor; posts all UI mutation (toast, hideProgress,
 	 * rotation update) back through runOnUiThread. Wrapped so a throw inside HorizonDetector can't leave the
-	 * progress overlay stuck.
+	 * progress overlay stuck or the busy flag held.
+	 *
+	 * Failure path: releases busy, clears UI, surfaces a toast. Success path: leaves busy held — the UI runnable
+	 * onHorizonDetectionResult will release it after applying rotation, so a load tap racing the result can't
+	 * apply our rotation to the new image's state.
 	 *
 	 * @param src         source bitmap (read-only here)
 	 * @param points      painted polyline in image-coordinate space
@@ -169,8 +258,13 @@ final class AutoRotateBinder
 			// (OutOfMemoryError, LinkageError, ThreadDeath) would let the recovery handler itself fail or
 			// worsen the situation. HorizonDetector already catches OutOfMemoryError internally.
 			Log.w(TAG, "horizon detection failed", t);
-			host.hideProgress();
-			host.runOnUiThread(() -> host.toastIfAlive("Horizon detection failed", Toast.LENGTH_SHORT));
+			host.getBusy().set(false);
+			host.runOnUiThread(() ->
+			{
+				host.setBusyUi(false);
+				host.hideProgress();
+				host.toastIfAlive("Horizon detection failed", Toast.LENGTH_SHORT);
+			});
 			return;
 		}
 		final float detected = angle;

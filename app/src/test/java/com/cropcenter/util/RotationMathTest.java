@@ -12,7 +12,7 @@ import org.junit.Test;
  * short-circuit is expected to leave the input untouched. Both invariants are easy to break with a sign flip in the
  * matrix.
  */
-public class RotationMathTest
+public final class RotationMathTest
 {
 	private static final float TOL = 1e-3f;
 
@@ -116,5 +116,41 @@ public class RotationMathTest
 
 		float[] returnedInv = RotationMath.inverse(0f, 0f, 0f, 0f, 30f, out);
 		assertSame(out, returnedInv);
+	}
+
+	@Test
+	public void snapToHundredthRoundsToTwoDecimalPlaces()
+	{
+		// Pin the contract: 1.234 → 1.23 (round-half-to-even via Math.round). Used by the auto-rotate / horizon
+		// paths so the announced angle lands on a ruler tick rather than between two of them.
+		assertEquals(1.23f, RotationMath.snapToHundredth(1.234f), 0f);
+	}
+
+	@Test
+	public void snapToHundredthRoundsHalfwayUp()
+	{
+		// Math.round rounds halfway cases up (toward positive infinity for positive values). Pin this so a
+		// regression to BigDecimal.HALF_EVEN or floor would be caught immediately.
+		assertEquals(1.24f, RotationMath.snapToHundredth(1.235f), 0f);
+	}
+
+	@Test
+	public void snapToHundredthHandlesNegativeInputs()
+	{
+		// Negative angles round symmetrically — the horizon-detector path passes negated tilts through here.
+		assertEquals(-2.34f, RotationMath.snapToHundredth(-2.341f), 0f);
+	}
+
+	@Test
+	public void snapToHundredthLeavesAlreadyAlignedValuesUntouched()
+	{
+		// 0.05 is already on a ruler tick; the round-trip must be exact (within float precision).
+		assertEquals(0.05f, RotationMath.snapToHundredth(0.05f), 1e-6f);
+	}
+
+	@Test
+	public void snapToHundredthMapsZeroToZero()
+	{
+		assertEquals(0f, RotationMath.snapToHundredth(0f), 0f);
 	}
 }

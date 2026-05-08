@@ -24,8 +24,12 @@ import java.util.Locale;
 /**
  * Color picker: grid of preset colors, alpha slider, and hex input. The hex field always reflects the current selection
  * and its background acts as the live preview.
+ *
+ * Each call to show() builds and shows a single dialog. The class itself is instance-scoped (one instance per
+ * dialog open) so the per-dialog mutable state (current selection, hex-watcher suppression flag, view references) lives
+ * as ordinary fields rather than being smuggled through 1-element arrays into static helper signatures.
  */
-public class ColorPickerDialog
+public final class ColorPickerDialog
 {
 	/**
 	 * Fires when the user confirms a color choice (taps OK). Cancellation does not invoke this.
@@ -39,17 +43,9 @@ public class ColorPickerDialog
 	}
 
 	/**
-	 * Container for the two widgets built by buildAlphaRow that the show() method wires up independently — the
-	 * SeekBar drives the alpha channel, the TextView mirrors the current value.
-	 */
-	private record AlphaRow(SeekBar slider, TextView valueText)
-	{
-	}
-
-	/**
 	 * Grid view that draws color swatches in a tap-to-select grid.
 	 */
-	private static class ColorGridView extends View
+	private static final class ColorGridView extends View
 	{
 		interface OnColorTapListener
 		{
@@ -57,13 +53,14 @@ public class ColorPickerDialog
 		}
 
 		// CLAUDE.md field order: `final` tier (alphabetical by type, uppercase types first, then alphabetical
-		// by name within a type) then regular (non-final) tier.
+		// by name within a type) then regular (non-final) tier. int and int[] both lead with 'i'; alphabetical
+		// by name puts cellSize, colors, cols, rows in that order.
 		private final Paint borderPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 		private final Paint paint = new Paint();
 		private final int cellSize;
+		private final int[] colors;
 		private final int cols;
 		private final int rows;
-		private final int[] colors;
 		private OnColorTapListener listener;
 		private int selectedColor;
 
@@ -87,6 +84,15 @@ public class ColorPickerDialog
 			{
 				int col = (int) (event.getX() / (getWidth() / (float) cols));
 				int row = (int) (event.getY() / (getHeight() / (float) rows));
+				// Hard-reject out-of-grid coords. A touch at exactly event.getX() == getWidth() yields
+				// col == cols, which folds into the next row's first cell via row-major
+				// (idx = row * cols + cols still satisfies `idx < colors.length` for any row except the
+				// last). Bottom edge is symmetric. Without the explicit col/row range check, the
+				// boundary tap selects an unintended swatch instead of being ignored.
+				if (col < 0 || col >= cols || row < 0 || row >= rows)
+				{
+					return true;
+				}
 				int idx = row * cols + col;
 				if (idx >= 0 && idx < colors.length)
 				{
@@ -186,50 +192,61 @@ public class ColorPickerDialog
 		0xFF000000, 0xFFFFFFFF, 0xFFFF0000, 0xFF00FF00, 0xFF0000FF, 0xFFFFFF00, 0xFF00FFFF, 0xFFFF00FF,
 	};
 
-	public static void show(Context context, int currentColor, int[] palette, OnColorSelectedListener listener)
+	// Per-dialog instance state. ColorPickerDialog is constructed fresh from show() for each open; these fields
+	// hold the values that the previous static-helper version smuggled through 1-element arrays (`int[] selected`,
+	// `boolean[] suppressHexWatcher`) plus the view references the wireXxx methods need to cross-reference.
+	private final Context context;
+	private final OnColorSelectedListener listener;
+	private final float density;
+	private final int[] palette;
+
+	private ColorGridView grid;
+	private EditText hexInput;
+	private SeekBar alphaSeekBar;
+	private TextView alphaValueText;
+	private boolean suppressHexWatcher;
+	private int selected;
+
+	private ColorPickerDialog(Context context, int currentColor, int[] palette, OnColorSelectedListener listener)
 	{
-		float density = context.getResources().getDisplayMetrics().density;
+		this.context = context;
+		this.density = context.getResources().getDisplayMetrics().density;
+		this.listener = listener;
+		this.palette = palette;
+		this.selected = currentColor;
+	}
 
-		final int[] selected = { currentColor };
-		final boolean[] suppressHexWatcher = { false };
-
-		LinearLayout root = new LinearLayout(context);
-		root.setOrientation(LinearLayout.VERTICAL);
-		root.setPadding(DpToPx.toPx(12, density), DpToPx.toPx(8, density),
-			DpToPx.toPx(12, density), DpToPx.toPx(4, density));
-
-		int cellSize = DpToPx.toPx(36, density);
-		ColorGridView grid = new ColorGridView(context, palette, COLS, ROWS, cellSize, currentColor);
-		root.addView(grid, new LinearLayout.LayoutParams(
-			LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
-
-		AlphaRow alphaRow = buildAlphaRow(context, root, currentColor, density);
-		EditText hexInput = buildHexInput(context, root, density);
-
-		Runnable syncHexToSelection = () -> syncHexDisplay(hexInput, selected[0], density, suppressHexWatcher);
-		syncHexToSelection.run();
-
-		wireGridTap(grid, selected, alphaRow.slider(), syncHexToSelection);
-		wireAlphaSlider(alphaRow.slider(), grid, selected, alphaRow.valueText(), syncHexToSelection);
-		wireHexInput(hexInput, grid, selected, alphaRow.slider(), density, suppressHexWatcher);
-
-		new AlertDialog.Builder(context)
-			.setTitle("Pick Color")
-			.setView(root)
-			.setPositiveButton("OK", (dialog, which) -> listener.onColorSelected(selected[0]))
-			.setNegativeButton("Cancel", null)
-			.show();
+	/**
+	 * Build and show the picker. Constructs a fresh ColorPickerDialog instance to hold per-dialog state, then
+	 * delegates to its private buildAndShow.
+	 *
+	 * Returns the AlertDialog so the caller can track and cancel it — SettingsDialog opens pickers from
+	 * its swatch click handlers and needs to cancel any open picker when the parent dialog is cancelled
+	 * (Codex round-17 F2). Without that propagation, a stale picker outliving SettingsDialog could fire
+	 * its OK listener and mutate state.gridConfig after the parent dialog had been forced-cancelled by an
+	 * inbound load.
+	 *
+	 * @param context      Activity context for inflation
+	 * @param currentColor initial color (ARGB) to highlight + show in the hex input
+	 * @param palette      grid palette to display (PALETTE_OPAQUE or PALETTE_TRANSLUCENT)
+	 * @param listener     invoked on OK with the chosen color; never on Cancel
+	 * @return the shown AlertDialog (caller tracks for forced-cancel propagation)
+	 */
+	public static AlertDialog show(Context context, int currentColor, int[] palette,
+		OnColorSelectedListener listener)
+	{
+		return new ColorPickerDialog(context, currentColor, palette, listener).buildAndShow();
 	}
 
 	/**
 	 * Paint the hex EditText's background with the current color and pick a contrasting text color (ITU-R BT.601
 	 * luma: Y' = 0.299R + 0.587G + 0.114B).
 	 */
-	private static void applySwatchPreview(EditText hexInput, int color, float density)
+	private void applySwatchPreview(int color)
 	{
 		GradientDrawable bg = new GradientDrawable();
 		bg.setColor(color);
-		bg.setCornerRadius(4 * density);
+		bg.setCornerRadius(DpToPx.toPx(4, density));
 		bg.setStroke(1, ThemeColors.SURFACE1);
 		hexInput.setBackground(bg);
 		int r = (color >> 16) & 0xFF;
@@ -240,11 +257,10 @@ public class ColorPickerDialog
 	}
 
 	/**
-	 * Build and attach the "Opacity" slider row. Returns the SeekBar + value TextView together so wiring can
-	 * address both without reaching into the row's children by index — that was fragile against future additions to
-	 * the row.
+	 * Build and attach the "Opacity" slider row. Stores `alphaSeekBar` and `alphaValueText` as fields so the wire
+	 * methods can reach them without an explicit return value.
 	 */
-	private static AlphaRow buildAlphaRow(Context context, LinearLayout root, int currentColor, float density)
+	private void buildAlphaRow(LinearLayout root)
 	{
 		LinearLayout alphaRow = new LinearLayout(context);
 		alphaRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -256,14 +272,14 @@ public class ColorPickerDialog
 		alphaLabel.setTextColor(ThemeColors.SUBTEXT0);
 		alphaRow.addView(alphaLabel);
 
-		SeekBar alphaSeekBar = new SeekBar(context);
+		alphaSeekBar = new SeekBar(context);
 		alphaSeekBar.setMax(255);
-		alphaSeekBar.setProgress(Color.alpha(currentColor));
+		alphaSeekBar.setProgress(Color.alpha(selected));
 		alphaRow.addView(alphaSeekBar, new LinearLayout.LayoutParams(
 			0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
 
-		TextView alphaValueText = new TextView(context);
-		alphaValueText.setText(String.valueOf(Color.alpha(currentColor)));
+		alphaValueText = new TextView(context);
+		alphaValueText.setText(String.valueOf(Color.alpha(selected)));
 		alphaValueText.setTextSize(11);
 		alphaValueText.setTextColor(ThemeColors.MAUVE);
 		alphaValueText.setMinWidth(DpToPx.toPx(28, density));
@@ -274,57 +290,93 @@ public class ColorPickerDialog
 			LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
 		alphaRowLayoutParams.topMargin = DpToPx.toPx(6, density);
 		root.addView(alphaRow, alphaRowLayoutParams);
-		return new AlphaRow(alphaSeekBar, alphaValueText);
+	}
+
+	/**
+	 * Assemble the full picker layout, wire all interactions, and show the dialog. Each component-build method
+	 * stashes its created view(s) on instance fields; each wireXxx method then reads those fields to set up
+	 * cross-component listener callbacks. The 1-element-array smuggle hack (selected / suppressHexWatcher) is gone
+	 * — both are ordinary instance fields now.
+	 *
+	 * @return the shown AlertDialog (returned to caller for forced-cancel propagation; see show)
+	 */
+	private AlertDialog buildAndShow()
+	{
+		LinearLayout root = new LinearLayout(context);
+		root.setOrientation(LinearLayout.VERTICAL);
+		root.setPadding(DpToPx.toPx(12, density), DpToPx.toPx(8, density),
+			DpToPx.toPx(12, density), DpToPx.toPx(4, density));
+
+		int cellSize = DpToPx.toPx(36, density);
+		grid = new ColorGridView(context, palette, COLS, ROWS, cellSize, selected);
+		root.addView(grid, new LinearLayout.LayoutParams(
+			LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+
+		buildAlphaRow(root);
+		buildHexInput(root);
+
+		syncHexDisplay();
+
+		wireGridTap();
+		wireAlphaSlider();
+		wireHexInput();
+
+		return new AlertDialog.Builder(context)
+			.setTitle("Pick Color")
+			.setView(root)
+			.setPositiveButton(DialogStrings.OK, (dialog, which) -> listener.onColorSelected(selected))
+			.setNegativeButton(DialogStrings.CANCEL, null)
+			.show();
 	}
 
 	/**
 	 * Build and attach the hex-code EditText. Background acts as the live swatch preview.
 	 */
-	private static EditText buildHexInput(Context context, LinearLayout root, float density)
+	private void buildHexInput(LinearLayout root)
 	{
-		EditText hexInput = new EditText(context);
+		hexInput = new EditText(context);
 		hexInput.setTextSize(14);
 		hexInput.setSingleLine(true);
 		hexInput.setGravity(Gravity.CENTER);
 		hexInput.setHint("#AARRGGBB");
-		hexInput.setPadding(DpToPx.toPx(12, density), DpToPx.toPx(10, density), DpToPx.toPx(12, density), DpToPx.toPx(10, density));
+		int hexPadHor = DpToPx.toPx(12, density);
+		int hexPadVer = DpToPx.toPx(10, density);
+		hexInput.setPadding(hexPadHor, hexPadVer, hexPadHor, hexPadVer);
 		LinearLayout.LayoutParams hexInputLayoutParams = new LinearLayout.LayoutParams(
 			LinearLayout.LayoutParams.MATCH_PARENT, DpToPx.toPx(44, density));
 		hexInputLayoutParams.topMargin = DpToPx.toPx(8, density);
 		root.addView(hexInput, hexInputLayoutParams);
-		return hexInput;
 	}
 
 	/**
 	 * Push the current selection into the hex EditText + swatch background without re-entering the TextWatcher (the
 	 * suppress flag shields afterTextChanged).
 	 */
-	private static void syncHexDisplay(EditText hexInput, int color, float density, boolean[] suppressHexWatcher)
+	private void syncHexDisplay()
 	{
-		suppressHexWatcher[0] = true;
-		hexInput.setText(String.format(Locale.ROOT, "#%08X", color));
-		suppressHexWatcher[0] = false;
-		applySwatchPreview(hexInput, color, density);
+		suppressHexWatcher = true;
+		hexInput.setText(String.format(Locale.ROOT, "#%08X", selected));
+		suppressHexWatcher = false;
+		applySwatchPreview(selected);
 	}
 
 	/**
 	 * Alpha slider → update alpha channel + hex. Split from onStart/onStop which stay empty — SeekBar's interface
 	 * requires all three.
 	 */
-	private static void wireAlphaSlider(SeekBar alphaSeekBar, ColorGridView grid, int[] selected,
-		TextView alphaValueText, Runnable syncHexToSelection)
+	private void wireAlphaSlider()
 	{
 		alphaSeekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener()
 		{
 			@Override
 			public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser)
 			{
-				selected[0] = (selected[0] & 0x00FFFFFF) | (progress << 24);
+				selected = (selected & 0x00FFFFFF) | (progress << 24);
 				alphaValueText.setText(String.valueOf(progress));
-				syncHexToSelection.run();
+				syncHexDisplay();
 				// Alpha change produces a new ARGB value that may or may not still match a palette
 				// entry. Keep the grid's highlighted swatch honest.
-				grid.setSelectedColor(selected[0]);
+				grid.setSelectedColor(selected);
 			}
 
 			@Override
@@ -337,17 +389,16 @@ public class ColorPickerDialog
 
 	/**
 	 * Grid tap → update selection, alpha slider, hex. The alpha listener updates its own value label; the explicit
-	 * syncHex call here covers the case where the tapped color's alpha matches the current slider position so the
-	 * listener wouldn't fire.
+	 * syncHexDisplay call here covers the case where the tapped color's alpha matches the current slider position
+	 * so the listener wouldn't fire.
 	 */
-	private static void wireGridTap(ColorGridView grid, int[] selected, SeekBar alphaSeekBar,
-		Runnable syncHexToSelection)
+	private void wireGridTap()
 	{
 		grid.setOnColorTapListener(color ->
 		{
-			selected[0] = color;
+			selected = color;
 			alphaSeekBar.setProgress(Color.alpha(color));
-			syncHexToSelection.run();
+			syncHexDisplay();
 		});
 	}
 
@@ -355,8 +406,7 @@ public class ColorPickerDialog
 	 * Hex EditText → parse and update selection + alpha slider. The suppress flag prevents programmatic setText
 	 * from re-entering this watcher.
 	 */
-	private static void wireHexInput(EditText hexInput, ColorGridView grid, int[] selected,
-		SeekBar alphaSeekBar, float density, boolean[] suppressHexWatcher)
+	private void wireHexInput()
 	{
 		hexInput.addTextChangedListener(new TextWatcher()
 		{
@@ -369,7 +419,7 @@ public class ColorPickerDialog
 			@Override
 			public void afterTextChanged(Editable editable)
 			{
-				if (suppressHexWatcher[0])
+				if (suppressHexWatcher)
 				{
 					return;
 				}
@@ -387,14 +437,14 @@ public class ColorPickerDialog
 					if (hex.length() == 8)
 					{
 						int parsed = (int) Long.parseLong(hex, 16);
-						selected[0] = parsed;
+						selected = parsed;
 						int alpha = Color.alpha(parsed);
 						if (alphaSeekBar.getProgress() != alpha)
 						{
 							alphaSeekBar.setProgress(alpha);
 						}
 						// Preview-only update — don't overwrite what the user is typing.
-						applySwatchPreview(hexInput, parsed, density);
+						applySwatchPreview(parsed);
 						// Keep the grid's highlighted swatch in sync with the typed color.
 						// Without this, the mauve ring stays on the last-tapped palette entry
 						// even after the user types a different color — the grid visually lies

@@ -18,12 +18,16 @@ import java.util.List;
 /**
  * Custom view that renders the source image with crop overlay, handles touch gestures for pan/zoom/center-set.
  */
-public class CropEditorView extends View implements TouchGestureHandler.Callback
+public final class CropEditorView extends View implements TouchGestureHandler.Callback
 {
 	private static final float TOUCH_THRESHOLD_PX = 30f;       // screen-pixel radius for tap / long-press / brush
 
 	private final HorizonPaintOverlay horizon = new HorizonPaintOverlay();
 	private final SelectionHistory history = new SelectionHistory();
+	// `new ViewportMath(this)` here captures `this` before the constructor body runs, which Effective Java
+	// item 17 names as a leak hazard. Safe in practice — ViewportMath stores `this` as a field and only ever
+	// reads `getWidth()` / `getHeight()` on it, never registering it with a listener / executor / anything that
+	// could call back. None of those reads happen during the rest of the View constructor chain.
 	private final ViewportMath viewport = new ViewportMath(this);
 
 	private CropState state;
@@ -270,9 +274,13 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
 		if (state.getEditorMode() == EditorMode.SELECT_FEATURE)
 		{
 			float threshold = TOUCH_THRESHOLD_PX / (viewport.getBaseScale() * viewport.getZoom());
-			for (int i = 0; i < state.getSelectionPoints().size(); i++)
+			// Snapshot the volatile-swapped selection list once. A bg-thread reset between the .size()
+			// call and a per-iteration .get() returns a different (smaller) list, throwing IOOBE on the
+			// get. EditorRenderer.draw uses the same snapshot pattern.
+			List<SelectionPoint> selectionSnapshot = state.getSelectionPoints();
+			for (int i = 0; i < selectionSnapshot.size(); i++)
 			{
-				SelectionPoint point = state.getSelectionPoints().get(i);
+				SelectionPoint point = selectionSnapshot.get(i);
 				if (Math.hypot(point.x() - imageX, point.y() - imageY) < threshold)
 				{
 					pushUndo();
@@ -344,9 +352,16 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
 					horizon.extend(screenX, screenY, imagePoint);
 					invalidate();
 				}
-				case MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL ->
+				case MotionEvent.ACTION_UP ->
 				{
+					// Genuine stroke completion — feed the final point and trigger detection.
 					horizon.end(viewport.screenToImagePixel(screenX, screenY, state));
+					invalidate();
+				}
+				case MotionEvent.ACTION_CANCEL ->
+				{
+					// OS / parent gesture interruption — see HorizonPaintOverlay.cancelStroke.
+					horizon.cancelStroke();
 					invalidate();
 				}
 			}
@@ -396,7 +411,14 @@ public class CropEditorView extends View implements TouchGestureHandler.Callback
 	}
 
 	/**
-	 * Enter horizon paint mode. User paints over the horizon region.
+	 * Enter or exit horizon paint mode. Entering installs the detection callback that fires on ACTION_UP
+	 * once the user finishes painting the horizon line; exiting (on=false) discards any in-progress stroke
+	 * without invoking the callback. Round-15 added two exit-path callers — AutoRotateBinder's re-tap
+	 * branch and AutoRotateBinder.cancelHorizonPaintMode (called from MainActivity.installImageOnUi when a
+	 * new image loads) — so this method is now bidirectional, not just an entry.
+	 *
+	 * @param on       true to enter paint mode, false to exit
+	 * @param onDrawn  callback invoked on ACTION_UP when on=true; ignored / may be null when on=false
 	 */
 	public void setHorizonMode(boolean on, Runnable onDrawn)
 	{

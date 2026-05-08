@@ -11,7 +11,7 @@ import org.junit.Test;
  * fire on the outermost end. A regression here silently breaks multi-field UI updates (no listener firing → no redraw,
  * but no crash and no log) so the cases need explicit pinning.
  */
-public class StateBusTest
+public final class StateBusTest
 {
 	@Test
 	public void notifyChangedFiresImmediatelyOutsideBatch()

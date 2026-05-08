@@ -8,8 +8,6 @@ import com.cropcenter.util.BitmapUtils;
 import com.cropcenter.util.TextFormat;
 import com.google.android.material.button.MaterialButton;
 
-import java.util.Locale;
-
 /**
  * Centralised UI state sync: update* / sync* methods that reflect CropState changes into the toolbar and info bar. All
  * methods run on the UI thread. Every CropState-driven UI refresh in the activity's state listener fans out through
@@ -37,7 +35,7 @@ final class UiSync
 		host.setRulerUpdating(false);
 		host.getRotationRuler().setRulerEnabled(hasImage);
 
-		// Show the readout only when there's an image AND a non-zero rotation. Per spec (REQUIREMENTS.md §4
+		// Show the readout only when there's an image AND a non-zero rotation. Per spec (REQUIREMENTS.md §5
 		// "Rotation"), the degree readout is visible only when rotation != 0 — a stale "0°" against an
 		// unrotated image is noise. Sub-epsilon rotations are drawn / exported as zero by the rest of the
 		// pipeline, so use the same threshold here for consistent behaviour with what the user sees.
@@ -46,8 +44,10 @@ final class UiSync
 	}
 
 	/**
-	 * Show / hide the (now-hidden) Auto rotate button based on whether an image is loaded. The button is hidden in
-	 * production but the visibility plumbing is kept so it can be re-enabled via XML without touching code.
+	 * Show / hide the Auto rotate button based on whether an image is loaded. Hidden by default (the XML default
+	 * is `visibility="gone"`) so an empty editor doesn't expose a control that would do nothing; flipped to
+	 * VISIBLE on every state-listener fire once a source image is in place. Spec REQUIREMENTS.md §5 ("Auto-rotate
+	 * button (in the Points row, hidden until an image is loaded)").
 	 */
 	void updateAutoRotateVisibility()
 	{
@@ -168,9 +168,12 @@ final class UiSync
 			return;
 		}
 		host.getZoomBadgeTextView().setVisibility(View.VISIBLE);
-		// Compact format: "2.5x", "26x" — avoids huge "25600%"
+		// Compact format: "2.5x", "26x" — avoids huge "25600%". The %.1f format uses the system locale's
+		// decimal separator (e.g. "2,5x" on de-DE) per CLAUDE.md's "system locale only for user-facing
+		// display" rule — Locale.ROOT here would force a "." even where the user's OS expects ",", which
+		// is the exact mismatch the rule exists to prevent for visible UI text.
 		host.getZoomBadgeTextView().setText(zoom < 10f
-			? String.format(Locale.ROOT, "%.1fx", zoom)
+			? String.format("%.1fx", zoom)
 			: Math.round(zoom) + "x");
 	}
 }

@@ -11,7 +11,7 @@ import org.junit.Test;
  * call-shape coverage and pins down the exact-fit boundary, the one-past-end rejection, the negative-offset rejection,
  * and the wraparound rejection at offsets near Integer.MAX_VALUE that the round-6 fix made impossible.
  */
-public class ByteBufferUtilsTest
+public final class ByteBufferUtilsTest
 {
 	@Test
 	public void readU16BeAtZeroReturnsValue()
@@ -191,5 +191,38 @@ public class ByteBufferUtilsTest
 		byte[] data = { 0x12, 0x34, 0x56, 0x78 };
 		assertEquals(0x78563412L, ByteBufferUtils.readU32(data, 0, true));
 		assertEquals(0x12345678L, ByteBufferUtils.readU32(data, 0, false));
+	}
+
+	@Test
+	public void readU16EndianDispatchPicksCorrectVariant()
+	{
+		// Symmetric to readU32EndianDispatchPicksLittleEndianForTrueFlag and the round-12
+		// writeU16AndWriteU32EndianDispatchPicksCorrectVariant test. ExifPatcher and BitmapUtils call
+		// readU16 with the boolean-dispatch form for orientation tags and IFD field counts; a regression
+		// that wired both branches to the same native variant would silently mis-read every Samsung EXIF
+		// orientation tag (the most common case being LE-encoded tags read as BE → garbage values).
+		byte[] data = { 0x12, 0x34 };
+		assertEquals(0x3412, ByteBufferUtils.readU16(data, 0, true));
+		assertEquals(0x1234, ByteBufferUtils.readU16(data, 0, false));
+	}
+
+	@Test
+	public void writeU16AndWriteU32EndianDispatchPicksCorrectVariant()
+	{
+		// Symmetric to readU32EndianDispatch above. ExifPatcher and MpfPatcher use the boolean-dispatched
+		// writeU16 / writeU32 to PATCH metadata in place — a regression that wired both branches to the
+		// same native variant would silently corrupt every saved Ultra HDR file (MPF offsets land in the
+		// wrong byte order, decoders refuse the gain map). Pin the dispatch directly.
+		byte[] data = new byte[8];
+		ByteBufferUtils.writeU16(data, 0, 0x1234, true);   // LE
+		assertEquals(0x34, data[0] & 0xFF);
+		assertEquals(0x12, data[1] & 0xFF);
+		ByteBufferUtils.writeU16(data, 2, 0x1234, false);  // BE
+		assertEquals(0x12, data[2] & 0xFF);
+		assertEquals(0x34, data[3] & 0xFF);
+		ByteBufferUtils.writeU32(data, 4, 0xDEADBEEFL, true);
+		assertEquals(0xDEADBEEFL, ByteBufferUtils.readU32LE(data, 4));
+		ByteBufferUtils.writeU32(data, 4, 0xDEADBEEFL, false);
+		assertEquals(0xDEADBEEFL, ByteBufferUtils.readU32BE(data, 4));
 	}
 }

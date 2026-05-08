@@ -16,7 +16,7 @@ import java.nio.charset.StandardCharsets;
  * categorization — surfacing as a missing format tag in the UI — or (b) over-claim a non-conforming APP segment as a
  * known type, which downstream parsers then crash on.
  */
-public class JpegSegmentTest
+public final class JpegSegmentTest
 {
 	@Test
 	public void componentAccessorsExposeMarkerAndData()
@@ -27,6 +27,20 @@ public class JpegSegmentTest
 		JpegSegment seg = new JpegSegment(0xE1, data);
 		assertEquals(0xE1, seg.marker());
 		assertArrayEquals(data, seg.data());
+	}
+
+	@Test
+	public void xmpHeaderConstantValueAndLength()
+	{
+		// HorizonDetector.detectFromMetadata reads `xmlStart = 4 + JpegSegment.XMP_HEADER.length()` to locate
+		// the XML body inside an XMP APP1 segment. If a future refactor drops the trailing `\0` from the
+		// literal (e.g. "this NUL looks redundant"), XMP_HEADER.length() shifts from 29 to 28 and
+		// HorizonDetector starts parsing 1 byte of "http://ns.adobe.com/xap/1.0/" payload as XML — producing
+		// silent garbage XPath misses without any test failure. Pin the exact value AND the trailing NUL
+		// so a length-changing edit gets caught here.
+		assertEquals(29, JpegSegment.XMP_HEADER.length());
+		assertEquals('\0', JpegSegment.XMP_HEADER.charAt(28));
+		assertEquals("http://ns.adobe.com/xap/1.0/\0", JpegSegment.XMP_HEADER);
 	}
 
 	@Test
@@ -95,6 +109,16 @@ public class JpegSegmentTest
 	}
 
 	@Test
+	public void isMpfFalseOnTooShortPayload()
+	{
+		// MPF requires at least 8 bytes (FF E2 + 2-byte len + "MPF\0"). Symmetric to isExif/isIcc/isXmp
+		// FalseOnTooShortPayload — pin so the AIOOBE-protective length guard on `data[4..7]` doesn't drift
+		// away on a future refactor.
+		byte[] tooShort = { (byte) 0xFF, (byte) 0xE2, 0x00, 0x06, 'M', 'P', 'F' };
+		assertFalse(new JpegSegment(0xE2, tooShort).isMpf());
+	}
+
+	@Test
 	public void isMpfTrueOnValidMpf()
 	{
 		// MPF APP2 starts with "MPF\0".
@@ -116,6 +140,17 @@ public class JpegSegmentTest
 		// Anything shorter must reject without indexing OOB.
 		byte[] tooShort = { (byte) 0xFF, (byte) 0xE1, 0x00, 0x10, 'h', 't', 't', 'p', ':', '/', '/' };
 		assertFalse(new JpegSegment(0xE1, tooShort).isXmp());
+	}
+
+	@Test
+	public void isXmpFalseOnWrongSignatureWithinApp1()
+	{
+		// Marker matches APP1 but payload signature is "Exif\0\0", not the XMP namespace identifier.
+		// Symmetric to isExifFalseOnWrongSignature; pin so a regression in the 29-char signature compare
+		// loop (e.g., a wrong `data[4 + i]` index) surfaces here even when isXmpFalseOnNonApp1 still
+		// short-circuits on the marker check.
+		byte[] exif = exifLike();
+		assertFalse(new JpegSegment(0xE1, exif).isXmp());
 	}
 
 	@Test

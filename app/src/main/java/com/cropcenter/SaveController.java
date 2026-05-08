@@ -1,11 +1,15 @@
 package com.cropcenter;
 
 import android.app.AlertDialog;
+import android.graphics.Bitmap;
 import android.net.Uri;
+import android.util.Log;
+import android.widget.Toast;
 
 import com.cropcenter.model.Format;
 import com.cropcenter.util.SafFileHelper;
 import com.cropcenter.util.StoragePermissionHelper;
+import com.cropcenter.view.DialogStrings;
 import com.cropcenter.view.SaveDialog;
 
 import java.io.File;
@@ -18,11 +22,35 @@ import java.io.File;
  */
 final class SaveController
 {
+	/**
+	 * Snapshot of state.exportConfig.format / state.gridConfig.includeInExport taken in
+	 * openSaveOptionsDialog before SaveDialog opens. SaveDialog's "Continue" tap commits the user's
+	 * in-dialog selections to CropState directly, but the user can still cancel the SAF picker that follows —
+	 * without this snapshot the cancelled choices would silently bake into the next save (e.g. "Export Grid"
+	 * stays enabled, or the next default extension is .png even though the user chose .jpg for the abandoned
+	 * save). Restored on every abort path: SAF cancel, launcher.launch RuntimeException, post-dialog
+	 * busy-toast early return. Bundling the fields as a record makes "no live snapshot" a single null
+	 * check (priorSnapshot == null) instead of the previous parallel-fields shape that needed an
+	 * "if priorFormat == null return" guard plus symmetric clear of priorIncludeGrid.
+	 *
+	 * sourceImage pins the Bitmap reference that was loaded when the snapshot was taken. A Share/View
+	 * intent that arrives with the SaveDialog still open runs ImageLoadController.applyBytes →
+	 * state.reset() + state.setSourceImage(newBmp) on the bg executor; the snapshot's sourceImage field
+	 * still points at the OLD bitmap reference, so restorePriorSaveSettings can identify a stale snapshot
+	 * by bitmap-reference inequality and skip the rollback. Without this guard the rollback would
+	 * overwrite the new image's fresh exportConfig.format (set by setSourceFormat during the load) with
+	 * the old image's format, defaulting the next save to JPEG over a PNG source (or vice versa).
+	 */
+	private record PriorSaveSnapshot(Bitmap sourceImage, Format format, boolean includeGrid) {}
+
+	private static final String TAG = "SaveController";
+
 	private final ExportPipeline exportPipeline;
 	private final ReplaceStrategy replaceStrategy;
 	private final SafFileHelper safFiles;
 	private final SaveHost host;
 
+	private PriorSaveSnapshot priorSnapshot;
 	// Filename we asked SAF to create. When SAF silently auto-renames to avoid a collision (e.g. "vacation.jpg" →
 	// "vacation (1).jpg"), the returned URI's display name won't match this — that's how we detect the rename.
 	private String pendingSaveName;
@@ -40,6 +68,61 @@ final class SaveController
 		// permissions is forwarded to ReplaceStrategy and not retained on this — SaveController itself never
 		// prompts for permissions, so storing it would be dead state.
 		this.replaceStrategy = new ReplaceStrategy(host, exportPipeline, safFiles, permissions);
+	}
+
+	/**
+	 * Detect SAF's auto-rename pattern on `chosen` alone and return the inferred base name (what the user was
+	 * actually trying to save). Returns null when chosen doesn't look like an auto-rename.
+	 *
+	 * Pattern: "X (N).ext" where X is any non-empty stem and N is 1+ digits, optionally
+	 * preceded by whitespace. The caller uses the returned base as the `requested` name
+	 * for the Replace dialog and for ReplaceStrategy, so this correctly handles both:
+	 * (1) classical auto-rename (pendingSaveName = "crop.jpg", chosen = "crop (1).jpg" → base
+	 *     = "crop.jpg", matches the original suggestion)
+	 * (2) user-edited-then-collided (pendingSaveName = "crop.jpg", user typed "foo.jpg",
+	 *     chosen = "foo (1).jpg" → base = "foo.jpg", the ACTUAL name that collided).
+	 *
+	 * A false positive from a user typing "(N)" intentionally without a real collision is filtered at the call site
+	 * by querying whether the base name actually exists.
+	 *
+	 * @param chosen SAF-returned filename (e.g. "crop (1).jpg")
+	 * @return inferred base name when chosen matches the auto-rename pattern, null otherwise
+	 */
+	static String autoRenameBaseName(String chosen)
+	{
+		if (chosen == null)
+		{
+			return null;
+		}
+		int choDot = chosen.lastIndexOf('.');
+		if (choDot <= 0)
+		{
+			return null;
+		}
+		String choStem = chosen.substring(0, choDot);
+		String choExt = chosen.substring(choDot);
+		// Must end with "(digits)"; allow optional whitespace between the stem and the open paren to match SAF
+		// variants that use "stem (1)" vs "stem(1)".
+		if (!choStem.endsWith(")"))
+		{
+			return null;
+		}
+		int openParen = choStem.lastIndexOf('(');
+		if (openParen <= 0)
+		{
+			return null;
+		}
+		String between = choStem.substring(openParen + 1, choStem.length() - 1);
+		if (between.isEmpty() || !between.chars().allMatch(Character::isDigit))
+		{
+			return null;
+		}
+		String baseStem = choStem.substring(0, openParen).stripTrailing();
+		if (baseStem.isEmpty())
+		{
+			return null;
+		}
+		return baseStem + choExt;
 	}
 
 	/**
@@ -78,32 +161,80 @@ final class SaveController
 	 * (C) chosen differs from requested but NOT an auto-rename pattern (or "(N)" stripped
 	 *     doesn't actually collide in that directory) — the user deliberately typed a
 	 *     different name in the picker. Save as-is.
+	 *
+	 * @param newUri SAF document URI returned by the ACTION_CREATE_DOCUMENT picker
 	 */
 	void handleSaveAsResult(Uri newUri)
 	{
+		// Defensive try/finally guard: any unhandled exception from a SAF query during the result handler
+		// (safFiles.getDisplayName, safFiles.deriveSiblingUri, siblingLooksLikeCollision,
+		// applyFormatFromFilename) would otherwise escape with savePending stuck at true, leaving every
+		// subsequent Save tap hitting "Busy — try again" until app restart. handleSaveAsResultBody returns
+		// true ONLY when the Replace dialog branch successfully took ownership of the savePending lifecycle
+		// (the dialog's per-button / cancel / BadTokenException handlers manage it); every other path
+		// returns false and the finally clears the flag.
+		boolean dialogTookOwnership = false;
+		try
+		{
+			dialogTookOwnership = handleSaveAsResultBody(newUri);
+		}
+		finally
+		{
+			if (!dialogTookOwnership)
+			{
+				savePending = false;
+			}
+		}
+	}
+
+	/**
+	 * Body of handleSaveAsResult — extracted so the public wrapper can manage the savePending lifecycle in
+	 * try/finally. See the wrapper's comment for the ownership contract.
+	 *
+	 * @param newUri SAF document URI returned by the picker
+	 * @return true when the Replace dialog branch took ownership of savePending and the wrapper must NOT clear
+	 *         it; false on every other path (including the early-return mismatch and Cases A / C, which clear
+	 *         savePending themselves before the wrapper's finally runs)
+	 */
+	private boolean handleSaveAsResultBody(Uri newUri)
+	{
 		String requested = pendingSaveName;
 		pendingSaveName = null;
+		// SAF returned a URI — the user committed to this save. Discard the format / grid-include snapshot
+		// taken in openSaveOptionsDialog so a subsequent stray onSaveCancelled (e.g., a follow-up async
+		// callback after a config change) can't roll back the now-baked choices.
+		priorSnapshot = null;
 
 		String chosen = safFiles.getDisplayName(newUri);
 
 		// Extension-change guard: SAF set the document's MIME from `requested` before the picker opened. If the
-		// user renamed ".jpg" → ".png" (or vice versa) in the picker, writing the new format's bytes would land
-		// them in a document whose MIME still says the old type — Gallery / MediaStore consumers would then
-		// misidentify the file. Reject the save and redirect the user to the Save dialog's format picker.
+		// user renamed ".jpg" → ".png" (or vice versa) — or to anything else like ".webp" / ".heic" — writing
+		// the new format's bytes would land them in a document whose MIME still says the old type AND a
+		// filename whose extension promises an encoding the encoder can't actually produce. Reject the save
+		// and redirect the user to the Save dialog's format picker.
+		//
+		// The guard rejects whenever `chosen`'s extension doesn't match `requested`'s Format. This catches
+		// three distinct misuses:
+		//   - .jpg → .png (or vice versa): both map to known Formats but differ
+		//   - .jpg → .webp (or .heic / any unknown image extension): chosen's Format lookup returns null
+		//     but the extension is clearly NOT what the encoder will produce
+		//   - .jpg → "filename-no-extension": ambiguous — let it through, the SAF MIME still says image/jpeg
+		//     and the encoder's bytes are valid for that MIME
 		Format requestedFormat = Format.fromExtension(requested);
 		Format chosenFormat = Format.fromExtension(chosen);
-		if (requestedFormat != null && chosenFormat != null && requestedFormat != chosenFormat)
+		boolean chosenHasExt = chosen != null && chosen.lastIndexOf('.') > 0;
+		boolean mismatch = requestedFormat != null && chosenHasExt && chosenFormat != requestedFormat;
+		if (mismatch)
 		{
-			savePending = false;
 			// Do NOT delete newUri on this rejection path. The same-name save logic below correctly treats
 			// priorSize <= 0 as ambiguous — a zero-byte URI can be either a fresh SAF placeholder OR an
 			// already-existing empty file the provider returned after its own Replace prompt. We can't tell
 			// from SAF alone, and losing a real zero-byte file (unusual but valid) to a rejection cleanup
 			// is strictly worse than leaving a disposable fresh placeholder behind. The dialog tells the
 			// user to fix the format in the Save dialog; a leftover placeholder is a minor file-manager
-			// annoyance, not data loss.
+			// annoyance, not data loss. The wrapper's finally clears savePending.
 			showExtensionMismatchDialog(requested, chosen);
-			return;
+			return false;
 		}
 
 		applyFormatFromFilename(chosen);
@@ -120,7 +251,8 @@ final class SaveController
 		// preserveOnFailure.
 		if (requested != null && chosen != null && requested.equalsIgnoreCase(chosen))
 		{
-			savePending = false;
+			// savePending cleared by the wrapper's finally — the placeholder/overwrite/preserve dispatches
+			// below are async and the user must be able to start a new Save after they return.
 			// wasOverwrite classification:
 			//   priorSize >  0                → confirmed overwrite
 			//   priorSize == 0                → ambiguous (treat as not-overwrite; empty
@@ -154,7 +286,7 @@ final class SaveController
 				// failure so we don't destroy a file the user might own.
 				exportPipeline.exportToPreserving(newUri);
 			}
-			return;
+			return false;
 		}
 
 		// Case (B): chosen has a "X (N).ext" auto-rename pattern. Detection works on `chosen` alone so it
@@ -170,15 +302,19 @@ final class SaveController
 			Uri baseUri = safFiles.deriveSiblingUri(newUri, autoRenameBase);
 			if (siblingLooksLikeCollision(baseUri))
 			{
+				// showReplaceDialog manages savePending across its button / cancel / BadTokenException
+				// handlers. Return true so the wrapper's finally does NOT clear it — the dialog needs
+				// savePending=true to gate parallel Save taps while the user decides.
 				showReplaceDialog(newUri, autoRenameBase, chosen);
-				return;
+				return true;
 			}
 		}
 
 		// Case (C): user changed the name intentionally (no "(N)" suffix, or "(N)" stripped doesn't collide
-		// with anything in the picked directory).
-		savePending = false;
+		// with anything in the picked directory). The wrapper's finally clears savePending after exportTo
+		// dispatches its async write.
 		exportPipeline.exportTo(newUri);
+		return false;
 	}
 
 	/**
@@ -188,6 +324,11 @@ final class SaveController
 	{
 		savePending = false;
 		pendingSaveName = null;
+		// Roll back the format / grid-include selections SaveDialog committed before launching the picker.
+		// Without this, a user who picked PNG + Export Grid in the dialog and then cancelled the SAF picker
+		// would find PNG + Export Grid as the next default — silently changing the next save's encoding
+		// based on a save the user explicitly abandoned.
+		restorePriorSaveSettings();
 	}
 
 	/**
@@ -228,6 +369,66 @@ final class SaveController
 	}
 
 	/**
+	 * Cancel-time hook for SaveDialog: clear priorSnapshot when the dialog dismisses without Continue
+	 * (user Cancel, back-press, outside-touch, or forced dismissTransientDialogs from a parallel load).
+	 * The snapshot's sourceImage field holds a strong reference to the source Bitmap; without this clear,
+	 * an abandoned dialog would pin the bitmap until the next openSaveOptionsDialog overwrites the field
+	 * or the Activity tears down (Codex round-17 F4). The Continue path deliberately does NOT call this —
+	 * handleSaveAsResultBody / onSaveCancelled / the launcher-exception path still own the snapshot
+	 * rollback contract for a save that's reached SAF and then abandoned.
+	 */
+	private void clearPriorSnapshotOnCancel()
+	{
+		priorSnapshot = null;
+	}
+
+	/**
+	 * Handle the Replace dialog's positive "Replace" button: full Replace semantics (write-then-swap +
+	 * "Replaced" toast). Busy-rejection cleanup: when a parallel bg op (e.g. a Share/View intent's load
+	 * that arrived while the user deliberated) holds busy, replaceColliding's downstream busy gate would
+	 * silently reject and leave the SAF auto-rename target on disk. Run cleanupPlaceholder here so the
+	 * orphan doesn't linger (R17-3).
+	 *
+	 * @param newUri             SAF auto-rename target URI ("foo (1).jpg")
+	 * @param requested          user-typed name that collided (drives downstream toast wording)
+	 * @param cleanupPlaceholder runs safFiles.tryDeleteSafDocument(newUri) on busy-rejection
+	 */
+	private void onReplaceConfirmed(Uri newUri, String requested, Runnable cleanupPlaceholder)
+	{
+		savePending = false;
+		if (host.getBusy().get())
+		{
+			cleanupPlaceholder.run();
+			host.toastIfAlive("Replace failed — try again", Toast.LENGTH_SHORT);
+			return;
+		}
+		// Case B: user explicitly confirmed Replace on a real collision. wasOverwrite=true drives the
+		// success toast wording ("Replaced X" vs "Saved X") downstream.
+		replaceStrategy.replaceColliding(newUri, requested, true);
+	}
+
+	/**
+	 * Handle the Replace dialog's neutral "Keep" button: commit the SAF auto-rename URI as the actual save
+	 * (no overwrite of the colliding original). Same busy-rejection cleanup contract as onReplaceConfirmed
+	 * — without it, exportTo's busy gate silently rejects and leaves the auto-rename SAF document
+	 * stranded (R17-3).
+	 *
+	 * @param newUri             SAF auto-rename target URI (already has the SAF-assigned name)
+	 * @param cleanupPlaceholder runs safFiles.tryDeleteSafDocument(newUri) on busy-rejection
+	 */
+	private void onReplaceKeep(Uri newUri, Runnable cleanupPlaceholder)
+	{
+		savePending = false;
+		if (host.getBusy().get())
+		{
+			cleanupPlaceholder.run();
+			host.toastIfAlive("Save failed — try again", Toast.LENGTH_SHORT);
+			return;
+		}
+		exportPipeline.exportTo(newUri);
+	}
+
+	/**
 	 * SaveDialog "Continue" handler — runs once the user has chosen format / grid options. Re-checks busy +
 	 * savePending (the dialog interaction itself can race a parallel Save tap), derives the default filename from
 	 * the source-image stem and the just-picked format extension, then launches the SAF CreateDocument picker.
@@ -239,6 +440,10 @@ final class SaveController
 		if (host.getBusy().get() || savePending)
 		{
 			host.showBusyToast();
+			// SaveDialog already committed the user's format / grid-include selections to state; rolling
+			// them back here is the post-dialog equivalent of the SAF-cancel path. Without this, a busy
+			// toast on the Continue tap would still leave the dialog's choices applied silently.
+			restorePriorSaveSettings();
 			return;
 		}
 		// Extension follows the format the user just picked in SaveDialog; if they change the extension in the
@@ -266,16 +471,85 @@ final class SaveController
 			// ActivityNotFoundException (no SAF picker installed) or similar provider failure — without
 			// this clear, savePending stays true forever and every subsequent Save tap hits the "Busy — try
 			// again" toast. Mirror ExportPipeline's pre-enqueue guard: release the pending flag and rethrow
-			// so the caller sees the real error.
+			// so the caller sees the real error. Also restore the dialog's mutations — the picker never
+			// opened, so the user's format / grid-include picks shouldn't bleed into a future save.
 			savePending = false;
 			pendingSaveName = null;
+			restorePriorSaveSettings();
 			throw e;
 		}
 	}
 
 	private void openSaveOptionsDialog()
 	{
-		SaveDialog.show(host.getActivity(), host.getState(), this::onSaveDialogConfirmed);
+		// BadTokenException guard — if onDestroy ran between the user's Save tap and this call (rare but
+		// reachable on config change racing the handler), AlertDialog.Builder would throw on .show(). The
+		// isDestroyed pre-check + try/catch around the show call mirror the pattern in showReplaceDialog,
+		// showExtensionMismatchDialog, and GraftController.confirmOversizedThenApply — config-change races
+		// can land between the pre-check and the actual show, so the catch is the second line of defense.
+		if (host.isDestroyed())
+		{
+			return;
+		}
+		// Snapshot the current export-format and grid-include selections BEFORE the dialog opens.
+		// SaveDialog.applySettings mutates state directly on its Continue tap; if the user then cancels the
+		// SAF picker, restorePriorSaveSettings unwinds the mutation so the cancelled choices don't bleed
+		// into the next save attempt.
+		priorSnapshot = new PriorSaveSnapshot(
+			host.getState().getSourceImage(),
+			host.getState().getExportConfig().format(),
+			host.getState().getGridConfig().includeInExport());
+		try
+		{
+			// Register the dialog with the host's transient-dialog tracker so a Share/View intent or graft
+			// apply that arrives mid-dialog dismisses it before bg state.reset() — without this, the user's
+			// Continue tap would commit image A's format/grid choices onto image B's state (R17-1).
+			// onClearPriorSnapshotOnCancel runs on every cancel path (user Cancel, back-press,
+			// outside-touch, forced dismissTransientDialogs) so the snapshot — which holds the source
+			// Bitmap reference — doesn't pin memory after an abandoned dialog (Codex round-17 F4).
+			host.registerTransientDialog(SaveDialog.show(host.getActivity(), host.getState(),
+				this::onSaveDialogConfirmed, this::clearPriorSnapshotOnCancel));
+		}
+		catch (RuntimeException e)
+		{
+			// On show / register failure the OnCancelListener is never installed, so
+			// clearPriorSnapshotOnCancel won't fire — clear the snapshot here so the source bitmap
+			// reference doesn't stay pinned until the next openSaveOptionsDialog or activity teardown
+			// (Codex round-18 F2).
+			Log.w(TAG, "save options dialog failed to show", e);
+			priorSnapshot = null;
+		}
+	}
+
+	/**
+	 * Roll back the export-format and grid-include selections committed by SaveDialog when the user cancels
+	 * (or otherwise abandons) the save before SAF accepts a URI. Idempotent — called on every abort path
+	 * (SAF cancel, launcher exception, post-dialog busy-toast); the priorSnapshot null-check makes a stale
+	 * second invocation a no-op rather than overwriting state with stale values.
+	 *
+	 * Skips the rollback when the live source bitmap differs from the one captured in the snapshot. That
+	 * means a Share/View intent arrived between openSaveOptionsDialog and now, replacing the loaded image —
+	 * the snapshot's format / includeGrid belong to the previous image and would silently overwrite the
+	 * new image's freshly-set format (PNG sources defaulting to JPEG on the next save, or the inverse).
+	 * The snapshot is cleared either way so a subsequent abort path doesn't retry against the same stale
+	 * data.
+	 */
+	private void restorePriorSaveSettings()
+	{
+		PriorSaveSnapshot snapshot = priorSnapshot;
+		if (snapshot == null)
+		{
+			return;
+		}
+		priorSnapshot = null;
+		if (snapshot.sourceImage() != host.getState().getSourceImage())
+		{
+			return;
+		}
+		Format format = snapshot.format();
+		boolean includeGrid = snapshot.includeGrid();
+		host.getState().updateExportConfig(c -> c.withFormat(format));
+		host.getState().updateGridConfig(g -> g.withIncludeInExport(includeGrid));
 	}
 
 	/**
@@ -300,48 +574,79 @@ final class SaveController
 			+ "locked when the picker opened, so writing the new format's bytes would "
 			+ "leave a file whose content and type disagree. Re-open Save and change "
 			+ "the format in the format picker instead.";
-		new AlertDialog.Builder(host.getActivity())
-			.setTitle("Change format in Save, not the picker")
-			.setMessage(message)
-			.setPositiveButton("OK", null)
-			.show();
+		try
+		{
+			// BadTokenException guard mirrors openSaveOptionsDialog / showReplaceDialog /
+			// GraftController.confirmOversizedThenApply — config-change races can land between the
+			// isDestroyed pre-check and the actual show() call (the Activity finishes after the
+			// pre-check but before WindowManager accepts the dialog). The catch keeps the warning
+			// best-effort instead of crashing the UI thread (Codex round-19 F2).
+			new AlertDialog.Builder(host.getActivity())
+				.setTitle("Change format in Save, not the picker")
+				.setMessage(message)
+				.setPositiveButton(DialogStrings.OK, null)
+				.show();
+		}
+		catch (RuntimeException e)
+		{
+			Log.w(TAG, "extension-mismatch dialog failed to show", e);
+		}
 	}
 
 	/**
-	 * Build and show the Replace / Keep / Cancel dialog for case (B) of the save flow.
+	 * Build and show the Replace / Keep / Cancel dialog for case (B) of the save flow. Guards against the
+	 * Activity finishing between the SAF result and this prompt: without the isDestroyed gate, .show() throws
+	 * BadTokenException before any button / cancel listener runs, leaving savePending stuck and the SAF
+	 * placeholder undeleted. Mirrors the same pattern in openSaveOptionsDialog and showExtensionMismatchDialog.
 	 */
 	private void showReplaceDialog(Uri newUri, String requested, String safName)
 	{
+		Runnable cleanupPlaceholder = () -> safFiles.tryDeleteSafDocument(newUri);
+		if (host.isDestroyed())
+		{
+			Log.w(TAG, "skipping replace-collision dialog on destroyed activity; cleaning placeholder");
+			cleanupPlaceholder.run();
+			savePending = false;
+			return;
+		}
 		String message = "A file with this name already exists in the selected location.\n\n"
 			+ "Replace \u2014 overwrite it.\n" + "Keep \u2014 save as \"" + safName + "\" instead.\n"
 			+ "Cancel \u2014 don't save.";
-		Runnable cleanupPlaceholder = () -> safFiles.tryDeleteSafDocument(newUri);
-		new AlertDialog.Builder(host.getActivity())
-			.setTitle("Replace " + requested + "?")
-			.setMessage(message)
-			.setPositiveButton("Replace", (dialog, which) ->
-			{
-				savePending = false;
-				// Case B: user explicitly confirmed Replace on a detected collision — always a real
-				// overwrite, so full Replace semantics (write-then-swap + "Replaced" toast).
-				replaceStrategy.replaceColliding(newUri, requested, true);
-			})
-			.setNeutralButton("Keep", (dialog, which) ->
-			{
-				savePending = false;
-				exportPipeline.exportTo(newUri); // newUri already has the SAF-assigned name
-			})
-			.setNegativeButton("Cancel", (dialog, which) ->
-			{
-				cleanupPlaceholder.run();
-				savePending = false;
-			})
-			.setOnCancelListener(dialog -> // BACK or touch-outside behaves like Cancel
-			{
-				cleanupPlaceholder.run();
-				savePending = false;
-			})
-			.show();
+		try
+		{
+			// Register with the host's transient-dialog tracker so a Share/View intent or graft apply
+			// dismisses this dialog before the bg state.reset(). Without this, a stale Replace prompt
+			// could outlive the source image it was opened for — pressing Replace/Keep then would write
+			// image B's state to image A's SAF target (Codex round-17 F1). dismissTransientDialogs uses
+			// cancel(), which fires the OnCancelListener below — so the cleanupPlaceholder + savePending
+			// reset still run even on forced dismissal.
+			host.registerTransientDialog(new AlertDialog.Builder(host.getActivity())
+				.setTitle("Replace " + requested + "?")
+				.setMessage(message)
+				.setPositiveButton("Replace", (dialog, which) ->
+					onReplaceConfirmed(newUri, requested, cleanupPlaceholder))
+				.setNeutralButton("Keep", (dialog, which) -> onReplaceKeep(newUri, cleanupPlaceholder))
+				.setNegativeButton(DialogStrings.CANCEL, (dialog, which) ->
+				{
+					cleanupPlaceholder.run();
+					savePending = false;
+				})
+				.setOnCancelListener(dialog -> // BACK / touch-outside / forced dismissTransientDialogs
+				{
+					cleanupPlaceholder.run();
+					savePending = false;
+				})
+				.show());
+		}
+		catch (RuntimeException e)
+		{
+			// BadTokenException if the activity died between the isDestroyed check and show, or any
+			// other UI-thread throw from the dialog plumbing. Don't strand savePending or leak the
+			// placeholder.
+			Log.w(TAG, "replace-collision dialog failed to show", e);
+			cleanupPlaceholder.run();
+			savePending = false;
+		}
 	}
 
 	/**
@@ -378,57 +683,4 @@ final class SaveController
 		// SAF-assigned "(N)" name) over the false-positive Replace dialog.
 		return false;
 	}
-
-	/**
-	 * Detect SAF's auto-rename pattern on `chosen` alone and return the inferred base name (what the user was
-	 * actually trying to save). Returns null when chosen doesn't look like an auto-rename.
-	 *
-	 * Pattern: "X (N).ext" where X is any non-empty stem and N is 1+ digits, optionally
-	 * preceded by whitespace. The caller uses the returned base as the `requested` name
-	 * for the Replace dialog and for ReplaceStrategy, so this correctly handles both:
-	 * (1) classical auto-rename (pendingSaveName = "crop.jpg", chosen = "crop (1).jpg" → base
-	 *     = "crop.jpg", matches the original suggestion)
-	 * (2) user-edited-then-collided (pendingSaveName = "crop.jpg", user typed "foo.jpg",
-	 *     chosen = "foo (1).jpg" → base = "foo.jpg", the ACTUAL name that collided).
-	 *
-	 * A false positive from a user typing "(N)" intentionally without a real collision is filtered at the call site
-	 * by querying whether the base name actually exists.
-	 */
-	private static String autoRenameBaseName(String chosen)
-	{
-		if (chosen == null)
-		{
-			return null;
-		}
-		int choDot = chosen.lastIndexOf('.');
-		if (choDot <= 0)
-		{
-			return null;
-		}
-		String choStem = chosen.substring(0, choDot);
-		String choExt = chosen.substring(choDot);
-		// Must end with "(digits)"; allow optional whitespace between the stem and the open paren to match SAF
-		// variants that use "stem (1)" vs "stem(1)".
-		if (!choStem.endsWith(")"))
-		{
-			return null;
-		}
-		int openParen = choStem.lastIndexOf('(');
-		if (openParen <= 0)
-		{
-			return null;
-		}
-		String between = choStem.substring(openParen + 1, choStem.length() - 1);
-		if (between.isEmpty() || !between.chars().allMatch(Character::isDigit))
-		{
-			return null;
-		}
-		String baseStem = choStem.substring(0, openParen).stripTrailing();
-		if (baseStem.isEmpty())
-		{
-			return null;
-		}
-		return baseStem + choExt;
-	}
-
 }

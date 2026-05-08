@@ -12,7 +12,7 @@ import org.junit.Test;
  * sources, the save format toggle would default to PNG, and the file would re-encode under a misleading toast — exactly
  * the "UI must not lie about state" failure mode CLAUDE.md flags.
  */
-public class ImageLoadControllerTest
+public final class ImageLoadControllerTest
 {
 	@Test
 	public void isJpegSignatureAcceptsValidSoi()

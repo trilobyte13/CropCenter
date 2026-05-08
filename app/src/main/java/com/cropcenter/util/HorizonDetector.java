@@ -4,11 +4,14 @@ import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.util.Log;
 
+import com.cropcenter.metadata.ExtendedXmpReassembler;
 import com.cropcenter.metadata.JpegSegment;
 
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -17,22 +20,48 @@ import java.util.regex.Pattern;
  *
  * Strategy (in priority order):
  *   1. XMP metadata: look for device roll angle (most accurate, ~0.01° precision)
- *   2. Computer vision: Canny edges + Radon variance maximization (fallback)
+ *   2. Computer vision: Canny edges + two-pass Hough transform (coarse 80–100° at 0.1° steps, then fine ±2° around
+ *      the coarse peak at 0.01° steps), refined by an inlier-fit pass
  */
 public final class HorizonDetector
 {
 	private static final String TAG = "HorizonDetector";
+	// Cached compiled regex per attribute suffix. detectFromMetadata calls findXmpFloat twice per APP1 segment
+	// (Roll, Tilt) and a JPEG can have several APP1s — recompiling each time was ~10 Pattern allocations per
+	// Auto-rotate tap. ConcurrentHashMap because the auto-rotate path can run on any thread; the compile is
+	// idempotent so a benign concurrent put is fine.
+	private static final ConcurrentHashMap<String, Pattern> XMP_FLOAT_PATTERNS = new ConcurrentHashMap<>();
 	private static final float COARSE_HOUGH_STEP_DEGREES = 0.1f;
 	private static final float FINE_HOUGH_STEP_DEGREES = 0.01f;
 	private static final float FINE_SEARCH_WINDOW_DEGREES = 2f;
 	private static final float LINE_FIT_INLIER_DISTANCE_PX = 2f;
+	// Both the metadata path (normalizeMetadataAngle) and the painted-region path
+	// (runHoughAndConvertToRotation) reject tilts past this magnitude as "too far for auto-rotate to be a
+	// reasonable correction" — large tilts indicate a held-sideways shot or sensor garbage, not a horizon
+	// the user wants nudged. Sharing one constant prevents the two paths from disagreeing on the same image
+	// (e.g. a 28° tilt accepted via Hough but rejected via XMP, dropping the user into paint mode purely
+	// because metadata happened to be present).
+	private static final float MAX_HORIZON_TILT_DEGREES = 30f;
 	private static final float MAX_LINE_FIT_DELTA_DEGREES = 0.25f;
+	// Pre-built 5x5 Gaussian convolution kernel (sigma ≈ 1.0). Hoisted from gaussianBlur5x5's body so we don't
+	// allocate 25 floats per call — auto-rotate runs this on a multi-MP source and the per-call allocation
+	// was pure waste.
+	private static final float[] GAUSSIAN_5X5_KERNEL = {
+		1 / 273f, 4 / 273f,  7 / 273f,  4 / 273f, 1 / 273f,
+		4 / 273f, 16 / 273f, 26 / 273f, 16 / 273f, 4 / 273f,
+		7 / 273f, 26 / 273f, 41 / 273f, 26 / 273f, 7 / 273f,
+		4 / 273f, 16 / 273f, 26 / 273f, 16 / 273f, 4 / 273f,
+		1 / 273f, 4 / 273f,  7 / 273f,  4 / 273f, 1 / 273f,
+	};
 	private static final int MIN_LINE_FIT_INLIERS = 30;
 
 	private HorizonDetector() {}
 
 	/**
-	 * Detect horizon tilt from EXIF/XMP metadata if available.
+	 * Detect horizon tilt from XMP metadata if available. EXIF-tag parsing (e.g. EXIF Roll, GPano roll,
+	 * MakerNote vendor extensions) is intentionally NOT implemented — see REQUIREMENTS.md §5: every
+	 * production capture path we've observed embeds the roll angle inside the XMP packet, so an EXIF
+	 * fallback would add metadata-extraction surface for zero observed benefit.
 	 *
 	 * @param meta JPEG metadata segments (from JpegMetadataExtractor)
 	 * @return correction angle in degrees, or NaN if no roll data found
@@ -60,7 +89,9 @@ public final class HorizonDetector
 				continue;
 			}
 
-			String xml = new String(segData, xmlStart, segData.length - xmlStart);
+			// XMP is UTF-8 per the XMP spec — explicit charset prevents mis-decoding on non-UTF8 system
+			// locales where new String(...) would otherwise apply the platform default charset.
+			String xml = new String(segData, xmlStart, segData.length - xmlStart, StandardCharsets.UTF_8);
 
 			// Search for roll angle in common XMP properties. Different cameras use different namespaces:
 			// GCamera:Roll, Device:Roll, samsung:LensRoll, exif:Roll, or generic Roll/Tilt attributes.
@@ -81,7 +112,32 @@ public final class HorizonDetector
 			}
 		}
 
-		// Also check extended XMP (APP1 segments with different identifier)
+		// Adobe Extended XMP: a > 64 KB XMP packet split across multiple APP1 segments by GUID + offset
+		// (Codex round-21 F1). Reassemble per-GUID before scanning so a Roll/Tilt attribute past the first
+		// chunk OR straddling a chunk boundary isn't lost. Per-segment scan in the next pass would otherwise
+		// miss "Ro|ll" split across chunks. Reassembly logic lives in metadata/ExtendedXmpReassembler so
+		// HdrSignature can share it for the symmetric hdrgm-detection case.
+		byte[] extendedBytes = ExtendedXmpReassembler.reassemble(meta);
+		if (extendedBytes.length > 0)
+		{
+			String extendedXml = new String(extendedBytes, StandardCharsets.UTF_8);
+			float roll = findXmpFloat(extendedXml, "Roll");
+			if (!Float.isNaN(roll))
+			{
+				Log.d(TAG, "Found Roll in Extended XMP: " + roll + "°");
+				return normalizeMetadataAngle(roll);
+			}
+			float tilt = findXmpFloat(extendedXml, "Tilt");
+			if (!Float.isNaN(tilt))
+			{
+				Log.d(TAG, "Found Tilt in Extended XMP: " + tilt + "°");
+				return normalizeMetadataAngle(tilt);
+			}
+		}
+
+		// Final fallback: any APP1 segment that contains XML-like content with Roll / roll / Tilt. Catches
+		// vendor shapes that don't use the canonical Adobe XMP namespace prefix (some Samsung / Pixel
+		// firmwares ship roll under a vendor-defined APP1 marker structure).
 		for (JpegSegment seg : meta)
 		{
 			byte[] segData = seg.data();
@@ -89,9 +145,17 @@ public final class HorizonDetector
 			{
 				continue;
 			}
-			// Try to find roll in any APP1 segment that contains XML-like content
-			String raw = new String(segData, 4, Math.min(segData.length - 4, 65000));
-			if (!raw.contains("Roll") && !raw.contains("roll") && !raw.contains("Tilt"))
+			// UTF-8 explicit (see note on the primary loop). No length cap — APP1 segments are bounded by
+			// the JPEG u16 length field at ~64 KB so a String allocation here is bounded; the previous
+			// 65000-byte clamp could miss a Roll attribute landing in the trailing ~535 bytes of a maxed
+			// segment (Codex round-21 F1).
+			String raw = new String(segData, 4, segData.length - 4, StandardCharsets.UTF_8);
+			// Lowercase pre-filter so a vendor segment with only `tilt="..."` (lowercase) isn't skipped —
+			// findXmpFloat itself uses Pattern.CASE_INSENSITIVE so catching it here keeps the pre-filter
+			// in step (Codex round-22 logic F1). Single toLowerCase pass over the raw body is bounded by
+			// the JPEG APP1 ~64 KB cap so the cost is negligible per segment.
+			String lower = raw.toLowerCase(Locale.ROOT);
+			if (!lower.contains("roll") && !lower.contains("tilt"))
 			{
 				continue;
 			}
@@ -116,23 +180,6 @@ public final class HorizonDetector
 		return Float.NaN;
 	}
 
-	/**
-	 * Convert a raw roll/tilt reading from metadata into the UI's correction-angle convention:
-	 * snap near-zero values to exact zero, reject implausibly-large tilts as NaN (bad sensor data),
-	 * and otherwise invert and round to 2 decimal places. Shared across all XMP/APP1 entry points.
-	 */
-	private static float normalizeMetadataAngle(float deg)
-	{
-		if (Math.abs(deg) < 0.005f)
-		{
-			return 0f;
-		}
-		if (Math.abs(deg) > 25f)
-		{
-			return Float.NaN;
-		}
-		return -Math.round(deg * 100f) / 100f;
-	}
 
 	/**
 	 * Detect horizon angle using only edges within a user-painted region. The painted points define a brush stroke;
@@ -235,6 +282,31 @@ public final class HorizonDetector
 	}
 
 	/**
+	 * Convert a raw roll/tilt reading from metadata into the UI's correction-angle convention:
+	 * snap near-zero values to exact zero, reject implausibly-large tilts as NaN (bad sensor data),
+	 * and otherwise invert and round to 2 decimal places. Shared across all XMP/APP1 entry points.
+	 */
+	private static float normalizeMetadataAngle(float deg)
+	{
+		// NaN bypasses both abs comparisons (NaN < x and NaN > x are always false), so an explicit guard
+		// here prevents the round-then-divide path from producing -0.0f and silently announcing a
+		// "valid 0° rotation" when XMP carries malformed roll data.
+		if (Float.isNaN(deg) || !Float.isFinite(deg))
+		{
+			return Float.NaN;
+		}
+		if (Math.abs(deg) < BitmapUtils.ROTATION_EPSILON)
+		{
+			return 0f;
+		}
+		if (Math.abs(deg) > MAX_HORIZON_TILT_DEGREES)
+		{
+			return Float.NaN;
+		}
+		return RotationMath.snapToHundredth(-deg);
+	}
+
+	/**
 	 * Stroke-to-mask rasterization. The paint stroke is rasterized at 1/4 source resolution into a boolean grid —
 	 * enough precision to localize which source pixels belong to the horizon region, 16× cheaper in memory than a
 	 * full-res mask.
@@ -285,9 +357,13 @@ public final class HorizonDetector
 	 */
 	private static float[] buildEdgeMap(Bitmap src, int width, int height)
 	{
-		int[] pixels = new int[width * height];
+		// width * height in int arithmetic silently overflows above ~46k px on a side. Use multiplyExact so a
+		// pathological input (synthetic / panorama wider than 65k px) throws ArithmeticException up to the
+		// outer catch in detectFromPaintedRegion (returns NaN) rather than allocating a negative-size array.
+		int pixelCount = Math.multiplyExact(width, height);
+		int[] pixels = new int[pixelCount];
 		src.getPixels(pixels, 0, width, 0, 0, width, height);
-		float[] luminance = new float[width * height];
+		float[] luminance = new float[pixelCount];
 		for (int i = 0; i < pixels.length; i++)
 		{
 			int pixel = pixels[i];
@@ -299,15 +375,15 @@ public final class HorizonDetector
 		float[] blurred = gaussianBlur5x5(luminance, width, height);
 		luminance = null;
 
-		float[] gradientMag = new float[width * height];
-		float[] gradientDir = new float[width * height];
+		float[] gradientMag = new float[pixelCount];
+		float[] gradientDir = new float[pixelCount];
 		sobelGradient(blurred, width, height, gradientMag, gradientDir);
 		blurred = null;
 
 		float[] edges = nonMaxSuppression(gradientMag, gradientDir, width, height);
 
 		// Direction filter: keep only near-horizontal edges (±35° from horizontal).
-		for (int i = 0; i < width * height; i++)
+		for (int i = 0; i < pixelCount; i++)
 		{
 			if (edges[i] > 0)
 			{
@@ -407,15 +483,19 @@ public final class HorizonDetector
 		float tilt = fineAngle - 90f;
 		Log.d(TAG, "Painted region tilt: " + String.format(Locale.ROOT, "%.3f", tilt) + "°");
 
-		if (Math.abs(tilt) < 0.005f)
-		{
-			return 0f;
-		}
-		if (Math.abs(tilt) > 30f)
+		if (Float.isNaN(tilt) || !Float.isFinite(tilt))
 		{
 			return Float.NaN;
 		}
-		return -Math.round(tilt * 100f) / 100f;
+		if (Math.abs(tilt) < BitmapUtils.ROTATION_EPSILON)
+		{
+			return 0f;
+		}
+		if (Math.abs(tilt) > MAX_HORIZON_TILT_DEGREES)
+		{
+			return Float.NaN;
+		}
+		return RotationMath.snapToHundredth(-tilt);
 	}
 
 	/**
@@ -428,10 +508,11 @@ public final class HorizonDetector
 	{
 		// Require either the start of a token (non-word char) or start of string, then an optional namespace
 		// prefix that ends in ':', then the exact suffix followed by whitespace or '='. This rules out AbcRoll,
-		// CameraRoll, GyroRoll, etc.
-		Pattern pattern = Pattern.compile(
-			"(?:^|[^\\w:])(?:\\w+:)?" + Pattern.quote(attrSuffix) + "\\s*=\\s*\"([^\"]+)\"",
-			Pattern.CASE_INSENSITIVE);
+		// CameraRoll, GyroRoll, etc. Pattern is cached per suffix.
+		Pattern pattern = XMP_FLOAT_PATTERNS.computeIfAbsent(attrSuffix, suffix ->
+			Pattern.compile(
+				"(?:^|[^\\w:])(?:\\w+:)?" + Pattern.quote(suffix) + "\\s*=\\s*\"([^\"]+)\"",
+				Pattern.CASE_INSENSITIVE));
 		Matcher matcher = pattern.matcher(xml);
 		while (matcher.find())
 		{
@@ -475,7 +556,7 @@ public final class HorizonDetector
 
 		for (int i = 0; i < edgeCount; i++)
 		{
-			int bin = (int) (edgeX[i] * cos + edgeY[i] * sin) + distanceOffset;
+			int bin = (int) Math.floor(edgeX[i] * cos + edgeY[i] * sin) + distanceOffset;
 			if (bin >= 0 && bin < numBins)
 			{
 				histogram[bin]++;
@@ -531,6 +612,14 @@ public final class HorizonDetector
 			return Float.NaN;
 		}
 		double slope = (sumXY - sumX * sumY / inliers) / denom;
+		// NaN slope (sumXX == sumX^2/inliers via floating-point underflow not caught by denom > 1e-6) would
+		// flow into atan → NaN → 90+NaN=NaN. The Math.clamp below would return NaN; the caller treats the
+		// result as a real rotation. Guard explicitly so a degenerate inlier set returns the spec'd "no
+		// reading" sentinel.
+		if (Double.isNaN(slope) || Double.isInfinite(slope))
+		{
+			return Float.NaN;
+		}
 		float refinedAngle = 90f + (float) Math.toDegrees(Math.atan(slope));
 		if (Math.abs(refinedAngle - houghAngleDeg) > MAX_LINE_FIT_DELTA_DEGREES)
 		{
@@ -541,13 +630,6 @@ public final class HorizonDetector
 
 	private static float[] gaussianBlur5x5(float[] src, int width, int height)
 	{
-		float[] kernel = {
-				1 / 273f, 4 / 273f,  7 / 273f,  4 / 273f, 1 / 273f,
-				4 / 273f, 16 / 273f, 26 / 273f, 16 / 273f, 4 / 273f,
-				7 / 273f, 26 / 273f, 41 / 273f, 26 / 273f, 7 / 273f,
-				4 / 273f, 16 / 273f, 26 / 273f, 16 / 273f, 4 / 273f,
-				1 / 273f, 4 / 273f,  7 / 273f,  4 / 273f, 1 / 273f,
-		};
 		float[] dst = new float[width * height];
 		for (int y = 2; y < height - 2; y++)
 		{
@@ -560,7 +642,7 @@ public final class HorizonDetector
 					for (int kernelX = -2; kernelX <= 2; kernelX++)
 					{
 						sum += src[rowOffset + (x + kernelX)]
-							* kernel[(kernelY + 2) * 5 + (kernelX + 2)];
+							* GAUSSIAN_5X5_KERNEL[(kernelY + 2) * 5 + (kernelX + 2)];
 					}
 				}
 				dst[y * width + x] = sum;
@@ -600,7 +682,7 @@ public final class HorizonDetector
 			double sin = sinTable[angleIdx];
 			for (int i = 0; i < edgeCount; i++)
 			{
-				int bin = (int) (edgeX[i] * cos + edgeY[i] * sin) + distanceOffset;
+				int bin = (int) Math.floor(edgeX[i] * cos + edgeY[i] * sin) + distanceOffset;
 				if (bin >= 0 && bin < numBins)
 				{
 					histogram[bin]++;

@@ -18,19 +18,33 @@ import com.cropcenter.util.AiRegionDetector.AiMask;
  * wasting a JPEG re-encode of the gain map) and the GraftController.LARGE_EDIT_FRACTION sanity gate (forces a confirm
  * dialog when a wrong-file pick or wholesale global edit produces a suspiciously large mask).
  */
-public class AiRegionDetectorTest
+public final class AiRegionDetectorTest
 {
 	@Test
 	public void componentAccessorsExposeAllFields()
 	{
 		// Records auto-generate accessors. Pin them down so a renamed component surfaces here as a compile
-		// error instead of at the call site.
+		// error instead of at the call site. AiMask.of derives maskedCount from a single walk of the mask;
+		// the canonical constructor takes the count directly.
 		boolean[] mask = { true, false, true, false };
-		AiMask aiMask = new AiMask(mask, 2, 2, 4);
+		AiMask aiMask = AiMask.of(mask, 2, 2, 4);
 		assertArrayEquals(mask, aiMask.mask());
 		assertEquals(2, aiMask.width());
 		assertEquals(2, aiMask.height());
 		assertEquals(4, aiMask.sampleSize());
+		assertEquals(2, aiMask.maskedCount());
+	}
+
+	@Test
+	public void canonicalConstructorAcceptsExplicitMaskedCount()
+	{
+		// AiRegionDetector.detect uses the canonical record constructor directly to avoid re-walking the
+		// mask post-detect. Pin the contract: the explicit count is preserved verbatim, even if it doesn't
+		// match a recount of the boolean array. This is intentional — the count is the source of truth at
+		// construction; the boolean array is just storage.
+		boolean[] mask = { true, false, true, false };
+		AiMask aiMask = new AiMask(mask, 2, 2, 4, 99);
+		assertEquals("explicit count is not recomputed", 99, aiMask.maskedCount());
 	}
 
 	@Test
@@ -38,7 +52,7 @@ public class AiRegionDetectorTest
 	{
 		// Zero-pixel mask (impossible in real life — detect() always returns at least one element — but the
 		// predicate must handle it without IOOBE).
-		AiMask aiMask = new AiMask(new boolean[0], 0, 0, 4);
+		AiMask aiMask = AiMask.of(new boolean[0], 0, 0, 4);
 		assertFalse(aiMask.hasMaskedPixels());
 	}
 
@@ -49,7 +63,7 @@ public class AiRegionDetectorTest
 		// Caller (UltraHdrCompat) skips the inpaint step entirely so the gain-map JPEG isn't re-encoded for
 		// nothing.
 		boolean[] mask = new boolean[100];
-		AiMask aiMask = new AiMask(mask, 10, 10, 4);
+		AiMask aiMask = AiMask.of(mask, 10, 10, 4);
 		assertFalse(aiMask.hasMaskedPixels());
 	}
 
@@ -61,7 +75,7 @@ public class AiRegionDetectorTest
 		// observable in tests.
 		boolean[] mask = new boolean[1000];
 		mask[0] = true;
-		AiMask aiMask = new AiMask(mask, 10, 100, 4);
+		AiMask aiMask = AiMask.of(mask, 10, 100, 4);
 		assertTrue(aiMask.hasMaskedPixels());
 	}
 
@@ -72,7 +86,7 @@ public class AiRegionDetectorTest
 		// A regression that bails too early would return false here.
 		boolean[] mask = new boolean[100];
 		mask[99] = true;
-		AiMask aiMask = new AiMask(mask, 10, 10, 4);
+		AiMask aiMask = AiMask.of(mask, 10, 10, 4);
 		assertTrue(aiMask.hasMaskedPixels());
 	}
 
@@ -80,7 +94,7 @@ public class AiRegionDetectorTest
 	public void maskedCountAllFalse()
 	{
 		boolean[] mask = new boolean[50];
-		AiMask aiMask = new AiMask(mask, 5, 10, 4);
+		AiMask aiMask = AiMask.of(mask, 5, 10, 4);
 		assertEquals(0, aiMask.maskedCount());
 	}
 
@@ -92,7 +106,7 @@ public class AiRegionDetectorTest
 		{
 			mask[i] = true;
 		}
-		AiMask aiMask = new AiMask(mask, 5, 10, 4);
+		AiMask aiMask = AiMask.of(mask, 5, 10, 4);
 		assertEquals(50, aiMask.maskedCount());
 	}
 
@@ -100,7 +114,7 @@ public class AiRegionDetectorTest
 	public void maskedCountEmptyArray()
 	{
 		// Zero-element array — count is 0 without throwing.
-		AiMask aiMask = new AiMask(new boolean[0], 0, 0, 4);
+		AiMask aiMask = AiMask.of(new boolean[0], 0, 0, 4);
 		assertEquals(0, aiMask.maskedCount());
 	}
 
@@ -110,7 +124,7 @@ public class AiRegionDetectorTest
 		// width/height/sampleSize don't affect maskedCount — it walks the raw mask array. This test pins down
 		// that contract: even with mismatched dims the count reflects the actual flagged-pixel total.
 		boolean[] mask = { true, false, true, true };
-		AiMask aiMask = new AiMask(mask, 99, 99, 4);
+		AiMask aiMask = AiMask.of(mask, 99, 99, 4);
 		assertEquals(3, aiMask.maskedCount());
 	}
 
@@ -125,7 +139,7 @@ public class AiRegionDetectorTest
 		{
 			mask[i] = true;
 		}
-		AiMask aiMask = new AiMask(mask, 10, 100, 4);
+		AiMask aiMask = AiMask.of(mask, 10, 100, 4);
 		int count = aiMask.maskedCount();
 		assertEquals(500, count);
 		assertTrue("50% should exceed 10% threshold", count > mask.length * 0.10);
@@ -140,7 +154,7 @@ public class AiRegionDetectorTest
 		mask[100] = true;
 		mask[500] = true;
 		mask[999] = true;
-		AiMask aiMask = new AiMask(mask, 100, 10, 4);
+		AiMask aiMask = AiMask.of(mask, 100, 10, 4);
 		assertEquals(4, aiMask.maskedCount());
 	}
 }

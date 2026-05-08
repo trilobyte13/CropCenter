@@ -19,7 +19,7 @@ import java.io.IOException;
  * scan" IOException so the caller can show a real "graft failed" toast — silently returning a corrupt splice would wipe
  * Samsung Gallery's Revert pre-flight on round-tripped edits.
  */
-public class GraftWriterTest
+public final class GraftWriterTest
 {
 	private static final byte[] DQT_STUB =
 	{

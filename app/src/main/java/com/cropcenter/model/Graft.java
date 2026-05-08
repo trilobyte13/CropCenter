@@ -22,7 +22,7 @@ public record Graft(byte[] bytes, String displayName, AiMask aiMask)
 {
 	/**
 	 * True when the graft carries a non-empty AI-region mask that GainMapInpainter should act on. False for grafts
-	 * with no detected AI fill (the splice still needs a canvas- encode pass for spatial alignment, but the inpaint
+	 * with no detected AI fill (the splice still needs a canvas-encode pass for spatial alignment, but the inpaint
 	 * step is skipped).
 	 */
 	public boolean hasAiMask()

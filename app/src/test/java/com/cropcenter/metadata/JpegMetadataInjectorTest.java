@@ -19,7 +19,7 @@ import java.util.List;
  * markers stacked back to back. The fix throws IOException so the caller's "Export failed" toast surfaces the actual
  * error.
  */
-public class JpegMetadataInjectorTest
+public final class JpegMetadataInjectorTest
 {
 	@Test
 	public void injectRejectsNonJpegInput()
@@ -109,6 +109,40 @@ public class JpegMetadataInjectorTest
 			}
 		}
 		assertTrue("output should contain the original EXIF bytes verbatim", foundExif);
+	}
+
+	@Test
+	public void injectHandlesFillBytesBeforeReencoderApp() throws IOException
+	{
+		// Per ITU-T T.81 §B.1.1.2, any marker may be preceded by any number of 0xFF fill bytes. Skia's
+		// Bitmap.compress could legitimately emit FF FF E0 for APP0 alignment. Without the fill-byte handling
+		// added in the recent fix, the injector mis-read the second 0xFF as marker code 0xFF, then parsed
+		// garbage as the segment length. This regression test pins the fix.
+		byte[] reencoded = JpegFixtures.concat(
+			JpegFixtures.soi(),
+			new byte[] { (byte) 0xFF, (byte) 0xFF, (byte) 0xE0, // FF + fill + APP0 marker
+				0x00, 0x07, 'J', 'F', 'I', 'F', 0 },           // segLen=7 + payload "JFIF\0"
+			new byte[] { (byte) 0xFF, (byte) 0xDB, 0x00, 0x04, 0x00, 0x00 }, // DQT
+			JpegFixtures.minimalScanAndEoi());
+
+		byte[] result = JpegMetadataInjector.inject(reencoded, Collections.emptyList());
+		// Output should start with SOI and end with EOI. Crucially, the JFIF payload from the re-encoder
+		// should NOT appear (the walker correctly skipped it).
+		assertEquals((byte) 0xFF, result[0]);
+		assertEquals((byte) 0xD8, result[1]);
+		assertEquals((byte) 0xFF, result[result.length - 2]);
+		assertEquals((byte) 0xD9, result[result.length - 1]);
+		// Confirm "JFIF" wasn't carried through (proves the APP0 was stripped).
+		boolean foundJfif = false;
+		for (int i = 0; i < result.length - 4; i++)
+		{
+			if (result[i] == 'J' && result[i + 1] == 'F' && result[i + 2] == 'I' && result[i + 3] == 'F')
+			{
+				foundJfif = true;
+				break;
+			}
+		}
+		assertTrue("re-encoder JFIF should be stripped from output", !foundJfif);
 	}
 
 	@Test

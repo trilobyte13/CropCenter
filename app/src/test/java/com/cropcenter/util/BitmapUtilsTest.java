@@ -16,7 +16,7 @@ import java.io.IOException;
  * high-leverage one: it gates the lossless integer-pixel-remap fast path in drawCropped, so a regression that
  * mis-classifies a near-cardinal angle silently downgrades export quality without any other failure signal.
  */
-public class BitmapUtilsTest
+public final class BitmapUtilsTest
 {
 	private static final float EPS = BitmapUtils.ROTATION_EPSILON;
 
@@ -109,6 +109,40 @@ public class BitmapUtilsTest
 	}
 
 	@Test
+	public void readExifOrientationReturnsAllValidValuesOneThroughEight() throws IOException
+	{
+		// Baseline tests above only exercise orientation=6. A regression that masked the orientation low
+		// byte (e.g. `& 0x07` instead of `& 0xFF`) would still pass orientation=6 (6 & 7 = 6) but corrupt
+		// orientation=8 (8 & 7 = 0 → out-of-range → maps to 1). Iterating over the full valid 1..8 range
+		// closes that gap. Both byte orders since the production code branches on isLittleEndian.
+		for (int orient = 1; orient <= 8; orient++)
+		{
+			byte[] le = buildJpegWithOrientation(true, orient);
+			assertEquals("LE orient " + orient, orient, BitmapUtils.readExifOrientation(le));
+			byte[] be = buildJpegWithOrientation(false, orient);
+			assertEquals("BE orient " + orient, orient, BitmapUtils.readExifOrientation(be));
+		}
+	}
+
+	@Test
+	public void readExifOrientationHandlesFillBytesBeforeApp1() throws IOException
+	{
+		// JPEG spec ITU-T T.81 §B.1.1.2: any marker may be preceded by any number of 0xFF fill bytes. Without
+		// fill-byte handling the walker would mis-read the second 0xFF as marker code 0xFF and return 1
+		// (upright) without finding the EXIF segment. Splice 2 fill bytes in front of the APP1 to pin the
+		// fix.
+		byte[] jpeg = buildJpegWithOrientation(true, 6);
+		// SOI is at [0..1]. APP1 starts at index 2 (FF E1). Insert two fill 0xFF bytes between SOI and APP1.
+		byte[] padded = new byte[jpeg.length + 2];
+		padded[0] = jpeg[0];
+		padded[1] = jpeg[1];
+		padded[2] = (byte) 0xFF;     // fill
+		padded[3] = (byte) 0xFF;     // fill
+		System.arraycopy(jpeg, 2, padded, 4, jpeg.length - 2);
+		assertEquals(6, BitmapUtils.readExifOrientation(padded));
+	}
+
+	@Test
 	public void readExifOrientationReturnsUprightOnImByteOrder() throws IOException
 	{
 		// Byte-order field "IM" (mismatched halves) must be rejected as a malformed pair rather than treated as
@@ -129,6 +163,55 @@ public class BitmapUtilsTest
 		// "MM" sits at offset 12, 13. Change second byte to 'I'.
 		jpeg[13] = 'I';
 		assertEquals(1, BitmapUtils.readExifOrientation(jpeg));
+	}
+
+	@Test
+	public void readExifOrientationRejectsWrongTiffMagic() throws IOException
+	{
+		// TIFF magic must be 42 (0x002A). A coincidental II/MM byte-order match without the magic field means
+		// the payload isn't actually TIFF — refuse to read further so a malformed APP1 with plausible offsets
+		// and a tag-0x0112 byte sequence can't make us return a non-1 orientation from random bytes.
+		byte[] jpeg = buildJpegWithOrientation(true, 6);
+		// TIFF magic sits at offset 14, 15 (after II at 12, 13). Overwrite with 0xABCD.
+		jpeg[14] = (byte) 0xCD;
+		jpeg[15] = (byte) 0xAB;
+		assertEquals(1, BitmapUtils.readExifOrientation(jpeg));
+	}
+
+	@Test
+	public void readExifOrientationRejectsWrongEntryType() throws IOException
+	{
+		// Real EXIF emits Orientation as type SHORT (3). Anything else means we'd be sampling the value field
+		// under the wrong type interpretation — typically reading a different number of bytes than the entry
+		// actually stores.
+		byte[] jpeg = buildJpegWithOrientation(true, 6);
+		// Entry type sits at offset 24, 25 (IFD entry: tag=22..23, type=24..25, count=26..29, value=30..31).
+		jpeg[24] = 4; // LONG instead of SHORT
+		jpeg[25] = 0;
+		assertEquals(1, BitmapUtils.readExifOrientation(jpeg));
+	}
+
+	@Test
+	public void readExifOrientationRejectsWrongEntryCount() throws IOException
+	{
+		// Count != 1 means the value field stores an offset to an array, not the value itself. A coincidental
+		// orientation entry with count=2 would otherwise have us read the offset's low u16 as orientation.
+		byte[] jpeg = buildJpegWithOrientation(true, 6);
+		// Entry count sits at offset 26..29 (u32, little-endian). Overwrite low byte with 2.
+		jpeg[26] = 2;
+		assertEquals(1, BitmapUtils.readExifOrientation(jpeg));
+	}
+
+	@Test
+	public void readExifOrientationRejectsOutOfRangeValues() throws IOException
+	{
+		// EXIF orientation is defined for values 1..8. A coincidental byte sequence that resolves to 9
+		// (or 0, or 0xFFFF) must map to upright (1) — never returned verbatim — because downstream code
+		// assumes the value is in-range.
+		byte[] jpeg = buildJpegWithOrientation(true, 9);
+		assertEquals(1, BitmapUtils.readExifOrientation(jpeg));
+		byte[] jpegZero = buildJpegWithOrientation(true, 0);
+		assertEquals(1, BitmapUtils.readExifOrientation(jpegZero));
 	}
 
 	/**

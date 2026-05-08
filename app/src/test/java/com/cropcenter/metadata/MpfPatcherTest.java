@@ -29,7 +29,7 @@ import java.io.IOException;
  *     gain-map size into a non-gain-map slot and leave the actual gain-map entry stale.
  *   - REJECTING single-image MPFs (no gain-map slot to patch).
  */
-public class MpfPatcherTest
+public final class MpfPatcherTest
 {
 	@Test
 	public void patchSucceedsOnTwoImageMpf() throws IOException
@@ -86,6 +86,13 @@ public class MpfPatcherTest
 		// blindly patch entry[1] (which could land the gain-map size into a depth map or thumbnail slot).
 		// Falling back to entry[1] is only safe when numImages == 2, where the Samsung Ultra HDR pattern
 		// guarantees the gain map lives at index 1 even when its MPType field is malformed.
+		//
+		// Pin BOTH the false return AND the no-byte-mutation invariant. The patch function reorders the
+		// gain-map walk before the entry[0] / gain-map writes specifically so a refused patch leaves the
+		// JPEG byte buffer in its pre-call state — a regression that wrote entry[0].size before the refusal
+		// check would silently corrupt the file while still returning false. Sister test
+		// patchRejectsMultipleGainMapMpTypeMatches pins the same invariant on the multi-match branch; this
+		// test pins it on the no-match-with-numImages-not-2 branch.
 		int newPrimarySize = 320;
 		int gainMapSize = 80;
 		long[] attrs = {
@@ -94,7 +101,13 @@ public class MpfPatcherTest
 			0x00010003L,                // Large Thumbnail (NOT gain map)
 		};
 		MpfFixture fx = buildMpfFile(newPrimarySize, gainMapSize, attrs);
+		byte[] snapshot = fx.bytes.clone();
 		assertFalse(MpfPatcher.patch(fx.bytes, newPrimarySize));
+		for (int i = 0; i < fx.bytes.length; i++)
+		{
+			assertEquals("byte " + i + " mutated on rejected patch (no-MPType-match branch)",
+				snapshot[i], fx.bytes[i]);
+		}
 	}
 
 	@Test
@@ -119,6 +132,27 @@ public class MpfPatcherTest
 		MpfFixture fx = buildMpfFile(100, 30, 1);
 		assertFalse(MpfPatcher.patch(fx.bytes, 100));
 	}
+
+	@Test
+	public void patchAcceptsExactlyMaxMpfEntriesAndRejectsOneOver() throws IOException
+	{
+		// Pin the cap boundary at MAX_MPF_ENTRIES = 64 (round-10 named constant). 64 entries with the gain
+		// map at index 1 must succeed; 65 entries must be refused as overflow protection for the int cast
+		// at `numImages = (int)(byteCount / MPF_ENTRY_BYTES)`. A regression that swapped `>` to `>=` would
+		// silently drop the cap by one and slip 65-entry MPFs through — caught here.
+		long[] attrsAtCap = new long[64];
+		attrsAtCap[1] = 0x00010005L;
+		MpfFixture okFx = buildMpfFile(2_000, 60, attrsAtCap);
+		assertTrue("64 entries (cap) must patch successfully",
+			MpfPatcher.patch(okFx.bytes, 2_000));
+
+		long[] attrsOverCap = new long[65];
+		attrsOverCap[1] = 0x00010005L;
+		MpfFixture badFx = buildMpfFile(3_000, 60, attrsOverCap);
+		assertFalse("65 entries (one over MAX_MPF_ENTRIES) must be rejected",
+			MpfPatcher.patch(badFx.bytes, 3_000));
+	}
+
 
 	@Test
 	public void patchLocatesGainMapByMpTypeWhenAtIndexTwo() throws IOException
@@ -215,6 +249,69 @@ public class MpfPatcherTest
 		out.write(JpegFixtures.appSegment(0xE2, iccPayload));
 		out.write(JpegFixtures.minimalScanAndEoi());
 		assertFalse(MpfPatcher.patch(out.toByteArray(), out.size()));
+	}
+
+	@Test
+	public void patchRejectsMultipleGainMapMpTypeMatches() throws IOException
+	{
+		// A spec-legal multi-gain-map MPF (composite depth + Original Preservation, some Apple Portrait
+		// variants) carries multiple 0x010005 entries. We have one post-edit gain-map size + offset, but no
+		// way to assign it across multiple entries without guessing — a single-entry write would leave the
+		// others pointing at pre-edit positions in the source file, which strict decoders reject. Refusing
+		// here lets GainMapComposer drop HDR cleanly per its design.
+		int newPrimarySize = 280;
+		int gainMapSize = 70;
+		long[] attrs = {
+			0x20000000L,                // entry[0] primary (representative-image bit)
+			0x00010005L,                // entry[1] Original Preservation #1 (gain map)
+			0x00010005L,                // entry[2] Original Preservation #2 (second gain map)
+		};
+		MpfFixture fx = buildMpfFile(newPrimarySize, gainMapSize, attrs);
+		byte[] snapshot = fx.bytes.clone();
+		assertFalse("multi-gain-map MPF must be refused, not silently single-patched",
+			MpfPatcher.patch(fx.bytes, newPrimarySize));
+
+		// No bytes mutated — a regression that wrote into entry[1] or entry[2] before checking the count
+		// would trip this assertion.
+		for (int i = 0; i < fx.bytes.length; i++)
+		{
+			assertEquals("byte " + i + " must be unchanged when patch refused on multi-match",
+				snapshot[i], fx.bytes[i]);
+		}
+	}
+
+	@Test
+	public void patchRejectsEntryArrayPointingPastMpfSegmentIntoSosData() throws IOException
+	{
+		// Adversarial MPF: dataOffset of the MPEntries IFD entry points past the MPF segment into SOS data.
+		// Without the segment-end bound on the entry array, the patcher would have walked the SOS bytes as
+		// "MP entries" and rewritten 12 bytes of compressed scan data with attacker-controlled values,
+		// corrupting the JPEG. With the bound, patch returns false and bytes are untouched. Pin both: the
+		// rejection AND the no-mutation invariant.
+		int newPrimarySize = 200;
+		int gainMapSize = 60;
+		MpfFixture fx = buildMpfFile(newPrimarySize, gainMapSize, 2);
+
+		// The MPEntries IFD entry's dataOffset field sits at mpfStart + 30 (LE u32). Point it past the MPF
+		// segment end (mpfSegmentEnd - mpfStart ≈ 70) but still within the JPEG file, so a vulnerability that
+		// only checked jpeg.length would have written into the scan body.
+		int corruptedRelativeOff = 100;
+		fx.bytes[fx.mpfStart + 30] = (byte) (corruptedRelativeOff & 0xFF);
+		fx.bytes[fx.mpfStart + 31] = (byte) ((corruptedRelativeOff >> 8) & 0xFF);
+		fx.bytes[fx.mpfStart + 32] = 0;
+		fx.bytes[fx.mpfStart + 33] = 0;
+
+		byte[] snapshot = fx.bytes.clone();
+		assertFalse("patch must reject an entry-array offset that points outside the MPF segment",
+			MpfPatcher.patch(fx.bytes, newPrimarySize));
+
+		// The rejected patch must not have mutated any byte. A regression that wrote entry[0].size before the
+		// out-of-bounds check would corrupt the scan body silently.
+		for (int i = 0; i < fx.bytes.length; i++)
+		{
+			assertEquals("byte " + i + " must be unchanged when patch rejected on segment-end bound",
+				snapshot[i], fx.bytes[i]);
+		}
 	}
 
 	/**

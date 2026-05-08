@@ -54,7 +54,9 @@ final class SelectionHistory
 
 	/**
 	 * Pop a redo frame and return its snapshot. Pushes the current state onto undo. Returns null when the redo
-	 * stack is empty.
+	 * stack is empty. Trims undoStack to MAX_DEPTH after the push because undo() / redo() exchange frames between
+	 * the two stacks and would otherwise let undoStack grow past the cap (push() trims, but push() isn't on the
+	 * undo→redo→undo→redo path).
 	 */
 	List<SelectionPoint> redo(List<SelectionPoint> current)
 	{
@@ -63,12 +65,17 @@ final class SelectionHistory
 			return null;
 		}
 		undoStack.add(snapshot(current));
+		if (undoStack.size() > MAX_DEPTH)
+		{
+			undoStack.remove(0);
+		}
 		return redoStack.remove(redoStack.size() - 1);
 	}
 
 	/**
 	 * Pop an undo frame and return its snapshot. Pushes the current state onto redo. Returns null when the undo
-	 * stack is empty.
+	 * stack is empty. Trims redoStack to MAX_DEPTH after the push for the same reason as redo() — an undo path
+	 * with deep history would otherwise push redoStack past the cap.
 	 */
 	List<SelectionPoint> undo(List<SelectionPoint> current)
 	{
@@ -77,6 +84,10 @@ final class SelectionHistory
 			return null;
 		}
 		redoStack.add(snapshot(current));
+		if (redoStack.size() > MAX_DEPTH)
+		{
+			redoStack.remove(0);
+		}
 		return undoStack.remove(undoStack.size() - 1);
 	}
 

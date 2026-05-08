@@ -16,7 +16,7 @@ import java.io.InputStream;
  * runtime and aren't tested here — but the parsing chokepoints that decide whether the path is sibling-derivable in the
  * first place are pure functions and well-suited to unit tests.
  */
-public class SafFileHelperTest
+public final class SafFileHelperTest
 {
 	@Test
 	public void lastSegmentSeparatorEndAtVolumeColonForRoot()
@@ -81,6 +81,50 @@ public class SafFileHelperTest
 		// volume root has no parent to look up. The current impl returns the volume prefix (= same as input)
 		// because indexOf(':') = 7 > 0. Worth pinning down so any change is intentional.
 		assertEquals("primary:", SafPaths.parentDocIdOf("primary:"));
+	}
+
+	// ── hasImageSignature ── The cheap upfront filter that gates tryReadDirectlyFromPath. A stale MediaStore
+	// _data row pointing at a non-image file would otherwise poison the load with garbage bytes; without these
+	// tests pinning the JPEG/PNG-only contract a future relaxation that accepts HEIC / GIF / WebP signatures
+	// would slip through unnoticed.
+
+	@Test
+	public void hasImageSignatureAcceptsJpegMagicBytes()
+	{
+		// JPEG SOI: FF D8. Any bytes after the first two are ignored by the check.
+		assertEquals(true, SafPaths.hasImageSignature(
+			new byte[]{ (byte) 0xFF, (byte) 0xD8, 0x12, 0x34 }));
+	}
+
+	@Test
+	public void hasImageSignatureAcceptsPngMagicBytes()
+	{
+		// PNG signature: 89 50 4E 47 [...]. Only the first 4 are inspected.
+		assertEquals(true, SafPaths.hasImageSignature(
+			new byte[]{ (byte) 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A }));
+	}
+
+	@Test
+	public void hasImageSignatureRejectsHeicAndOtherFormats()
+	{
+		// HEIC ftyp box. BitmapFactory on Android 28+ can decode this, which is exactly why the explicit
+		// signature gate matters — without it, HEIC would slip past and corrupt the load pipeline.
+		byte[] heic = { 0x00, 0x00, 0x00, 0x18, 'f', 't', 'y', 'p' };
+		assertEquals(false, SafPaths.hasImageSignature(heic));
+		// WebP "RIFF????WEBP".
+		byte[] webp = { 'R', 'I', 'F', 'F', 0x00, 0x00, 0x00, 0x00 };
+		assertEquals(false, SafPaths.hasImageSignature(webp));
+		// GIF "GIF89a".
+		byte[] gif = { 'G', 'I', 'F', '8', '9', 'a' };
+		assertEquals(false, SafPaths.hasImageSignature(gif));
+	}
+
+	@Test
+	public void hasImageSignatureRejectsTooShortInput()
+	{
+		// Less than 4 bytes — the check needs all four to disambiguate JPEG (2 bytes) from PNG (4 bytes).
+		assertEquals(false, SafPaths.hasImageSignature(new byte[]{ (byte) 0xFF, (byte) 0xD8, 0x12 }));
+		assertEquals(false, SafPaths.hasImageSignature(new byte[0]));
 	}
 
 	// ── readbackByteCountFromStream ── Verify the contract documented on readbackByteCount: full match returns

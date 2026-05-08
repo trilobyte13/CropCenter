@@ -9,11 +9,11 @@ import org.junit.Test;
 /**
  * Tests for RotatedCropClamp's pure-math clamps. Both entry points run on every CropState.setCenter call, so a
  * regression that lets the clamp pick a position with corners outside the image bounds silently corrupts every
- * rotated-crop export. The axis-aligned path is cheap and only needs the cropW &gt;= imgW snap-to-mid contract pinned
+ * rotated-crop export. The axis-aligned path is cheap and only needs the cropW >= imgW snap-to-mid contract pinned
  * down; the rotated path runs a 25-iteration binary search whose three branches (image-center fallback, X-search,
  * Y-search) all need pinning.
  */
-public class RotatedCropClampTest
+public final class RotatedCropClampTest
 {
 	private static final float TOL = 1e-3f;
 

@@ -16,7 +16,7 @@ import java.util.function.UnaryOperator;
 /**
  * Central state object for the crop editor. Holds all parameters, source image, and extracted metadata.
  */
-public class CropState
+public final class CropState
 {
 	public interface OnStateChangedListener
 	{
@@ -31,8 +31,12 @@ public class CropState
 	// Set by GraftController.onEditPicked when an Apply External Edit produces an AI region; cleared by reset() on
 	// the next image load. Read by UltraHdrCompat at HDR re-encode time so the gain map's HDR boost in the AI
 	// region can be inpainted from surrounding values (matches the visual intent of Generative Remove without the
-	// stale "boost the features that used to be there" artifact).
-	private AiMask aiMask;
+	// stale "boost the features that used to be there" artifact). Volatile because the install path
+	// (assembleGraftOnBg → applyGraftedBytesOnBg → installGraft) writes from the bg executor, but the read path
+	// (CropExporter.exportJpeg → UltraHdrCompat.compressWithGainmap) also runs on the bg executor — serialised
+	// today, but a future helper that reads the mask from the UI thread (e.g. a "graft preview" badge) would
+	// otherwise see stale null without a happens-before. Cheap insurance.
+	private volatile AiMask aiMask;
 	private AspectRatio aspectRatio = AspectRatio.R4_5;
 	private Bitmap sourceImage;
 	private CenterMode centerMode = CenterMode.BOTH;
@@ -59,11 +63,24 @@ public class CropState
 	// Set by MainActivity after applyBytes installs the spliced bytes. Read by ExportPipeline.canBypassEncode to
 	// refuse the verbatim-write bypass for graft saves — bypassing would ship source's gain map verbatim over the
 	// spliced primary, so any user crop afterwards shifts the gain map's HDR boost off the features it's meant for.
-	// The full encode regenerates the gain map from the spliced primary.
-	private boolean graftApplied;
+	// The full encode regenerates the gain map from the spliced primary. Volatile because installGraft writes from
+	// the bg executor (applyGraftedBytesOnBg) and ExportPipeline.canBypassEncode reads from the UI thread (Save tap
+	// pre-enqueue path); without volatile a Save landing in the brief window between the bg-side write and the
+	// installImageOnUi runnable could miss the graft and bypass-encode despite the splice — silently shipping HDR
+	// misalignment.
+	private volatile boolean graftApplied;
 	private boolean hasCenter;
 	private byte[] gainMap;
 	private byte[] originalFileBytes;
+	// Raw TIFF bytes from the source PNG's eXIf chunk (PNG 1.6 spec). Set by ImageLoadController.extractMetadata
+	// for PNG sources via PngMetadataExtractor.extractRawTiff. CropExporter.exportPng prefers this over jpegMeta
+	// for PNG → PNG round-trips because the PNG eXIf chunk has a u31 length field — JPEG APP1's u16 cap doesn't
+	// apply, so a PNG with > 64KB of EXIF (camera with extensive MakerNote / GPS metadata) keeps its full
+	// metadata when re-saved as PNG. Null for JPEG sources or PNGs without eXIf. Volatile to match the cross-thread
+	// publication contract of jpegMeta (set by extractMetadata on bg, observed by exportPng on bg via the single
+	// thread executor — but reset() also clears it on bg, so a future change that introduces a UI-thread read needs
+	// the happens-before).
+	private volatile byte[] pngExifTiff;
 	private byte[] seftTrailer; // Samsung SEFT trailer (appended after gain map)
 	private float anchorX; // stable "intent" center for no-selection rotations
 	private float anchorY;
@@ -236,6 +253,10 @@ public class CropState
 	/**
 	 * Raw Ultra HDR gain-map bytes extracted at load time, or null for non-HDR sources. The exporter re-composes
 	 * this onto the cropped primary for HDR-preserving saves.
+	 *
+	 * Caller must not mutate the returned array. The reference is shared with all consumers and with internal
+	 * state — appending to or rewriting elements would silently corrupt the next save. A defensive clone is not
+	 * done because the array is potentially multi-MB and every consumer treats it as read-only.
 	 */
 	public byte[] getGainMap()
 	{
@@ -280,6 +301,9 @@ public class CropState
 	 * Original file bytes captured at load. Used by ExportPipeline.canBypassEncode for the verbatim-write path and
 	 * by GraftController.onEditPicked as the splice base. Null when the source was loaded via a SAF stream that
 	 * wasn't buffered.
+	 *
+	 * Caller must not mutate the returned array. The reference is shared across consumers and feeds the
+	 * verbatim-write bypass; appending or rewriting elements would silently corrupt the next save.
 	 */
 	public byte[] getOriginalFileBytes()
 	{
@@ -292,6 +316,15 @@ public class CropState
 	public String getOriginalFilename()
 	{
 		return originalFilename;
+	}
+
+	/**
+	 * Raw TIFF bytes from the source PNG's eXIf chunk, or null when the source was JPEG / had no eXIf chunk.
+	 * Used by CropExporter.exportPng for PNG → PNG round-trip where the JPEG APP1 u16 cap doesn't apply.
+	 */
+	public byte[] getPngExifTiff()
+	{
+		return pngExifTiff;
 	}
 
 	/**
@@ -308,6 +341,9 @@ public class CropState
 	 * — the trailer's backup-path reference still points at Gallery's own `/data/sec/photoeditor/` backup, which we
 	 * never touched. CropCenter does not generate fresh trailers for new edits (Gallery rejects backup paths
 	 * outside its blessed locations).
+	 *
+	 * Caller must not mutate the returned array. The reference is shared and gets re-appended verbatim by the
+	 * exporter; mutation would silently corrupt the saved trailer.
 	 */
 	public byte[] getSeftTrailer()
 	{
@@ -375,8 +411,9 @@ public class CropState
 	}
 
 	/**
-	 * True while Pan mode is active — suppresses auto-recompute so the crop stays put while the user drags the
-	 * viewport.
+	 * True while the user has the Lock-center checkbox enabled — suppresses the selection-point auto-recompute
+	 * in Select mode so the crop stays put as points are added or removed. Independent of Pan mode (which
+	 * routes through setCenterMode(LOCKED) instead). See REQUIREMENTS.md §3.
 	 */
 	public boolean isCenterLocked()
 	{
@@ -439,12 +476,14 @@ public class CropState
 	}
 
 	/**
-	 * Replace all selection points atomically (used for undo/redo snapshot restores).
+	 * Replace all selection points atomically (used for undo/redo snapshot restores). Swaps the volatile field
+	 * to a fresh list rather than mutating in place — a bg-thread caller (rare on this path, but the field's
+	 * volatile-swap contract documents the guarantee for ALL writers) could otherwise CME a UI-thread
+	 * iteration. Same pattern reset() uses on line below.
 	 */
 	public void replaceSelectionPoints(Collection<SelectionPoint> newPoints)
 	{
-		selectionPoints.clear();
-		selectionPoints.addAll(newPoints);
+		selectionPoints = new ArrayList<>(newPoints);
 		notifyChanged();
 	}
 
@@ -466,7 +505,6 @@ public class CropState
 		cropSizeDirty = true;
 		rotationDegrees = 0f;
 		centerLocked = false;
-		graftApplied = false;
 		// Restore the documented defaults (Select mode, Both lock-axis). Without this, a new image inherits the
 		// previous session's editor/lock state — e.g. loading a photo into a still-active Move + Pan combo
 		// jumps straight to viewport-pan gestures when the spec says new loads start in Select mode centered on
@@ -494,8 +532,16 @@ public class CropState
 		selectionPoints = new ArrayList<>();
 		jpegMeta = new ArrayList<>();
 		gainMap = null;
+		pngExifTiff = null;
 		seftTrailer = null;
+		// Order matters: clear aiMask BEFORE graftApplied so a concurrent UI read mid-reset never observes
+		// the inconsistent (graftApplied=false, aiMask=stale-non-null) intermediate state. With this order,
+		// any read that sees graftApplied=true also sees the still-installed aiMask; any read that sees
+		// graftApplied=false sees aiMask=null (or, briefly, the old aiMask paired with old graftApplied=true,
+		// which is also self-consistent). UltraHdrCompat.compressWithGainmap reads aiMask only when
+		// graftApplied is true, so the consistent pairing matters.
 		aiMask = null;
+		graftApplied = false;
 	}
 
 	/**
@@ -547,8 +593,9 @@ public class CropState
 	}
 
 	/**
-	 * Lock / unlock auto-recompute. Used by Pan mode to freeze the crop while the user drags the viewport. Does not
-	 * fire the listener — caller controls redraw cadence.
+	 * Lock / unlock the selection-point auto-recompute. Wired to the Lock-center checkbox in the toolbar
+	 * (chkLockCenter) — not to Pan mode, which is its own LOCKED CenterMode value via setCenterMode. Does
+	 * not fire the listener — caller controls redraw cadence.
 	 */
 	public void setCenterLocked(boolean locked)
 	{
@@ -654,15 +701,27 @@ public class CropState
 	}
 
 	/**
+	 * Record the raw TIFF bytes extracted from the source PNG's eXIf chunk. No listener fire — consulted by the
+	 * exporter, not rendered. Pass null to clear (matches reset() behavior).
+	 */
+	public void setPngExifTiff(byte[] tiff)
+	{
+		this.pngExifTiff = tiff;
+	}
+
+	/**
 	 * Replace the rotation angle. Handles NaN / infinite inputs by treating them as 0, clamps to [−180, 180], snaps
-	 * sub-epsilon magnitudes to exactly 0, marks the crop size dirty (recompute needed to shrink the crop for the
-	 * new rotation), and fires the listener.
+	 * magnitudes below BitmapUtils.ROTATION_EPSILON (0.005°) to exactly 0, marks the crop size dirty (recompute
+	 * needed to shrink the crop for the new rotation), and fires the listener.
 	 *
 	 * The sub-epsilon snap is the single chokepoint that keeps every rotation entry point — ruler, precise-rotation
 	 * dialog, horizon detector, programmatic — aligned with what UiSync, CropEngine, ViewportMath,
-	 * BitmapUtils.drawCropped, and ExportPipeline actually render. Without it, those callers can store 0.01°-0.04°
-	 * values that the renderer collapses to zero, producing a hidden readout, no visible rotation, and (until
-	 * ExportPipeline's epsilon check was added) a needless re-encode of an unchanged image.
+	 * BitmapUtils.drawCropped, and ExportPipeline actually render. The 0.005° epsilon sits a half-step below the
+	 * ruler's 0.01° finest tick (and the horizon detector's 0.01° rounding), so every value those entry points can
+	 * produce is honored end-to-end. The snap exists for inputs strictly smaller than what the UI exposes — e.g.,
+	 * float-precision residue near zero from RotationMath, or a programmatic caller passing 1e-6° — that would
+	 * otherwise leave the model holding a non-zero value the renderer treats as zero (hidden readout + needless
+	 * re-encode).
 	 */
 	public void setRotationDegrees(float deg)
 	{
@@ -767,5 +826,4 @@ public class CropState
 	{
 		this.graftApplied = grafted;
 	}
-
 }

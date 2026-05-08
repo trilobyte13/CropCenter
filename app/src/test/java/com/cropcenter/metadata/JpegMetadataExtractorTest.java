@@ -14,7 +14,7 @@ import java.util.List;
  * APPs onto the canvas-encoded output). A regression that drops a real APP segment, walks past EOF, or accepts a
  * malformed segment length would manifest as missing EXIF on saved files or hard crashes on truncated inputs.
  */
-public class JpegMetadataExtractorTest
+public final class JpegMetadataExtractorTest
 {
 	@Test
 	public void emptyInputReturnsEmptyList() throws IOException
@@ -61,6 +61,37 @@ public class JpegMetadataExtractorTest
 			new byte[]{ (byte) 0xFF, (byte) 0xE1, 0x00, 0x01 });   // segLen = 1, malformed
 		List<JpegSegment> segs = JpegMetadataExtractor.extract(jpeg);
 		assertTrue("malformed segment should not be added", segs.isEmpty());
+	}
+
+	@Test
+	public void malformedZeroSegmentLengthHaltsParsing() throws IOException
+	{
+		// Boundary case: segLen=0 must also bail. The guard is `segLen < 2`, so segLen=0 is rejected. Pin
+		// this distinct from the segLen=1 test so a regression to `segLen < 1` (which would still pass the
+		// segLen=1 test but loop forever at next == off when segLen=0) surfaces here.
+		byte[] jpeg = JpegFixtures.concat(JpegFixtures.soi(),
+			new byte[]{ (byte) 0xFF, (byte) 0xE1, 0x00, 0x00 });   // segLen = 0, malformed
+		List<JpegSegment> segs = JpegMetadataExtractor.extract(jpeg);
+		assertTrue("zero-length segment should not be added", segs.isEmpty());
+	}
+
+	@Test
+	public void markerFillBytesBetweenSegmentsArePreserved() throws IOException
+	{
+		// JPEG spec ITU-T T.81 §B.1.1.2: any marker may be preceded by any number of 0xFF fill bytes. Without
+		// fill-byte handling the walker would mis-read the second 0xFF as marker code 0xFF and fail to
+		// extract the APP segment that follows. This test pins the regression fix.
+		byte[] exif = JpegFixtures.exifAppPayload();
+		byte[] jpeg = JpegFixtures.concat(
+			JpegFixtures.soi(),
+			new byte[] { (byte) 0xFF, (byte) 0xFF, (byte) 0xE1 }, // 1 fill byte before APP1
+			new byte[] { 0x00, (byte) (2 + exif.length) },         // segLen
+			exif,
+			JpegFixtures.minimalScanAndEoi());
+		List<JpegSegment> segs = JpegMetadataExtractor.extract(jpeg);
+		assertEquals(1, segs.size());
+		assertEquals(0xE1, segs.get(0).marker());
+		assertTrue(segs.get(0).isExif());
 	}
 
 	@Test

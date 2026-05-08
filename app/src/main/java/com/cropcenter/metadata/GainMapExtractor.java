@@ -2,6 +2,8 @@ package com.cropcenter.metadata;
 
 import android.util.Log;
 
+import java.util.Arrays;
+
 /**
  * Extracts the HDR gain map from a Samsung Ultra HDR JPEG file. The gain map is a secondary JPEG stored between the
  * primary image's EOI and any trailing data (e.g., Samsung SEFT trailer).
@@ -18,187 +20,81 @@ public final class GainMapExtractor
 	/**
 	 * Extract the gain map JPEG from the raw file bytes.
 	 *
-	 * @param file raw bytes of the full Samsung Ultra HDR JPEG
+	 * @param file         raw bytes of the full Samsung Ultra HDR JPEG
+	 * @param isHdrSource  true when the caller has confirmed the file carries the XMP hdrgm namespace
+	 *                     marker — for parsed-segment callers (ImageLoadController.extractMetadata,
+	 *                     GraftWriter.graft) use HdrSignature.hasHdrgmInXmp(meta) which scans XMP
+	 *                     segment bodies only; HdrSignature.isHdrSource(byte[]) is a full-file scan
+	 *                     reserved for UltraHdrCompat's post-compress diagnostic where the freshly-
+	 *                     emitted JPEG can only carry the marker in XMP (Codex round-19 F1 narrowed the
+	 *                     load-time scan from full-file to XMP-only to close the false-positive class
+	 *                     where stray "hdrgm" bytes in MakerNote / COM / vendor blob / SEFT history
+	 *                     would mis-classify SDR files as HDR). When false the extractor returns null
+	 *                     without inspecting post-primary FF D8 bytes — without this gate, an SDR
+	 *                     Samsung file whose SEFT data block begins with an embedded JPEG thumbnail's
+	 *                     FF D8 would be mis-extracted as a gain map (Codex round-18 F1).
 	 * @return gain map JPEG bytes (starting with FFD8), or null if not found
 	 */
-	public static byte[] extract(byte[] file)
+	public static byte[] extract(byte[] file, boolean isHdrSource)
 	{
 		if (file == null || file.length < 10)
 		{
 			return null;
 		}
+		if (!isHdrSource)
+		{
+			// No HDR signature (caller said so) — even if FF D8 follows primary EOI, those bytes are SEFT
+			// data (embedded thumbnail / history blob), not a gain map. Pre-Codex-round-18 the extractor
+			// trusted the FF D8 alone and would mis-extract a thumbnail as a gain map.
+			return null;
+		}
 
-		int endBound = findEndBoundary(file);
-		int primaryEoiOffset = findPrimaryEoi(file, endBound);
-		if (primaryEoiOffset < 0)
+		// Walk primary's marker chain to find its EOI. The walker handles SOS entropy, RST / STUFFING / TEM
+		// standalone markers, segment-length math, and overflow guards.
+		int primaryEnd = JpegMarkerWalker.findPrimaryEoi(file, file.length);
+		if (primaryEnd < 0)
 		{
 			return null;
 		}
-		return extractBetween(file, primaryEoiOffset, endBound);
-	}
 
-	/**
-	 * Return the file offset at which to stop the primary-JPEG search — either the file length, or the byte just
-	 * past the gain-map's EOI if a Samsung SEFT trailer is present. The SEFT magic sits at the very end of the
-	 * file; the SEFH directory size field only covers the directory, not the data blocks before it, so we scan
-	 * backwards from the 8-byte SEFT footer for the last FF D9 instead of relying on the size field.
-	 */
-	private static int findEndBoundary(byte[] file)
-	{
-		int len = file.length;
-		if (len < 12 || file[len - 4] != 'S' || file[len - 3] != 'E'
-			|| file[len - 2] != 'F' || file[len - 1] != 'T')
-		{
-			return len;
-		}
-
-		// Start before the 8-byte footer (4-byte len + 4-byte "SEFT") to skip false matches.
-		for (int i = len - 9; i >= 2; i--)
-		{
-			if ((file[i] & 0xFF) == 0xFF && (file[i + 1] & 0xFF) == 0xD9)
-			{
-				int endBound = i + 2;
-				Log.d(TAG, "SEFT trailer detected, endBound=" + endBound);
-				return endBound;
-			}
-		}
-		return len;
-	}
-
-	/**
-	 * Walk forward through the primary JPEG's markers and return the offset just past its EOI (FF D9), or -1 if the
-	 * primary doesn't end cleanly. SOS markers trigger entropy-coded-data scanning that handles byte stuffing and
-	 * restart markers, so progressive JPEGs with multiple SOS segments parse correctly.
-	 */
-	private static int findPrimaryEoi(byte[] file, int endBound)
-	{
-		int off = 2; // skip SOI
-		while (off < endBound - 1)
-		{
-			if ((file[off] & 0xFF) != 0xFF)
-			{
-				off++;
-				continue;
-			}
-			int marker = file[off + 1] & 0xFF;
-
-			if (marker == JpegMarker.EOI)
-			{
-				return off + 2;
-			}
-			if (marker == JpegMarker.SOS)
-			{
-				ScanResult scan = scanEntropyCodedData(file, off, endBound);
-				if (scan.eoiOffset() >= 0)
-				{
-					return scan.eoiOffset();
-				}
-				off = scan.nextMarkerOffset();
-				continue;
-			}
-
-			// Standalone markers (no length field)
-			if (marker == JpegMarker.STUFFING || marker == JpegMarker.TEM
-				|| (marker >= JpegMarker.RST_FIRST && marker <= JpegMarker.RST_LAST))
-			{
-				off += 2;
-				continue;
-			}
-
-			// Segment with a big-endian u16 length field
-			if (off + 3 < endBound)
-			{
-				int segLen = ((file[off + 2] & 0xFF) << 8) | (file[off + 3] & 0xFF);
-				int next = off + 2 + segLen;
-				// Wrap-to-negative guard (segLen can be up to 65535; adversarial sources can drive
-				// `off` close to MAX_INT, causing the addition to wrap negative and the next iteration
-				// to read at a negative index). Combined with the past-endBound check.
-				if (next < off || next > endBound)
-				{
-					return -1;
-				}
-				off = next;
-			}
-			else
-			{
-				off += 2;
-			}
-		}
-		return -1;
-	}
-
-	/**
-	 * Skip past an SOS segment's entropy-coded data, honoring byte-stuff (FF 00) and restart (FF D0..D7) markers.
-	 * Returns either the offset of the next real marker (eoiOffset = -1) or the offset just past the EOI if one is
-	 * encountered inside the entropy stream (nextMarkerOffset = -1). Caller checks eoiOffset to distinguish.
-	 */
-	private static ScanResult scanEntropyCodedData(byte[] file, int sosOffset, int endBound)
-	{
-		if (sosOffset + 3 >= endBound)
-		{
-			return new ScanResult(endBound, -1);
-		}
-		int sosLen = ((file[sosOffset + 2] & 0xFF) << 8) | (file[sosOffset + 3] & 0xFF);
-		int off = sosOffset + 2 + sosLen;
-		// Wrap-to-negative guard: sosLen up to 65535 + sosOffset near MAX_INT could overflow `off`. Treat
-		// overflow / past-EOF as "no recoverable scan" — same convention as the parent walker.
-		if (off < sosOffset || off > endBound)
-		{
-			return new ScanResult(endBound, -1);
-		}
-
-		while (off < endBound - 1)
-		{
-			if ((file[off] & 0xFF) != 0xFF)
-			{
-				off++;
-				continue;
-			}
-			int next = file[off + 1] & 0xFF;
-			if (next == JpegMarker.EOI)
-			{
-				return new ScanResult(-1, off + 2);
-			}
-			if (next == JpegMarker.STUFFING
-				|| (next >= JpegMarker.RST_FIRST && next <= JpegMarker.RST_LAST))
-			{
-				off += 2; // byte-stuffed or restart marker
-				continue;
-			}
-			break; // another marker segment — fall through to outer loop
-		}
-		return new ScanResult(off, -1);
-	}
-
-	/**
-	 * Outcome of scanning an SOS segment's entropy-coded data. Exactly one field is meaningful: nextMarkerOffset ≥
-	 * 0 with eoiOffset = -1 means "stopped at the next marker"; eoiOffset ≥ 0 with nextMarkerOffset = -1 means "hit
-	 * EOI, terminate the outer walk at this offset". Using a record (instead of the earlier sign-bit sentinel)
-	 * makes the two cases explicit.
-	 */
-	private record ScanResult(int nextMarkerOffset, int eoiOffset)
-	{
-	}
-
-	private static byte[] extractBetween(byte[] file, int primaryEnd, int endBound)
-	{
-		if (primaryEnd >= endBound || primaryEnd + 1 >= file.length)
+		// Gain map (when present) starts immediately after primary's EOI with its own SOI. Absence of FF D8
+		// here means there's no gain map — only primary plus possibly a SEFT trailer.
+		if (primaryEnd + 1 >= file.length
+			|| (file[primaryEnd] & 0xFF) != 0xFF || (file[primaryEnd + 1] & 0xFF) != 0xD8)
 		{
 			return null;
 		}
-		int gmLen = endBound - primaryEnd;
-		if (gmLen < 4)
+
+		// Walk the gain map's own marker chain forward to find ITS EOI. Cap the slice end at len-8 when
+		// the file carries a SEFT footer to keep the walker out of trailer bytes; without SEFT, the slice
+		// runs to file end.
+		//
+		// Walking forward is structurally sound where the previous backwards-FF-D9 scan from len-9 was not.
+		// SEFT data blocks contain arbitrary binary content — embedded thumbnails (themselves JPEGs ending
+		// in FF D9) and edit-history blobs — and a backwards scan can land on a stuffed FF D9 inside a
+		// thumbnail rather than the real gain-map EOI. Following the JPEG marker chain instead of
+		// pattern-matching on raw bytes stops at the first real EOI marker and ignores any byte-stuffed
+		// FF D9 within entropy data.
+		int sliceEnd = SeftExtractor.hasSeftFooter(file)
+			? file.length - SeftExtractor.FOOTER_SIZE
+			: file.length;
+		if (sliceEnd <= primaryEnd)
 		{
 			return null;
 		}
-		// Verify it starts with JPEG SOI
-		if ((file[primaryEnd] & 0xFF) != 0xFF || (file[primaryEnd + 1] & 0xFF) != 0xD8)
+		byte[] gainMapSlice = Arrays.copyOfRange(file, primaryEnd, sliceEnd);
+		int gmEoiInSlice = JpegMarkerWalker.findPrimaryEoi(gainMapSlice, gainMapSlice.length);
+		if (gmEoiInSlice < 0)
 		{
+			Log.w(TAG, "gain map between primary EOI " + primaryEnd + " and " + sliceEnd
+				+ " doesn't parse as a JPEG; treating as no-gain-map");
 			return null;
 		}
-		byte[] gainMap = new byte[gmLen];
-		System.arraycopy(file, primaryEnd, gainMap, 0, gmLen);
-		Log.d(TAG, "Extracted gain map: " + gmLen + " bytes after primary EOI");
+
+		byte[] gainMap = new byte[gmEoiInSlice];
+		System.arraycopy(file, primaryEnd, gainMap, 0, gmEoiInSlice);
+		Log.d(TAG, "Extracted gain map: " + gmEoiInSlice + " bytes after primary EOI");
 		return gainMap;
 	}
+
 }

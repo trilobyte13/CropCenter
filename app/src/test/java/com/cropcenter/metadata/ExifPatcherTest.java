@@ -18,7 +18,7 @@ import java.util.List;
  * tiffStart). Both bypass- the-guard regressions would corrupt the EXIF segment by writing orientation = 1 over
  * arbitrary bytes — the safest crash mode is a benign no-op, which is what the guards deliver.
  */
-public class ExifPatcherTest
+public final class ExifPatcherTest
 {
 	// Position of the TIFF header inside the EXIF segment payload, mirroring ExifPatcher.TIFF_HEADER_OFFSET (FF E1
 	// + 2-byte length + "Exif\0\0").

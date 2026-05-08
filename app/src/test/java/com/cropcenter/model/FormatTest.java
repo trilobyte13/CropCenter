@@ -11,7 +11,7 @@ import org.junit.Test;
  * extension/MIME pair, so the contract strings (".jpg", ".png", "image/jpeg", "image/png") are pinned here against the
  * external SAF / ContentResolver wire format.
  */
-public class FormatTest
+public final class FormatTest
 {
 	// ── extension / mimeType ──
 
@@ -113,5 +113,19 @@ public class FormatTest
 		// SAF display names sometimes include path-like prefixes. The endsWith check still works.
 		assertEquals(Format.JPEG, Format.fromExtension("/storage/emulated/0/DCIM/foo.jpg"));
 		assertEquals(Format.PNG, Format.fromExtension("primary:Pictures/screenshot.png"));
+	}
+
+	@Test
+	public void valuesContainsExactlyJpegAndPng()
+	{
+		// Exhaustiveness pin: Format is JPEG and PNG — adding a third value (e.g. WEBP) without updating
+		// CropExporter's switch dispatch reintroduces the silent-default-branch foot-gun the enum was
+		// created to prevent. This test fails on the cardinality OR on the membership, forcing a
+		// deliberate update everywhere a Format consumer dispatches.
+		Format[] vals = Format.values();
+		assertEquals("Adding a new Format requires updating CropExporter's dispatch and this test",
+			2, vals.length);
+		assertEquals(Format.JPEG, vals[0]);
+		assertEquals(Format.PNG, vals[1]);
 	}
 }

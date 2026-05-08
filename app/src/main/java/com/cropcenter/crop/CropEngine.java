@@ -85,7 +85,7 @@ public final class CropEngine
 		if (!state.isCropSizeDirty() && state.getCropW() > 0 && state.getCropH() > 0)
 		{
 			// Size locked — keep cropW / cropH, let setCenter clamp centerX / centerY into the rotated
-			// image bounds. No parity snap: cropImageX comes from getCropImageX's floor().
+			// image bounds. No parity snap: cropImageX comes from getCropImageXFloat's floor().
 			state.setCropSizeSilent(state.getCropW(), state.getCropH());
 			state.setCenter(centerX, centerY);
 			return;
@@ -100,9 +100,10 @@ public final class CropEngine
 		float cropW = cropSize[0];
 		float cropH = cropSize[1];
 
-		// Free-axis clamp runs BEFORE the rotation shrink so H / V / BOTH stay visibly distinct under rotation
-		// — see recomputeCrop_design-note.md. If the rotation shrink ran first, the shrunk crop fits at any
-		// mode's requested center, collapsing all modes to the same result.
+		// Free-axis clamp runs BEFORE the rotation shrink so H / V / BOTH stay visibly distinct under rotation.
+		// If the rotation shrink ran first, the shrunk crop fits at any mode's requested center, collapsing all
+		// modes to the same result — the user-visible behaviour is that "free X" / "free Y" / "free both" all
+		// produce identical crops, defeating the whole point of the mode toggle.
 		float[] clampedCenter = clampFreeAxes(centerX, centerY, cropW, cropH, imgW, imgH, lockedX, lockedY);
 		centerX = clampedCenter[0];
 		centerY = clampedCenter[1];
@@ -149,8 +150,10 @@ public final class CropEngine
 	 * @param imgW     source image width
 	 * @param imgH     source image height
 	 * @param rotation user-applied rotation in degrees
-	 * @return [midX, midY] in un-rotated image coords; for a single-point input the
-	 *         result is snapped to a pixel-half-integer in rotated space
+	 * @return [midX, midY] in ROTATED image space (each input point is forward-rotated around the image center
+	 *         and the AABB midpoint is taken there); callers consume this directly to match rotated selection
+	 *         framing in CropEngine.recomputeCrop and MainActivity.recenterOnSelection. For a single-point
+	 *         input the result is snapped to a pixel-half-integer.
 	 */
 	public static float[] rotatedSelectionMidpoint(List<SelectionPoint> points, int imgW, int imgH, float rotation)
 	{
@@ -285,7 +288,10 @@ public final class CropEngine
 			{
 				float loScale = 0.01f;           // min 1% to avoid degenerate 0-size crops
 				float hiScale = 1f;
-				for (int i = 0; i < 20; i++)
+				// 25 iterations — matches RotatedCropClamp.binarySearchAxis. Previously 20, which
+				// resolved to ~1ppm of the search range vs 25's ~30ppb. The drift produced visible
+				// jitter on thin crop slices at high zoom under continuous rotation drag.
+				for (int i = 0; i < 25; i++)
 				{
 					float midScale = (loScale + hiScale) / 2f;
 					float testCornerX = centerX + offset[0] * cropW * midScale;

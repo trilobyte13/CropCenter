@@ -24,7 +24,7 @@ import org.junit.Test;
  * The hasCenter + bitmap-dimension-match happy path can't be unit-tested without a real Bitmap (BitmapFactory returns
  * null under unitTests.returnDefaultValues=true), but every disable path AND the no-center happy path are covered.
  */
-public class ExportPipelineTest
+public final class ExportPipelineTest
 {
 	@Test
 	public void rejectsBypassWhenOutputIsPng()
@@ -56,7 +56,7 @@ public class ExportPipelineTest
 		CropState state = new CropState();
 		state.setSourceFormat(Format.JPEG);
 		state.setOriginalFileBytes(new byte[]{ (byte) 0xFF, (byte) 0xD8 });
-		AiMask mask = new AiMask(new boolean[]{ true }, 1, 1, 4);
+		AiMask mask = AiMask.of(new boolean[]{ true }, 1, 1, 4);
 		state.installGraft(new Graft(new byte[]{ 0x01 }, "test.jpg", mask));
 		assertFalse(ExportPipeline.canBypassEncode(state, false));
 	}

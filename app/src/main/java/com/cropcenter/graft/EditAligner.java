@@ -79,11 +79,32 @@ public final class EditAligner
 	 */
 	public static Result align(byte[] originalBytes, byte[] editBytes)
 	{
-		int[] origStored = decodeStoredDims(originalBytes);
-		int[] editStored = decodeStoredDims(editBytes);
-		if (origStored == null || editStored == null)
+		// Explicit SOI check up front. BitmapFactory accepts HEIC / WebP / PNG (depending on Android version),
+		// so a picker selection that bypasses the image/jpeg MIME filter would otherwise sail through the
+		// dimension probe and re-orient pass and only fail at GraftWriter with a generic "Edit is not a JPEG"
+		// IOException. Catching it here surfaces an actionable "Selected file is not a JPEG" message — telling
+		// the user what kind of file they need rather than the generic "Couldn't read JPEG dimensions" which
+		// they could mis-read as "the file is corrupt, retry".
+		if (editBytes == null || editBytes.length < 4
+			|| (editBytes[0] & 0xFF) != 0xFF || (editBytes[1] & 0xFF) != 0xD8)
 		{
-			return Result.error("Couldn't read JPEG dimensions");
+			return Result.error("Selected file is not a JPEG");
+		}
+		int[] origStored = decodeStoredDims(originalBytes);
+		if (origStored == null)
+		{
+			// Source bytes are something we previously loaded successfully — if dim probe fails now, the
+			// source was corrupted between load and graft (memory pressure, bg-write race). The user-facing
+			// "Source image" matches the spec's terminology for "the photo already loaded" vs "edit" for
+			// the just-picked file; saying "original" would be ambiguous (which one?).
+			return Result.error("Source image is corrupt — reload it");
+		}
+		int[] editStored = decodeStoredDims(editBytes);
+		if (editStored == null)
+		{
+			// Edit has a valid SOI (passed the check above) but BitmapFactory rejected it. The edit JPEG is
+			// structurally malformed past the marker — corrupt export from the editor.
+			return Result.error("Couldn't decode the edit — try exporting again");
 		}
 		int origOrient = BitmapUtils.readExifOrientation(originalBytes);
 		int editOrient = BitmapUtils.readExifOrientation(editBytes);
@@ -92,9 +113,10 @@ public final class EditAligner
 		int[] editDisplay = displayDims(editStored, editOrient);
 		if (origDisplay[0] != editDisplay[0] || origDisplay[1] != editDisplay[1])
 		{
-			return Result.error("Edit dimensions don't match: original "
-				+ origDisplay[0] + "x" + origDisplay[1]
-				+ ", edit " + editDisplay[0] + "x" + editDisplay[1]);
+			return Result.error("Edit dimensions don't match the source ("
+				+ "source " + origDisplay[0] + "x" + origDisplay[1]
+				+ ", edit " + editDisplay[0] + "x" + editDisplay[1]
+				+ ") — re-crop in the editor and re-export");
 		}
 
 		boolean perfectMatch = origOrient == editOrient && origStored[0] == editStored[0]
@@ -106,7 +128,9 @@ public final class EditAligner
 		byte[] reoriented = reorientEdit(editBytes, editOrient, origOrient);
 		if (reoriented == null)
 		{
-			return Result.error("Couldn't reorient edit to match original");
+			// reorientEdit returns null only when BitmapFactory.decodeByteArray rejects the bytes — same
+			// failure mode as the edit-decode-null branch above, so route the user to the same remediation.
+			return Result.error("Couldn't decode the edit during reorientation — try exporting again");
 		}
 		Log.d(TAG, "Reoriented edit (origOrient=" + origOrient + " editOrient=" + editOrient
 			+ ") from " + editStored[0] + "x" + editStored[1]
@@ -190,6 +214,15 @@ public final class EditAligner
 		{
 			return null;
 		}
+		// Bitmap.compress(JPEG, 100, ...) emits a baseline JPEG with NO APP markers — every edit-side EXIF /
+		// XMP / ICC segment that was present in editBytes is silently discarded. GraftWriter is designed to
+		// keep original's metadata wholesale (the graft's identity is the original photo, not the edit), so
+		// this is correct by design — but for users who made an edit that wrote new metadata (tone-curve →
+		// fresh ICC profile, descriptive XMP keywords from a Lightroom round-trip), the loss is invisible.
+		// Log so the loss is at least diagnosable in bug reports rather than silent.
+		Log.d(TAG, "reorientEdit re-encoding edit JPEG to match original's stored layout"
+			+ " (editOrient=" + editOrient + ", origOrient=" + origOrient + ");"
+			+ " any edit-side EXIF / XMP / ICC segments are not preserved");
 		Bitmap inDisplay = null;
 		Bitmap inOrigStored = null;
 		try

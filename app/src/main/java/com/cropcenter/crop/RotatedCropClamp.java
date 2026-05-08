@@ -15,6 +15,13 @@ package com.cropcenter.crop;
  */
 public final class RotatedCropClamp
 {
+	// Sign multipliers for the four corner offsets relative to crop center: TL, TR, BL, BR. Hoisted as static
+	// constants because cornersInside runs ~25 iterations per axis × 2 axes per binary search × ~50 calls per
+	// second during a fling-rotation drag — allocating two 4-element float arrays per call (the previous
+	// array-literal pattern) created hundreds of throwaway allocations per second on a hot path.
+	private static final float[] CORNER_SIGN_X = { -1f, 1f, -1f, 1f };
+	private static final float[] CORNER_SIGN_Y = { -1f, -1f, 1f, 1f };
+
 	private RotatedCropClamp() {}
 
 	/**
@@ -144,12 +151,10 @@ public final class RotatedCropClamp
 	 */
 	private static boolean cornersInside(float centerX, float centerY, CropFitContext ctx)
 	{
-		float[] cornerDx = { -ctx.halfWidth(), ctx.halfWidth(), -ctx.halfWidth(), ctx.halfWidth() };
-		float[] cornerDy = { -ctx.halfHeight(), -ctx.halfHeight(), ctx.halfHeight(), ctx.halfHeight() };
 		for (int i = 0; i < 4; i++)
 		{
-			double deltaX = centerX + cornerDx[i] - ctx.imageMidX();
-			double deltaY = centerY + cornerDy[i] - ctx.imageMidY();
+			double deltaX = centerX + CORNER_SIGN_X[i] * ctx.halfWidth() - ctx.imageMidX();
+			double deltaY = centerY + CORNER_SIGN_Y[i] * ctx.halfHeight() - ctx.imageMidY();
 			double unrotatedX = deltaX * ctx.cosR() - deltaY * ctx.sinR() + ctx.imageMidX();
 			double unrotatedY = deltaX * ctx.sinR() + deltaY * ctx.cosR() + ctx.imageMidY();
 			if (unrotatedX < -0.5 || unrotatedX > ctx.imgW() + 0.5

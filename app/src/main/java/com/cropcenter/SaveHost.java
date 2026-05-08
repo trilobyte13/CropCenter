@@ -1,5 +1,7 @@
 package com.cropcenter;
 
+import android.app.AlertDialog;
+
 import androidx.activity.result.ActivityResultLauncher;
 
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -26,6 +28,19 @@ interface SaveHost extends EditorHost
 	 * Hide the full-screen progress overlay. Safe to call from any thread.
 	 */
 	void hideProgress();
+
+	/**
+	 * Track an AlertDialog as the active state-mutating transient dialog and install an OnDismissListener that
+	 * clears the tracked reference when the dialog dismisses normally. Called by every dialog producer whose
+	 * widgets commit to CropState directly (SaveDialog format/grid choices, custom AR dimensions, precise
+	 * rotation value) and the Replace dialog (writes to the SAF target on Replace/Keep) so a Share/View intent
+	 * or graft apply that arrives mid-dialog can dismiss it via dismissTransientDialogs() before bg
+	 * state.reset() races the dialog's UI commits.
+	 *
+	 * @param newDialog dialog to track; passed through and returned for fluent chaining
+	 * @return same dialog, returned so callers can chain or assign in one line
+	 */
+	AlertDialog registerTransientDialog(AlertDialog newDialog);
 
 	/**
 	 * Toggle Save / Open button enabled state while a background task is running.

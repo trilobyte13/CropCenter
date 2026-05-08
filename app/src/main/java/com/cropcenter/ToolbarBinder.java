@@ -21,6 +21,7 @@ import com.cropcenter.model.CenterMode;
 import com.cropcenter.model.EditorMode;
 import com.cropcenter.util.DpToPx;
 import com.cropcenter.util.ThemeColors;
+import com.cropcenter.view.DialogStrings;
 
 import java.util.Locale;
 
@@ -44,6 +45,27 @@ final class ToolbarBinder
 	private final AutoRotateBinder autoRotate;
 	private final ToolbarHost host;
 	private final UiSync ui;
+	// AR spinner adapter, cached so applyAndResetSpinner can call notifyDataSetChanged after updating
+	// customArLabel — the closed-spinner view re-reads the (overridden) selected-position text from the
+	// adapter, and the dropdown's Custom row picks up the new label on next open.
+	private ArrayAdapter<String> arAdapter;
+	// Dynamic Custom row label. Defaults to "Custom" until the user applies a custom AR; then reads
+	// "Custom W:H" so the spinner head + dropdown reflect the active model state. The closed spinner
+	// shows this string whenever customArActive is true (instead of the AR_LABELS preset text); the
+	// Custom dropdown row at AR_LABELS.length - 1 always shows it. Codex round-16: without this dynamic
+	// reflection, the spinner could show e.g. "16:9" while the crop was actually using a custom 5:7.
+	private String customArLabel = "Custom";
+	// True when state holds a Custom (non-preset) AR. Set in applyAndResetSpinner; cleared whenever the
+	// user picks a preset row from the AR spinner. Drives the getView override that overrides the closed
+	// spinner's displayed text with customArLabel so the spinner head reflects the model rather than the
+	// previousArPosition reset.
+	private boolean customArActive;
+	// Suppression flag for the AR spinner's onItemSelected listener. After the Custom dialog applies a
+	// non-preset ratio, we reset the spinner to a non-Custom position so a future tap on Custom can reopen
+	// the dialog (Spinner suppresses no-op-position selections, so leaving it on Custom blocks reopen). The
+	// listener early-returns on this flag so the synthetic setSelection doesn't overwrite the just-applied
+	// custom AR with the previous position's preset. UI-thread-only, no synchronization needed.
+	private boolean suppressArListener;
 
 	ToolbarBinder(ToolbarHost host, UiSync ui)
 	{
@@ -64,6 +86,64 @@ final class ToolbarBinder
 		setupClearPointsButton();
 		setupRotation();
 		autoRotate.bind();
+	}
+
+	/**
+	 * Forward to AutoRotateBinder.cancelHorizonPaintMode — see that method for the full behaviour contract
+	 * (touch routing reset, Auto-button label / color reset) and the rationale.
+	 */
+	void cancelHorizonPaintMode()
+	{
+		autoRotate.cancelHorizonPaintMode();
+	}
+
+	private static int parseIntOr(String text, int def)
+	{
+		try
+		{
+			return Integer.parseInt(text.trim());
+		}
+		catch (NumberFormatException ignored)
+		{
+			return def;
+		}
+	}
+
+	private static TextView styleArLabel(TextView tv, int textSize, int padH, int padV)
+	{
+		tv.setTextSize(textSize);
+		tv.setTextColor(ThemeColors.TEXT);
+		tv.setPadding(padH, padV, padH, padV);
+		return tv;
+	}
+
+	/**
+	 * Apply the user's typed Custom AR values, update the spinner's dynamic Custom label + customArActive
+	 * flag (so the closed spinner head reads "Custom W:H" via the adapter's getView override), then
+	 * setSelection back to previousArPosition so a future Custom tap fires onItemSelected (Spinner
+	 * suppresses same-position re-selections, so leaving it on Custom blocks reopen). suppressArListener
+	 * gates the synthetic setSelection's listener fire so it doesn't overwrite the just-applied custom AR
+	 * with the previous preset. Extracted from the showCustomArDialog Apply runnable to keep the
+	 * positive-button lambda within CLAUDE.md's 3-line cap (the inline body grew to 6 statements after
+	 * round-16 added the customArLabel / customArActive / notifyDataSetChanged reflection).
+	 *
+	 * @param widthInput        custom-W EditText
+	 * @param heightInput       custom-H EditText
+	 * @param spinner           the AR spinner whose selection is reset
+	 * @param previousArPosition non-Custom spinner position to restore after Apply
+	 */
+	private void applyCustomArAndResetSpinner(EditText widthInput, EditText heightInput,
+		Spinner spinner, int previousArPosition)
+	{
+		applyCustomAspectRatio(widthInput, heightInput);
+		customArLabel = "Custom "
+			+ Math.max(1, parseIntOr(widthInput.getText().toString(), 16))
+			+ ":"
+			+ Math.max(1, parseIntOr(heightInput.getText().toString(), 9));
+		customArActive = true;
+		arAdapter.notifyDataSetChanged();
+		suppressArListener = true;
+		spinner.setSelection(previousArPosition);
 	}
 
 	/**
@@ -272,25 +352,37 @@ final class ToolbarBinder
 		int padH = DpToPx.toPx(6, density);
 		int padV = DpToPx.toPx(4, density);
 
-		// Custom adapter with compact item views (tight padding, 12sp text)
-		ArrayAdapter<String> adapter = new ArrayAdapter<>(host.getActivity(),
+		// Custom adapter with compact item views (tight padding, 12sp text). Two getView overrides
+		// reflect the active model state in the spinner UI: the closed-spinner head substitutes
+		// customArLabel for the preset text whenever a custom AR is active (so the head reads
+		// "Custom 5:7" instead of the previousArPosition preset), and the Custom dropdown row always
+		// reads customArLabel (so the user can see what's currently committed before re-tapping Custom).
+		arAdapter = new ArrayAdapter<>(host.getActivity(),
 			android.R.layout.simple_spinner_item, AR_LABELS)
 		{
 			@Override
 			public View getView(int position, View convertView, ViewGroup parent)
 			{
-				return styleArLabel((TextView) super.getView(position, convertView, parent),
-					12, padH, padV);
+				TextView tv = (TextView) super.getView(position, convertView, parent);
+				if (customArActive)
+				{
+					tv.setText(customArLabel);
+				}
+				return styleArLabel(tv, 12, padH, padV);
 			}
 
 			@Override
 			public View getDropDownView(int position, View convertView, ViewGroup parent)
 			{
-				return styleArLabel((TextView) super.getDropDownView(position, convertView, parent),
-					13, padH * 2, padV * 2);
+				TextView tv = (TextView) super.getDropDownView(position, convertView, parent);
+				if (position == AR_LABELS.length - 1)
+				{
+					tv.setText(customArLabel);
+				}
+				return styleArLabel(tv, 13, padH * 2, padV * 2);
 			}
 		};
-		spinner.setAdapter(adapter);
+		spinner.setAdapter(arAdapter);
 		spinner.setSelection(0);
 
 		// Size the spinner to exactly fit the widest label + arrow.
@@ -311,11 +403,34 @@ final class ToolbarBinder
 		}
 		spinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener()
 		{
+			// Last non-Custom position the user picked. When they tap Custom and then cancel the dialog,
+			// the spinner is already visually on Custom but the model is unchanged — without restoring, a
+			// subsequent tap on Custom doesn't fire onItemSelected (Spinner suppresses no-op selections),
+			// so the dialog can't reopen. Capturing the prior position lets cancel revert to it.
+			private int lastNonCustomPos = 0;
+
 			@Override
 			public void onItemSelected(AdapterView<?> parent, View view, int pos, long id)
 			{
+				if (suppressArListener)
+				{
+					// Synthetic re-selection from Custom dialog Apply. State already holds the
+					// custom AR; setSelection moved spinner off Custom so a future tap on Custom
+					// reopens the dialog. Don't overwrite with the synthetic position's preset.
+					suppressArListener = false;
+					return;
+				}
 				if (pos < AR_VALUES.length && AR_VALUES[pos] != null)
 				{
+					lastNonCustomPos = pos;
+					// Picking a preset clears customArActive so the closed-spinner head stops
+					// substituting customArLabel — the head should now display the preset that
+					// was just committed.
+					if (customArActive)
+					{
+						customArActive = false;
+						arAdapter.notifyDataSetChanged();
+					}
 					host.getState().setAspectRatio(AR_VALUES[pos]);
 					if (!host.getState().getSelectionPoints().isEmpty())
 					{
@@ -328,7 +443,7 @@ final class ToolbarBinder
 				}
 				else
 				{
-					showCustomArDialog();
+					showCustomArDialog(spinner, lastNonCustomPos);
 				}
 			}
 
@@ -336,6 +451,7 @@ final class ToolbarBinder
 			public void onNothingSelected(AdapterView<?> parent) {}
 		});
 	}
+
 	private void setupCenterModeButtons()
 	{
 		host.findViewById(R.id.btnLockBoth).setOnClickListener(this::onLockButtonClick);
@@ -350,15 +466,18 @@ final class ToolbarBinder
 		((CheckBox) host.findViewById(R.id.chkLockCenter))
 			.setOnCheckedChangeListener(this::onLockCenterCheckedChanged);
 	}
+
 	private void setupClearPointsButton()
 	{
 		host.findViewById(R.id.btnClearPoints).setOnClickListener(this::onClearPointsClick);
 	}
+
 	private void setupModeButtons()
 	{
 		host.findViewById(R.id.btnModeMove).setOnClickListener(this::onModeButtonClick);
 		host.findViewById(R.id.btnModeSelect).setOnClickListener(this::onModeButtonClick);
 	}
+
 	private void setupRotation()
 	{
 		host.getRotationRuler().setOnRotationChangedListener(this::onRotationChanged);
@@ -373,6 +492,7 @@ final class ToolbarBinder
 		host.findViewById(R.id.btnRotZoomIn).setOnClickListener(view ->
 			host.getRotationRuler().zoomBy(2f));
 	}
+
 	private void setupUndoRedo()
 	{
 		host.findViewById(R.id.btnUndo).setOnClickListener(view -> host.getEditorView().undo());
@@ -384,18 +504,19 @@ final class ToolbarBinder
 	 * and route through applyCustomAspectRatio which clamps each to ≥ 1 and triggers a recompute. Triggered by
 	 * selecting the "Custom" sentinel in the AR spinner.
 	 */
-	private void showCustomArDialog()
+	private void showCustomArDialog(Spinner spinner, int previousArPosition)
 	{
 		float density = host.getActivity().getResources().getDisplayMetrics().density;
 
 		LinearLayout layout = new LinearLayout(host.getActivity());
 		layout.setOrientation(LinearLayout.HORIZONTAL);
 		layout.setGravity(Gravity.CENTER);
-		layout.setPadding(DpToPx.toPx(20, density), DpToPx.toPx(16, density), DpToPx.toPx(20, density), DpToPx.toPx(8, density));
+		int padH = DpToPx.toPx(20, density);
+		layout.setPadding(padH, DpToPx.toPx(16, density), padH, DpToPx.toPx(8, density));
 
+		int editWidth = DpToPx.toPx(60, density);
 		EditText editW = numberInput("16");
-		layout.addView(editW,
-			new LinearLayout.LayoutParams(DpToPx.toPx(60, density), LinearLayout.LayoutParams.WRAP_CONTENT));
+		layout.addView(editW, new LinearLayout.LayoutParams(editWidth, LinearLayout.LayoutParams.WRAP_CONTENT));
 
 		TextView separator = new TextView(host.getActivity());
 		separator.setText("  :  ");
@@ -403,16 +524,37 @@ final class ToolbarBinder
 		layout.addView(separator);
 
 		EditText editH = numberInput("9");
-		layout.addView(editH,
-			new LinearLayout.LayoutParams(DpToPx.toPx(60, density), LinearLayout.LayoutParams.WRAP_CONTENT));
+		layout.addView(editH, new LinearLayout.LayoutParams(editWidth, LinearLayout.LayoutParams.WRAP_CONTENT));
 
-		new AlertDialog.Builder(host.getActivity())
+		// Cancel and dismiss (X / back-press / forced dismissTransientDialogs) all restore the spinner
+		// to the prior non-Custom position so the visual selection matches the spinner's affordance
+		// (back to a tap-to-select spot). suppressArListener gates the synthetic onItemSelected fire so
+		// it does NOT commit AR_VALUES[previousArPosition] over state.aspectRatio. Without the suppress,
+		// two leaks happen: (1) re-edit case — user has Custom AR active, opens Custom dialog to edit,
+		// cancels — restore would commit a preset over the preserved Custom AR, silently replacing the
+		// user's saved Custom W:H. (2) cross-load case — forced cancel from inbound load posts the
+		// setSelection async, by which time state.reset has run and image B is loaded; the post-async
+		// onItemSelected would commit a stale preset onto image B's preserved AR. Suppress closes both
+		// (Codex round-18 F18-4).
+		Runnable restore = () ->
+		{
+			suppressArListener = true;
+			spinner.setSelection(previousArPosition);
+		};
+		// Register the dialog with the host's transient-dialog tracker so a Share/View intent or graft
+		// apply that arrives mid-dialog dismisses it before bg state.reset(). Without this, applying the
+		// dialog's Custom values after a load would set state.aspectRatio + customArLabel for image A's
+		// typed values onto image B's spinner (R17-4).
+		host.registerTransientDialog(new AlertDialog.Builder(host.getActivity())
 			.setTitle("Custom Aspect Ratio")
 			.setView(layout)
-			.setPositiveButton("Apply", (dialog, which) -> applyCustomAspectRatio(editW, editH))
-			.setNegativeButton("Cancel", null)
-			.show();
+			.setPositiveButton(DialogStrings.APPLY, (dialog, which) ->
+				applyCustomArAndResetSpinner(editW, editH, spinner, previousArPosition))
+			.setNegativeButton(DialogStrings.CANCEL, (dialog, which) -> restore.run())
+			.setOnCancelListener(dialog -> restore.run())
+			.show());
 	}
+
 	/**
 	 * Dialog for entering an exact rotation value.
 	 */
@@ -433,31 +575,18 @@ final class ToolbarBinder
 		input.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL
 			| InputType.TYPE_NUMBER_FLAG_SIGNED);
 		input.setSingleLine(true);
-		input.setPadding(DpToPx.toPx(12, density), DpToPx.toPx(10, density), DpToPx.toPx(12, density), DpToPx.toPx(10, density));
+		int padHor = DpToPx.toPx(12, density);
+		int padVer = DpToPx.toPx(10, density);
+		input.setPadding(padHor, padVer, padHor, padVer);
 
-		new AlertDialog.Builder(host.getActivity())
+		// Register with the host's transient-dialog tracker so a Share/View intent or graft apply
+		// dismisses this dialog before bg state.reset() \u2014 applyPreciseRotation otherwise commits image
+		// A's typed degrees onto image B's just-reset 0\u00B0 (R17-2).
+		host.registerTransientDialog(new AlertDialog.Builder(host.getActivity())
 			.setTitle("Enter Rotation (\u00B0)")
 			.setView(input)
-			.setPositiveButton("Apply", (dialog, which) -> applyPreciseRotation(input))
-			.setNegativeButton("Cancel", null)
-			.show();
-	}
-	private static int parseIntOr(String text, int def)
-	{
-		try
-		{
-			return Integer.parseInt(text.trim());
-		}
-		catch (NumberFormatException ignored)
-		{
-			return def;
-		}
-	}
-	private static TextView styleArLabel(TextView tv, int textSize, int padH, int padV)
-	{
-		tv.setTextSize(textSize);
-		tv.setTextColor(ThemeColors.TEXT);
-		tv.setPadding(padH, padV, padH, padV);
-		return tv;
+			.setPositiveButton(DialogStrings.APPLY, (dialog, which) -> applyPreciseRotation(input))
+			.setNegativeButton(DialogStrings.CANCEL, null)
+			.show());
 	}
 }

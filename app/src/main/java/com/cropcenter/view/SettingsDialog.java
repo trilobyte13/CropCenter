@@ -28,19 +28,45 @@ import com.cropcenter.util.ThemeColors;
  * All mutations flow through CropState.updateGridConfig so each user action fires the state listener exactly once —
  * callers don't need to pass an invalidate callback.
  */
-public class SettingsDialog
+public final class SettingsDialog
 {
+	// Active color picker, tracked across all colorRow swatches so a forced parent cancellation (load
+	// arrived) cancels the open picker too, and a user picking a new swatch dismisses the prior picker
+	// before opening a new one. UI-thread-only — SettingsDialog runs on the UI thread, all colorRow /
+	// picker interactions happen there, no synchronisation needed. Cleared by the new picker's
+	// OnDismissListener so a normal user-OK / Cancel doesn't strand the reference. Codex round-17 F2.
+	private static AlertDialog activePicker;
+
 	/**
 	 * Build and show the settings dialog. Card-style layout: Grid (cols/rows + line color/width), Pixel Grid
-	 * (toggle + color), Selection &amp; Paint (shared color), and a Build info card. Mutates state in place via
-	 * updateGridConfig as the user toggles. Cancel does nothing; OK commits the dimension EditText values that
-	 * weren't already committed via preset chip taps.
+	 * (toggle + color), Selection & Paint (shared color), and a Build info card. Toggles and color-picker
+	 * selections commit to state via updateGridConfig immediately as the user interacts; the Cols / Rows
+	 * EditText values are deferred to the "Done" button (the dialog has no Cancel button — every other
+	 * interaction is already committed, so dismissing without "Done" only forfeits the typed-but-not-committed
+	 * dimension inputs).
+	 *
+	 * Returns the AlertDialog so the caller can track it for forced dismissal — the SettingsDialog mutates
+	 * state.gridConfig on the UI thread, and a Share/View intent that arrives mid-dialog runs state.reset()
+	 * on bg, racing the user's in-dialog commits. MainActivity.showSettingsDialog stores the returned
+	 * dialog and dismisses it from ImageLoadController.load's UI-thread entry before any bg work begins
+	 * (Codex round-16 F2).
+	 *
+	 * The OnCancelListener also cancels any open ColorPickerDialog (Codex round-17 F2): the picker is a
+	 * separate AlertDialog that mutates state.gridConfig through its own OK button, so without forced
+	 * cancellation a stale picker outliving SettingsDialog could keep applying colors to the new image's
+	 * state. The Done path leaves the picker alone — user-initiated parent dismissal isn't a state-leak
+	 * race, just a UX choice.
 	 *
 	 * @param ctx   Activity context for inflation
 	 * @param state CropState whose gridConfig is mutated as the user interacts
+	 * @return the shown AlertDialog (caller tracks it for cross-load dismissal)
 	 */
-	public static void show(Context ctx, CropState state)
+	public static AlertDialog show(Context ctx, CropState state)
 	{
+		// Reset the cross-dialog tracker so a previous SettingsDialog instance's stale picker reference
+		// can't survive into this new one. The previous instance's OnCancelListener / picker dismiss
+		// listener should already have cleared it on dismissal, but reset here defensively.
+		activePicker = null;
 		float density = ctx.getResources().getDisplayMetrics().density;
 		int dp4 = DpToPx.toPx(4, density);
 		int dp8 = DpToPx.toPx(8, density);
@@ -62,30 +88,22 @@ public class SettingsDialog
 
 		Runnable applyDimensions = () -> applyDimensionInputs(state, dimensionInputs[0], dimensionInputs[1]);
 
-		new AlertDialog.Builder(ctx)
+		return new AlertDialog.Builder(ctx)
 			.setTitle("Settings")
 			.setView(scroll)
 			.setPositiveButton("Done", (dialog, which) -> applyDimensions.run())
+			.setOnCancelListener(dialog ->
+			{
+				// Forced cancel (load arrived) / back-press / outside-touch: cancel any open picker so
+				// its OK listener can't mutate gridConfig after the parent is gone (Codex round-17 F2).
+				AlertDialog picker = activePicker;
+				activePicker = null;
+				if (picker != null && picker.isShowing())
+				{
+					picker.cancel();
+				}
+			})
 			.show();
-	}
-
-	/**
-	 * Commit a freshly-picked color to the swatch + tracked-state box and notify the caller's listener. Extracted
-	 * from colorRow's inner ColorPickerDialog callback to keep the lambda body within CLAUDE.md's 3-line cap.
-	 *
-	 * @param color    new ARGB color
-	 * @param tracked  1-element box holding the current color (mutated)
-	 * @param swatchBg drawable backing the swatch view (color updated in place)
-	 * @param swatch   swatch view to invalidate so the new color renders
-	 * @param onPick   caller-supplied listener invoked with the new color
-	 */
-	private static void applyPickedColor(int color, int[] tracked, GradientDrawable swatchBg,
-		View swatch, ColorPickerDialog.OnColorSelectedListener onPick)
-	{
-		tracked[0] = color;
-		swatchBg.setColor(color);
-		swatch.invalidate();
-		onPick.onColorSelected(color);
 	}
 
 	/**
@@ -103,6 +121,24 @@ public class SettingsDialog
 		catch (NumberFormatException ignored)
 		{
 		}
+	}
+
+	/**
+	 * Commit a freshly-picked color to the swatch + tracked-state box and notify the caller's listener.
+	 *
+	 * @param color    new ARGB color
+	 * @param tracked  1-element box holding the current color (mutated)
+	 * @param swatchBg drawable backing the swatch view (color updated in place)
+	 * @param swatch   swatch view to invalidate so the new color renders
+	 * @param onPick   caller-supplied listener invoked with the new color
+	 */
+	private static void applyPickedColor(int color, int[] tracked, GradientDrawable swatchBg,
+		View swatch, ColorPickerDialog.OnColorSelectedListener onPick)
+	{
+		tracked[0] = color;
+		swatchBg.setColor(color);
+		swatch.invalidate();
+		onPick.onColorSelected(color);
 	}
 
 	/**
@@ -152,6 +188,25 @@ public class SettingsDialog
 			state.updateGridConfig(g -> g.withColor(color))), DialogCards.topMargin(dp12));
 
 		card.addView(buildWidthRow(ctx, state, cfg, density), DialogCards.topMargin(dp8));
+		return card;
+	}
+
+	/**
+	 * Build the "Build" info card — shows the BUILD_TIME constant from BuildConfig so testers can verify which
+	 * build is running without Logcat.
+	 */
+	private static LinearLayout buildInfoCard(Context ctx, float density)
+	{
+		int dp4 = DpToPx.toPx(4, density);
+		LinearLayout card = DialogCards.newCard(ctx, density);
+		DialogCards.addCardTitle(card, "Build");
+
+		TextView buildTime = new TextView(ctx);
+		buildTime.setText("Version: " + BuildConfig.BUILD_TIME);
+		buildTime.setTextSize(11);
+		buildTime.setTextColor(ThemeColors.SUBTEXT0);
+		buildTime.setTypeface(Typeface.MONOSPACE);
+		card.addView(buildTime, DialogCards.topMargin(dp4));
 		return card;
 	}
 
@@ -241,25 +296,6 @@ public class SettingsDialog
 	}
 
 	/**
-	 * Build the "Build" info card — shows the BUILD_TIME constant from BuildConfig so testers can verify which
-	 * build is running without Logcat.
-	 */
-	private static LinearLayout buildInfoCard(Context ctx, float density)
-	{
-		int dp4 = DpToPx.toPx(4, density);
-		LinearLayout card = DialogCards.newCard(ctx, density);
-		DialogCards.addCardTitle(card, "Build");
-
-		TextView buildTime = new TextView(ctx);
-		buildTime.setText("Version: " + BuildConfig.BUILD_TIME);
-		buildTime.setTextSize(11);
-		buildTime.setTextColor(ThemeColors.SUBTEXT0);
-		buildTime.setTypeface(Typeface.MONOSPACE);
-		card.addView(buildTime, DialogCards.topMargin(dp4));
-		return card;
-	}
-
-	/**
 	 * Build the "Width" seek-bar row — user drags to pick a grid stroke width (1-20 image pixels). The zero
 	 * position clamps up to 1 so the grid never invisible.
 	 */
@@ -321,7 +357,7 @@ public class SettingsDialog
 		btn.setGravity(Gravity.CENTER);
 		GradientDrawable bg = new GradientDrawable();
 		bg.setColor(ThemeColors.SURFACE1);
-		bg.setCornerRadius(4 * density);
+		bg.setCornerRadius(DpToPx.toPx(4, density));
 		btn.setBackground(bg);
 		btn.setPadding(0, DpToPx.toPx(6, density), 0, DpToPx.toPx(6, density));
 		btn.setSingleLine(true);
@@ -354,7 +390,7 @@ public class SettingsDialog
 		View swatch = new View(ctx);
 		GradientDrawable swatchBg = new GradientDrawable();
 		swatchBg.setColor(currentColor);
-		swatchBg.setCornerRadius(4 * density);
+		swatchBg.setCornerRadius(DpToPx.toPx(4, density));
 		swatchBg.setStroke(1, ThemeColors.SURFACE1);
 		swatch.setBackground(swatchBg);
 		row.addView(swatch, new LinearLayout.LayoutParams(swatchSize, swatchSize));
@@ -364,7 +400,9 @@ public class SettingsDialog
 		btn.setText("Edit");
 		btn.setTextSize(12);
 		btn.setTextColor(ThemeColors.MAUVE);
-		btn.setPadding(DpToPx.toPx(10, density), DpToPx.toPx(6, density), DpToPx.toPx(10, density), DpToPx.toPx(6, density));
+		int btnPadHor = DpToPx.toPx(10, density);
+		int btnPadVer = DpToPx.toPx(6, density);
+		btn.setPadding(btnPadHor, btnPadVer, btnPadHor, btnPadVer);
 		btn.setGravity(Gravity.CENTER);
 		LinearLayout.LayoutParams editBtnLayoutParams = new LinearLayout.LayoutParams(
 			LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
@@ -372,8 +410,7 @@ public class SettingsDialog
 		row.addView(btn, editBtnLayoutParams);
 
 		View.OnClickListener openPicker = view ->
-				ColorPickerDialog.show(ctx, tracked[0], palette,
-					color -> applyPickedColor(color, tracked, swatchBg, swatch, onPick));
+			openColorPicker(ctx, tracked, swatchBg, swatch, palette, onPick);
 		btn.setOnClickListener(openPicker);
 		swatch.setOnClickListener(openPicker);
 		return row;
@@ -390,11 +427,45 @@ public class SettingsDialog
 		edit.setTextColor(ThemeColors.TEXT);
 		GradientDrawable bg = new GradientDrawable();
 		bg.setColor(ThemeColors.SURFACE1);
-		bg.setCornerRadius(4 * density);
+		bg.setCornerRadius(DpToPx.toPx(4, density));
 		edit.setBackground(bg);
 		int pad = DpToPx.toPx(4, density);
 		edit.setPadding(pad, pad, pad, pad);
 		return edit;
+	}
+
+	/**
+	 * Open a ColorPickerDialog for one of the swatch rows. Extracted from colorRow's openPicker click
+	 * listener to keep the lambda body within CLAUDE.md's 3-line cap (Codex round-18 R18-2). Tracks the
+	 * fresh picker as the active one so SettingsDialog's OnCancelListener can cancel it on forced
+	 * parent dismissal, and dismisses any prior picker first so rapid swatch taps don't stack two
+	 * pickers (the deeper one would still fire its OK listener and mutate gridConfig).
+	 *
+	 * @param ctx       Activity context for inflation
+	 * @param tracked   1-element int array holding the row's currently-tracked color (ARGB)
+	 * @param swatchBg  the row's swatch background drawable, repainted by applyPickedColor
+	 * @param swatch    the row's swatch view (background re-set by applyPickedColor)
+	 * @param palette   PALETTE_OPAQUE or PALETTE_TRANSLUCENT
+	 * @param onPick    state-update callback fired by applyPickedColor after the picker confirms
+	 */
+	private static void openColorPicker(Context ctx, int[] tracked, GradientDrawable swatchBg,
+		View swatch, int[] palette, ColorPickerDialog.OnColorSelectedListener onPick)
+	{
+		AlertDialog prev = activePicker;
+		if (prev != null && prev.isShowing())
+		{
+			prev.dismiss();
+		}
+		AlertDialog picker = ColorPickerDialog.show(ctx, tracked[0], palette,
+			color -> applyPickedColor(color, tracked, swatchBg, swatch, onPick));
+		activePicker = picker;
+		picker.setOnDismissListener(dialog ->
+		{
+			if (activePicker == dialog)
+			{
+				activePicker = null;
+			}
+		});
 	}
 
 	private static LinearLayout row(Context ctx)
@@ -418,9 +489,11 @@ public class SettingsDialog
 		tv.setMinWidth(DpToPx.toPx(32, density));
 		GradientDrawable bg = new GradientDrawable();
 		bg.setColor(ThemeColors.SURFACE1);
-		bg.setCornerRadius(4 * density);
+		bg.setCornerRadius(DpToPx.toPx(4, density));
 		tv.setBackground(bg);
-		tv.setPadding(DpToPx.toPx(6, density), DpToPx.toPx(3, density), DpToPx.toPx(6, density), DpToPx.toPx(3, density));
+		int chipPadHor = DpToPx.toPx(6, density);
+		int chipPadVer = DpToPx.toPx(3, density);
+		tv.setPadding(chipPadHor, chipPadVer, chipPadHor, chipPadVer);
 		return tv;
 	}
 }

@@ -17,7 +17,7 @@ import org.junit.Test;
  * together cover the core "what stored layout should the edit end up in" logic that motivates the realignment in the
  * first place.
  */
-public class EditAlignerTest
+public final class EditAlignerTest
 {
 	@Test
 	public void resultOkBuildsSuccessResult()
@@ -37,16 +37,67 @@ public class EditAlignerTest
 	}
 
 	@Test
-	public void alignReturnsErrorWhenDecodeFails()
+	public void alignReturnsErrorWhenOriginalDecodeFails()
 	{
 		// Under unitTests.returnDefaultValues=true, BitmapFactory.decodeByteArray returns null and never sets
-		// outWidth/outHeight, so decodeStoredDims sees 0×0 and returns null. align() should produce the
-		// documented error string.
+		// outWidth/outHeight, so decodeStoredDims sees 0×0 and returns null on the source. The error message
+		// must point at the source ("reload") not the edit, since the source was loaded successfully earlier
+		// and only became un-decodable later (memory pressure, race).
 		byte[] notRealJpeg = { (byte) 0xFF, (byte) 0xD8, 0x00, 0x00 };
 		EditAligner.Result result = EditAligner.align(notRealJpeg, notRealJpeg);
 		assertNotNull(result.errorMessage());
-		assertEquals("Couldn't read JPEG dimensions", result.errorMessage());
+		assertEquals("Source image is corrupt — reload it", result.errorMessage());
 		assertNull(result.alignedBytes());
+	}
+
+	@Test
+	public void alignChecksSourceDecodeBeforeEditDecode()
+	{
+		// Pin the source-then-edit probe ordering with DIFFERENTIATING fixtures so a refactor that
+		// swaps the two probes silently shifts error attribution. Both bytes pass the SOI gate; both
+		// would fail decodeStoredDims under unitTests.returnDefaultValues=true. The "Source image is
+		// corrupt" message must fire FIRST, before any "Couldn't decode the edit" check runs. Without
+		// distinct fixtures, the existing test (alignReturnsErrorWhenOriginalDecodeFails) coincidentally
+		// passes both source AND edit as the same array — pinning the source-first ordering by
+		// happenstance rather than by design.
+		byte[] originalSoi = { (byte) 0xFF, (byte) 0xD8, 0x11, 0x22 };
+		byte[] editSoi = { (byte) 0xFF, (byte) 0xD8, 0x33, 0x44 };
+		EditAligner.Result result = EditAligner.align(originalSoi, editSoi);
+		assertEquals("Source image is corrupt — reload it", result.errorMessage());
+	}
+
+	@Test
+	public void alignRejectsNonJpegByteStreamAtSoiCheck()
+	{
+		// REGRESSION: a HEIC / WebP / PNG byte stream that bypasses the picker's image/jpeg MIME filter would
+		// previously sail through decodeStoredDims (BitmapFactory accepts those formats) and only fail at
+		// GraftWriter with a generic "Edit is not a JPEG" IOException. The explicit SOI gate at the top of
+		// align() catches it earlier with an actionable "Selected file is not a JPEG" message — telling the
+		// user what kind of file they need rather than a corrupt-file blame.
+		byte[] heicMagic = { 0x00, 0x00, 0x00, 0x20, 'f', 't', 'y', 'p', 'h', 'e', 'i', 'c' };
+		byte[] originalSoi = { (byte) 0xFF, (byte) 0xD8, 0x00, 0x00 };
+		EditAligner.Result result = EditAligner.align(originalSoi, heicMagic);
+		assertEquals("Selected file is not a JPEG", result.errorMessage());
+		assertNull(result.alignedBytes());
+	}
+
+	@Test
+	public void alignRejectsTooShortEditAtSoiCheck()
+	{
+		// 0-3 byte input can't carry SOI — the gate handles it without an AIOOBE. Same SOI-mismatch error
+		// path as the non-JPEG byte stream case.
+		byte[] tooShort = { (byte) 0xFF, (byte) 0xD8, 0x00 };
+		byte[] originalSoi = { (byte) 0xFF, (byte) 0xD8, 0x00, 0x00 };
+		EditAligner.Result result = EditAligner.align(originalSoi, tooShort);
+		assertEquals("Selected file is not a JPEG", result.errorMessage());
+	}
+
+	@Test
+	public void alignRejectsNullEditAtSoiCheck()
+	{
+		byte[] originalSoi = { (byte) 0xFF, (byte) 0xD8, 0x00, 0x00 };
+		EditAligner.Result result = EditAligner.align(originalSoi, null);
+		assertEquals("Selected file is not a JPEG", result.errorMessage());
 	}
 
 	@Test

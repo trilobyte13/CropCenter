@@ -11,6 +11,16 @@ import android.graphics.Bitmap;
 interface ImageLoadHost extends SaveHost
 {
 	/**
+	 * Dismiss any open state-mutating dialog (currently only SettingsDialog) before a load begins. Called by
+	 * ImageLoadController on the UI thread immediately before busy.compareAndSet so an already-open
+	 * SettingsDialog can't keep committing state.gridConfig writes against a bg state.reset() — without this
+	 * forced dismissal, an open SettingsDialog at the moment a Share/View intent fires races the reset's
+	 * gridConfig clear with the user's still-active color / width / preset interactions (Codex round-16 F2).
+	 * No-op when no transient dialog is open.
+	 */
+	void dismissTransientDialogs();
+
+	/**
 	 * Install a freshly-loaded bitmap on the UI thread. Called from ImageLoadController's runOnUiThread block once
 	 * decode + metadata extraction finished on the bg thread. Implementer is expected to: reset toolbar checkboxes
 	 * (chkPan, chkLockCenter), apply lock mode, refresh ui highlights, write setSourceImage on CropState, populate

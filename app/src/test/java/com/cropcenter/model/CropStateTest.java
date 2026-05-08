@@ -19,7 +19,7 @@ import java.util.Collections;
  * infinity sanitization, ±180° clamp, and the sub-epsilon snap-to-zero that's the chokepoint for every rotation entry
  * point in the app. A bug in any of these would let a malformed input poison the rotation pipeline.
  */
-public class CropStateTest
+public final class CropStateTest
 {
 	private static final float EPS = BitmapUtils.ROTATION_EPSILON;
 
@@ -142,7 +142,7 @@ public class CropStateTest
 		// the "no fill detected" branch which intentionally doesn't install the mask.
 		boolean[] maskBits = new boolean[100];
 		maskBits[42] = true;
-		AiMask mask = new AiMask(maskBits, 10, 10, 1);
+		AiMask mask = AiMask.of(maskBits, 10, 10, 1);
 		Graft graft = new Graft(new byte[] { 0x10, 0x20 }, "edited.jpg", mask);
 		state.installGraft(graft);
 		assertTrue("graftApplied must be set", state.isGraftApplied());
@@ -260,7 +260,8 @@ public class CropStateTest
 		// Documented footgun-prevention: bake-grid is per-save; the colors/cols/rows are user prefs that should
 		// bleed across loads. Verify both halves of the rule.
 		CropState state = new CropState();
-		state.updateGridConfig(g -> g.withIncludeInExport(true).withColumns(7).withRows(9).withColor(0xFFFF0000));
+		state.updateGridConfig(g ->
+			g.withIncludeInExport(true).withColumns(7).withRows(9).withColor(0xFFFF0000));
 		state.reset();
 		assertFalse("includeInExport must be cleared", state.getGridConfig().includeInExport());
 		assertEquals("columns must be preserved", 7, state.getGridConfig().columns());
@@ -293,7 +294,7 @@ public class CropStateTest
 		// the "no fill detected" branch which intentionally doesn't install the mask.
 		boolean[] maskBits = new boolean[100];
 		maskBits[42] = true;
-		AiMask mask = new AiMask(maskBits, 10, 10, 1);
+		AiMask mask = AiMask.of(maskBits, 10, 10, 1);
 		state.installGraft(new Graft(new byte[] { 0x10 }, "edited.jpg", mask));
 		assertTrue(state.isGraftApplied());
 		assertNotNull(state.getAiMask());

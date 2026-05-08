@@ -25,22 +25,6 @@ public enum Format
 	}
 
 	/**
-	 * @return file extension including the leading dot, e.g. ".jpg"
-	 */
-	public String extension()
-	{
-		return extension;
-	}
-
-	/**
-	 * @return canonical MIME type, e.g. "image/jpeg"
-	 */
-	public String mimeType()
-	{
-		return mimeType;
-	}
-
-	/**
 	 * Map a filename's extension to a Format constant. Accepts the canonical extension (.jpg / .png) plus the
 	 * common .jpeg alias. Unknown extensions return null so callers can keep their existing
 	 * "leave-format-unchanged" semantics.
@@ -64,5 +48,21 @@ public enum Format
 			return JPEG;
 		}
 		return null;
+	}
+
+	/**
+	 * @return file extension including the leading dot, e.g. ".jpg"
+	 */
+	public String extension()
+	{
+		return extension;
+	}
+
+	/**
+	 * @return canonical MIME type, e.g. "image/jpeg"
+	 */
+	public String mimeType()
+	{
+		return mimeType;
 	}
 }

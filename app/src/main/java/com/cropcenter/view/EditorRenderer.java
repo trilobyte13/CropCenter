@@ -9,6 +9,7 @@ import android.graphics.Path;
 import android.view.View;
 
 import com.cropcenter.model.CropState;
+import com.cropcenter.model.GridConfig;
 import com.cropcenter.model.SelectionPoint;
 import com.cropcenter.util.BitmapUtils;
 import com.cropcenter.util.ThemeColors;
@@ -28,8 +29,15 @@ final class EditorRenderer
 	private static final int POINT_LABEL_COLOR = ThemeColors.CRUST;
 
 	private final GridRenderer gridRenderer = new GridRenderer();
-	// Cached per-draw scratch — reset at the top of each use so onDraw does no allocation.
+	// Cached per-draw scratch — reset / overwritten at the top of each use so onDraw does no allocation.
+	private final int[] aabbScratch = new int[4];
 	private final Matrix bitmapMatrix = new Matrix();
+	// Single shared 2-float scratch used by the visible-bounds AABB walk (4 corner reads, sequentially used
+	// for min/max — single buffer is safe because we don't need to keep all 4 corners alive at once) and the
+	// selection-label imageToScreenRotated calls in drawSelectionLabels (single label position consumed
+	// immediately by drawText). Both paths run on the UI thread and don't overlap with each other within a
+	// single draw call.
+	private final float[] coordScratch = new float[2];
 	private final Paint cropBorderPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 	private final Paint crosshairPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 	private final Paint dimPaint = new Paint();
@@ -85,8 +93,13 @@ final class EditorRenderer
 			drawEmptyHint(canvas);
 			return;
 		}
+		// Same snapshot reasoning for gridConfig: CropState.reset() replaces the gridConfig reference on the
+		// bg executor, and a multi-stage draw that re-reads `state.getGridConfig()` per stage could see the
+		// old config in early stages and the new config in later stages — selection markers and the horizon
+		// overlay would briefly paint in different colors during a load. One read = one consistent frame.
+		GridConfig grid = state.getGridConfig();
 
-		canvas.drawColor(ThemeColors.APP_BG);
+		canvas.drawColor(ThemeColors.BACKGROUND);
 		float scale = viewport.getBaseScale() * viewport.getZoom();
 
 		// Crisp pixels when zoomed past 4x
@@ -109,7 +122,7 @@ final class EditorRenderer
 		}
 		canvas.drawBitmap(bmp, bitmapMatrix, imagePaint);
 
-		drawPixelGridIfZoomed(canvas, state, bmp, scale);
+		drawPixelGridIfZoomed(canvas, state, grid, bmp, scale);
 
 		float gridImgX;
 		float gridImgY;
@@ -120,7 +133,9 @@ final class EditorRenderer
 			int cropW = state.getCropW();
 			int cropH = state.getCropH();
 			// Use the continuous-float crop origin for rendering so smooth rotation produces smooth crop
-			// motion. The exporter's integer getCropImageX absorbs the sub-pixel.
+			// motion. CropExporter samples the same float origin via BitmapUtils.drawCropped, which falls
+			// back to bilinear sampling on non-integer offsets — so the rendered overlay and the exported
+			// pixels stay in lockstep at sub-pixel precision.
 			gridImgX = state.getCropImageXFloat();
 			gridImgY = state.getCropImageYFloat();
 			gridW = cropW;
@@ -136,19 +151,29 @@ final class EditorRenderer
 		}
 
 		gridRenderer.draw(canvas, gridImgX, gridImgY, gridW, gridH,
-			state.getGridConfig(), viewport.getBaseScale() * viewport.getZoom(),
+			grid, viewport.getBaseScale() * viewport.getZoom(),
 			viewport::imageToScreenX, viewport::imageToScreenY);
 
-		if (!state.getSelectionPoints().isEmpty())
+		// Snapshot the selection list once. The list is volatile-swapped on image-load reset, so reading it
+		// twice (once for isEmpty, once for the iteration inside drawSelectionPoints) could see two different
+		// lists if a bg-thread reset lands between the calls. Pass the local snapshot down to keep the whole
+		// frame consistent.
+		List<SelectionPoint> selectionPoints = state.getSelectionPoints();
+		if (!selectionPoints.isEmpty())
 		{
-			drawSelectionPoints(canvas, state, scale);
+			drawSelectionPoints(canvas, selectionPoints, state, grid, scale);
 		}
 
 		if (horizon.isActive() || horizon.isDrawing())
 		{
-			int selColor = state.getGridConfig().selectionColor();
-			horizon.draw(canvas, view.getWidth(), view.getHeight(), selColor, infoPaint, density);
+			horizon.draw(canvas, view.getWidth(), view.getHeight(),
+				grid.selectionColor(), infoPaint, density);
 		}
+	}
+
+	private static int withAlpha(int color, int alpha)
+	{
+		return (color & 0x00FFFFFF) | (alpha << 24);
 	}
 
 	/**
@@ -190,7 +215,7 @@ final class EditorRenderer
 
 	private void drawEmptyHint(Canvas canvas)
 	{
-		canvas.drawColor(ThemeColors.APP_BG);
+		canvas.drawColor(ThemeColors.BACKGROUND);
 		infoPaint.setTextAlign(Paint.Align.CENTER);
 		infoPaint.setTextSize(16f);
 		infoPaint.setColor(ThemeColors.SURFACE2);
@@ -204,13 +229,13 @@ final class EditorRenderer
 	 * bounding box of the visible image area and only draws lines inside that AABB to avoid the O(W * H) full-image
 	 * walk.
 	 */
-	private void drawPixelGridIfZoomed(Canvas canvas, CropState state, Bitmap bmp, float scale)
+	private void drawPixelGridIfZoomed(Canvas canvas, CropState state, GridConfig grid, Bitmap bmp, float scale)
 	{
-		if (!state.getGridConfig().showPixelGrid() || scale < 6f)
+		if (!grid.showPixelGrid() || scale < 6f)
 		{
 			return;
 		}
-		pixelGridPaint.setColor(state.getGridConfig().pixelGridColor());
+		pixelGridPaint.setColor(grid.pixelGridColor());
 		pixelGridPaint.setStrokeWidth(1f);
 
 		// The grid must follow the rotated bitmap. Draw in the rotated canvas so the pixel lines stay aligned
@@ -275,21 +300,22 @@ final class EditorRenderer
 			{
 				int pixelX = (int) Math.floor(point.x());
 				int pixelY = (int) Math.floor(point.y());
-				float[] center = viewport.imageToScreenRotated(pixelX + 0.5f, pixelY + 0.5f, state);
+				viewport.imageToScreenRotatedInto(pixelX + 0.5f, pixelY + 0.5f, state, coordScratch);
 				infoPaint.setTextAlign(Paint.Align.CENTER);
 				infoPaint.setTextSize(Math.min(pixelSize * 0.6f, 14f * density));
 				infoPaint.setColor(POINT_LABEL_COLOR);
 				float labelOffset = infoPaint.getTextSize() * 0.35f;
 				canvas.drawText(String.valueOf(labelIndex),
-					center[0], center[1] + labelOffset, infoPaint);
+					coordScratch[0], coordScratch[1] + labelOffset, infoPaint);
 			}
 			else
 			{
-				float[] center = viewport.imageToScreenRotated(point.x(), point.y(), state);
+				viewport.imageToScreenRotatedInto(point.x(), point.y(), state, coordScratch);
 				infoPaint.setTextAlign(Paint.Align.CENTER);
 				infoPaint.setTextSize(9f * density);
 				infoPaint.setColor(POINT_LABEL_COLOR);
-				canvas.drawText(String.valueOf(labelIndex), center[0], center[1] + 4, infoPaint);
+				canvas.drawText(String.valueOf(labelIndex),
+					coordScratch[0], coordScratch[1] + 4, infoPaint);
 			}
 		}
 	}
@@ -328,12 +354,11 @@ final class EditorRenderer
 	 * in a canvas save/rotate/restore when the editor is rotated, so markers stay axis-aligned in image-space
 	 * (visually rotating with the image) rather than appearing to slide as the image rotates underneath.
 	 */
-	private void drawSelectionPoints(Canvas canvas, CropState state, float scale)
+	private void drawSelectionPoints(Canvas canvas, List<SelectionPoint> points, CropState state,
+		GridConfig grid, float scale)
 	{
-		List<SelectionPoint> points = state.getSelectionPoints();
-
 		// Shared selection color (with its exact alpha) drives points and polygon.
-		int selColor = state.getGridConfig().selectionColor();
+		int selColor = grid.selectionColor();
 		pointPaint.setColor(selColor);
 		polygonPaint.setColor(selColor);
 
@@ -401,29 +426,34 @@ final class EditorRenderer
 	{
 		int viewWidth = view.getWidth();
 		int viewHeight = view.getHeight();
-		float[] cornerTopLeft = viewport.screenToImagePixel(0f, 0f, state);
-		float[] cornerTopRight = viewport.screenToImagePixel(viewWidth, 0f, state);
-		float[] cornerBottomLeft = viewport.screenToImagePixel(0f, viewHeight, state);
-		float[] cornerBottomRight = viewport.screenToImagePixel(viewWidth, viewHeight, state);
+		// Reuse coordScratch across the four corner reads. The min/max are accumulated as floats so we never
+		// need to keep two corners alive simultaneously — the alternative (4 fresh float[2]s) was the
+		// dominant per-frame allocation source flagged by the round-10 audit.
+		viewport.screenToImagePixelInto(0f, 0f, state, coordScratch);
+		float minX = coordScratch[0];
+		float maxX = coordScratch[0];
+		float minY = coordScratch[1];
+		float maxY = coordScratch[1];
+		viewport.screenToImagePixelInto(viewWidth, 0f, state, coordScratch);
+		minX = Math.min(minX, coordScratch[0]);
+		maxX = Math.max(maxX, coordScratch[0]);
+		minY = Math.min(minY, coordScratch[1]);
+		maxY = Math.max(maxY, coordScratch[1]);
+		viewport.screenToImagePixelInto(0f, viewHeight, state, coordScratch);
+		minX = Math.min(minX, coordScratch[0]);
+		maxX = Math.max(maxX, coordScratch[0]);
+		minY = Math.min(minY, coordScratch[1]);
+		maxY = Math.max(maxY, coordScratch[1]);
+		viewport.screenToImagePixelInto(viewWidth, viewHeight, state, coordScratch);
+		minX = Math.min(minX, coordScratch[0]);
+		maxX = Math.max(maxX, coordScratch[0]);
+		minY = Math.min(minY, coordScratch[1]);
+		maxY = Math.max(maxY, coordScratch[1]);
 
-		float minX = Math.min(Math.min(cornerTopLeft[0], cornerTopRight[0]),
-			Math.min(cornerBottomLeft[0], cornerBottomRight[0]));
-		float maxX = Math.max(Math.max(cornerTopLeft[0], cornerTopRight[0]),
-			Math.max(cornerBottomLeft[0], cornerBottomRight[0]));
-		float minY = Math.min(Math.min(cornerTopLeft[1], cornerTopRight[1]),
-			Math.min(cornerBottomLeft[1], cornerBottomRight[1]));
-		float maxY = Math.max(Math.max(cornerTopLeft[1], cornerTopRight[1]),
-			Math.max(cornerBottomLeft[1], cornerBottomRight[1]));
-
-		int startX = Math.max(0, (int) Math.floor(minX) - 1);
-		int startY = Math.max(0, (int) Math.floor(minY) - 1);
-		int endX = Math.min(imgW, (int) Math.ceil(maxX) + 1);
-		int endY = Math.min(imgH, (int) Math.ceil(maxY) + 1);
-		return new int[] { startX, startY, endX, endY };
-	}
-
-	private static int withAlpha(int color, int alpha)
-	{
-		return (color & 0x00FFFFFF) | (alpha << 24);
+		aabbScratch[0] = Math.max(0, (int) Math.floor(minX) - 1);
+		aabbScratch[1] = Math.max(0, (int) Math.floor(minY) - 1);
+		aabbScratch[2] = Math.min(imgW, (int) Math.ceil(maxX) + 1);
+		aabbScratch[3] = Math.min(imgH, (int) Math.ceil(maxY) + 1);
+		return aabbScratch;
 	}
 }

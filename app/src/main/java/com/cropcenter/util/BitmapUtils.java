@@ -6,6 +6,9 @@ import android.graphics.Matrix;
 import android.graphics.Paint;
 import android.graphics.Rect;
 
+import com.cropcenter.metadata.JpegMarkerWalker;
+import com.cropcenter.metadata.TiffTag;
+
 /**
  * Reads EXIF orientation from raw JPEG bytes and rotates the bitmap accordingly. BitmapFactory.decodeByteArray() does
  * NOT auto-apply EXIF rotation.
@@ -188,11 +191,13 @@ public final class BitmapUtils
 		{
 			return readExifOrientationInternal(jpeg);
 		}
-		catch (Exception ignored)
+		catch (IndexOutOfBoundsException ignored)
 		{
-			// Per the documented contract, malformed EXIF returns 1 (upright) — the same fallback as a
-			// missing tag. The exception is genuinely intentional to swallow: corrupted EXIF bytes are
-			// common in third-party-edited JPEGs and we don't want to spam the log on every load.
+			// Narrow catch — IOOBE is the only expected throw from ByteBufferUtils.checkRead's bounds
+			// checks inside readU16/readU32. Any other RuntimeException (NPE, OOM, anything else) is
+			// genuinely unexpected and should propagate so the caller's failure is real, not silently
+			// masked. Per the documented contract, malformed EXIF returns 1 (upright) — the same fallback
+			// as a missing tag. Corrupted EXIF is common in third-party-edited JPEGs; intentional swallow.
 			return 1;
 		}
 	}
@@ -215,24 +220,36 @@ public final class BitmapUtils
 			{
 				return 1;
 			}
-			int marker = jpeg[off + 1] & 0xFF;
+			// Fill bytes (legal per ITU-T T.81 §B.1.1.2) — skip extra 0xFF bytes before reading the marker.
+			int markerByteOff = JpegMarkerWalker.skipFillBytes(jpeg, off, jpeg.length);
+			if (markerByteOff < 0)
+			{
+				return 1;
+			}
+			int marker = jpeg[markerByteOff] & 0xFF;
+			int afterMarker = markerByteOff + 1;
 			if (marker == 0xDA || marker == 0xD9)
 			{
 				break; // SOS or EOI
 			}
 			if (marker == 0x00 || marker == 0x01 || (marker >= 0xD0 && marker <= 0xD7))
 			{
-				off += 2;
+				off = afterMarker;
 				continue;
 			}
-			int segLen = ByteBufferUtils.readU16BE(jpeg, off + 2);
+			if (afterMarker + 2 > jpeg.length)
+			{
+				return 1;
+			}
+			int segLen = ByteBufferUtils.readU16BE(jpeg, afterMarker);
 
 			// APP1 with Exif header
-			if (marker == 0xE1 && segLen > 14 && jpeg[off + 4] == 'E' && jpeg[off + 5] == 'x'
-				&& jpeg[off + 6] == 'i' && jpeg[off + 7] == 'f'
-				&& jpeg[off + 8] == 0 && jpeg[off + 9] == 0)
+			if (marker == 0xE1 && segLen > 14 && afterMarker + 8 <= jpeg.length
+				&& jpeg[afterMarker + 2] == 'E' && jpeg[afterMarker + 3] == 'x'
+				&& jpeg[afterMarker + 4] == 'i' && jpeg[afterMarker + 5] == 'f'
+				&& jpeg[afterMarker + 6] == 0 && jpeg[afterMarker + 7] == 0)
 			{
-				int tiffStart = off + 10; // TIFF header
+				int tiffStart = afterMarker + 8; // TIFF header
 				if (tiffStart + 8 > jpeg.length)
 				{
 					return 1;
@@ -249,12 +266,28 @@ public final class BitmapUtils
 				}
 				boolean isLittleEndian = byteOrderHi == 0x49;
 
-				long ifdOff = ByteBufferUtils.readU32(jpeg, tiffStart + 4, isLittleEndian);
-				int ifd = (int) (tiffStart + ifdOff);
-				if (ifd < tiffStart || ifd + 2 > jpeg.length)
+				// TIFF magic = 42 (0x002A). A byte-order match without the magic value means the chunk
+				// isn't really TIFF — without this check a malformed payload with plausible offsets and
+				// a coincidental TiffTag.ORIENTATION byte sequence would rotate pixels.
+				int tiffMagic = ByteBufferUtils.readU16(jpeg, tiffStart + 2, isLittleEndian);
+				if (tiffMagic != 42)
 				{
 					return 1;
 				}
+
+				// Validate the long sum BEFORE casting — an adversarial u32 ifdOff like 0xFFFFFFFE plus
+				// a small tiffStart wraps to a small positive int that passes both bounds checks on the
+				// truncated value, letting the IFD entry walk read garbage as tag/type/value and rotate
+				// pixels. Mirrors the long-arithmetic guard in ExifPatcher.scanIfd, MpfPatcher.patch,
+				// and PngMetadataExtractor.extractOrientationInternal — was the lone JPEG-side site
+				// that relied on signed-int wrap to catch the overflow.
+				long ifdOff = ByteBufferUtils.readU32(jpeg, tiffStart + 4, isLittleEndian);
+				long absIfd = (long) tiffStart + ifdOff;
+				if (absIfd < tiffStart || absIfd + 2 > jpeg.length || absIfd > Integer.MAX_VALUE)
+				{
+					return 1;
+				}
+				int ifd = (int) absIfd;
 
 				int count = ByteBufferUtils.readU16(jpeg, ifd, isLittleEndian);
 				for (int i = 0; i < count; i++)
@@ -265,15 +298,48 @@ public final class BitmapUtils
 						break;
 					}
 					int tag = ByteBufferUtils.readU16(jpeg, entry, isLittleEndian);
-					if (tag == 0x0112) // Orientation
+					if (tag == TiffTag.ORIENTATION)
 					{
-						return ByteBufferUtils.readU16(jpeg, entry + 8, isLittleEndian);
+						return readOrientationFromIfdEntry(jpeg, entry, isLittleEndian);
 					}
 				}
 				return 1; // EXIF found but no orientation tag
 			}
-			off += 2 + segLen;
+			int next = afterMarker + segLen;
+			if (next > jpeg.length || next < off)
+			{
+				return 1;
+			}
+			off = next;
 		}
 		return 1;
+	}
+
+	/**
+	 * Read the orientation value from an IFD entry whose tag has already been confirmed to be TiffTag.ORIENTATION.
+	 * Validates that the entry is well-formed (type SHORT, count 1, value 1..8) — any other shape is malformed
+	 * and maps to upright (1). A coincidental TiffTag.ORIENTATION entry with the wrong type / count would
+	 * otherwise have us reading random bytes as orientation. Real EXIF always emits this entry as SHORT/1.
+	 *
+	 * @param data           full JPEG / PNG-eXIf byte array
+	 * @param entry          offset of the 12-byte IFD entry (tag at entry, type at entry+2, count at entry+4,
+	 *                       value at entry+8)
+	 * @param isLittleEndian TIFF byte order
+	 * @return orientation 1..8, or 1 when the entry is malformed
+	 */
+	private static int readOrientationFromIfdEntry(byte[] data, int entry, boolean isLittleEndian)
+	{
+		int entryType = ByteBufferUtils.readU16(data, entry + 2, isLittleEndian);
+		long entryCount = ByteBufferUtils.readU32(data, entry + 4, isLittleEndian);
+		if (entryType != TiffTag.TYPE_SHORT || entryCount != 1)
+		{
+			return 1;
+		}
+		int orientation = ByteBufferUtils.readU16(data, entry + 8, isLittleEndian);
+		if (orientation < 1 || orientation > 8)
+		{
+			return 1;
+		}
+		return orientation;
 	}
 }

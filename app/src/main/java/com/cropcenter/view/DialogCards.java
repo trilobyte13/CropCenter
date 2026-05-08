@@ -41,7 +41,7 @@ final class DialogCards
 		card.setOrientation(LinearLayout.VERTICAL);
 		GradientDrawable background = new GradientDrawable();
 		background.setColor(ThemeColors.SURFACE0);
-		background.setCornerRadius(8 * density);
+		background.setCornerRadius(DpToPx.toPx(8, density));
 		card.setBackground(background);
 		int padding = DpToPx.toPx(12, density);
 		card.setPadding(padding, DpToPx.toPx(10, density), padding, DpToPx.toPx(10, density));

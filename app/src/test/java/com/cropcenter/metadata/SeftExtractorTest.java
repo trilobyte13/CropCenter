@@ -14,7 +14,7 @@ import java.io.IOException;
  * Samsung-edited sources) or include gain-map bytes in the "trailer" (which then get re-appended after an
  * already-present gain-map block and fail Gallery's pre-flight).
  */
-public class SeftExtractorTest
+public final class SeftExtractorTest
 {
 	@Test
 	public void extractsTrailerAfterSinglePrimaryEoi() throws IOException
@@ -30,7 +30,7 @@ public class SeftExtractorTest
 			JpegFixtures.soi(), JpegFixtures.appSegment(0xE1, JpegFixtures.exifAppPayload()),
 			JpegFixtures.minimalScanAndEoi(), expectedTrailer);
 
-		byte[] result = SeftExtractor.extract(file);
+		byte[] result = SeftExtractor.extract(file, true);
 		assertArrayEquals(expectedTrailer, result);
 	}
 
@@ -51,7 +51,7 @@ public class SeftExtractorTest
 			JpegFixtures.minimalScanAndEoi(),       // gain map EOI (FFD9)
 			expectedTrailer);
 
-		byte[] result = SeftExtractor.extract(file);
+		byte[] result = SeftExtractor.extract(file, true);
 		assertArrayEquals(expectedTrailer, result);
 	}
 
@@ -60,9 +60,9 @@ public class SeftExtractorTest
 	{
 		// SEFT trailer is at minimum 12 bytes (FFD9 + 4-byte size + "SEFT"). Anything shorter can't carry one
 		// and must return null without indexing OOB.
-		assertNull(SeftExtractor.extract(new byte[]{ }));
-		assertNull(SeftExtractor.extract(new byte[]{ 0x01 }));
-		assertNull(SeftExtractor.extract(new byte[11]));
+		assertNull(SeftExtractor.extract(new byte[]{ }, true));
+		assertNull(SeftExtractor.extract(new byte[]{ 0x01 }, true));
+		assertNull(SeftExtractor.extract(new byte[11], true));
 	}
 
 	@Test
@@ -70,13 +70,54 @@ public class SeftExtractorTest
 	{
 		// File ends with bytes other than "SEFT" — not a Samsung file.
 		byte[] file = JpegFixtures.concat(JpegFixtures.soi(), JpegFixtures.minimalScanAndEoi());
-		assertNull(SeftExtractor.extract(file));
+		assertNull(SeftExtractor.extract(file, true));
 	}
 
 	@Test
 	public void returnsNullOnNullInput()
 	{
-		assertNull(SeftExtractor.extract(null));
+		assertNull(SeftExtractor.extract(null, true));
+	}
+
+	@Test
+	public void returnsNullWhenGainMapPresentButSliceUnparseable() throws IOException
+	{
+		// Round 8 forward-walk fix: when primary's EOI is followed by FFD8 (gain-map SOI) but the slice
+		// has no clean EOI before the SEFT footer, JpegMarkerWalker.findPrimaryEoi(slice, ...) returns -1
+		// and the extractor must return null. A regression that fell back to trailerStart=primaryEnd on
+		// gmEoiInSlice<0 would mis-locate the trailer start IN THE MIDDLE OF the broken gain map and ship
+		// gain-map bytes as the SEFT trailer on save — silent corruption when re-appended downstream.
+		byte[] gainMapWithNoEoi = {
+			(byte) 0xFF, (byte) 0xD8,                    // SOI
+			(byte) 0xFF, (byte) 0xE0, 0x00, 0x06,        // APP0 with 6-byte length
+			0x01, 0x02, 0x03, 0x04                       // 4 bytes of body — never reaches EOI
+		};
+		byte[] sizeFooter = { 0x00, 0x00, 0x00, 0x04 };
+		byte[] seftMagic = { 'S', 'E', 'F', 'T' };
+		byte[] file = JpegFixtures.concat(JpegFixtures.soi(), JpegFixtures.minimalScanAndEoi(),
+			gainMapWithNoEoi, sizeFooter, seftMagic);
+		assertNull(SeftExtractor.extract(file, true));
+	}
+
+	@Test
+	public void sdrFileWithEmbeddedThumbnailInSeftKeepsThumbnailInTrailer() throws IOException
+	{
+		// Codex round-18 F1: an SDR Samsung file's SEFT data block can begin with FF D8 (embedded JPEG
+		// thumbnail). With hasGainMap=false the extractor must NOT walk past those bytes as if they were
+		// a gain-map EOI — the trailer must include the thumbnail bytes verbatim. Pre-fix, the extractor
+		// trusted the FF D8 alone and would mis-walk to the thumbnail's FF D9, dropping the thumbnail
+		// from state.seftTrailer; the next save's re-appended trailer would be missing the thumbnail
+		// and break Samsung Gallery's Revert flow.
+		byte[] embeddedThumb = JpegFixtures.concat(JpegFixtures.soi(), JpegFixtures.minimalScanAndEoi());
+		byte[] sizeFooter = { 0x00, 0x00, 0x00, 0x10 };
+		byte[] seftMagic = { 'S', 'E', 'F', 'T' };
+		byte[] expectedTrailer = JpegFixtures.concat(embeddedThumb, sizeFooter, seftMagic);
+
+		byte[] file = JpegFixtures.concat(
+			JpegFixtures.soi(), JpegFixtures.minimalScanAndEoi(), expectedTrailer);
+
+		byte[] result = SeftExtractor.extract(file, false);
+		assertArrayEquals(expectedTrailer, result);
 	}
 
 	@Test
@@ -91,7 +132,7 @@ public class SeftExtractorTest
 		trailer[11] = 'T';
 		byte[] file = JpegFixtures.concat(JpegFixtures.soi(), JpegFixtures.minimalScanAndEoi(), trailer);
 
-		byte[] result = SeftExtractor.extract(file);
+		byte[] result = SeftExtractor.extract(file, true);
 		assertEquals(12, result.length);
 	}
 }

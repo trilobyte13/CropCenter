@@ -23,35 +23,27 @@ public final class AiRegionDetector
 	 * Binary mask of AI-modified pixels in downsampled stored coordinates. The mask is row-major: mask[y * width +
 	 * x] = true means the pixel at (x, y) in the downsampled coords differs from source by more than DIFF_THRESHOLD
 	 * on at least one channel. sampleSize is the BitmapFactory inSampleSize used during detection, so callers can
-	 * map mask coordinates back to full-resolution coords (multiply by sampleSize) when needed.
+	 * map mask coordinates back to full-resolution coords (multiply by sampleSize) when needed. maskedCount caches
+	 * the flagged-pixel count from detect()'s diff pass — accessing it is O(1). Before the cache, callers
+	 * (GraftController.assembleGraftOnBg, GainMapInpainter.inpaintBitmap via hasMaskedPixels) re-walked the mask
+	 * array to re-derive the count, paying O(N) each. Storing the count on the record makes those reads O(1) and
+	 * is the reason the canonical constructor takes the count as an explicit parameter (rather than always
+	 * re-walking).
 	 */
-	public record AiMask(boolean[] mask, int width, int height, int sampleSize)
+	public record AiMask(boolean[] mask, int width, int height, int sampleSize, int maskedCount)
 	{
 		/**
-		 * True when at least one pixel is flagged as AI-modified. Callers use this to skip the inpaint step
-		 * entirely when the edit didn't change anything (the inpaint would be a no-op but the JPEG re-encode of
-		 * the gain map would still burn cycles + add minor quantization noise to the saved file).
-		 * Short-circuits on the first true pixel — use maskedCount when the actual number is needed.
+		 * Construct an AiMask with maskedCount derived from a single walk of `mask`. Used by tests and
+		 * out-of-band callers that have a pre-built mask but no count; AiRegionDetector.detect uses the
+		 * canonical constructor directly because it counted during the diff pass anyway.
+		 *
+		 * @param mask       row-major boolean array of width*height
+		 * @param width      mask width in downsampled pixels
+		 * @param height     mask height in downsampled pixels
+		 * @param sampleSize BitmapFactory inSampleSize used during detection
+		 * @return AiMask with maskedCount set to the number of true entries in mask
 		 */
-		public boolean hasMaskedPixels()
-		{
-			for (boolean flag : mask)
-			{
-				if (flag)
-				{
-					return true;
-				}
-			}
-			return false;
-		}
-
-		/**
-		 * Total number of AI-modified pixels in the mask. Used by the graft sanity check — a fraction (count /
-		 * mask.length) far above what a typical Generative Remove touch-up produces (~0.001%-0.5% of pixels)
-		 * signals either a wrong-file pick or a wholesale global edit, both of which the graft pipeline isn't
-		 * designed for.
-		 */
-		public int maskedCount()
+		public static AiMask of(boolean[] mask, int width, int height, int sampleSize)
 		{
 			int count = 0;
 			for (boolean flag : mask)
@@ -61,7 +53,17 @@ public final class AiRegionDetector
 					count++;
 				}
 			}
-			return count;
+			return new AiMask(mask, width, height, sampleSize, count);
+		}
+
+		/**
+		 * True when at least one pixel is flagged as AI-modified. Callers use this to skip the inpaint step
+		 * entirely when the edit didn't change anything (the inpaint would be a no-op but the JPEG re-encode of
+		 * the gain map would still burn cycles + add minor quantization noise to the saved file).
+		 */
+		public boolean hasMaskedPixels()
+		{
+			return maskedCount > 0;
 		}
 	}
 
@@ -118,12 +120,27 @@ public final class AiRegionDetector
 					+ ", edit " + edit.getWidth() + "x" + edit.getHeight());
 				return null;
 			}
-			int[] sourcePixels = new int[width * height];
-			int[] editPixels = new int[width * height];
+			// width * height in int arithmetic silently overflows above ~46k px on a side. Reject before
+			// allocating with Math.multiplyExact so a 200MP-mode source (12k×9k = 108M, fine) doesn't trip
+			// us, but a synthetic 50k+ px input throws ArithmeticException to the outer catch instead of
+			// allocating a negative-size array.
+			int pixelCount;
+			try
+			{
+				pixelCount = Math.multiplyExact(width, height);
+			}
+			catch (ArithmeticException e)
+			{
+				Log.w(TAG, "AI mask refused: width*height overflows int ("
+					+ width + "x" + height + ")");
+				return null;
+			}
+			int[] sourcePixels = new int[pixelCount];
+			int[] editPixels = new int[pixelCount];
 			source.getPixels(sourcePixels, 0, width, 0, 0, width, height);
 			edit.getPixels(editPixels, 0, width, 0, 0, width, height);
 
-			boolean[] mask = new boolean[width * height];
+			boolean[] mask = new boolean[pixelCount];
 			int maskedCount = 0;
 			for (int i = 0; i < sourcePixels.length; i++)
 			{
@@ -142,7 +159,7 @@ public final class AiRegionDetector
 			Log.d(TAG, "AI mask: " + maskedCount + " of " + mask.length
 				+ " pixels (" + String.format(Locale.ROOT, "%.3f", 100.0 * maskedCount / mask.length)
 				+ "%) at " + width + "x" + height + " (sampleSize=" + IN_SAMPLE_SIZE + ")");
-			return new AiMask(mask, width, height, IN_SAMPLE_SIZE);
+			return new AiMask(mask, width, height, IN_SAMPLE_SIZE, maskedCount);
 		}
 		finally
 		{

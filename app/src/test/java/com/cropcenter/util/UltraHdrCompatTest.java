@@ -12,7 +12,7 @@ import java.nio.charset.StandardCharsets;
  * on the post-encode HDR-success verification path — a regression that always returns true would mask a silent
  * HDR-failed save with a false "HDR OK" toast; one that always returns false would mark every HDR save as failed.
  */
-public class UltraHdrCompatTest
+public final class UltraHdrCompatTest
 {
 	@Test
 	public void containsHdrgmFindsAtBufferEnd()

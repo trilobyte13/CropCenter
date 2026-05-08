@@ -3,6 +3,17 @@ package com.cropcenter.metadata;
 /**
  * Represents a single JPEG marker segment (APPn or COM). The data array includes the full segment: FF marker + length +
  * payload.
+ *
+ * Mutability contract — callers MUST NOT mutate data(). Records expose their byte[] component via the
+ * auto-generated accessor as a live reference (Java Language Spec §8.10.3). The metadata pipeline
+ * (`JpegMetadataExtractor` / `PngMetadataExtractor` / `ExifPatcher` / `MpfPatcher`) treats every segment as
+ * immutable: patchers produce NEW segments via `Result.ok(...)` rather than mutating in place, and
+ * `CropState.getJpegMeta()` wraps the list with `Collections.unmodifiableList`. A caller who writes through the
+ * `data()` accessor would silently corrupt later metadata-injection / save / round-trip steps that share the
+ * same reference. Per CLAUDE.md's "byte[] components are fine" guidance, defensive copies are NOT made (every
+ * load decodes 5-15 segments and copying on every accessor read would be a measurable hot-path tax) — the
+ * convention is documentation-level immutability, enforced by code review and the patchers' replace-don't-mutate
+ * pattern. Callers that need an actually-defensive copy can use `Arrays.copyOf(seg.data(), seg.data().length)`.
  */
 public record JpegSegment(int marker, byte[] data)
 {

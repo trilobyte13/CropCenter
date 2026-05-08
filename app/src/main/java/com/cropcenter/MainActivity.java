@@ -1,6 +1,7 @@
 package com.cropcenter;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.Context;
 import android.content.Intent;
 import android.graphics.Bitmap;
@@ -41,7 +42,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * are handled by binders (ToolbarBinder, AutoRotateBinder) and controllers (ImageLoadController, GraftController,
  * SaveController) — this class wires them up and provides view accessors / state plumbing.
  */
-public class MainActivity extends AppCompatActivity implements ImageLoadHost, SaveHost, UiHost, ToolbarHost
+public final class MainActivity extends AppCompatActivity implements ImageLoadHost, SaveHost, UiHost, ToolbarHost
 {
 	private static final String TAG = "MainActivity";
 
@@ -71,6 +72,11 @@ public class MainActivity extends AppCompatActivity implements ImageLoadHost, Sa
 	private ActivityResultLauncher<String[]> graftPickerLauncher;
 	private ActivityResultLauncher<String[]> openLauncher;
 	private ActivityResultLauncher<String> saveAsLauncher;
+	// Currently-open state-mutating dialog (SettingsDialog) tracked so an inbound load can dismiss it
+	// before its own bg dispatch starts. Cleared via the dialog's OnDismissListener so the field doesn't
+	// outlive the dialog. Touched only from the UI thread (showSettingsDialog, OnDismissListener,
+	// dismissTransientDialogs are all on UI). Codex round-16 F2.
+	private AlertDialog activeTransientDialog;
 	private CenterMode moveLockPref = CenterMode.VERTICAL;
 	private CenterMode selectLockPref = CenterMode.BOTH;
 	private CropEditorView editorView;
@@ -88,6 +94,22 @@ public class MainActivity extends AppCompatActivity implements ImageLoadHost, Sa
 	public void applyLockMode()
 	{
 		state.setCenterMode(isPanning() ? CenterMode.LOCKED : getCurrentPref());
+	}
+
+	@Override
+	public void dismissTransientDialogs()
+	{
+		AlertDialog dialog = activeTransientDialog;
+		// Use cancel() not dismiss() so the dialog's OnCancelListener fires too — Custom AR's
+		// spinner-position restore, Replace dialog's placeholder cleanup, and SaveDialog's priorSnapshot
+		// clear all live in OnCancelListener (Codex round-17 F3). dismiss() would only fire
+		// OnDismissListener and skip these. cancel() also fires OnDismissListener afterward, so
+		// activeTransientDialog still gets cleared via the registerTransientDialog listener.
+		if (dialog != null && dialog.isShowing())
+		{
+			dialog.cancel();
+		}
+		activeTransientDialog = null;
 	}
 
 	@Override
@@ -178,14 +200,7 @@ public class MainActivity extends AppCompatActivity implements ImageLoadHost, Sa
 	@Override
 	public void hideProgress()
 	{
-		runOnUiThread(() ->
-		{
-			if (isDestroyed())
-			{
-				return;
-			}
-			findViewById(R.id.progressOverlay).setVisibility(View.GONE);
-		});
+		runOnUiThread(this::hideProgressOnUi);
 	}
 
 	@Override
@@ -195,22 +210,37 @@ public class MainActivity extends AppCompatActivity implements ImageLoadHost, Sa
 		// (rotation, app backgrounded then killed). findViewById on a destroyed Activity returns null, and the
 		// immediate CheckBox cast below would NPE the main thread, taking down the app. state.setListener(null)
 		// in onDestroy suppresses listener-driven UI updates but not these inline findViewByIds, so the guard
-		// has to live here. The leaked bmp from this branch is reclaimed by the GC finalizer once the destroyed
-		// Activity itself is GC'd.
+		// has to live here. ImageLoadController.applyBytes flips its handedOff flag BEFORE posting this UI
+		// runnable so the bg-side cleanup won't recycle bmp on its way out — without an explicit recycle
+		// here, the native pixel buffer would only be reclaimed by the GC finalizer once the destroyed
+		// Activity itself was GC'd, which on a config-change with a multi-MB source means a real (if
+		// short-lived) memory pressure spike.
 		if (isDestroyed())
 		{
+			bmp.recycle();
 			return;
 		}
 		// CropState.reset() restored editorMode and centerMode to defaults (Select + Both) and cleared
-		// centerLocked, but the Pan / Lock toolbar checkboxes are UI-driven state that doesn't auto-sync.
-		// Uncheck them here so the visual state matches CropState, then call applyLockMode() to propagate the
-		// unchecked Pan into centerMode (no-op since reset already set BOTH, but keeps the invariant that
-		// state.centerMode follows chkPan + lock-axis pref).
+		// centerLocked, but the Pan / Lock toolbar checkboxes AND the per-mode lock-axis prefs are UI-driven
+		// state that doesn't auto-sync. Uncheck the toolbar boxes AND reset the lock-axis prefs to their
+		// initial defaults (Select=BOTH, Move=VERTICAL) so a previous image's H/V Select-lock doesn't bleed
+		// into the new load — without this reset, applyLockMode() below would re-apply the persisted
+		// selectLockPref and overwrite reset()'s BOTH, contradicting the documented "new loads start
+		// Select+Both" invariant. Then call applyLockMode() to propagate the unchecked Pan into centerMode
+		// (now genuinely a no-op since both reset() and the pref reset agree on BOTH).
 		((CheckBox) findViewById(R.id.chkPan)).setChecked(false);
 		((CheckBox) findViewById(R.id.chkLockCenter)).setChecked(false);
+		selectLockPref = CenterMode.BOTH;
+		moveLockPref = CenterMode.VERTICAL;
 		applyLockMode();
 		ui.updateModeHighlight();
 		ui.updateLockHighlight();
+		// Exit horizon paint mode if it was active when this load started. Auto-rotate paint mode never
+		// holds the busy flag (it's acquired later, after the user commits the stroke), so Open remains
+		// reachable while paint mode is up — without this reset, the new image's first touch would route
+		// to horizon painting instead of the expected Select / Move behavior, AND the Auto button would
+		// stay stuck on its "Cancel" label / red color from the previous load.
+		toolbar.cancelHorizonPaintMode();
 
 		state.setSourceImage(bmp);
 		editorView.setState(state);
@@ -279,6 +309,20 @@ public class MainActivity extends AppCompatActivity implements ImageLoadHost, Sa
 	}
 
 	@Override
+	public AlertDialog registerTransientDialog(AlertDialog newDialog)
+	{
+		activeTransientDialog = newDialog;
+		newDialog.setOnDismissListener(dialog ->
+		{
+			if (activeTransientDialog == dialog)
+			{
+				activeTransientDialog = null;
+			}
+		});
+		return newDialog;
+	}
+
+	@Override
 	public void runInBackground(Runnable task)
 	{
 		backgroundExecutor.execute(task);
@@ -331,22 +375,13 @@ public class MainActivity extends AppCompatActivity implements ImageLoadHost, Sa
 	@Override
 	public void showBusyToast()
 	{
-		Toast.makeText(this, "Busy — try again", Toast.LENGTH_SHORT).show();
+		toastIfAlive("Busy — try again", Toast.LENGTH_SHORT);
 	}
 
 	@Override
 	public void showProgress(String message)
 	{
-		runOnUiThread(() ->
-		{
-			if (isDestroyed())
-			{
-				return;
-			}
-			View overlay = findViewById(R.id.progressOverlay);
-			((TextView) findViewById(R.id.progressText)).setText(message);
-			overlay.setVisibility(View.VISIBLE);
-		});
+		runOnUiThread(() -> showProgressOnUi(message));
 	}
 
 	/**
@@ -450,7 +485,7 @@ public class MainActivity extends AppCompatActivity implements ImageLoadHost, Sa
 		btnOpen.setOnLongClickListener(view -> graftController.start(graftPickerLauncher));
 		findViewById(R.id.btnSave).setOnClickListener(view -> saveController.showSaveDialog());
 		setBusyUi(false); // Save stays disabled until an image is loaded
-		findViewById(R.id.btnSettings).setOnClickListener(view -> SettingsDialog.show(this, state));
+		findViewById(R.id.btnSettings).setOnClickListener(view -> showSettingsDialog());
 
 		// Display-only toggle; full grid settings live in the Settings dialog.
 		CheckBox chkGrid = findViewById(R.id.chkGridMain);
@@ -502,7 +537,9 @@ public class MainActivity extends AppCompatActivity implements ImageLoadHost, Sa
 	 *
 	 * Busy ownership: GraftController.onEditPicked claims busy on the UI thread before dispatching its bg work, and
 	 * that claim is held all the way through to here. We inherit it (no compareAndSet — racing here is impossible
-	 * because Save / Open couldn't have started while busy was held) and release it in finally.
+	 * because Save / Open couldn't have started while busy was held); the bg body's finally block releases on the
+	 * normal path, and GraftController.applyConfirmedGraft's catch (which runs releaseBusy then rethrows) handles
+	 * the throw-before-bg-runs path.
 	 *
 	 * Post-apply state writes flow through state.installGraft, which encapsulates the "graftApplied AND aiMask,
 	 * both AFTER reset" invariant. Skipping the call would let canBypassEncode short-circuit the canvas pass and
@@ -510,6 +547,18 @@ public class MainActivity extends AppCompatActivity implements ImageLoadHost, Sa
 	 */
 	private void applyGraftedBytes(Graft graft)
 	{
+		// Unlike the other 4 runInBackground entry points (ImageLoadController.load, ExportPipeline.exportTo,
+		// GraftController.onEditPicked, AutoRotateBinder.onHorizonPaintComplete), this enqueue site does NOT
+		// acquire busy and does NOT own pre-enqueue cleanup. Two distinct cleanup paths:
+		//   - bg body completes / throws → applyGraftedBytesOnBg's finally releases busy.
+		//   - runInBackground itself throws (RejectedExecutionException after executor shutdown) → the throw
+		//     propagates synchronously to GraftController.applyConfirmedGraft.catch, which runs releaseBusy
+		//     and rethrows.
+		// Dismiss any open state-mutating dialog (SettingsDialog) BEFORE the bg dispatch — applyBytes runs
+		// state.reset() on bg, and an open Settings dialog would race the reset with its in-dialog
+		// updateGridConfig commits. Mirrors ImageLoadController.load's UI-thread pre-dispatch dismiss
+		// (Codex round-16 F2).
+		dismissTransientDialogs();
 		runInBackground(() -> applyGraftedBytesOnBg(graft));
 	}
 
@@ -537,16 +586,38 @@ public class MainActivity extends AppCompatActivity implements ImageLoadHost, Sa
 				state.installGraft(graft);
 				runOnUiThread(() -> toastIfAlive("External edit applied", Toast.LENGTH_SHORT));
 			}
+			else
+			{
+				// applyBytes returns false when BitmapFactory rejected the spliced bytes — the user
+				// already saw "Failed to decode" but has no signal that graft assembly itself succeeded
+				// and the result wouldn't decode (which is the actionable bug — likely a GraftWriter
+				// corner case). Without this branch the user concludes their image is corrupt rather
+				// than the graft pipeline. Log.w fires a developer-facing breadcrumb on logcat with the
+				// MainActivity tag; the toast names the failure mode without asking the user to file a
+				// bug they have no in-app affordance to file.
+				Log.w(TAG, "graft splice produced undecodable bytes — likely a GraftWriter regression");
+				runOnUiThread(() -> toastIfAlive(
+					"Graft produced an undecodable result — apply aborted", Toast.LENGTH_LONG));
+			}
 		}
-		catch (Exception e)
+		catch (Exception | OutOfMemoryError e)
 		{
+			// Widened to include OutOfMemoryError — graft bytes carry the source's HDR + SEFT, so the
+			// applyBytes decode + applyOrientation pass is the second-largest allocation peak in the
+			// app (after primary export). Without OOM in the catch, a low-memory device would see the
+			// progress overlay vanish with no signal that the graft apply died. Mirrors round-17 F5 in
+			// ExportPipeline and the parallel widening in ImageLoadController.runLoadBg.
 			Log.e(TAG, "Apply graft failed", e);
 			runOnUiThread(() -> toastIfAlive("Apply failed: " + e.getMessage(), Toast.LENGTH_SHORT));
 		}
 		finally
 		{
 			busy.set(false);
-			runOnUiThread(() -> setBusyUi(false));
+			runOnUiThread(() ->
+			{
+				setBusyUi(false);
+				hideProgress();
+			});
 		}
 	}
 
@@ -607,4 +678,57 @@ public class MainActivity extends AppCompatActivity implements ImageLoadHost, Sa
 		}
 	}
 
+	/**
+	 * UI-thread body of hideProgress. Extracted so the runOnUiThread call site stays a method-reference
+	 * one-liner instead of a 5-line lambda — CLAUDE.md caps lambda bodies at 3 lines, and the isDestroyed
+	 * guard + view-tree mutation tend to push past that. Symmetric to showProgressOnUi.
+	 */
+	private void hideProgressOnUi()
+	{
+		if (isDestroyed())
+		{
+			return;
+		}
+		findViewById(R.id.progressOverlay).setVisibility(View.GONE);
+	}
+
+	/**
+	 * UI-thread body of showProgress. Extracted to keep the runOnUiThread call-site lambda within the
+	 * 3-line cap. Same isDestroyed-guard pattern as hideProgressOnUi / installImageOnUi.
+	 *
+	 * @param message progress-text label
+	 */
+	private void showProgressOnUi(String message)
+	{
+		if (isDestroyed())
+		{
+			return;
+		}
+		View overlay = findViewById(R.id.progressOverlay);
+		((TextView) findViewById(R.id.progressText)).setText(message);
+		overlay.setVisibility(View.VISIBLE);
+	}
+
+	/**
+	 * Open the Settings dialog, or show the busy toast if a save / load / detect / graft is in flight.
+	 * Mirrors showSaveDialog's busy gate. The gate matters because SettingsDialog mutates state.gridConfig
+	 * (color picker, line width, presets) on the UI thread while a concurrent load on the bg executor runs
+	 * state.reset() — which read-modify-writes the same non-volatile gridConfig field. Without the gate,
+	 * tapping Settings during a Share/View load can lose either the user's preference change or the reset's
+	 * includeInExport=false clear.
+	 *
+	 * The complementary already-open-dialog race is closed by dismissTransientDialogs(): the dialog
+	 * reference is tracked here and dismissed from ImageLoadController.load's UI-thread entry before any
+	 * bg work begins (Codex round-16 F2). The OnDismissListener clears the tracked reference so a normal
+	 * "Done" dismissal doesn't leave a stale handle behind.
+	 */
+	private void showSettingsDialog()
+	{
+		if (busy.get())
+		{
+			showBusyToast();
+			return;
+		}
+		registerTransientDialog(SettingsDialog.show(this, state));
+	}
 }

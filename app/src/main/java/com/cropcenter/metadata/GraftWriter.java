@@ -15,14 +15,16 @@ import java.util.List;
  * feature to round-trip a Photoshop Generative Fill / Generative Remove edit through CropCenter while preserving
  * Samsung Gallery's Revert button.
  *
- * Both inputs must be JPEGs and must share the same stored SOF0 dimensions when this splice runs — otherwise the
- * output's metadata (from original) describes different pixel counts than the SOF (from edit) carries, producing an
- * incoherent decoder result. The caller is responsible for getting the edit into source's stored layout: Photoshop
- * tends to bake the orientation into pixels and write orientation=1, which means a portrait-display source from a
- * landscape-stored Samsung original (orient=6) and the Photoshop edit (orient=1, stored portrait) will have matching
- * DISPLAY dimensions but different STORED dimensions. GraftController.alignEditToOriginalLayout decodes + re- rotates
- * the edit back to the source's stored layout in that case before invoking GraftWriter. GraftWriter itself trusts the
- * caller and throws IOException only on structural malformation (missing SOI, missing primary EOI, etc.).
+ * Caller-enforced precondition: both inputs MUST be JPEGs, AND the caller MUST guarantee they already share the same
+ * stored SOF0 dimensions before calling this splice — otherwise the output's metadata (from original) describes
+ * different pixel counts than the SOF (from edit) carries, producing an incoherent decoder result. GraftWriter does
+ * NOT verify the dimensions itself; it only checks the JPEG signature and structural well-formedness. The dimension
+ * check + alignment lives in `EditAligner.align`: Photoshop tends to bake the orientation into pixels and write
+ * orientation=1, which means a portrait-display source from a landscape-stored Samsung original (orient=6) and the
+ * Photoshop edit (orient=1, stored portrait) will have matching DISPLAY dimensions but different STORED dimensions —
+ * EditAligner decodes + re-rotates the edit back to the source's stored layout in that case before invoking
+ * GraftWriter. GraftWriter throws IOException only on structural malformation (missing SOI, missing primary EOI,
+ * etc.).
  *
  * Per-segment provenance (see SWAP_* constants):
  *   - APP1/EXIF, APP1/XMP, APP2/ICC, APP2/MPF, gain map, SEFT trailer: from original —
@@ -32,10 +34,10 @@ import java.util.List;
  *
  * Why ICC stays original-side: the recommended editor (Photoshop with Camera Raw disabled — see GraftController.start)
  * preserves the source's pixel values verbatim outside the AI fill, so the edit's pixels are P3-numerical even though
- * Photoshop doesn't write any ICC tag. When GraftController.reorientEdit re-encodes the edit through Bitmap.compress to
+ * Photoshop doesn't write any ICC tag. When EditAligner.reorientEdit re-encodes the edit through Bitmap.compress to
  * fix a stored-layout mismatch, Skia injects its own synthetic 456-byte sRGB profile — that ICC describes Skia's
  * container, not the actual pixel encoding. Trusting it would tag the spliced output as sRGB while the pixels remain
- * P3-numerical and the gain map is calibrated for P3, producing washed- out HDR composition (sRGB-tagged pixels read as
+ * P3-numerical and the gain map is calibrated for P3, producing washed-out HDR composition (sRGB-tagged pixels read as
  * smaller-gamut, gain map boost misaligned). Keeping the source's ICC keeps the encoding triplet (pixels, ICC, gain
  * map) self-consistent.
  *
@@ -62,13 +64,12 @@ public final class GraftWriter
 
 	/**
 	 * Splice the edit's pixel content into the original's container. Returns the assembled JPEG bytes. Ships
-	 * source's gain map verbatim — the AI-region gain- map inpaint runs later in the save pipeline (UltraHdrCompat)
+	 * source's gain map verbatim — the AI-region gain-map inpaint runs later in the save pipeline (UltraHdrCompat)
 	 * where the gain map is decoded into a Bitmap that preserves source's single-channel format.
 	 *
 	 * @param original source JPEG providing identity metadata + HDR package + SEFT trailer
 	 * @param edit     external-edit JPEG providing the primary scan; must already share
-	 *                 original's stored layout (caller's responsibility — see
-	 *                 GraftController.alignEditToOriginalLayout)
+	 *                 original's stored layout (caller's responsibility — see EditAligner.align)
 	 * @return assembled JPEG bytes
 	 * @throws IOException when either input fails structural validation (not a JPEG,
 	 *                     missing primary EOI, malformed segments)
@@ -94,12 +95,27 @@ public final class GraftWriter
 		List<JpegSegment> editSegments = (SWAP_EXIF || SWAP_HDR_MPF || SWAP_ICC || SWAP_XMP)
 			? JpegMetadataExtractor.extract(edit)
 			: Collections.emptyList();
-		byte[] origGainMap = GainMapExtractor.extract(original);
-		byte[] editGainMap = SWAP_HDR_GAINMAP ? GainMapExtractor.extract(edit) : null;
-		byte[] origSeft = SeftExtractor.extract(original);
+		// HDR gate: the post-primary FF D8 byte sequence is only a gain map when the file ACTUALLY
+		// carries an Ultra HDR layout — both an MPF segment (describes the multi-picture offsets) AND
+		// the XMP hdrgm namespace marker INSIDE a parsed XMP APP1 segment. Three failure modes the
+		// gate closes: (1) MPF can describe non-HDR multi-picture (focus-stacked / panorama / ZSL),
+		// so MPF alone isn't sufficient; (2) a stray "hdrgm" 5-byte sequence in MakerNote / COM /
+		// vendor blob / SEFT history / entropy would false-positive a full-file scan, so the hdrgm
+		// check restricts to XMP segment bodies (Codex round-19 F1); (3) without this combined gate,
+		// GraftWriter's bare full-file scan re-opened the Codex-round-18 F1 false-positive on the
+		// graft-pipeline path (Codex round-19 F19-1). Mirrors ImageLoadController.extractMetadata's
+		// gate. hasMpf is the cheap pre-filter — segment-list scan, near-free — so the XMP-only hdrgm
+		// scan runs only when MPF is present.
+		boolean origHasMpf = hasMpf(origSegments);
+		boolean editHasMpf = SWAP_HDR_GAINMAP && hasMpf(editSegments);
+		boolean origIsHdr = origHasMpf && HdrSignature.hasHdrgmInXmp(origSegments);
+		boolean editIsHdr = editHasMpf && HdrSignature.hasHdrgmInXmp(editSegments);
+		byte[] origGainMap = GainMapExtractor.extract(original, origIsHdr);
+		byte[] editGainMap = SWAP_HDR_GAINMAP ? GainMapExtractor.extract(edit, editIsHdr) : null;
+		byte[] origSeft = SeftExtractor.extract(original, origGainMap != null);
 
 		int editPixelStart = findFirstNonAppNonCom(edit);
-		int editPixelEnd = findPrimaryEoi(edit);
+		int editPixelEnd = JpegMarkerWalker.findPrimaryEoi(edit, edit.length);
 		if (editPixelStart < 0 || editPixelEnd <= editPixelStart)
 		{
 			throw new IOException("Edit JPEG has no recoverable primary scan");
@@ -238,14 +254,7 @@ public final class GraftWriter
 
 	private static JpegSegment findExif(List<JpegSegment> segments)
 	{
-		for (JpegSegment seg : segments)
-		{
-			if (seg.isExif())
-			{
-				return seg;
-			}
-		}
-		return null;
+		return segments.stream().filter(JpegSegment::isExif).findFirst().orElse(null);
 	}
 
 	/**
@@ -265,182 +274,73 @@ public final class GraftWriter
 			{
 				return -1;
 			}
-			int marker = file[off + 1] & 0xFF;
-			if (marker == 0xD9 || marker == 0xDA)
+			// Fill bytes (legal per ITU-T T.81 §B.1.1.2) — skip extra 0xFF bytes before reading the marker.
+			int markerByteOff = JpegMarkerWalker.skipFillBytes(file, off, file.length);
+			if (markerByteOff < 0)
+			{
+				return -1;
+			}
+			int marker = file[markerByteOff] & 0xFF;
+			int afterMarker = markerByteOff + 1;
+			if (marker == JpegMarker.EOI || marker == JpegMarker.SOS)
 			{
 				// EOI (impossible — we'd have only APP/COM segments) or SOS without any preceding
 				// DQT/DHT/SOF — malformed, can't proceed.
 				return -1;
 			}
-			if (marker == 0x00 || marker == 0x01 || (marker >= 0xD0 && marker <= 0xD7))
+			if (marker == JpegMarker.STUFFING || marker == JpegMarker.TEM
+				|| (marker >= JpegMarker.RST_FIRST && marker <= JpegMarker.RST_LAST))
 			{
-				off += 2;
+				off = afterMarker;
 				continue;
 			}
 			boolean isAppOrCom = (marker >= 0xE0 && marker <= 0xEF) || marker == 0xFE;
 			if (!isAppOrCom)
 			{
+				// Return the leading 0xFF (including any fill bytes) so the caller's splice keeps the
+				// fill bytes with the marker they precede — they still belong with "the next marker".
 				return off;
 			}
-			int segLen = ByteBufferUtils.readU16BE(file, off + 2);
+			if (afterMarker + 2 > file.length)
+			{
+				return -1;
+			}
+			int segLen = ByteBufferUtils.readU16BE(file, afterMarker);
 			if (segLen < 2)
 			{
 				return -1;
 			}
-			off += 2 + segLen;
+			// Wrap-overflow guard — same defensive pattern as JpegMarkerWalker.findPrimaryEoi. With segLen
+			// near 65535 and afterMarker near MAX_INT, the addition would wrap negative and the next loop
+			// iteration would index into negative offsets.
+			long next = (long) afterMarker + segLen;
+			if (next > file.length || next > Integer.MAX_VALUE)
+			{
+				return -1;
+			}
+			off = (int) next;
 		}
 		return -1;
 	}
 
 	private static JpegSegment findIcc(List<JpegSegment> segments)
 	{
-		for (JpegSegment seg : segments)
-		{
-			if (seg.isIcc())
-			{
-				return seg;
-			}
-		}
-		return null;
+		return segments.stream().filter(JpegSegment::isIcc).findFirst().orElse(null);
 	}
 
 	private static JpegSegment findMpf(List<JpegSegment> segments)
 	{
-		for (JpegSegment seg : segments)
-		{
-			if (seg.isMpf())
-			{
-				return seg;
-			}
-		}
-		return null;
-	}
-
-	/**
-	 * Find the byte offset just past the primary JPEG's EOI (FF D9). Walks markers and scans SOS entropy-coded data
-	 * including byte-stuffing (FF 00) and restart markers (FF D0..D7). Handles progressive JPEGs with multiple SOS
-	 * segments. Returns -1 if no clean EOI is found.
-	 *
-	 * Bounded by file length rather than by SEFT detection — the caller is expected to be passing an external edit
-	 * which generally doesn't have a SEFT trailer; if it does, the trailer-bounding logic is moot because we drop
-	 * everything past the primary EOI anyway.
-	 */
-	private static int findPrimaryEoi(byte[] file)
-	{
-		int off = 2;
-		while (off < file.length - 1)
-		{
-			if ((file[off] & 0xFF) != 0xFF)
-			{
-				off++;
-				continue;
-			}
-			int marker = file[off + 1] & 0xFF;
-			if (marker == JpegMarker.EOI)
-			{
-				return off + 2;
-			}
-			if (marker == JpegMarker.SOS)
-			{
-				// SOS needs 4 bytes (FF DA + 2-byte segLen) before reading sosLen. On a truncated edit
-				// that ends mid-SOS-header the readU16BE would throw IndexOutOfBoundsException; bail
-				// with -1 to let the caller surface a "graft failed" toast instead of a runtime
-				// exception.
-				if (off + 4 > file.length)
-				{
-					return -1;
-				}
-				int sosLen = ByteBufferUtils.readU16BE(file, off + 2);
-				int scanOff = off + 2 + sosLen;
-				// Defensive: a lying or adversarial sosLen plus a large `off` could either produce a
-				// scanOff past EOF (handled by the inner loop's bounds) OR an integer-overflow negative
-				// scanOff that satisfies `< file.length - 1` and then indexes a negative offset →
-				// AIOOBE. The same overflow pattern is guarded in JpegMetadataExtractor for segment
-				// lengths.
-				if (scanOff < off || scanOff > file.length)
-				{
-					return -1;
-				}
-				while (scanOff < file.length - 1)
-				{
-					if ((file[scanOff] & 0xFF) != 0xFF)
-					{
-						scanOff++;
-						continue;
-					}
-					int next = file[scanOff + 1] & 0xFF;
-					if (next == JpegMarker.EOI)
-					{
-						return scanOff + 2;
-					}
-					if (next == JpegMarker.STUFFING
-						|| (next >= JpegMarker.RST_FIRST && next <= JpegMarker.RST_LAST))
-					{
-						scanOff += 2;
-						continue;
-					}
-					// Real marker — fall through to outer loop for multi-scan progressive.
-					break;
-				}
-				off = scanOff;
-				continue;
-			}
-			if (marker == JpegMarker.STUFFING || marker == JpegMarker.TEM
-				|| (marker >= JpegMarker.RST_FIRST && marker <= JpegMarker.RST_LAST))
-			{
-				off += 2;
-				continue;
-			}
-			if (off + 3 < file.length)
-			{
-				int segLen = ByteBufferUtils.readU16BE(file, off + 2);
-				// Segment length per JPEG spec MUST include the 2 length bytes themselves; values < 2
-				// mean the file is malformed. Without this guard the loop advances by 2 or 3 (instead
-				// of the real segment size), getting stuck mid-segment and returning -1 with a "no
-				// recoverable primary scan" toast — misleading vs. the real "malformed JPEG" cause.
-				// Matches the equivalent guard in JpegMetadataExtractor.extract.
-				if (segLen < 2)
-				{
-					return -1;
-				}
-				int next = off + 2 + segLen;
-				// Wrap-to-negative + past-EOF guard, matching the SOS branch above.
-				if (next < off || next > file.length)
-				{
-					return -1;
-				}
-				off = next;
-			}
-			else
-			{
-				off += 2;
-			}
-		}
-		return -1;
+		return segments.stream().filter(JpegSegment::isMpf).findFirst().orElse(null);
 	}
 
 	private static JpegSegment findXmp(List<JpegSegment> segments)
 	{
-		for (JpegSegment seg : segments)
-		{
-			if (seg.isXmp())
-			{
-				return seg;
-			}
-		}
-		return null;
+		return segments.stream().filter(JpegSegment::isXmp).findFirst().orElse(null);
 	}
 
 	private static boolean hasMpf(List<JpegSegment> segs)
 	{
-		for (JpegSegment seg : segs)
-		{
-			if (seg.isMpf())
-			{
-				return true;
-			}
-		}
-		return false;
+		return segs.stream().anyMatch(JpegSegment::isMpf);
 	}
 
 	private static boolean isJpeg(byte[] file)

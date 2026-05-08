@@ -16,7 +16,7 @@ import com.cropcenter.util.AiRegionDetector.AiMask;
  * always returned false would skip the inpaint on every HDR graft and let the gain map's ghost-of-removed- object
  * artifact survive in the output.
  */
-public class GraftTest
+public final class GraftTest
 {
 	@Test
 	public void componentAccessorsReturnFields()
@@ -24,7 +24,7 @@ public class GraftTest
 		// Records auto-generate accessors but it's worth pinning them down — record component renames silently
 		// break callers, and tests catch it earlier than runtime ClassCastException at the call site.
 		byte[] bytes = { 0x01, 0x02, 0x03 };
-		AiMask mask = new AiMask(new boolean[]{ true }, 1, 1, 4);
+		AiMask mask = AiMask.of(new boolean[]{ true }, 1, 1, 4);
 		Graft graft = new Graft(bytes, "name.jpg", mask);
 		assertArrayEquals(bytes, graft.bytes());
 		assertEquals("name.jpg", graft.displayName());
@@ -37,7 +37,7 @@ public class GraftTest
 		// hasMaskedPixels delegates to the AiMask record's own check — a mask with no flagged pixels means
 		// Photoshop didn't actually change anything in the AI detection threshold. Skip the inpaint entirely;
 		// the splice itself is enough.
-		AiMask emptyMask = new AiMask(new boolean[4 * 4], 4, 4, 4);
+		AiMask emptyMask = AiMask.of(new boolean[4 * 4], 4, 4, 4);
 		Graft graft = new Graft(new byte[0], "n.jpg", emptyMask);
 		assertFalse(graft.hasAiMask());
 	}
@@ -57,7 +57,7 @@ public class GraftTest
 	{
 		boolean[] pixels = new boolean[8];
 		pixels[3] = true;
-		AiMask mask = new AiMask(pixels, 4, 2, 4);
+		AiMask mask = AiMask.of(pixels, 4, 2, 4);
 		Graft graft = new Graft(new byte[]{ 0x01 }, "n.jpg", mask);
 		assertTrue(graft.hasAiMask());
 	}

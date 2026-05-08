@@ -14,9 +14,13 @@ import java.io.IOException;
  * (the round-7 P2 fix that prevents shipping orphaned HDR bytes), and combined
  * bytes when patch succeeds. The MPF-patch-failure case is the key safety
  * invariant — without it, decoders that scan for the hdrgm signature would
- * render HDR with the wrong offset and reportSuccess would still claim "[HDR OK]".
+ * render HDR with the wrong offset on a file whose metadata still claimed an
+ * attached gain map. The save-toast wiring through ExportResult.hdrAttached
+ * separately ensures the [HDR OK] / [HDR dropped] suffix reflects what the
+ * encoder actually appended (Codex round-20 F2 replaced an earlier full-file
+ * substring scan).
  */
-public class GainMapComposerTest
+public final class GainMapComposerTest
 {
 	@Test
 	public void composeReturnsPrimaryUnchangedForNullGainMap()
@@ -41,8 +45,9 @@ public class GainMapComposerTest
 		// Without a valid MPF segment in primary, MpfPatcher.patch returns false. compose must DROP the gain
 		// map and ship primary verbatim — appending orphaned gain-map bytes that no MPF entry points at would
 		// either crash strict decoders' Revert pre-flight (Samsung Gallery) or render with the wrong offset in
-		// lenient decoders (which scan for the hdrgm signature). reportSuccess only checks for the hdrgm
-		// marker, so without this fix the save toast would falsely announce "[HDR OK]" on a broken file.
+		// lenient decoders (which scan for the hdrgm signature). Reference equality on the compose result is
+		// what CropExporter uses to set ExportResult.hdrAttached=false on this drop path so the save toast
+		// reads "[HDR dropped]" instead of "[HDR OK]" (Codex round-20 F2 replaced an earlier full-file scan).
 		byte[] primary = { 0x10, 0x20, 0x30 };
 		byte[] gainMap = { 0x40, 0x50 };
 		byte[] result = GainMapComposer.compose(primary, gainMap);

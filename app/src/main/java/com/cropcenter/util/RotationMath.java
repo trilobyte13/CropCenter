@@ -52,4 +52,17 @@ public final class RotationMath
 		out[1] = (float) (dx * sin + dy * cos + pivotY);
 		return out;
 	}
+
+	/**
+	 * Round `degrees` to the nearest 0.01° — the precision of the rotation ruler's tick spacing. Used by the
+	 * horizon-detector and auto-rotate paths so the announced angle lands exactly on a ruler tick rather than
+	 * between two of them, which would otherwise show as visible jitter when the user nudges the dial.
+	 *
+	 * @param degrees raw rotation in degrees
+	 * @return degrees rounded to the nearest 0.01°
+	 */
+	public static float snapToHundredth(float degrees)
+	{
+		return Math.round(degrees * 100f) / 100f;
+	}
 }

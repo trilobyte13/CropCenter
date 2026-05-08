@@ -9,7 +9,9 @@ import android.util.Log;
 
 import com.cropcenter.metadata.ExifPatcher;
 import com.cropcenter.metadata.GainMapComposer;
+import com.cropcenter.metadata.HdrSignature;
 import com.cropcenter.metadata.JpegMarker;
+import com.cropcenter.metadata.JpegMarkerWalker;
 import com.cropcenter.metadata.JpegMetadataInjector;
 import com.cropcenter.metadata.JpegSegment;
 import com.cropcenter.model.CropState;
@@ -21,6 +23,7 @@ import com.cropcenter.util.UltraHdrCompat;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.zip.CRC32;
@@ -32,17 +35,13 @@ import java.util.zip.CRC32;
 public final class CropExporter
 {
 	private static final String TAG = "CropExporter";
+	// Referenced by name in REQUIREMENTS.md §9 ("not filled with CANVAS_BG for PNG"). Keeping at class scope
+	// so the spec citation remains a real symbol rather than a bare hex literal in prose.
 	private static final int CANVAS_BG = 0xFF0D0E14; // opaque very-dark-navy — visible at rotation corners
-	private static final int MAX_THUMBNAIL_BUDGET = 60_000; // JPEG thumbnail cap (leaves room under APP1 limit)
-	// Used when no EXIF is present to measure against — defaults to the same cap. Kept as a separate constant so
-	// the two can diverge later without a literal hunt.
-	private static final int THUMBNAIL_DEFAULT_BUDGET = MAX_THUMBNAIL_BUDGET;
-	private static final int THUMBNAIL_MARGIN_BYTES = 200; // margin for IFD changes beyond measured size
-	private static final int THUMBNAIL_MAX_DIM = 1024;
 
 	private CropExporter() {}
 
-	public static byte[] export(CropState state, File cacheDir)
+	public static ExportResult export(CropState state, File cacheDir)
 		throws IOException
 	{
 		Bitmap src = state.getSourceImage();
@@ -74,10 +73,19 @@ public final class CropExporter
 			srcY = 0f;
 		}
 
-		// Create output bitmap. Use Display P3 ONLY for JPEG when the source carries a gain map (Ultra HDR):
-		// the gain map was tuned against a P3-gamut base, so composing it onto an sRGB primary produces a
-		// subtly wrong HDR boost. PNG always uses sRGB — color-managed canvases can apply subtle filtering
-		// during rasterization, causing grid lines to render at inconsistent widths or drop out.
+		// Create output bitmap. Color-space picking has three branches:
+		//   1. JPEG + gain map (Ultra HDR): force Display P3 because Samsung's gain map was calibrated
+		//      against a P3-gamut base. Composing it onto an sRGB primary produces a subtly wrong HDR boost,
+		//      so this path overrides whatever the source bitmap reports.
+		//   2. JPEG without gain map: match the source bitmap's color space so the metadata-inject pass
+		//      (which restores the source's APP2 ICC profile verbatim) describes the actual pixel encoding.
+		//      Without this, a Display P3 source (modern iPhone JPEGs, Photoshop P3 exports) would render
+		//      into the default sRGB canvas while the saved ICC tag still claimed P3 — ICC-aware viewers
+		//      would then show wrong colors. Falls back to default (sRGB) when the source's color space
+		//      lookup returns null (rare, but defensive).
+		//   3. PNG: stays on the default (sRGB) so source alpha round-trips and rotation corners stay
+		//      transparent. Color-managed canvases can apply subtle filtering during rasterization,
+		//      causing grid lines to render at inconsistent widths or drop out.
 		boolean isJpeg = state.getExportConfig().format() == Format.JPEG;
 		boolean hasGainMap = state.getGainMap() != null && state.getGainMap().length > 0;
 		Bitmap outBmp;
@@ -86,6 +94,13 @@ public final class CropExporter
 			outBmp = Bitmap.createBitmap(cropW, cropH, Bitmap.Config.ARGB_8888, true,
 				ColorSpace.get(ColorSpace.Named.DISPLAY_P3));
 		}
+		else if (isJpeg)
+		{
+			ColorSpace srcCs = src.getColorSpace();
+			outBmp = (srcCs != null)
+				? Bitmap.createBitmap(cropW, cropH, Bitmap.Config.ARGB_8888, true, srcCs)
+				: Bitmap.createBitmap(cropW, cropH, Bitmap.Config.ARGB_8888);
+		}
 		else
 		{
 			outBmp = Bitmap.createBitmap(cropW, cropH, Bitmap.Config.ARGB_8888);
@@ -93,7 +108,7 @@ public final class CropExporter
 
 		// outBmp ownership transfers to exportJpeg / exportPng on the success path — both recycle in their own
 		// finally. But if drawCropped or drawGridPixels throws (OOM on huge inputs is the realistic case), or
-		// if the switch hits the encode- failure branch before ownership transfers, outBmp would leak its
+		// if the switch hits the encode-failure branch before ownership transfers, outBmp would leak its
 		// native pixel buffer to the GC finalizer. The handedOff flag flips true the moment the switch is about
 		// to delegate, so the catch / non-success paths recycle locally.
 		boolean handedOff = false;
@@ -123,7 +138,7 @@ public final class CropExporter
 			return switch (state.getExportConfig().format())
 			{
 				case JPEG -> exportJpeg(state, outBmp, cropW, cropH, cacheDir);
-				case PNG -> exportPng(state, outBmp, cropW, cropH);
+				case PNG -> new ExportResult(exportPng(state, outBmp, cropW, cropH), false);
 			};
 		}
 		finally
@@ -169,50 +184,50 @@ public final class CropExporter
 		int halfLineWidth = lineWidth / 2;
 		int color = grid.color();
 
-		// Vertical lines
+		// Allocate one full-size band per axis up front (sized for the WIDEST possible line); reuse the same
+		// buffer for every line by passing the actual stride to setPixels. The previous version allocated
+		// a fresh int[] for any line clipped at the image edge — on a 16K-wide crop with a 7×7 grid and
+		// lineWidth=20, that was up to 14 fresh allocations totaling ~18 MB of transient int[] per save.
 		int[] vertColumn = new int[lineWidth * height];
 		Arrays.fill(vertColumn, color);
 		for (int i = 1; i < grid.columns(); i++)
 		{
 			int x = gridLinePixel(i, grid.columns(), width);
 			int left = Math.max(0, x - halfLineWidth);
-			int right = Math.min(width, left + lineWidth);
+			// Right bound is computed from the un-clipped line center (x + lineWidth - halfLineWidth) so a
+			// line whose left edge clipped against image x=0 doesn't extend its width by halfLineWidth-x to
+			// the right. The previous `left + lineWidth` form drew the full lineWidth even after the left
+			// portion was lost, producing visibly thicker grid lines on the image's left edge at thick
+			// widths. The right-edge case has always been correct because the clamp catches it; this aligns
+			// the left-edge case with the same "render only the visible pixels" semantics.
+			int right = Math.min(width, x + lineWidth - halfLineWidth);
 			int actualWidth = right - left;
 			if (actualWidth <= 0)
 			{
 				continue;
 			}
-			int[] band = (actualWidth == lineWidth)
-				? vertColumn
-				: filledBuffer(actualWidth * height, color);
-			bmp.setPixels(band, 0, actualWidth, left, 0, actualWidth, height);
+			// Buffer is uniformly colored, so reading any (stride × height) subset gives the same result.
+			// Required: vertColumn.length >= actualWidth * height — satisfied because actualWidth is
+			// always ≤ lineWidth (clipped at the image edge).
+			bmp.setPixels(vertColumn, 0, actualWidth, left, 0, actualWidth, height);
 		}
 
-		// Horizontal lines
 		int[] horizBand = new int[width * lineWidth];
 		Arrays.fill(horizBand, color);
 		for (int i = 1; i < grid.rows(); i++)
 		{
 			int y = gridLinePixel(i, grid.rows(), height);
 			int top = Math.max(0, y - halfLineWidth);
-			int bottom = Math.min(height, top + lineWidth);
+			// Symmetric fix for the horizontal band — bottom is the un-clipped line's bottom edge clamped
+			// to image height, not (top + lineWidth) which over-draws when the top clipped against y=0.
+			int bottom = Math.min(height, y + lineWidth - halfLineWidth);
 			int actualHeight = bottom - top;
 			if (actualHeight <= 0)
 			{
 				continue;
 			}
-			int[] band = (actualHeight == lineWidth)
-				? horizBand
-				: filledBuffer(width * actualHeight, color);
-			bmp.setPixels(band, 0, width, 0, top, width, actualHeight);
+			bmp.setPixels(horizBand, 0, width, 0, top, width, actualHeight);
 		}
-	}
-
-	private static int[] filledBuffer(int size, int color)
-	{
-		int[] buf = new int[size];
-		Arrays.fill(buf, color);
-		return buf;
 	}
 
 	/**
@@ -238,19 +253,22 @@ public final class CropExporter
 		return (int) Math.round((double) dim * i / count);
 	}
 
-	private static byte[] exportJpeg(CropState state, Bitmap bmp, int cropW, int cropH,
+	private static ExportResult exportJpeg(CropState state, Bitmap bmp, int cropW, int cropH,
 		File cacheDir) throws IOException
 	{
 		int quality = 100;
-		byte[] thumbnail = buildEmbeddedThumbnail(state, bmp);
-		byte[] croppedGainMap = buildCroppedGainMap(state, cropW, cropH, cacheDir, quality);
-
-		// Recycle the primary bitmap on every exit, including when bmp.compress throws a native OOM / format
-		// error partway through — the non-finally version would orphan the native pixel buffer for the GC
-		// finalizer to clean up later.
+		// Recycle the primary bitmap on every exit, covering the entire pre-compress + compress block.
+		// buildEmbeddedThumbnail and buildCroppedGainMap both render into intermediate bitmaps and can
+		// throw OutOfMemoryError on multi-MP HDR sources; before the wrap was extended to cover them, an
+		// OOM there would orphan bmp's native pixel buffer for the GC finalizer (Codex round-16). The
+		// post-compress metadata work below doesn't touch bmp, so it stays outside.
+		byte[] thumbnail;
+		byte[] croppedGainMap;
 		byte[] jpegBytes;
 		try
 		{
+			thumbnail = buildEmbeddedThumbnail(state, bmp);
+			croppedGainMap = buildCroppedGainMap(state, cropW, cropH, cacheDir, quality);
 			ByteArrayOutputStream bos = new ByteArrayOutputStream();
 			bmp.compress(Bitmap.CompressFormat.JPEG, quality, bos);
 			jpegBytes = bos.toByteArray();
@@ -260,11 +278,47 @@ public final class CropExporter
 			bmp.recycle();
 		}
 
-		jpegBytes = injectExifMetadata(jpegBytes, state, cropW, cropH, thumbnail);
-		jpegBytes = composeGainMap(jpegBytes, state, croppedGainMap);
+		// HDR-drop bookkeeping: an HDR source carries XMP-hdrgm + APP2-MPF metadata describing the gain map's
+		// presence and offset. If the gain-map composition is skipped (croppedGainMap == null because
+		// UltraHdrCompat couldn't produce a valid output) OR fails inside GainMapComposer.compose (MPF patch
+		// rejects, e.g. malformed source MPF), the output won't carry an attached gain map but the metadata
+		// would still claim one — strict decoders' Revert pre-flight would reject the orphaned-metadata
+		// shape, and lenient decoders that scan for the hdrgm signature would render with the wrong offset.
+		// Strip the HDR-specific segments from the injected metadata when we know the gain map didn't make
+		// it. Codex round-20 F2 separately replaced ExportPipeline.reportSuccess's full-file substring scan
+		// with the structural hdrAttached flag returned in ExportResult below, so the toast no longer
+		// false-positive's on stale metadata; the strip remains the right behaviour for honest output bytes.
+		boolean hdrAttempted = state.getGainMap() != null && state.getGainMap().length > 0
+			&& state.getOriginalFileBytes() != null;
+		List<JpegSegment> meta = state.getJpegMeta();
+		List<JpegSegment> metaForFullHdr = meta;
+		List<JpegSegment> metaWithHdrStripped = (hdrAttempted && meta != null)
+			? stripHdrSegments(meta) : meta;
+
+		// Optimistically inject the full metadata, then attempt the gain-map compose. If the compose drops
+		// the gain map (returns the input unchanged), re-inject from scratch with HDR-specific segments
+		// stripped so the output's metadata stays honest about what's actually attached.
+		byte[] withFullMeta = injectExifMetadata(jpegBytes, metaForFullHdr, cropW, cropH, thumbnail);
+		byte[] withGainMap = composeGainMap(withFullMeta, state, croppedGainMap);
+		boolean hdrAttached = withGainMap != withFullMeta;
+		if (hdrAttempted && !hdrAttached)
+		{
+			Log.d(TAG, "HDR drop detected — re-injecting metadata with hdrgm XMP + MPF stripped");
+			jpegBytes = injectExifMetadata(jpegBytes, metaWithHdrStripped, cropW, cropH, thumbnail);
+		}
+		else
+		{
+			jpegBytes = withGainMap;
+		}
 		jpegBytes = appendSeft(jpegBytes, state.getSeftTrailer());
 
-		return jpegBytes;
+		// Codex round-20 F2: thread `hdrAttached` back to the caller structurally, so
+		// ExportPipeline.reportSuccess doesn't have to substring-scan the output for "hdrgm" — that scan
+		// false-positive'd on preserved trailers, stale metadata, and Extended-XMP segments. The flag
+		// reflects what composeGainMap actually did: a different byte array means the gain map was
+		// appended; the same array means HDR was dropped (and stripHdrSegments has already removed the
+		// HDR-claiming segments above).
+		return new ExportResult(jpegBytes, hdrAttached);
 	}
 
 	/**
@@ -275,12 +329,21 @@ public final class CropExporter
 	 */
 	private static byte[] buildEmbeddedThumbnail(CropState state, Bitmap bmp)
 	{
+		// JPEG thumbnail cap. APP1 segment limit is 65535 bytes total; this leaves room for the IFD0/IFD1
+		// metadata before the thumbnail bytes. Used both as the no-source-meta fallback budget AND as the
+		// upper clamp on the measured budget below — a corrupted source EXIF could report an arbitrarily
+		// large "remaining APP1 space", and clamping here keeps the encoded thumbnail under the segment cap.
+		final int maxThumbnailBudget = 60_000;
+		// Margin against the measured EXIF-segment budget to absorb IFD bookkeeping changes that the patcher
+		// adds when it injects the new thumbnail entries.
+		final int thumbnailMarginBytes = 200;
+		final int thumbnailMaxDim = 1024;
 		List<JpegSegment> metaForThumb = state.getJpegMeta();
 		int thumbBudget = (metaForThumb != null && !metaForThumb.isEmpty())
-			? ExifPatcher.maxThumbnailBytes(metaForThumb) - THUMBNAIL_MARGIN_BYTES
-			: THUMBNAIL_DEFAULT_BUDGET;
-		thumbBudget = Math.clamp(thumbBudget, 0, MAX_THUMBNAIL_BUDGET);
-		return generateThumbnail(bmp, THUMBNAIL_MAX_DIM, thumbBudget);
+			? ExifPatcher.maxThumbnailBytes(metaForThumb) - thumbnailMarginBytes
+			: maxThumbnailBudget;
+		thumbBudget = Math.clamp(thumbBudget, 0, maxThumbnailBudget);
+		return generateThumbnail(bmp, thumbnailMaxDim, thumbBudget);
 	}
 
 	/**
@@ -292,7 +355,11 @@ public final class CropExporter
 	private static byte[] buildCroppedGainMap(CropState state, int cropW, int cropH, File cacheDir, int quality)
 	{
 		byte[] originalBytes = state.getOriginalFileBytes();
-		boolean hasHdr = state.getGainMap() != null && originalBytes != null;
+		// Match the gain-map presence check at the top of export() — a zero-length gain-map array means
+		// extraction succeeded structurally but produced no usable bytes (rare but observed after malformed
+		// extraction). UltraHdrCompat would silently fall back to SDR; flag here so the caller's null check
+		// drops the HDR path explicitly rather than letting a degraded HDR encode go through.
+		boolean hasHdr = state.getGainMap() != null && state.getGainMap().length > 0 && originalBytes != null;
 		if (!hasHdr)
 		{
 			return null;
@@ -301,8 +368,8 @@ public final class CropExporter
 		float centerX = state.hasCenter() ? state.getCenterX() : state.getImageWidth() / 2f;
 		float centerY = state.hasCenter() ? state.getCenterY() : state.getImageHeight() / 2f;
 		int exifOrient = BitmapUtils.readExifOrientation(originalBytes);
-		CropRender render = new CropRender(centerX, centerY, cropH, cropW,
-			state.getImageHeight(), state.getImageWidth(), state.getRotationDegrees());
+		CropRender render = CropRender.of(centerX, centerY, cropW, cropH,
+			state.getImageWidth(), state.getImageHeight(), state.getRotationDegrees());
 		byte[] hdrResult = UltraHdrCompat.compressWithGainmap(
 			originalBytes, quality, cacheDir, render, exifOrient, state.getAiMask());
 		if (hdrResult == null)
@@ -311,31 +378,75 @@ public final class CropExporter
 			return null;
 		}
 
-		int pe = findPrimaryEnd(hdrResult);
-		if (pe <= 0 || pe >= hdrResult.length)
+		int primaryEnd = JpegMarkerWalker.findPrimaryEoi(hdrResult, hdrResult.length);
+		if (primaryEnd <= 0 || primaryEnd >= hdrResult.length)
 		{
 			return null;
 		}
-		byte[] gainMap = new byte[hdrResult.length - pe];
-		System.arraycopy(hdrResult, pe, gainMap, 0, gainMap.length);
+		byte[] gainMap = new byte[hdrResult.length - primaryEnd];
+		System.arraycopy(hdrResult, primaryEnd, gainMap, 0, gainMap.length);
 		Log.d(TAG, "Extracted gain map: " + gainMap.length + " bytes");
 		return gainMap;
 	}
 
 	/**
-	 * Patch the JPEG's EXIF metadata with new crop dimensions and the freshly-generated thumbnail, re-injecting the
-	 * patched segments into the output bytes. No-op when the source carried no JPEG segment list.
+	 * Patch the JPEG's EXIF metadata with new crop dimensions and the freshly-generated thumbnail, re-injecting
+	 * the patched segments into the output bytes. No-op when the source carried no JPEG segment list. Caller
+	 * chooses the meta list (full vs HDR-stripped) so the same primary-JPEG bytes can be re-injected on the
+	 * rare HDR-drop path without re-compressing the bitmap.
+	 *
+	 * @param jpegBytes raw JPEG bytes (output of bmp.compress) — must still carry Skia's APP markers
+	 * @param meta      original metadata segments; null / empty short-circuits the inject
+	 * @param cropW     cropped width to write into IFD0/SubIFD dimension tags
+	 * @param cropH     cropped height to write into IFD0/SubIFD dimension tags
+	 * @param thumbnail freshly-generated thumbnail JPEG bytes, or null to leave any existing IFD1 thumbnail
+	 * @return JPEG bytes with metadata replaced
 	 */
-	private static byte[] injectExifMetadata(byte[] jpegBytes, CropState state,
+	private static byte[] injectExifMetadata(byte[] jpegBytes, List<JpegSegment> meta,
 		int cropW, int cropH, byte[] thumbnail) throws IOException
 	{
-		List<JpegSegment> meta = state.getJpegMeta();
 		if (meta == null || meta.isEmpty())
 		{
 			return jpegBytes;
 		}
 		List<JpegSegment> patched = ExifPatcher.patch(meta, cropW, cropH, thumbnail);
 		return JpegMetadataInjector.inject(jpegBytes, patched);
+	}
+
+	/**
+	 * Drop HDR-specific segments — XMP segments containing the `hdrgm` namespace marker (standard OR
+	 * Extended XMP), and APP2/MPF segments pointing at the gain map. Used on the HDR-drop path so the
+	 * saved JPEG's metadata doesn't claim HDR that the output file doesn't actually carry.
+	 *
+	 * Drops the WHOLE XMP segment when it contains hdrgm rather than surgically rewriting the XML — most camera
+	 * vendors split XMP into multiple APP1 segments anyway, so any non-hdrgm XMP typically lives in a separate
+	 * segment. The corner case (a single XMP segment carrying hdrgm + non-hdrgm metadata) loses the non-hdrgm
+	 * tags too, but that beats lying to ExportPipeline.reportSuccess about HDR presence.
+	 *
+	 * Delegates to HdrSignature.isHdrgmXmpSegment so the standard-plus-extended-XMP detection stays in
+	 * lockstep with the load-time hasHdrgmInXmp gate — without that, an HDR-drop output of a source whose
+	 * hdrgm declaration was in Extended XMP would leak the HDR signature past the gain-map removal
+	 * (Codex round-20 F1).
+	 *
+	 * @param meta source JPEG segment list
+	 * @return new list with HDR-specific segments removed; non-HDR segments preserved verbatim
+	 */
+	private static List<JpegSegment> stripHdrSegments(List<JpegSegment> meta)
+	{
+		List<JpegSegment> filtered = new ArrayList<>(meta.size());
+		for (JpegSegment seg : meta)
+		{
+			if (seg.isMpf())
+			{
+				continue;
+			}
+			if (HdrSignature.isHdrgmXmpSegment(seg))
+			{
+				continue;
+			}
+			filtered.add(seg);
+		}
+		return filtered;
 	}
 
 	/**
@@ -374,108 +485,47 @@ public final class CropExporter
 			bmp.recycle();
 		}
 
-		// Inject EXIF metadata via PNG eXIf chunk (PNG 1.6 spec)
-		List<JpegSegment> meta = state.getJpegMeta();
-		if (meta != null)
+		// Inject EXIF metadata via PNG eXIf chunk (PNG 1.6 spec). Two paths:
+		//   1. PNG sources keep raw TIFF in state.pngExifTiff (uncapped — the JPEG APP1 u16 limit doesn't
+		//      apply to PNG output). Wrap as a synthetic APP1 just to run through ExifPatcher.patch (which
+		//      normalises orientation to 1 and rewrites the cropped dimensions); the wrapper's bytes[2..3]
+		//      length field may be truncated for > 64KB TIFFs but that's harmless because injectPngExif
+		//      uses data().length, not the wrapper's claimed segLen.
+		//   2. JPEG sources keep their full segment list in state.jpegMeta; PNG export pulls the EXIF
+		//      segment from there. JPEG-source EXIF is always under the u16 cap by spec, so no special
+		//      handling needed.
+		byte[] pngExifTiff = state.getPngExifTiff();
+		boolean wrotePngExif = false;
+		if (pngExifTiff != null)
 		{
-			for (JpegSegment seg : ExifPatcher.patch(meta, cropW, cropH, null))
+			byte[] patchedTiff = patchPngExifTiff(pngExifTiff, cropW, cropH);
+			if (patchedTiff != null)
 			{
-				if (seg.isExif())
+				pngBytes = injectPngExifFromTiff(pngBytes, patchedTiff);
+				wrotePngExif = true;
+			}
+		}
+		// Fall through to the synthetic-APP1 path when (a) the source was JPEG (pngExifTiff null) or (b) the
+		// raw-TIFF patch returned null because ExifPatcher rejected the input as malformed. Without this
+		// fallback, a malformed PNG eXIf chunk would silently drop EXIF on the saved PNG even though
+		// state.jpegMeta still has a valid synthetic APP1 (capped, but valid for in-bounds payloads).
+		if (!wrotePngExif)
+		{
+			List<JpegSegment> meta = state.getJpegMeta();
+			if (meta != null)
+			{
+				for (JpegSegment seg : ExifPatcher.patch(meta, cropW, cropH, null))
 				{
-					pngBytes = injectPngExif(pngBytes, seg.data());
-					break; // only one EXIF segment
+					if (seg.isExif())
+					{
+						pngBytes = injectPngExif(pngBytes, seg.data());
+						break; // only one EXIF segment
+					}
 				}
 			}
 		}
 
 		return pngBytes;
-	}
-
-	/**
-	 * Find the end of the primary JPEG (position after first EOI). Used to determine where the gain map starts.
-	 */
-	private static int findPrimaryEnd(byte[] jpeg)
-	{
-		// Walk JPEG markers to find the primary's EOI
-		int off = 2; // skip SOI
-		while (off < jpeg.length - 1)
-		{
-			if ((jpeg[off] & 0xFF) != 0xFF)
-			{
-				off++;
-				continue;
-			}
-			int marker = jpeg[off + 1] & 0xFF;
-			if (marker == JpegMarker.EOI)
-			{
-				return off + 2; // EOI found
-			}
-			if (marker == JpegMarker.SOS)
-			{
-				// SOS — scan entropy data for EOI
-				if (off + 3 >= jpeg.length)
-				{
-					break;
-				}
-				int sosLen = ((jpeg[off + 2] & 0xFF) << 8) | (jpeg[off + 3] & 0xFF);
-				int sosNext = off + 2 + sosLen;
-				// Wrap-to-negative guard (sosLen can be up to 65535; off near MAX_INT could overflow)
-				// plus the legitimate past-EOF check. Match the equivalent guard in
-				// GraftWriter.findPrimaryEoi.
-				if (sosNext < off || sosNext > jpeg.length)
-				{
-					return -1;
-				}
-				off = sosNext;
-				while (off < jpeg.length - 1)
-				{
-					if ((jpeg[off] & 0xFF) != 0xFF)
-					{
-						off++;
-						continue;
-					}
-					int next = jpeg[off + 1] & 0xFF;
-					if (next == JpegMarker.EOI)
-					{
-						return off + 2;
-					}
-					if (next == JpegMarker.STUFFING)
-					{
-						off += 2;
-						continue;
-					}
-					if (next >= JpegMarker.RST_FIRST && next <= JpegMarker.RST_LAST)
-					{
-						off += 2;
-						continue;
-					}
-					break;
-				}
-				continue;
-			}
-			if (marker == JpegMarker.STUFFING || marker == JpegMarker.TEM
-				|| (marker >= JpegMarker.RST_FIRST && marker <= JpegMarker.RST_LAST))
-			{
-				off += 2;
-				continue;
-			}
-			if (off + 3 < jpeg.length)
-			{
-				int segLen = ((jpeg[off + 2] & 0xFF) << 8) | (jpeg[off + 3] & 0xFF);
-				int segNext = off + 2 + segLen;
-				// Same wrap + past-EOF guard as the SOS branch above.
-				if (segNext < off || segNext > jpeg.length)
-				{
-					return -1;
-				}
-				off = segNext;
-			}
-			else
-			{
-				off += 2;
-			}
-		}
-		return -1; // not found
 	}
 
 	/**
@@ -550,8 +600,13 @@ public final class CropExporter
 			Log.w(TAG, "Thumbnail too large even at halved size: " + result.length + " > " + maxBytes);
 			return null;
 		}
-		catch (Exception e)
+		catch (Exception | OutOfMemoryError e)
 		{
+			// Widened to OOM as well as Exception so a thumbnail-side allocation failure (Bitmap.compress
+			// on a multi-MP intermediate, or renderSrgbThumb's Canvas.drawBitmap rasterisation) degrades
+			// to "save without embedded thumbnail" rather than aborting the whole save with no toast —
+			// encodePhase's catch is also Exception-only and OOM would otherwise propagate past it
+			// silently (R17-5).
 			Log.w(TAG, "Thumbnail generation failed", e);
 			return null;
 		}
@@ -568,22 +623,37 @@ public final class CropExporter
 	 * Render `src` into a fresh sRGB ARGB_8888 bitmap at the requested dimensions using a bilinear-filtered Canvas
 	 * draw. The output is guaranteed to compress to a plain baseline JPEG with no ICC profile APP2 segment,
 	 * regardless of `src`'s color space.
+	 *
+	 * Recycles `out` and rethrows on any Canvas / Paint / drawBitmap failure (RuntimeException) or
+	 * OutOfMemoryError. Without the wrap, `out`'s native pixel buffer would orphan to the GC finalizer
+	 * under the same allocation pressure that triggered the OOM. Mirrors UltraHdrCompat.renderPrimary's
+	 * recycle-and-rethrow shape (R17-5).
 	 */
 	private static Bitmap renderSrgbThumb(Bitmap src, int width, int height)
 	{
 		Bitmap out = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888, true,
 			ColorSpace.get(ColorSpace.Named.SRGB));
-		Canvas canvas = new Canvas(out);
-		Rect srcRect = new Rect(0, 0, src.getWidth(), src.getHeight());
-		Rect dstRect = new Rect(0, 0, width, height);
-		Paint paint = new Paint(Paint.FILTER_BITMAP_FLAG);
-		canvas.drawBitmap(src, srcRect, dstRect, paint);
-		return out;
+		try
+		{
+			Canvas canvas = new Canvas(out);
+			Rect srcRect = new Rect(0, 0, src.getWidth(), src.getHeight());
+			Rect dstRect = new Rect(0, 0, width, height);
+			Paint paint = new Paint(Paint.FILTER_BITMAP_FLAG);
+			canvas.drawBitmap(src, srcRect, dstRect, paint);
+			return out;
+		}
+		catch (RuntimeException | OutOfMemoryError e)
+		{
+			out.recycle();
+			throw e;
+		}
 	}
 
 	/**
-	 * Inject EXIF data into a PNG as an eXIf chunk, inserted after IHDR. The eXIf chunk contains raw TIFF data
-	 * (from EXIF APP1, minus the FF E1 length "Exif\0\0" wrapper).
+	 * Inject EXIF data into a PNG as an eXIf chunk, inserted after IHDR. Takes a JPEG-style APP1 segment (FF
+	 * E1 LL LL "Exif\0\0" [TIFF...]) — the form held in state.jpegMeta — unwraps the TIFF body, and delegates
+	 * to injectPngExifFromTiff for the actual chunk write. Used by JPEG → PNG export where state.jpegMeta is
+	 * the only metadata source.
 	 */
 	private static byte[] injectPngExif(byte[] png, byte[] exifApp1)
 	{
@@ -596,7 +666,22 @@ public final class CropExporter
 		int tiffLen = exifApp1.length - 10;
 		byte[] tiffData = new byte[tiffLen];
 		System.arraycopy(exifApp1, 10, tiffData, 0, tiffLen);
+		return injectPngExifFromTiff(png, tiffData);
+	}
 
+	/**
+	 * Write a PNG eXIf chunk carrying tiffData, inserted after the IHDR chunk. Unlike injectPngExif this takes
+	 * raw TIFF bytes directly with no JPEG APP1 u16 cap — used by the PNG → PNG round-trip path so a PNG with
+	 * > 64KB EXIF (camera with extensive MakerNote / GPS metadata) keeps its full metadata when re-saved. The
+	 * PNG eXIf length field is u31 so the chunk holds anything up to ~2GB.
+	 */
+	private static byte[] injectPngExifFromTiff(byte[] png, byte[] tiffData)
+	{
+		int tiffLen = tiffData.length;
+		if (tiffLen == 0)
+		{
+			return png;
+		}
 		// PNG structure: 8-byte signature, then chunks. Insert eXIf after the first chunk (IHDR).
 		if (png.length < 8 + 12)
 		{
@@ -641,5 +726,51 @@ public final class CropExporter
 
 		Log.d(TAG, "Injected eXIf chunk: " + tiffLen + " bytes TIFF data");
 		return result;
+	}
+
+	/**
+	 * Run a raw TIFF through ExifPatcher.patch to normalise orientation (forced to 1 because pixels were
+	 * rotated at load time) and rewrite cropped dimensions. Wraps the TIFF as a synthetic APP1 segment for
+	 * ExifPatcher's segment-oriented API; the wrapper's u16 length field (bytes 2..3) may be truncated for
+	 * > 64KB TIFFs but ExifPatcher reads only data().length, never the wrapped length, so the truncation is
+	 * harmless. Returns the patched TIFF bytes, or null when ExifPatcher rejected the input (malformed byte
+	 * order, etc.).
+	 */
+	private static byte[] patchPngExifTiff(byte[] tiff, int newW, int newH)
+	{
+		// Build a synthetic APP1 segment: FF E1 LL LL "Exif\0\0" [TIFF...]. Bytes 2..3 (segLen u16) get
+		// truncated when 2 + 6 + tiff.length > 65535, but the only consumer here is ExifPatcher.patch which
+		// reads data().length directly.
+		int segLen = 2 + 6 + tiff.length;
+		byte[] wrapped = new byte[2 + segLen];
+		wrapped[0] = (byte) 0xFF;
+		wrapped[1] = (byte) 0xE1;
+		wrapped[2] = (byte) ((segLen >> 8) & 0xFF);
+		wrapped[3] = (byte) (segLen & 0xFF);
+		wrapped[4] = 'E';
+		wrapped[5] = 'x';
+		wrapped[6] = 'i';
+		wrapped[7] = 'f';
+		wrapped[8] = 0;
+		wrapped[9] = 0;
+		System.arraycopy(tiff, 0, wrapped, 10, tiff.length);
+
+		List<JpegSegment> wrappedList = new ArrayList<>(1);
+		wrappedList.add(new JpegSegment(0xE1, wrapped));
+		for (JpegSegment seg : ExifPatcher.patch(wrappedList, newW, newH, null))
+		{
+			if (seg.isExif())
+			{
+				byte[] patchedData = seg.data();
+				if (patchedData.length <= 10)
+				{
+					return null;
+				}
+				byte[] patchedTiff = new byte[patchedData.length - 10];
+				System.arraycopy(patchedData, 10, patchedTiff, 0, patchedTiff.length);
+				return patchedTiff;
+			}
+		}
+		return null;
 	}
 }

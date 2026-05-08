@@ -35,7 +35,10 @@ public final class JpegMetadataInjector
 			throw new IOException("Not a valid JPEG");
 		}
 
-		// Find where re-encoded image data starts (skip its APP/COM markers)
+		// Find where re-encoded image data starts (skip its APP/COM markers). Fill bytes (legal per
+		// ITU-T T.81 §B.1.1.2 — any number of 0xFF before the marker byte) are skipped via the canonical
+		// JpegMarkerWalker.skipFillBytes helper so a Skia output that uses fill-byte alignment doesn't
+		// get its first APP misread as marker code 0xFF.
 		int scanStart = 2;
 		while (scanStart < reencoded.length - 3)
 		{
@@ -43,13 +46,23 @@ public final class JpegMetadataInjector
 			{
 				break;
 			}
-			int marker = reencoded[scanStart + 1] & 0xFF;
+			int markerByteOff = JpegMarkerWalker.skipFillBytes(reencoded, scanStart, reencoded.length);
+			if (markerByteOff < 0)
+			{
+				break;
+			}
+			int marker = reencoded[markerByteOff] & 0xFF;
+			int afterMarker = markerByteOff + 1;
 			// Stop at non-APP/COM markers: DQT(DB), SOF(C0-CF), DHT(C4), SOS(DA), etc.
 			if (!((marker >= 0xE0 && marker <= 0xEF) || marker == 0xFE))
 			{
 				break;
 			}
-			int segLen = ByteBufferUtils.readU16BE(reencoded, scanStart + 2);
+			if (afterMarker + 2 > reencoded.length)
+			{
+				break;
+			}
+			int segLen = ByteBufferUtils.readU16BE(reencoded, afterMarker);
 			if (segLen < 2)
 			{
 				break; // malformed segment
@@ -57,18 +70,19 @@ public final class JpegMetadataInjector
 			// A lying segLen claiming to extend past EOF means the re-encoded buffer is genuinely malformed
 			// (Skia produced a corrupt JPEG, or the byte stream got damaged between encode and injector).
 			// Earlier versions silently fell back to `scanStart = 2`, which then wrote a verbatim copy of
-			// the entire re- encoded image AFTER the SOI as the "primary scan" — that included the
+			// the entire re-encoded image AFTER the SOI as the "primary scan" — that included the
 			// re-encoder's own APP markers (JFIF, sRGB ICC) duplicated alongside original's, exactly the
 			// situation this function is supposed to avoid. Throw instead so the caller
 			// (ExportPipeline.encodePhase) surfaces a real "Export failed" toast rather than silently
 			// shipping a JPEG with duplicate APP segments.
-			if (scanStart + 2L + segLen > reencoded.length)
+			long next = (long) afterMarker + segLen;
+			if (next > reencoded.length)
 			{
 				throw new IOException("Re-encoded APP segment at " + scanStart
-					+ " claims length " + segLen + " but only " + (reencoded.length - scanStart - 2)
+					+ " claims length " + segLen + " but only " + (reencoded.length - afterMarker)
 					+ " bytes remain");
 			}
-			scanStart += 2 + segLen;
+			scanStart = (int) next;
 		}
 
 		Log.d(TAG, "Skipped " + (scanStart - 2) + " bytes of re-encoder APP markers");
