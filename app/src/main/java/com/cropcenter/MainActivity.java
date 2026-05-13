@@ -3,6 +3,7 @@ package com.cropcenter;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Context;
+import android.content.DialogInterface;
 import android.content.Intent;
 import android.graphics.Bitmap;
 import android.net.Uri;
@@ -52,11 +53,11 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 	// Single-thread executor with daemon-threaded worker — serialises load/export/horizon-detect so only one
 	// heavyweight CropState-touching task runs at a time. Daemon thread doesn't prevent JVM exit; onDestroy shuts
 	// the executor down gracefully so config-change rotation doesn't leak an orphaned worker per recreation.
-	private final ExecutorService backgroundExecutor = Executors.newSingleThreadExecutor(r ->
+	private final ExecutorService backgroundExecutor = Executors.newSingleThreadExecutor(task ->
 	{
-		Thread t = new Thread(r, "CropCenter-bg");
-		t.setDaemon(true);
-		return t;
+		Thread thread = new Thread(task, "CropCenter-bg");
+		thread.setDaemon(true);
+		return thread;
 	});
 	// safFiles / permissions declared before saveController and graftController because both constructors take them
 	// — Java initialises fields in declaration order, so dependencies must come first regardless of strict
@@ -653,6 +654,24 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 	}
 
 	/**
+	 * Dismiss-listener callback for SettingsDialog.show — clears `activeTransientDialog` only if it
+	 * still references the dialog that just dismissed. The reference-equality guard prevents a stale
+	 * dismiss from a now-superseded dialog from clearing a tracking handle that already points at a
+	 * different dialog.
+	 *
+	 * @param dismissed the dialog reporting its dismiss; cleared from tracking only when it still
+	 *                  matches activeTransientDialog (reference equality, not value equality —
+	 *                  AlertDialog has no equals override)
+	 */
+	private void clearActiveTransientDialogIfMatches(DialogInterface dismissed)
+	{
+		if (activeTransientDialog == dismissed)
+		{
+			activeTransientDialog = null;
+		}
+	}
+
+	/**
 	 * UI-thread body of hideProgress. Extracted so the runOnUiThread call site stays a method-reference
 	 * one-liner instead of a 5-line lambda — CLAUDE.md caps lambda bodies at 3 lines, and the isDestroyed
 	 * guard + view-tree mutation tend to push past that. Symmetric to showProgressOnUi.
@@ -747,6 +766,10 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 			showBusyToast();
 			return;
 		}
-		registerTransientDialog(SettingsDialog.show(this, state));
+		// Can't use `registerTransientDialog(SettingsDialog.show(...))` here because that wraps with
+		// `setOnDismissListener` which REPLACES SettingsDialog's own cancelActivePicker cleanup (Codex
+		// round-38 F1). Pass the activity-tracking clear as SettingsDialog.show's hostDismissListener
+		// parameter so the dialog installs ONE composed listener that runs both cleanups.
+		activeTransientDialog = SettingsDialog.show(this, state, this::clearActiveTransientDialogIfMatches);
 	}
 }

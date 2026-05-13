@@ -83,17 +83,17 @@ public final class GainMapExtractor
 			return null;
 		}
 		byte[] gainMapSlice = Arrays.copyOfRange(file, primaryEnd, sliceEnd);
-		int gmEoiInSlice = JpegMarkerWalker.findPrimaryEoi(gainMapSlice, gainMapSlice.length);
-		if (gmEoiInSlice < 0)
+		int gainMapEoiInSlice = JpegMarkerWalker.findPrimaryEoi(gainMapSlice, gainMapSlice.length);
+		if (gainMapEoiInSlice < 0)
 		{
 			Log.w(TAG, "gain map between primary EOI " + primaryEnd + " and " + sliceEnd
 				+ " doesn't parse as a JPEG; treating as no-gain-map");
 			return null;
 		}
 
-		byte[] gainMap = new byte[gmEoiInSlice];
-		System.arraycopy(file, primaryEnd, gainMap, 0, gmEoiInSlice);
-		Log.d(TAG, "Extracted gain map: " + gmEoiInSlice + " bytes after primary EOI");
+		byte[] gainMap = new byte[gainMapEoiInSlice];
+		System.arraycopy(file, primaryEnd, gainMap, 0, gainMapEoiInSlice);
+		Log.d(TAG, "Extracted gain map: " + gainMapEoiInSlice + " bytes after primary EOI");
 		return gainMap;
 	}
 

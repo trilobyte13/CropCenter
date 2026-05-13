@@ -2,6 +2,9 @@ package com.cropcenter.model;
 
 import static org.junit.Assert.assertEquals;
 
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicInteger;
+
 import org.junit.Test;
 
 /**
@@ -143,6 +146,155 @@ public final class StateBusTest
 		bus.endBatch();
 		assertEquals("first listener should not fire after being replaced", 0, firstCount[0]);
 		assertEquals("second listener fires on endBatch", 1, secondCount[0]);
+	}
+
+	@Test
+	public void concurrentNotifyAcrossEndBatchNeverLosesDirtyFlag() throws Exception
+	{
+		// Round-40 F1 regression test. The pre-fix race: bg thread enters notifyChanged() and reads
+		// batchDepth > 0; UI thread interleaves an endBatch() that decrements depth to 0 and reads
+		// batchDirty == false (the bg thread hasn't set it yet); bg thread sets batchDirty = true and
+		// returns. The dirty flag is now stranded — endBatch already passed its check, and the next batch is
+		// what eventually flushes it. The bg-issued notify produces zero fires for this trial.
+		//
+		// The fix groups (depth, dirty) under one synchronized section so endBatch either sees a dirty flag
+		// set inside the lock-protected window or sees that no notify is in flight; the "set just after
+		// flush" gap is closed.
+		//
+		// Test design: fresh bus per trial; main thread opens a batch; bg + ui threads race notifyChanged
+		// against endBatch; assert every trial produces at least one fire (no stranding). Without the fix,
+		// the race scenario (bg-preempted-mid-notify, ui-finishes-endBatch, bg-resumes) leaves fired == 0
+		// for the trial — measurable across many iterations.
+		int trials = 1000;
+		int strandedTrials = 0;
+		for (int trial = 0; trial < trials; trial++)
+		{
+			StateBus bus = new StateBus();
+			AtomicInteger fired = new AtomicInteger();
+			bus.setListener(fired::incrementAndGet);
+			bus.beginBatch();
+			CountDownLatch ready = new CountDownLatch(2);
+			CountDownLatch go = new CountDownLatch(1);
+			Thread bg = new Thread(() ->
+			{
+				ready.countDown();
+				try
+				{
+					go.await();
+				}
+				catch (InterruptedException ignored)
+				{
+					// Unreachable in JUnit flow — checked-exception escape only. A force-kill
+					// returns here and the trial aborts without its notify; strand assertion would
+					// then flag the unusual run rather than silently retry.
+					Thread.currentThread().interrupt();
+					return;
+				}
+				bus.notifyChanged();
+			});
+			Thread ui = new Thread(() ->
+			{
+				ready.countDown();
+				try
+				{
+					go.await();
+				}
+				catch (InterruptedException ignored)
+				{
+					// Same checked-exception escape hatch as the bg thread above — never reached in
+					// normal JUnit flow; force-kill aborts the trial without an endBatch.
+					Thread.currentThread().interrupt();
+					return;
+				}
+				bus.endBatch();
+			});
+			bg.start();
+			ui.start();
+			ready.await();
+			go.countDown();
+			bg.join();
+			ui.join();
+			if (fired.get() == 0)
+			{
+				strandedTrials++;
+			}
+		}
+		assertEquals("notify across endBatch must never be stranded (race regression)",
+			0, strandedTrials);
+	}
+
+	@Test
+	public void concurrentSetListenerNullDuringFireNeverNpes() throws Exception
+	{
+		// Round-44 F1 regression test. The pre-fix race: bg thread enters fire(), reads
+		// `this.listener != null` in the guard, gets non-null; UI thread interleaves setListener(null),
+		// clearing the volatile field; bg thread re-reads `this.listener` at the invocation site and
+		// gets null → NullPointerException. Activity.onDestroy clears the listener precisely so a
+		// late-firing bg worker can no-op safely, so an NPE here would defeat the lifecycle guard.
+		//
+		// The fix snapshots the volatile field to a local before the guard + invoke pair so the field
+		// can be cleared mid-fire without the invocation seeing null. Test design: bg thread spams
+		// notifyChanged() while UI thread alternates setListener(non-null) / setListener(null). Any
+		// NPE caught surfaces as a non-zero failure count. The race is probabilistic by nature, but a
+		// few thousand interleaved iterations reliably hits it on the pre-fix code while the fixed
+		// code remains clean (the snapshot pins whichever value was current at fire()-entry).
+		int iterations = 5000;
+		StateBus bus = new StateBus();
+		AtomicInteger fires = new AtomicInteger();
+		AtomicInteger npesCaught = new AtomicInteger();
+		bus.setListener(fires::incrementAndGet);
+		CountDownLatch ready = new CountDownLatch(2);
+		CountDownLatch go = new CountDownLatch(1);
+		Thread bg = new Thread(() ->
+		{
+			ready.countDown();
+			try
+			{
+				go.await();
+			}
+			catch (InterruptedException ignored)
+			{
+				// Unreachable in JUnit flow — checked-exception escape only.
+				Thread.currentThread().interrupt();
+				return;
+			}
+			for (int i = 0; i < iterations; i++)
+			{
+				try
+				{
+					bus.notifyChanged();
+				}
+				catch (NullPointerException npe)
+				{
+					npesCaught.incrementAndGet();
+				}
+			}
+		});
+		Thread ui = new Thread(() ->
+		{
+			ready.countDown();
+			try
+			{
+				go.await();
+			}
+			catch (InterruptedException ignored)
+			{
+				// Same checked-exception escape hatch as the bg thread above.
+				Thread.currentThread().interrupt();
+				return;
+			}
+			for (int i = 0; i < iterations; i++)
+			{
+				bus.setListener((i % 2 == 0) ? null : fires::incrementAndGet);
+			}
+		});
+		bg.start();
+		ui.start();
+		ready.await();
+		go.countDown();
+		bg.join();
+		ui.join();
+		assertEquals("setListener(null) racing fire() must not surface as NPE", 0, npesCaught.get());
 	}
 
 	@Test

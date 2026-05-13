@@ -44,5 +44,5 @@ interface EditorHost
 	/**
 	 * Post a Runnable to the UI thread, satisfied by Activity.runOnUiThread.
 	 */
-	void runOnUiThread(Runnable r);
+	void runOnUiThread(Runnable task);
 }

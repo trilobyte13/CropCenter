@@ -116,11 +116,15 @@ public final class MpfPatcher
 
 				for (int i = 0; i < entryCount; i++)
 				{
-					int entryOffset = ifdOff + 2 + i * 12;
-					if (entryOffset + 12 > mpfSegmentEnd)
+					// Long-arithmetic stride matches sister walkers in ExifPatcher / BitmapUtils /
+					// PngMetadataExtractor (round-35/37/38 hardening sweep). Bounded by the 128 MB
+					// SafFileHelper cap today but kept consistent for symmetry.
+					long entryOffsetLong = (long) ifdOff + 2 + (long) i * 12;
+					if (entryOffsetLong + 12 > mpfSegmentEnd)
 					{
 						break;
 					}
+					int entryOffset = (int) entryOffsetLong;
 					int tag = ByteBufferUtils.readU16(jpeg, entryOffset, isLittleEndian);
 
 					if (tag == TiffTag.MP_ENTRY)
@@ -148,11 +152,13 @@ public final class MpfPatcher
 	{
 		for (int img = 0; img < numImages; img++)
 		{
-			int base = entryOff + img * MPF_ENTRY_BYTES;
-			if (base + MPF_ENTRY_BYTES > jpeg.length)
+			// Long-arithmetic stride for symmetry with the patch() walker above.
+			long baseLong = (long) entryOff + (long) img * MPF_ENTRY_BYTES;
+			if (baseLong + MPF_ENTRY_BYTES > jpeg.length)
 			{
 				break;
 			}
+			int base = (int) baseLong;
 			long attr = ByteBufferUtils.readU32(jpeg, base, isLittleEndian);
 			long size = ByteBufferUtils.readU32(jpeg, base + 4, isLittleEndian);
 			long dataOffset = ByteBufferUtils.readU32(jpeg, base + 8, isLittleEndian);
@@ -235,7 +241,13 @@ public final class MpfPatcher
 		int gainMapMatchCount = 0;
 		for (int img = 1; img < numImages; img++)
 		{
-			int base = entryOff + img * MPF_ENTRY_BYTES;
+			// Long-arithmetic stride for symmetry with the IFD entry walker above.
+			long baseLong = (long) entryOff + (long) img * MPF_ENTRY_BYTES;
+			if (baseLong + MPF_ENTRY_BYTES > jpeg.length)
+			{
+				break;
+			}
+			int base = (int) baseLong;
 			long attr = ByteBufferUtils.readU32(jpeg, base, isLittleEndian);
 			if ((attr & 0x00FFFFFFL) == 0x00010005L)
 			{

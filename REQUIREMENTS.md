@@ -11,10 +11,11 @@ a Gallery-edited file keeps its Revert chain across CropCenter re-edits).
 **Target/Compile SDK**: 36
 **Language**: Java 21
 **Build**: AGP 9.1.1, Gradle 9.3.1
-**LSLOC**: ~17,065 total (~10,857 main + ~6,208 test) — UCC-style logical SLOC via `scripts/count_lsloc.py` (counts
+**LSLOC**: ~13,008 total (~7,526 main + ~5,482 test) — UCC-style logical SLOC via `scripts/audit.py lsloc` (counts
 `;`-terminated statements, control-flow openers, type declarations, and method signatures; excludes blanks, comments,
-and bare brace lines). The numbers grow modestly each round — refresh via `python scripts/count_lsloc.py app/src/main`
-and `python scripts/count_lsloc.py app/src/test` when they drift past the 5% "~" tolerance.
+and bare-brace-only lines — the latter is a substantial chunk of Allman-style code and was previously inflating the
+count by ~30%). The numbers grow modestly each round — refresh via `python scripts/audit.py lsloc app/src/main` and
+`python scripts/audit.py lsloc app/src/test` when they drift past the 5% "~" tolerance.
 
 ---
 
@@ -58,12 +59,12 @@ ordinary Save As flows don't require it. `ACCESS_MEDIA_LOCATION` is NOT declared
 
 | Component | Class | Purpose |
 |-----------|-------|---------|
-| State | `model/CropState` | Central state: crop params, metadata, rotation anchor (stable intent center for no-selection rotations). Cross-thread fields are volatile so the bg load/graft/save executor can publish to the UI thread without a lock: `selectionPoints`, `jpegMeta`, `aiMask`, `graftApplied` (read by `ExportPipeline.canBypassEncode` on the UI thread, written by `installGraft` on bg). `pngExifTiff` (raw TIFF for PNG → PNG export) is also volatile but currently bg-only — set by `extractMetadata` on bg, consumed by `exportPng` on bg via the same single-thread executor; the volatile is preventive rather than load-bearing for now. |
+| State | `model/CropState` | Central state: crop params, metadata, rotation anchor (stable intent center for no-selection rotations). Cross-thread fields are volatile so the bg load/graft/save executor can publish to the UI thread without a lock: `sourceImage`, `selectionPoints`, `jpegMeta`, `aiMask`, `graftApplied` (read by `ExportPipeline.canBypassEncode` on the UI thread, written by `installGraft` on bg). `sourceImage` was added round-37 to match the sister fields — UI-thread `EditorRenderer.draw` reads it on every frame while bg-thread `reset()` writes it during load; the per-frame snapshot fix in EditorRenderer is necessary but not sufficient without volatile. `pngExifTiff` (raw TIFF for PNG → PNG export) is also volatile but currently bg-only — set by `extractMetadata` on bg, consumed by `exportPng` on bg via the same single-thread executor; the volatile is preventive rather than load-bearing for now. |
 | State Dispatch | `model/StateBus` | Listener-dispatch + batch-suppression protocol extracted from CropState. `bus.beginBatch / endBatch` lets the Activity wrap recomputeCrop + UI updates so inner setter calls coalesce into one listener invocation |
 | Output Format | `model/Format` | Enum (`JPEG` / `PNG`) carrying MIME type + file extension. Replaced earlier `String FORMAT_JPEG` constants — gives compile-time exhaustiveness on the export-pipeline switch and removes "any string flows through to default" foot-gun |
 | Crop Math | `crop/CropEngine` | Computes crop from center + AR + lock + rotation; keeps cropX continuous mid-rotation, with parity-snap applied at drag-release in `CropEditorView.onPanRelease` |
 | Rotated Clamp | `crop/RotatedCropClamp` + `crop/CropFitContext` | Clamp candidate crop centers against a rotated image's bounds via 25-iter binary search. CropFitContext bundles the pre-computed sin/cos/halfWidth/halfHeight that the binary search and corner-check share, replacing an 11-parameter signature |
-| Render Geometry | `crop/CropRender` | Record bundling (centerX, centerY, cropW, cropH, imgW, imgH, rotation) + derived `srcX()` / `srcY()`. Threaded into `UltraHdrCompat.compressWithGainmap` (was a 12-arg method) |
+| Render Geometry | `crop/CropRender` | Final class bundling (centerX, centerY, cropW, cropH, imgW, imgH, rotation) + derived `srcX()` / `srcY()`. Private constructor + public `of(...)` factory in (W, H) order — record-style storage swapped for a factory-only API after the canonical positional constructor's (H, W) alphabetical order was identified as a transposable footgun against the codebase's (W, H) convention (Codex round-43 F4). Threaded into `UltraHdrCompat.compressWithGainmap` (was a 12-arg method) |
 | Export Result | `crop/ExportResult` | Record bundling encoded bytes + structurally-derived `hdrAttached` flag, returned by `CropExporter.export`. Threaded through `ExportPipeline.encodePhase` to `reportSuccess` so the [HDR OK] / [HDR dropped] toast is driven by what `composeGainMap` actually appended (reference inequality with the metadata-only inject) rather than a full-file substring scan (Codex round-20 F2) |
 | Horizon | `util/HorizonDetector` | Auto-rotation: metadata pass first, fallback to painted-region Hough transform |
 | Export | `crop/CropExporter` | Full pipeline: crop, rotate, compress, HDR, EXIF, SEFT |
@@ -80,7 +81,7 @@ ordinary Save As flows don't require it. `ACCESS_MEDIA_LOCATION` is NOT declared
 | Toolbar / AR Spinner | `ToolbarBinder` | AR spinner population, custom-AR dialog, mode/lock-axis row wiring, precise-rotation dialog. Extracted from MainActivity to keep the Activity focused on lifecycle and host-interface implementations |
 | Auto-Rotate Button | `AutoRotateBinder` | Wires the Auto button in the Points row to `HorizonDetector` (metadata pass + painted-region fallback) and posts the toast outcome |
 | Editor Render Pipeline | `view/EditorRenderer` + `view/ViewportMath` + `view/GridRenderer` + `view/HorizonPaintOverlay` + `view/SelectionHistory` + `view/DialogCards` + `view/DialogStrings` | onDraw delegate (rendering only, no state mutation), screen↔image transform helper, grid render, horizon-paint overlay, undo/redo storage (50-step), shared dialog-card styling, shared dialog button labels (Apply / Cancel / OK) |
-| Host interfaces | `EditorHost` / `ImageLoadHost` / `SaveHost` / `UiHost` / `ToolbarHost` + `UiSync` | Capability-typed views the controllers and binders see of MainActivity; `UiSync` brokers state-bus listener registration so MainActivity owns the wiring |
+| Host interfaces | `EditorHost` / `ImageLoadHost` / `SaveHost` / `UiHost` / `ToolbarHost` + `UiSync` | Capability-typed views the controllers and binders see of MainActivity. `UiSync` collects the per-state-change UI refresh methods (toolbar / progress / dialog reactions) so MainActivity owns the wiring but the response code lives in one cohesive collaborator. Listener registration on `CropState` happens directly in MainActivity.onCreate — UiSync doesn't broker that step. |
 
 ### Metadata Pipeline
 
@@ -88,34 +89,34 @@ ordinary Save As flows don't require it. `ACCESS_MEDIA_LOCATION` is NOT declared
 |-------|---------|
 | `metadata/JpegMetadataExtractor` | Extract all APP/COM segments from JPEG header |
 | `metadata/JpegMetadataInjector` | Replace re-encoder's APP markers with originals |
-| `metadata/ExifPatcher` | Update orientation, dimensions, thumbnail in EXIF |
+| `metadata/ExifPatcher` | Update orientation, dimensions, and IFD1 thumbnail in EXIF. Four-state thumbnail contract on `patch(...)`: (1) `null` preserves the source's IFD1 (only safe when saved pixels equal source pixels), (2) `byte[0]` / `STRIP_IFD1_THUMBNAIL` strips IFD1 by zeroing IFD0's next-IFD pointer (used as the fail-closed fallback when fresh thumbnail generation fails — Codex round-31 F1), (3) `byte[N>0]` replaces with the supplied JPEG bytes, and (4) when the input segment list contains no EXIF segment at all (screenshots, generated images, files re-encoded by minimal tools), `patch` synthesises a fresh APP1 EXIF via `buildMinimalExifSegment` so the freshly-generated thumbnail still lands in the saved file (round-36 user-reported bug). Replace path also has a fallback chain: when `spliceExistingThumbnail` rejects the rebuild (missing thumb tags, out-of-bounds offsets, oversized cap), `replaceThumbnail` tries `appendFreshIfd1WithThumbnail` against IFD0's existing next-IFD slot before strip-on-fail. Public predicate `hasIfd1Thumbnail(segments)` walks IFD0 → next-IFD → IFD1 → JPEGInterchangeFormat looking for a parse-reachable thumbnail offset; consumed by `ExportPipeline.canBypassEncode` to force re-encode when the source has no pre-computed thumbnail. |
 | `metadata/GainMapExtractor` | Extract HDR gain map from between primary EOI and SEFT |
 | `metadata/GainMapComposer` | Append gain map + trigger MPF patch |
 | `metadata/MpfPatcher` | Fix MPF APP2 offsets after primary size changes |
 | `metadata/SeftExtractor` | Extract existing SEFT trailer (re-appended verbatim by CropExporter) |
 | `metadata/JpegSegment` | Data class for a single JPEG marker segment. Carries the canonical XMP namespace identifier (`XMP_HEADER`) consumed by both `isXmp()` and `HorizonDetector.detectFromMetadata` |
 | `metadata/JpegMarker` | Constants for the JPEG marker bytes (`SOI` / `EOI` / `SOS` / `RST_FIRST..RST_LAST` / `STUFFING` / `TEM`) used directly by `JpegMarkerWalker`, `JpegMetadataExtractor`, `MpfPatcher`, and indirectly (via the walker) by `CropExporter`, `GraftWriter`, `GainMapExtractor` |
-| `metadata/JpegMarkerWalker` | Canonical `findPrimaryEoi(file, endBound)` walker. Consolidates the SOS / EOI / RST / segment-length / overflow-guard logic previously duplicated across `CropExporter`, `GraftWriter`, and `GainMapExtractor` — hardened against `segLen < 2`, wrap-overflow, and truncated SOS headers |
+| `metadata/JpegMarkerWalker` | Canonical JPEG marker-walking helpers. `findPrimaryEoi(file, endBound)` consolidates the SOS / EOI / RST / segment-length / overflow-guard logic previously duplicated across `CropExporter`, `GraftWriter`, and `GainMapExtractor` — hardened against `segLen < 2`, wrap-overflow, and truncated SOS headers. `skipFillBytes(file, ffOff, endBound)` honors legal `FF FF MARKER` fill-byte sequences (ITU-T T.81 §B.1.1.2) — consumed by `MpfPatcher`, `JpegMetadataExtractor`, `JpegMetadataInjector`, `BitmapUtils.readExifOrientationInternal`, `GraftWriter`, and `XmpItemLengthPatcher`'s segment walker (Codex round-31 F2) so a `FF FF E1 ...` shape doesn't break any byte-walker on the second 0xFF |
 | `metadata/PngMetadataExtractor` | Walk PNG chunks (8-byte signature + length/type/data/CRC chunks) for the eXIf chunk per PNG 1.6 spec. Three entry points: `extract()` returns a synthetic APP1 EXIF segment (capped at the JPEG APP1 u16 limit so JPEG injection stays well-formed), `extractRawTiff()` returns the raw TIFF bytes uncapped (used by PNG → PNG round-trip where the eXIf chunk's u31 length field has no JPEG-side cap), `extractOrientation()` parses the TIFF Orientation tag (0x0112) so PNG sources rotate pixels at load time matching JPEG behavior. Hardened against malformed TIFF (rejects byte order ≠ II/MM, magic ≠ 42, IFD entries with type ≠ SHORT or count ≠ 1, and orientation values outside 1..8) |
 | `metadata/TiffTag` | Single-source-of-truth constants for EXIF / TIFF tag IDs (`ORIENTATION`, `IMAGE_WIDTH`, `IMAGE_LENGTH`, `PIXEL_X_DIMENSION`, `PIXEL_Y_DIMENSION`, `EXIF_SUB_IFD`, `JPEG_INTERCHANGE_FORMAT[_LENGTH]`, `MP_ENTRY`) and entry-type codes (`TYPE_SHORT`, `TYPE_LONG`). Consumed by `ExifPatcher`, `BitmapUtils`, `PngMetadataExtractor`, and `MpfPatcher` so a future spec change (new tag, type widening) lands in one file rather than a multi-site bare-literal hunt |
 | `metadata/GraftWriter` | In-memory byte splice for "Apply External Edit" — assembles the grafted JPEG per `SWAP_*` constants (original metadata + edit primary scan + original gain map + original SEFT) |
 | `metadata/HdrSignature` | XMP "hdrgm" namespace marker scanner. Two entry points: `hasHdrgmInXmp(List<JpegSegment>)` walks ONLY parsed XMP APP1 bodies (standard + extended) for the load + graft HDR-source gate, then falls back to the reassembled Extended XMP buffer to catch markers straddling chunk boundaries (a stray "hdrgm" outside XMP doesn't false-positive — Codex round-19 F1, round-20 F3, round-22 logic F2); `isHdrSource(byte[])` is a full-file scanner reserved for `UltraHdrCompat`'s post-`Bitmap.compress` diagnostic where the freshly-emitted JPEG is well-formed. Pure Java, no Android deps. |
 | `metadata/ExtendedXmpReassembler` | Reassemble Adobe Extended XMP chunks (`http://ns.adobe.com/xmp/extension/`) by 32-byte GUID + 4-byte unsigned offset into a single concatenated byte buffer. Used by `HorizonDetector.detectFromMetadata` (Roll / Tilt scanning across chunk boundaries — Codex round-21 F1), `HdrSignature.hasHdrgmInXmp` (hdrgm marker — Codex round-22 logic F2), and `XmpItemLengthPatcher` (Item:Length straddle detection — Codex round-26 F1) so the reassembly logic is one chokepoint. Pure Java, no Android deps. |
-| `metadata/XmpItemLengthPatcher` | Rewrites the GContainer `Item:Length` attribute in the primary's XMP packet to match the actual gain-map byte size after re-encode. The Ultra HDR pipeline preserves source XMP byte-identically, so the source's pre-edit gain-map length attribute goes stale — strict GContainer decoders (Google's libUltraHdr) slice the gain map by `Item:Length` and would decode a truncated stream, silently dropping HDR boost. Patches in-place when the attribute lives in the standard XMP packet; **fail-closes** (returns null) when (a) the attribute lives in an Extended XMP chunk, (b) the per-chunk Extended XMP scan misses but the reassembled-bytes scan hits a straddling occurrence, OR (c) the attribute lives in standard XMP but the segment is unpatchable — patched segLen would exceed the APP1 u16 cap, the value is non-quoted, the digit run is empty / unterminated, or the closing quote doesn't match (Codex round-27 F2). Walks ALL standard XMP APP1 segments (legacy non-Adobe splitters can emit two — Codex round-28 F1). `GainMapComposer.compose` checks for null and drops HDR rather than ship stale `Item:Length`. Uses a private tagged record `SegmentPatchResult` (factories `failClosed()` / `notPresent()` / `patched(byte[])`) to distinguish "attribute not in this segment" (caller scans the next segment / falls through to Extended XMP) from "attribute here but unpatchable" (caller fails closed). Pure Java, no Android deps. |
+| `metadata/XmpItemLengthPatcher` | Rewrites the GContainer `Item:Length` attribute in the primary's XMP packet to match the actual gain-map byte size after re-encode. The Ultra HDR pipeline preserves source XMP byte-identically, so the source's pre-edit gain-map length attribute goes stale — strict GContainer decoders (Google's libUltraHdr) slice the gain map by `Item:Length` and would decode a truncated stream, silently dropping HDR boost. Patches in-place when the attribute lives in the standard XMP packet; **fail-closes** (returns null) when (a) the attribute lives in an Extended XMP chunk, (b) the per-chunk Extended XMP scan misses but the reassembled-bytes scan hits a straddling occurrence, OR (c) the attribute lives in standard XMP but the segment is unpatchable — patched segLen would exceed the APP1 u16 cap, the value is non-quoted, the digit run is empty / unterminated, or the closing quote doesn't match (Codex round-27 F2). Walks ALL standard XMP APP1 segments (legacy non-Adobe splitters can emit two — Codex round-28 F1). All four APP1-walking sites (`patch`, `collectApp1Segments`, `extendedXmpContainsItemLength`, `findAllXmpApp1Segments`) route through one private `walkApp1Ranges` helper that consolidates length validation + `JpegMarkerWalker.skipFillBytes` fill-byte handling — Codex round-32 S1 caught three near-identical inline walkers drifting apart. `GainMapComposer.compose` checks for null and drops HDR rather than ship stale `Item:Length`. Uses a private tagged record `SegmentPatchResult` (factories `failClosed()` / `notPresent()` / `patched(byte[])`) to distinguish "attribute not in this segment" (caller scans the next segment / falls through to Extended XMP) from "attribute here but unpatchable" (caller fails closed). Pure Java, no Android deps. |
 
 ### Utilities
 
 | Class | Purpose |
 |-------|---------|
-| `util/BitmapUtils` | EXIF orientation reading, `orientationMatrix()` (shared) |
+| `util/BitmapUtils` | EXIF orientation reading (`readExifOrientation`), `orientationMatrix()` (shared with `UltraHdrCompat.applyExifOrientation`), `applyOrientation()` (consumed by `ImageLoadController` / `EditAligner` / `GraftController` / `MainActivity`; UltraHdrCompat has its own `applyExifOrientation` that ALSO rotates the embedded gainmap pixel buffer — round-40 fix), `drawCropped()` (shared crop+rotate render between `CropExporter` and `UltraHdrCompat.renderPrimary` so primary-byte output is byte-identical), `isCardinalRotation()` (90°/180°/270° fast-path for the gain-map render), and the `ROTATION_EPSILON` constant (0.005°, the canonical sub-epsilon threshold consumed by the render pipeline / ruler / bypass-encode gate / horizon detector) |
 | `util/ByteBufferUtils` | Endian-aware read/write with bounds checking |
 | `util/DpToPx` | Density-independent-pixel → pixel conversion using `Math.round` (not `(int)` truncation, which collapses 1dp values to zero on density-0.75 screens). Required by every dialog/binder; centralised here so the rounding contract can't drift |
 | `util/HorizonDetector` | XMP-roll-tag parse first, then Canny edges + two-pass Hough transform (coarse 80–100° at 0.1° / fine ±2° at 0.01°) over the user-painted horizon region; used by the auto-rotate fallback |
 | `util/AiRegionDetector` | Identifies the AI-edited region in a graft by diffing source vs aligned-edit at sampleSize=4. Output `AiMask` record drives the gain-map inpaint at save time |
 | `util/GainMapInpainter` | Frontier-tracked grow-from-boundary inpaint that fills the AI-masked region of the source's gain-map Bitmap with the average of unmasked 8-neighbors. Mutates in place from `Gainmap.getGainmapContents()` so the single-channel container survives the save's `Bitmap.compress(JPEG)` call |
-| `util/RotationMath` | `rotate(x, y, cx, cy, deg)` / `inverse(...)` helpers, single source of truth for rotation math |
-| `util/SafFileHelper` | SAF/MediaStore URI helpers: copy (`transferTo`-based), derive sibling (handles both nested `primary:Pictures/foo.jpg` and root-level `primary:foo.jpg` document IDs), file-from-URI, query size, content-readback verify, create-sibling-placeholder, persistable bytes read (`readNBytes`) |
-| `util/SafPaths` | Pure-string helpers extracted from SafFileHelper: `parentDocIdOf`, `lastSegmentSeparatorEnd`, `hasImageSignature`. Static, no Context — testable directly without an Android runtime |
+| `util/RotationMath` | `rotate(x, y, pivotX, pivotY, deg, out)` / `inverse(x, y, pivotX, pivotY, deg, out)` helpers — single source of truth for rotation math. Both write the rotated point into the caller-allocated length-2 `out` array (no allocation per call) and return `out` for chaining; sub-`ROTATION_EPSILON` rotations short-circuit to identity |
+| `util/SafFileHelper` | SAF/MediaStore URI helpers: copy (`transferTo`-based), derive sibling (handles both nested `primary:Pictures/foo.jpg` and root-level `primary:foo.jpg` document IDs), file-from-URI, query size, content-readback verify, create-sibling-placeholder, full bytes read via `readUriBytes` (routes direct-file → SAF-stream with per-call temp cache) |
+| `util/SafPaths` | Pure-string helpers extracted from SafFileHelper: `parentDocIdOf`, `lastSegmentSeparatorEnd`, `hasImageSignature`, `hasParentTraversalSegment` (segment-aware `..` check — round-40 F2, replacing the substring `String.contains("..")` that rejected legit "IMG..edited.jpg" filenames). Static, no Context — testable directly without an Android runtime |
 | `util/StoragePermissionHelper` | MANAGE_EXTERNAL_STORAGE detection + settings deep-link |
 | `util/TextFormat` | Locale-safe number formatting for the info bar |
 | `util/ThemeColors` | Catppuccin Mocha int constants for code paths without a Context |
@@ -209,9 +210,14 @@ silently apply image A's typed values to image B's freshly-reset state. Dialog p
 normal dismissal. `dismissTransientDialogs` calls `dialog.cancel()` (not `dialog.dismiss()`) so the dialog's
 `OnCancelListener` fires too — Custom AR's spinner-position restore, Replace dialog's placeholder cleanup, and
 SaveDialog's `priorSnapshot` clear all live in `OnCancelListener` and would leak / stick on a plain `dismiss()`.
-`SettingsDialog`'s `OnCancelListener` additionally cancels any open `ColorPickerDialog` it parented, since the picker
-is a separate AlertDialog that mutates gridConfig through its own OK button — without that propagation a stale picker
-outliving its parent would keep applying colors to the new image's state. SaveDialog's `priorSnapshot` has a second
+`SettingsDialog`'s `OnCancelListener` AND `OnDismissListener` both cancel any open `ColorPickerDialog` it parented,
+since the picker is a separate AlertDialog that mutates gridConfig through its own OK button — without that propagation
+a stale picker outliving its parent would keep applying colors to the new image's state. The OnDismissListener is the
+load-bearing one: it fires on the "Done" button path AND on Activity-destroyed-mid-dialog config-change dismissal,
+which the OnCancelListener doesn't see (Codex round-35 P1, round-38 F1). Because `setOnDismissListener` replaces rather
+than chains, `SettingsDialog.show` takes the host-tracking cleanup as a parameter and composes both cleanups into a
+single dismiss listener — `registerTransientDialog(SettingsDialog.show(...))` would silently clobber the picker cleanup
+otherwise (Codex round-38 F1). SaveDialog's `priorSnapshot` has a second
 clear path beyond the OnCancelListener: if `SaveDialog.show` itself throws (BadTokenException from a config-change
 race that lands between the `isDestroyed()` pre-check and the actual `.show()` call, or any RuntimeException from the
 transient-dialog registration), `SaveController.openSaveOptionsDialog` clears the snapshot in its catch block —
@@ -299,8 +305,14 @@ locked center, preserving the anchor — `setCenter`'s edge-clamp would otherwis
 inward (Codex round-24 F1). The gain map stays at its natural rounded quarter-resolution dims — **not**
 snapped — so the sampled source region matches the primary's full extent (Codex round-27 F1; snapping the
 gain map would shrink the sampled region by up to (Wᵣ-1, Hᵣ-1) pixels, reintroducing spatial HDR misalignment
-on high-contrast crop edges, and the ≤ 2e-04 AR drift between primary and gain map is imperceptible after the
-decoder scales the gain map over the primary). No-op for `FREE` and fractional ARs (Custom AR with non-integer
+on high-contrast crop edges, and the AR drift between primary and gain map is imperceptible after the
+decoder scales the gain map over the primary). The drift comes from half-pixel rounding on the gainmap side:
+when `primaryH / 4` is a half-integer (e.g., 3750 / 4 = 937.5 or 3735 / 4 = 933.75), `Math.round` snaps to
+the nearest integer, producing up to a 0.5-gainmap-pixel error that translates to an AR delta of roughly
+`0.5 / gainmapH`. For typical quarter-resolution gainmaps (gainmapH ~ 900-1000), the worst-case AR drift is
+~5e-04; observed peak across the May 2025 fixture set is 6e-04 on 2988x3735 primaries. Sub-perceptible at
+display resolution after the decoder's scale-to-fit (Codex round-46 doc-accuracy update — the older `≤ 2e-04`
+bound undercounted the worst-case half-pixel-rounding error by ~3x). No-op for `FREE` and fractional ARs (Custom AR with non-integer
 inputs).
 
 ### 5. Rotation
@@ -440,13 +452,17 @@ move; B: SAF direct overwrite with byte-for-byte verify; C: SAF rename-with-fall
 `exportToOverwrite` (direct write to the target with preserve-on-failure, "Replaced <name>" toast on success).
 
 **No-edit bypass**: when the user has applied no transformations (no crop, no rotation, no grid bake-in, JPEG-to-JPEG
-round-trip) AND the in-memory image is not a graft (`!state.isGraftApplied()`), `ExportPipeline` writes
+round-trip) AND the in-memory image is not a graft (`!state.isGraftApplied()`) AND the source carries a pre-computed
+IFD1 thumbnail (`ExifPatcher.hasIfd1Thumbnail(state.getJpegMeta())`), `ExportPipeline` writes
 `state.originalFileBytes` verbatim instead of canvas-encoding. Preserves byte-perfect fidelity for re-saves of
-unmodified Samsung originals. Cropped / rotated / grid-baked saves AND any graft save go through the canvas-encode +
-ExifPatcher pipeline. Graft saves are explicitly excluded from the bypass because the splice ships source's gain map
-verbatim over the edit's primary scan; if the user later crops, the gain map's spatial alignment shifts off the features
-it boosts. Forcing graft saves through the full encode regenerates the gain map from the spliced primary via
-`UltraHdrCompat.compressWithGainmap`, keeping save-without-crop and save-after-crop both correct.
+unmodified Samsung originals. Cropped / rotated / grid-baked saves, any graft save, AND saves of sources lacking an
+IFD1 thumbnail go through the canvas-encode + ExifPatcher pipeline. The thumbnail-presence gate (round-36
+user-reported bug) forces the re-encode path on screenshots / minimal-EXIF sources so `CropExporter`'s synthesise-
+fresh-EXIF chain can add a thumbnail; without this gate the bypass shipped source bytes verbatim including the
+empty-IFD1 state. Graft saves are excluded because the splice ships source's gain map verbatim over the edit's primary
+scan; if the user later crops, the gain map's spatial alignment shifts off the features it boosts. Forcing graft saves
+through the full encode regenerates the gain map from the spliced primary via `UltraHdrCompat.compressWithGainmap`,
+keeping save-without-crop and save-after-crop both correct.
 
 **JPEG quality**: 100 (hardcoded, always maximum) when canvas-encoding; verbatim when bypassing.
 
@@ -474,12 +490,16 @@ are allowed through (SAF MIME stays valid, encoder bytes match).
 ```
 Original JPEG -> decode with gainmap -> render primary on cropW x cropH canvas
   (same rotation/positioning as preview: rotate around image center)
--> apply identical transform to gainmap bitmap at gainmap resolution
-   (gainmap dims stay at the natural rounded quarter-resolution — NOT AspectRatio.snap'd —
-    so the sampled source-gainmap region matches the primary's full extent; the ≤ 2e-04 AR
-    drift between primary and gainmap is imperceptible after the decoder scales the gainmap
-    over the primary, and is the lesser evil vs spatial HDR misalignment on edge content
-    that snapping would introduce — Codex round-27 F1)
+-> apply analogous transform to gainmap bitmap at gainmap resolution — same EXIF rotation
+   matrix, same scaled draw offset; unrotated branch snaps the fractional draw offset to
+   the nearest integer + nearest-neighbor (round-40 follow-up; ≤ 0.5 gainmap-pixel drift,
+   detailed below) — and gainmap dims stay at the natural rounded quarter-resolution —
+   NOT AspectRatio.snap'd — so the sampled source-gainmap region matches the primary's
+   full extent; the AR drift between primary and gainmap (worst case ~5e-04 from half-pixel
+   rounding at gainmap-side dims around 900-1000 px — see "Locked-AR exact-integer realisation"
+   for the rationale) is imperceptible after
+   the decoder scales the gainmap over the primary, and is the lesser evil vs spatial HDR
+   misalignment on edge content that snapping the dims would introduce — Codex round-27 F1
 -> attach gainmap to output bitmap -> Bitmap.compress -> Ultra HDR JPEG
 -> extract gain map portion -> compose with canvas-rendered primary
 -> patch GContainer Item:Length to match new gain-map byte size (XmpItemLengthPatcher;
@@ -487,8 +507,29 @@ Original JPEG -> decode with gainmap -> render primary on cropW x cropH canvas
 -> inject original EXIF (patched) -> re-append existing SEFT trailer verbatim (if any)
 ```
 
-The gain map undergoes the exact same canvas transform as the primary (same position, pivot, angle, scaled to gainmap
-resolution), guaranteeing spatial alignment regardless of rotation or crop position.
+The gain map undergoes the analogous canvas transform as the primary (same position, pivot, angle, scaled to gainmap
+resolution), with one deliberate departure: the unrotated branch snaps the fractional draw offset to the nearest
+integer + switches to nearest-neighbor sampling (round-40 follow-up, Codex round-43 F1). Bilinear sampling at
+fractional gainmap offsets bilinear-blended adjacent rows of the source gainmap on every output row, softening
+high-contrast features (horizon lines, cliff edges, wave foam) into visible 5–30-level per-pixel diffs against the
+source gainmap. Snap-to-int trades ≤ 0.5 gainmap-pixel (≤ 2 primary-pixel at quarter-res gainmap) of spatial drift on
+non-grid-aligned crops for pixel-exact gainmap reproduction at the JPEG round-trip noise floor — sub-perceptible at
+display resolution, structurally clean against the noise-proof heatmap. The rotated branch keeps bilinear (rotation
+already requires resampling) with a cardinal-rotation + integer-alignment gate that drops to nearest-neighbor when
+applicable. Spatial alignment thus matches the primary structurally; the unrotated branch trades sub-pixel positional
+accuracy for pixel-exact gainmap content — see the "Gain-map render snap-to-int at fractional offsets" section below
+for the full rationale.
+
+**EXIF-orientation rotation of the gainmap** (round-40 fix): When the source EXIF orientation is non-identity (2..8),
+`UltraHdrCompat.applyExifOrientation` rotates the embedded gainmap's pixel buffer with the SAME matrix as the primary
+and substitutes a fresh `Gainmap` instance (tone-mapping metadata copied verbatim via `copyGainmapMetadata`) on the
+rotated primary. Android's `Bitmap.createBitmap(src, matrix)` propagates the source's `Gainmap` reference but does NOT
+rotate its underlying pixel buffer; without explicit rotation the downstream `renderGainmap` step computes
+`scaleX = gmW/primW` against a stored-orientation gainmap whose axes are transposed relative to the rotated primary,
+producing catastrophic spatial misalignment on orient=6/8 sources (panel-3 of the graft-analyze heatmap was entirely
+lit up — the gainmap diff approached 100% of pixels because every pixel was sampled against the wrong gainmap
+neighborhood). The fix keeps the gainmap rotation in lockstep with the primary, so subsequent canvas-renders project
+both into display orientation coherently.
 
 **Grid + HDR**: The gain map is extracted from the HDR path and composed with the canvas primary (which has the grid
 baked in). The XMP hdrgm metadata from the original is preserved via `JpegMetadataInjector`.
@@ -501,17 +542,33 @@ Canvas-rendered bitmap -> Bitmap.compress(JPEG, 100) -> inject original metadata
 
 **PNG Export**:
 ```
-Canvas-rendered bitmap -> Bitmap.compress(PNG) -> inject EXIF via eXIf chunk
+Canvas-rendered bitmap -> generate fresh JPEG-compressed IFD1 thumbnail of the cropped pixels
+(buildEmbeddedThumbnail; falls back to STRIP_IFD1_THUMBNAIL sentinel on OOM / over-budget)
+-> Bitmap.compress(PNG) -> inject EXIF via eXIf chunk with the fresh IFD1 thumbnail
 (PNG 1.6 spec: raw TIFF data in CRC32'd chunk after IHDR)
 ```
+
+PNG export generates a fresh IFD1 thumbnail (JPEG-compressed, per EXIF spec) of the cropped pixels —
+without this, passing a `null` thumbnail to `ExifPatcher.patch` would PRESERVE the source's pre-edit
+IFD1 thumbnail, leaking pre-crop content via any EXIF-thumbnail-aware viewer (Codex round-30 F1).
+When fresh thumbnail generation fails (budget too small, OOM, retry-at-half also oversized),
+`buildEmbeddedThumbnail` returns `ExifPatcher.STRIP_IFD1_THUMBNAIL` (the byte[0] sentinel), routing
+ExifPatcher through the strip path that zeros IFD0's next-IFD pointer — the saved file has no
+embedded preview rather than the source's stale one (Codex round-31 F1).
 
 PNG export pulls EXIF from one of two sources, depending on the source format:
 - **PNG sources** use `state.pngExifTiff` (raw TIFF, uncapped) wrapped through
   `CropExporter.patchPngExifTiff` — synthesizes a transient APP1 only to run `ExifPatcher.patch` for
   orientation/dimension normalisation, then unwraps the patched TIFF and writes via
   `injectPngExifFromTiff`. The PNG eXIf chunk has a u31 length field, so a > 64KB EXIF block (camera with
-  extensive MakerNote / GPS metadata) round-trips fully on PNG → PNG. When `ExifPatcher` rejects a
-  malformed source TIFF, the export falls through to the synthetic-APP1 path below rather than silently
+  extensive MakerNote / GPS metadata) round-trips on PNG → PNG. The IFD1 thumbnail itself is still
+  bounded by the JPEG APP1 u16 cap that `ExifPatcher.spliceExistingThumbnail` enforces internally;
+  `patchPngExifTiff` predicts a too-large rebuild via `ExifPatcher.maxThumbnailBytes` (which subtracts
+  the OLD thumbnail's bytes before measuring remaining APP1 room — Codex round-34 F1; the prior
+  round-33 F1 used a naive `tiff.length + thumbnail.length` sum that force-stripped splices that
+  would actually have shrunk the segment) and force-routes to `STRIP_IFD1_THUMBNAIL` so the saved PNG
+  carries no IFD1 rather than the source's pre-edit preview. When `ExifPatcher` rejects a malformed
+  source TIFF, the export falls through to the synthetic-APP1 path below rather than silently
   dropping metadata.
 - **JPEG sources** (and the fallback path above) iterate `state.jpegMeta` through `ExifPatcher.patch` and
   hand the EXIF segment to `injectPngExif`, which strips the JPEG APP1 wrapper before writing the eXIf
@@ -536,6 +593,47 @@ degrades to "save without embedded thumbnail" rather than aborting the encode si
 `preserveOnFailure` for collision-overwrite Replace flows — when the target had prior content, the partial bytes are
 kept and the recovery path runs from `ReplaceStrategy` rather than deleting a file the user didn't ask us to destroy.
 
+**Encoder-return-value checks** (round-40). Every `Bitmap.compress(JPEG|PNG, q, bos)` callsite now checks the boolean
+return and treats `false` as a failure. Previously the partial buffer in `bos` (Skia wrote headers + entropy data
+before bailing) was shipped onward to `injectExifMetadata` / `composeGainMap` / `appendSeft`, producing structurally
+invalid output JPEGs (no primary EOI, no gainmap, no SEFT). The five sites now check explicitly:
+- `CropExporter.exportJpeg` / `exportPng` — `throw IOException` on false, routes through `encodePhase`'s catch and the
+  user sees "Export failed: Bitmap.compress returned false" instead of a corrupt 8 MB file landing on disk.
+- `CropExporter.generateThumbnail` (three thumbnail-fallback tries) — false advances to the next quality / dim tier;
+  if all fail, returns null → caller routes through `STRIP_IFD1_THUMBNAIL` (no preview embedded, better than partial).
+- `UltraHdrCompat.compressWithGainmap` — false → return null → caller drops HDR and re-injects EXIF with
+  `hdrgm`/MPF stripped, so the output's metadata stays honest about what's actually attached.
+- `EditAligner.reorientEdit` — false → return null → `align()` surfaces "Couldn't decode the edit during reorientation — try exporting again" toast (same message as the BitmapFactory decode-null path because both failures route through a single null-check at the caller site).
+
+**Direct file-I/O write path** (round-40). `ExportPipeline.writePhase` tries `FileOutputStream` against the SAF URI's
+resolved filesystem path first, falling back to the SAF stream only when `SafFileHelper.fileFromSafUri` returns null
+(cloud / opaque-ID providers). On Samsung devices the SAF stream path has been observed to silently corrupt writes:
+`openOutputStream("w")` returns success and reports the correct post-write byte count, but the actual disk content
+never changes — the provider buffers the write in memory and never flushes, leaving the placeholder document with
+stale bytes that downstream Replace strategies then propagate onto the target. The direct file I/O sidesteps the
+entire SAF write path: bytes land via the kernel filesystem layer where the provider's caching can't intercept. The
+`fsync` after write forces durability before close. Trailing `MediaScannerConnection.scanFile` triggers MediaStore
+reindex so Gallery / Photos sees the new content.
+
+**Explicit mtime refresh** (round-40). `ExportPipeline.writePhase` (after the direct I/O write) and
+`ReplaceStrategy.replaceViaFileIo` (after `Files.move` atomic swap) both call `setLastModified(currentTimeMillis())`
+to force the file's last-modified timestamp to update. Samsung's FUSE-backed scoped storage skips mtime refresh on
+dedup-detected content-identical writes — the kernel-level write happens but userspace observers (file managers,
+`adb stat`, sync tools that compare timestamps) see the old mtime, creating ambiguity about whether the save
+actually ran. `setLastModified` after the write/sync forces the timestamp regardless of dedup behaviour, so the user
+always has a concrete signal that the save landed.
+
+**Gain-map render snap-to-int at fractional offsets** (round-40). `UltraHdrCompat.renderGainmap`'s unrotated branch
+now snaps `gainmapDrawX/Y` to the nearest integer and switches to a non-filtering Paint
+(`setFilterBitmap(false)` → nearest-neighbor) before `drawBitmap`. Pre-fix, drawing at a fractional offset
+(e.g. `gainmapDrawY=-31.25` from `srcY=125 * gainmapScaleY=0.25`) with `FILTER_BITMAP_FLAG` bilinear-blended adjacent
+gainmap rows on every output row, softening the boost map and producing 5-30 levels of per-pixel diff against the
+source gainmap on high-contrast content (horizon lines, cliff edges, wave foam). The cost of snap-to-int is ≤ 0.5
+gainmap pixels of spatial misalignment (≤ 2 primary pixels at quarter-res gainmap — sub-perceptible on a 4000-pixel-
+tall image); the benefit is pixel-exact gainmap reproduction at the JPEG-round-trip noise floor. The rotated branch's
+`drawGainmapRotated` already had an integer-alignment + cardinal-rotation guard that took the NN path; round-40
+extended the same logic to the unrotated path that was missing it.
+
 ### 10. Metadata Preservation
 
 #### EXIF
@@ -554,6 +652,14 @@ kept and the recovery path runs from `ReplaceStrategy` rather than deleting a fi
   `com.android.externalstorage.documents` SAF authorities, requires `MANAGE_EXTERNAL_STORAGE`) and reads via
   `FileInputStream` when possible, returning the on-disk bytes that still carry GPS. Falls back to the SAF stream copy
   for cloud or SAF-only sources where no filesystem path is resolvable.
+- **SAF path-traversal guard** (`SafFileHelper.fileFromSafUri` + the `com.android.externalstorage.documents` branch of
+  `getFilePathAndId`, round-40 F2). Rejects docIds whose tail contains a `..` path segment — checked via the
+  segment-aware `SafPaths.hasParentTraversalSegment` (splits on `/`, rejects only segments exactly equal to `..`) —
+  or that begin with `/`. The pre-round-40 check used `String.contains("..")` which rejected legitimate filenames whose
+  characters happened to include `..` (Samsung's "IMG..edited.jpg" pattern), forcing them through the SAF stream path
+  and losing the Samsung-MediaStore-bypass benefit above. Applied to the `primary:` volume handler, the `raw:` volume
+  handler, AND the ExternalStorageProvider `relPath` branch. Prevents a crafted Share intent with
+  `primary:../../data/data/com.othertarget/foo` from materialising a File outside the volume root on rooted devices.
 - **TIFF orientation-tag validation** in both readers (`BitmapUtils.readExifOrientationInternal` for JPEG APP1 EXIF
   and `PngMetadataExtractor.extractOrientationInternal` for PNG eXIf). After accepting the byte-order field
   (`II` / `MM`), the reader also validates: TIFF magic = 42 (0x002A), Orientation entry type = SHORT (3),
@@ -823,11 +929,13 @@ testing):
   preserved.
 
 **`ExportPipeline.canBypassEncode`**: returns `true` only when output is JPEG, source is JPEG, **no graft applied**, no
-rotation, no grid bake-in, source bytes available, AND (no crop OR full-image crop). The graft-applied check is what
-forces graft saves through `CropExporter.export`. Without it, the verbatim-write bypass would ship source's gain map
-(calibrated for source's primary) over the spliced primary; if the user later crops, the gain map's spatial alignment
-shifts off the features it boosts. The canvas-encode path regenerates the gain map for the spliced primary, keeping
-save-without-crop and save-after-crop both correct.
+rotation, no grid bake-in, source bytes available, (no crop OR full-image crop), AND the source carries an IFD1
+thumbnail (`ExifPatcher.hasIfd1Thumbnail(state.getJpegMeta())`). The graft-applied check is what forces graft saves
+through `CropExporter.export`; without it, the verbatim-write bypass would ship source's gain map (calibrated for
+source's primary) over the spliced primary, breaking spatial alignment after a later crop. The IFD1-thumbnail check is
+the round-36 user-reported fix: screenshots / generated images / minimal-EXIF JPEGs would otherwise verbatim-ship their
+empty-IFD1 state, so the user-facing thumbnail in Files / Gallery / EXIF viewers would be missing. Forcing the
+re-encode path lets `CropExporter`'s synthesise-fresh-EXIF chain add a thumbnail.
 
 **`MainActivity.applyGraftedBytes`**: after `imageLoader.applyBytes` returns true, calls `state.installGraft(graft)`
 which atomically sets `graftApplied=true` and stashes the AI mask. `canBypassEncode` then returns false for this image
@@ -919,7 +1027,7 @@ trivial and noise is invisible below ~5 cycles.
 - **Records**: `model/AspectRatio`, `model/ExportConfig`, `model/GridConfig`, `model/SelectionPoint`, `model/Graft`,
   `metadata/JpegSegment`, `metadata/ExtendedXmpReassembler.ExtendedXmpChunk`,
   `metadata/XmpItemLengthPatcher.SegmentPatchResult`, `crop/CropFitContext`,
-  `crop/CropRender`, `crop/ExportResult`, `util/AiRegionDetector.AiMask`, `view/RotationRulerView.TickConfig`,
+  `crop/ExportResult`, `util/AiRegionDetector.AiMask`, `view/RotationRulerView.TickConfig`,
   `graft/EditAligner.Result`, `GraftController.SourceSnapshot`, `ReplaceStrategy.VerifyFailure`,
   `ExportPipeline.WriteOutcome`, `SaveController.PriorSaveSnapshot`, `ImageLoadController.MetadataExtraction` —
   immutable value types replace boilerplate POJOs
@@ -932,7 +1040,7 @@ trivial and noise is invisible below ~5 cycles.
 - **Pattern matching for `instanceof`**: in metadata-segment dispatch sites
 - **`InputStream.transferTo` / `readNBytes`**: stdlib I/O in `SafFileHelper.copyUriContents` and `readUriBytes` instead
   of hand-rolled byte-loop / partial-read accounting
-- **Consolidated utilities**: `BitmapUtils.orientationMatrix()` shared between `BitmapUtils` and `UltraHdrCompat`;
+- **Consolidated utilities**: `BitmapUtils.drawCropped` shared between `CropExporter` and `UltraHdrCompat.renderPrimary` so primary-byte output is byte-identical; `BitmapUtils.orientationMatrix` + `applyOrientation` shared for stored→display EXIF rotation;
   `RotationMath` is the single source of truth for rotation; `SafFileHelper` + `SafPaths` consolidate SAF/MediaStore URI
   helpers; `JpegMarker` consolidates marker-byte constants across the five byte-walking parsers; `DpToPx.toPx` is the
   single dp→px conversion (Math.round-based, never `(int)` truncation); `JpegSegment.XMP_HEADER` is deduped from prior
@@ -956,15 +1064,16 @@ depends on:
   instance methods sort among themselves). Don't pair getters with setters — strict alphabetical keeps the file
   Ctrl-F-scannable.
 - **Constructors are above the access tiers**: they don't participate in the static-vs-instance ordering rule.
-- **Canonical helpers are single chokepoints**: `util/DpToPx`, `util/RotationMath`, `metadata/JpegMarker`,
-  `metadata/JpegMarkerWalker`, `metadata/JpegSegment.XMP_HEADER`, `metadata/ExtendedXmpReassembler`,
-  `metadata/HdrSignature`, `metadata/TiffTag`, `metadata/XmpItemLengthPatcher`, `model/AspectRatio.snap`,
-  `model/Format`, `model/StateBus`, `crop/CropFitContext`, `crop/CropRender`, `util/SafPaths`,
-  `view/DialogStrings`. Reach for the helper rather than re-rolling.
+- **Canonical helpers are single chokepoints**: `util/DpToPx`, `util/RotationMath`, `util/BitmapUtils.drawCropped`,
+  `util/BitmapUtils.ROTATION_EPSILON`, `metadata/JpegMarker`, `metadata/JpegMarkerWalker`,
+  `metadata/JpegSegment.XMP_HEADER`, `metadata/ExtendedXmpReassembler`, `metadata/HdrSignature`,
+  `metadata/TiffTag`, `metadata/XmpItemLengthPatcher`, `model/AspectRatio.snap`, `model/Format`,
+  `model/StateBus`, `crop/CropFitContext`, `crop/CropRender`, `util/SafPaths`, `view/DialogStrings`.
+  Reach for the helper rather than re-rolling.
 
-Self-audit scripts in `CLAUDE.md` cover these mechanically — `scripts/audit_static_first.py` enforces the
-static-before-instance rule, the awk one-liners catch double-indents / over-width lines / inline FQNs / HTML entities /
-dp-px truncation.
+Self-audit scripts in `CLAUDE.md` cover these mechanically — `scripts/audit.py` is the consolidated runner
+(subcommands: `over-cols`, `ignored-catches`, `static-first`, `final-classes`, `lsloc`; no-arg form runs all),
+and the awk one-liners catch double-indents / over-width lines / inline FQNs / HTML entities / dp-px truncation.
 
 ---
 

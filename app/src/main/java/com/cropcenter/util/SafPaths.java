@@ -38,6 +38,38 @@ public final class SafPaths
 	}
 
 	/**
+	 * True when `relativePath` contains a `..` path SEGMENT (separator: `/`). The original sites used
+	 * `String.contains("..")` which rejected legitimate filenames whose characters happened to include `..` —
+	 * `IMG..edited.jpg` is a single legitimate segment, not a parent-directory escape, so callers like Samsung's
+	 * ExternalStorageProvider relPath were losing the direct-filesystem path and falling back to provider streams
+	 * (Codex round-40 F2). Segments around the substring keep their literal text; only an exact `..` between
+	 * `/` boundaries (or as the whole string) trips the guard.
+	 *
+	 * @param relativePath SAF docId tail or relPath to check ("DCIM/Camera/IMG.jpg",
+	 *                     "Pictures/IMG..edited.jpg", "../etc/passwd")
+	 * @return true when any `/`-separated segment is exactly the two-character string `..`
+	 */
+	public static boolean hasParentTraversalSegment(String relativePath)
+	{
+		int start = 0;
+		int len = relativePath.length();
+		for (int i = 0; i <= len; i++)
+		{
+			if (i == len || relativePath.charAt(i) == '/')
+			{
+				if (i - start == 2
+					&& relativePath.charAt(start) == '.'
+					&& relativePath.charAt(start + 1) == '.')
+				{
+					return true;
+				}
+				start = i + 1;
+			}
+		}
+		return false;
+	}
+
+	/**
 	 * Index just past the separator that ends the parent's segment of a path-addressed SAF document ID. For nested
 	 * files ("primary:Pictures/foo.jpg") this is the position after the last "/", so docId.substring(0, end) +
 	 * child yields the sibling. For files at the provider root ("primary:foo.jpg") it falls back to the position

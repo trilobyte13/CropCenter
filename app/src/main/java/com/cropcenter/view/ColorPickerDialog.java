@@ -52,9 +52,13 @@ public final class ColorPickerDialog
 			void onTap(int color);
 		}
 
-		// CLAUDE.md field order: `final` tier (alphabetical by type, uppercase types first, then alphabetical
-		// by name within a type) then regular (non-final) tier. int and int[] both lead with 'i'; alphabetical
-		// by name puts cellSize, colors, cols, rows in that order.
+		// Two-tile alpha checkerboard for the transparent-color visualisation. Light tile fills the cell,
+		// dark tile diagonals overlay (top-left + bottom-right quadrants) — same pattern as Photoshop's
+		// transparency grid so users immediately read the cell as "alpha < 255". Class-private so a future
+		// theme tweak lands in one spot rather than four `0xFF...` literals scattered through onDraw.
+		private static final int CHECKERBOARD_DARK = 0xFF999999;
+		private static final int CHECKERBOARD_LIGHT = 0xFFCCCCCC;
+
 		private final Paint borderPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 		private final Paint paint = new Paint();
 		private final int cellSize;
@@ -135,9 +139,9 @@ public final class ColorPickerDialog
 				// Checkerboard behind transparent cells
 				if (Color.alpha(colors[i]) < 255)
 				{
-					paint.setColor(0xFFCCCCCC);
+					paint.setColor(CHECKERBOARD_LIGHT);
 					canvas.drawRect(left, top, left + cellWidth, top + cellHeight, paint);
-					paint.setColor(0xFF999999);
+					paint.setColor(CHECKERBOARD_DARK);
 					canvas.drawRect(left, top, left + cellWidth / 2f, top + cellHeight / 2f, paint);
 					canvas.drawRect(left + cellWidth / 2f, top + cellHeight / 2f,
 						left + cellWidth, top + cellHeight, paint);

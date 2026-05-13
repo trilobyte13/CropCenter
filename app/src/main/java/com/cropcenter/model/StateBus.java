@@ -15,20 +15,21 @@ package com.cropcenter.model;
  */
 final class StateBus
 {
-	// All three fields are crossed from bg to UI: notifyChanged fires from bg-thread setters in
-	// ImageLoadController.applyBytes / state.installGraft, while beginBatch / endBatch run on the UI thread
-	// from MainActivity.applyStateToUi. Volatile guarantees per-field visibility across threads. The
-	// remaining concern — non-atomic compound reads like `--batchDepth == 0 && batchDirty` in endBatch, or
-	// two threads both observing `batchDepth == 0` in notifyChanged and both calling fire() — is benign at
-	// the call-site level: the registered listener is `() -> runOnUiThread(this::applyStateToUi)`, which
-	// posts to the UI thread queue; applyStateToUi itself is guarded by MainActivity's `applyingStateToUi`
-	// re-entrancy flag (MainActivity:601-604). Two posts queued from a racing-fire path collapse to one
-	// effective UI update because the second post sees `applyingStateToUi=true` and short-circuits. So the
-	// only failure mode the synchronization tier needs to prevent is a MISSED listener fire (a write that
-	// never becomes visible) — which volatile does prevent. A double-fire is acceptable.
+	// `batchDepth` and `batchDirty` are guarded by `batchLock`. The previous AtomicInteger / volatile-boolean
+	// pair had each field atomic in isolation but their PAIR was not: a bg-thread notifyChanged could read
+	// batchDepth > 0, the UI thread could endBatch through zero and observe batchDirty == false (the bg thread
+	// hadn't set it yet), then the bg thread set batchDirty = true after the flush window had closed. The
+	// stranded dirty flag survived until the next batch — listeners missed the just-completed change (Codex
+	// round-40 F1). Putting depth check, depth mutation, and dirty read/write in one synchronized section
+	// makes the (depth, dirty) transition atomic, so endBatch either flushes a dirty flag set during this
+	// batch or none was set; there is no "set just after the flush window" window. `fire()` runs outside the
+	// lock so a slow listener can't block bg setters; double-fire on a racing fire path remains acceptable
+	// because applyStateToUi's `applyingStateToUi` re-entrancy flag (MainActivity:601-604) collapses two
+	// posts into one effective UI update.
+	private final Object batchLock = new Object();
 	private volatile CropState.OnStateChangedListener listener;
-	private volatile boolean batchDirty;
-	private volatile int batchDepth;
+	private boolean batchDirty;
+	private int batchDepth;
 
 	/**
 	 * Start a batch: any notifyChanged calls until the matching endBatch record a dirty flag instead of firing the
@@ -36,7 +37,10 @@ final class StateBus
 	 */
 	void beginBatch()
 	{
-		batchDepth++;
+		synchronized (batchLock)
+		{
+			batchDepth++;
+		}
 	}
 
 	/**
@@ -45,13 +49,22 @@ final class StateBus
 	 */
 	void endBatch()
 	{
-		if (batchDepth <= 0)
+		boolean shouldFire = false;
+		synchronized (batchLock)
 		{
-			return;
+			if (batchDepth <= 0)
+			{
+				return;
+			}
+			batchDepth--;
+			if (batchDepth == 0 && batchDirty)
+			{
+				batchDirty = false;
+				shouldFire = true;
+			}
 		}
-		if (--batchDepth == 0 && batchDirty)
+		if (shouldFire)
 		{
-			batchDirty = false;
 			fire();
 		}
 	}
@@ -62,16 +75,22 @@ final class StateBus
 	 */
 	void notifyChanged()
 	{
-		if (batchDepth > 0)
+		synchronized (batchLock)
 		{
-			batchDirty = true;
-			return;
+			if (batchDepth > 0)
+			{
+				batchDirty = true;
+				return;
+			}
 		}
 		fire();
 	}
 
 	/**
 	 * Register (or clear via null) the single state-change listener.
+	 *
+	 * @param listener the new listener, or null to clear (Activity.onDestroy uses null to detach
+	 *                 before a bg thread that holds the old reference can fire on a destroyed View tree)
 	 */
 	void setListener(CropState.OnStateChangedListener listener)
 	{
@@ -81,12 +100,23 @@ final class StateBus
 	/**
 	 * Invoke the registered listener if one is set. No-op when no listener has been attached (e.g. between Activity
 	 * onDestroy clearing the listener and a bg thread finishing its in-flight task).
+	 *
+	 * Snapshot the volatile field to a local before the null check + invoke (Codex round-44 F1): re-reading
+	 * `this.listener` twice would let a setListener(null) racing between the check and the call dereference a
+	 * cleared listener. Activity.onDestroy clears via setListener(null) precisely to detach before the View
+	 * tree is gone, and bg load / save / graft worker threads can still fire notifyChanged → fire() on the
+	 * way down. A local snapshot pins whichever value was current at entry; if it's null we no-op, if it's
+	 * non-null we invoke that exact instance regardless of what happens to the field afterward. The listener
+	 * itself is responsible for handling a "Activity already destroyed" callback (typically a no-op guard via
+	 * Activity.isFinishing / isDestroyed), so invoking a stale-but-non-null reference is safe; dereferencing
+	 * null is what we have to prevent.
 	 */
 	private void fire()
 	{
-		if (listener != null)
+		CropState.OnStateChangedListener snapshot = listener;
+		if (snapshot != null)
 		{
-			listener.onStateChanged();
+			snapshot.onStateChanged();
 		}
 	}
 }

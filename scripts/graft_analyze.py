@@ -80,16 +80,60 @@ def analyze(stem):
 
 	src_gm_disp = graft_lib.reorient(src_gm_im.convert('L'), src_orient)
 	graft_gm_disp = graft_lib.reorient(graft_gm_im.convert('L'), graft_orient)
-	if src_gm_disp.size != graft_gm_disp.size:
-		src_gm_disp = src_gm_disp.resize(graft_gm_disp.size, Image.LANCZOS)
 	src_gm_arr = np.asarray(src_gm_disp, dtype=np.int16)
 	graft_gm_arr = np.asarray(graft_gm_disp, dtype=np.int16)
+	src_gm_arr, alignment_dx, alignment_dy = _align_source_to_graft(src_gm_arr, graft_gm_arr)
 	d_gm = np.abs(src_gm_arr - graft_gm_arr).astype(np.uint8)
+	# Display dims now match graft's after alignment crop — re-derive the display variant for downstream
+	# heatmap rendering / inpaint-effect reporting that expect Image-shaped inputs.
+	src_gm_disp = Image.fromarray(src_gm_arr.astype(np.uint8))
+	print(f'\n  Best source->graft alignment: dx={alignment_dx} dy={alignment_dy}'
+		f' (crops source from {graft_gm_disp.size[0] + abs(alignment_dx)}x'
+		f'{graft_gm_disp.size[1] + abs(alignment_dy)})')
 
 	_report_diff_distribution(d_gm)
 	ai_mask_in_gm = _report_inpaint_effect(ai_mask_stored, src_orient, graft_gm_disp.size, d_gm)
 
 	_render_heatmap(src_path, graft_gm_disp.size, ai_mask_in_gm, d_gm, stem, out_heatmap)
+
+
+def _align_source_to_graft(src_arr, graft_arr):
+	"""Find the (dx, dy) crop offset where the user's crop placed the graft within source's gain map.
+
+	The export pipeline crops the source's gain map to the user's crop region; the analyzer previously
+	assumed centered crop, which silently overestimated the gainmap diff by ~5-8 mean for any non-
+	centered crop. This helper slides a graft-sized window over the source's gain map (both axes) and
+	picks the offset that minimises L1 mean diff — that's the alignment that reflects where the user
+	actually positioned the crop on the source. Returns the source array cropped to graft's dims at
+	the discovered offset, plus the offset itself for reporting.
+
+	For typical Samsung HDR JPEGs the quarter-resolution gain map's slide space is small (≤ 250 rows
+	for a 3000x4000 → 3000x3750 crop with 0.25 scale → 62-row vertical slide; full-width crops have
+	zero horizontal slide). The full grid search is O(slide_w * slide_h * gain_map_pixels), which on
+	750x938 with a 62-row slide is ~44M operations — sub-second in numpy.
+	"""
+	sH, sW = src_arr.shape
+	gH, gW = graft_arr.shape
+	slide_y = sH - gH
+	slide_x = sW - gW
+	if slide_y < 0 or slide_x < 0:
+		# Source is smaller than graft along some axis — fall back to centered Lanczos resize so the
+		# pipeline still produces a diff (degenerate but recoverable on a malformed graft).
+		src_pil = Image.fromarray(src_arr.astype(np.uint8))
+		resized = np.asarray(src_pil.resize((gW, gH), Image.LANCZOS), dtype=np.int16)
+		return (resized, 0, 0)
+	best_mean = float('inf')
+	best_dx = 0
+	best_dy = 0
+	for dy in range(slide_y + 1):
+		for dx in range(slide_x + 1):
+			window = src_arr[dy:dy + gH, dx:dx + gW]
+			m = float(np.abs(window - graft_arr).mean())
+			if m < best_mean:
+				best_mean = m
+				best_dx = dx
+				best_dy = dy
+	return (src_arr[best_dy:best_dy + gH, best_dx:best_dx + gW], best_dx, best_dy)
 
 
 def _ai_mask_stored(src_path, edit_path, src_orient, edit_orient):

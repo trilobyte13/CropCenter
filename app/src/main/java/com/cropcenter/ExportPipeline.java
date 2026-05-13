@@ -1,19 +1,25 @@
 package com.cropcenter;
 
 import android.graphics.Bitmap;
+import android.media.MediaScannerConnection;
 import android.net.Uri;
 import android.util.Log;
 import android.widget.Toast;
 
 import com.cropcenter.crop.CropExporter;
 import com.cropcenter.crop.ExportResult;
+import com.cropcenter.metadata.ExifPatcher;
 import com.cropcenter.model.CropState;
 import com.cropcenter.model.Format;
 import com.cropcenter.util.BitmapUtils;
 import com.cropcenter.util.SafFileHelper;
 
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.util.function.Consumer;
 
 /**
@@ -25,10 +31,14 @@ final class ExportPipeline
 {
 	/**
 	 * Result of phase 2. exception is non-null when openOutputStream / write / close threw; writeReturned is true
-	 * when close() succeeded (close-after-write is the final barrier between "written" and "thrown"). Field order
-	 * follows CLAUDE.md's uppercase-type-before-primitive rule.
+	 * when close() succeeded (close-after-write is the final barrier between "written" and "thrown"). directPath
+	 * is non-null when phase 2 took the direct java.io.FileOutputStream branch — set so verifyPhase can confirm
+	 * the write via the resolved filesystem path instead of querying SAF provider metadata that may not have
+	 * flushed yet (round-43 follow-up: a direct write that bypassed the provider would otherwise verify against
+	 * a stale provider-cached SIZE / cached input stream, false-failing a correct write and then deleting it).
+	 * Field order follows CLAUDE.md's uppercase-type-before-primitive rule (Exception < File alphabetically).
 	 */
-	private record WriteOutcome(Exception exception, boolean writeReturned)
+	private record WriteOutcome(Exception exception, File directPath, boolean writeReturned)
 	{
 	}
 
@@ -110,6 +120,18 @@ final class ExportPipeline
 			{
 				return false;
 			}
+		}
+		// Round-36 user-reported bug: when the source carries no IFD1 thumbnail (screenshots,
+		// generated images, files re-encoded by minimal tools that strip metadata), bypass would
+		// write the source bytes verbatim — preserving the empty-IFD1 state and never giving the
+		// re-encode path's `buildEmbeddedThumbnail` / `ExifPatcher.patch` synthesise chain a chance
+		// to add a fresh thumbnail. Force the re-encode path so the saved file gains the embedded
+		// preview the user expects. The re-encode trade-off (different DCT/Huffman tables vs
+		// source) is worth it for the thumbnail; verbatim fidelity stays preserved for the common
+		// case where the source DOES have a pre-computed thumbnail to round-trip.
+		if (!ExifPatcher.hasIfd1Thumbnail(state.getJpegMeta()))
+		{
+			return false;
 		}
 		return true;
 	}
@@ -205,7 +227,7 @@ final class ExportPipeline
 			return null;
 		}
 		byte[] data = encoded.bytes();
-		WriteOutcome write = writePhase(uri, data);
+		WriteOutcome write = writePhase(uri, data, preserveOnFailure);
 		if (!verifyPhase(uri, data, write))
 		{
 			reportFailure(uri, write.exception(), preserveOnFailure);
@@ -431,9 +453,39 @@ final class ExportPipeline
 	 *   - write path threw (many providers throw harmless EPIPE on close yet persist the
 	 *     full payload — readback is the ground truth)
 	 * Returns true when the save is good, false when it's genuinely lost.
+	 *
+	 * Direct-file shortcut (Codex round-43 F2): when writePhase took the direct
+	 * java.io.FileOutputStream + fsync branch, the SAF provider's cached metadata may not have
+	 * caught up with the on-disk bytes yet — the MediaScannerConnection.scanFile fired after the
+	 * write is asynchronous and almost certainly hasn't reindexed by the time this verify runs.
+	 * Querying SIZE through the SAF URI in that window can return the pre-write byte count even
+	 * though the bytes ARE on disk, causing verifyPhase to false-fail and reportFailure to then
+	 * delete a correctly-written file. Skip the SAF query entirely when directPath is set and
+	 * verify via File.length() — the fsync after write guarantees the inode is committed before
+	 * we read its length.
+	 *
+	 * Deliberate trade-off (Codex round-30 F2 acknowledged + accepted): when the write didn't throw
+	 * AND SIZE matches the payload length, we trust the provider and skip content readback. A
+	 * misbehaving provider that returned success + correct byte count but stored same-length wrong
+	 * content would slip through as a false-positive save. We accept this because: (a) it requires
+	 * active provider corruption, not a real-world failure mode for any major SAF / MediaStore /
+	 * cloud provider; (b) always-content-verify would double the I/O on every replace save, a
+	 * measurable hot-path tax for a hypothetical bug; (c) the readback path IS exercised on every
+	 * SIZE-omitted / SIZE-mismatched / write-threw branch, which covers all real provider failure
+	 * modes we've seen in the wild.
 	 */
 	private boolean verifyPhase(Uri uri, byte[] data, WriteOutcome write)
 	{
+		if (write.directPath() != null && write.writeReturned())
+		{
+			// Direct file I/O path: fos.getFD().sync() before close committed the bytes to the
+			// inode; trust the kernel-level length over the SAF provider's cached metadata.
+			long fileLen = write.directPath().length();
+			boolean directOk = fileLen == data.length;
+			Log.d(TAG, "Direct-path verify: file=" + write.directPath() + " length=" + fileLen
+				+ " expected=" + data.length + " → savedOk=" + directOk);
+			return directOk;
+		}
 		boolean savedOk = write.writeReturned();
 		long sizeCheck = -1;
 		long verifiedBytes = -1;
@@ -468,12 +520,158 @@ final class ExportPipeline
 	}
 
 	/**
-	 * Phase 2 — write. Uses try-with-resources so close() runs after writeReturned=true and a close-only failure
-	 * can't invalidate a successful write. Returns the outcome so phase 3 can decide whether to trust it or fall
+	 * Direct file I/O via a temp sibling + fsync + atomic rename. Used when the caller flagged
+	 * `preserveOnFailure=true` — the target URI may already contain user data, so opening it in truncate
+	 * mode is unsafe (a disk-full / I/O error between open and full-write would leave the original
+	 * zeroed). Writes the payload to `.<name>.cropcenter-tmp-<nanos>` in the same parent directory, fsyncs,
+	 * confirms byte count, and atomic-moves the temp onto the target via Files.move with
+	 * ATOMIC_MOVE + REPLACE_EXISTING. Mirrors the proven pattern in ReplaceStrategy.replaceViaFileIo and
+	 * keeps the target file content intact on any pre-move failure (Codex round-45 F1).
+	 *
+	 * Returns the WriteOutcome on success, or null when any step failed — caller falls through to the SAF
+	 * stream path on null (the SAF path doesn't truncate either: openOutputStream "w" is append-then-
+	 * replace semantically and a mid-stream failure leaves the SAF provider's stale prior content rather
+	 * than zeroing the target).
+	 */
+	private WriteOutcome tryDirectAtomicWrite(File target, byte[] data)
+	{
+		File parent = target.getParentFile();
+		if (parent == null)
+		{
+			return null;
+		}
+		File tempFile = new File(parent,
+			"." + target.getName() + ".cropcenter-tmp-" + System.nanoTime());
+		try (FileOutputStream fos = new FileOutputStream(tempFile))
+		{
+			fos.write(data);
+			fos.getFD().sync();
+		}
+		catch (Exception e)
+		{
+			Log.w(TAG, "Atomic write temp " + tempFile + " failed; target preserved: " + e.getMessage());
+			if (tempFile.exists() && !tempFile.delete())
+			{
+				Log.w(TAG, "couldn't clean up temp file " + tempFile);
+			}
+			return null;
+		}
+		long written = tempFile.length();
+		if (written != data.length)
+		{
+			Log.w(TAG, "Atomic write temp produced " + written + " bytes; expected " + data.length);
+			if (!tempFile.delete())
+			{
+				Log.w(TAG, "couldn't clean up short temp file " + tempFile);
+			}
+			return null;
+		}
+		try
+		{
+			Files.move(tempFile.toPath(), target.toPath(),
+				StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+		}
+		catch (Exception e)
+		{
+			Log.w(TAG, "Atomic swap " + tempFile + " → " + target + " failed; target preserved: "
+				+ e.getMessage());
+			if (tempFile.exists() && !tempFile.delete())
+			{
+				Log.w(TAG, "couldn't clean up temp file " + tempFile);
+			}
+			return null;
+		}
+		Log.d(TAG, "Atomic direct write delivered " + data.length + " bytes to " + target);
+		if (!target.setLastModified(System.currentTimeMillis()))
+		{
+			Log.w(TAG, "setLastModified failed on " + target);
+		}
+		MediaScannerConnection.scanFile(host.getActivity().getApplicationContext(),
+			new String[] { target.getAbsolutePath() }, null, null);
+		return new WriteOutcome(null, target, true);
+	}
+
+	/**
+	 * Phase 2 — write. Tries direct java.io.FileOutputStream first when the URI resolves to a real filesystem
+	 * path via SafFileHelper.fileFromSafUri (typically requires MANAGE_EXTERNAL_STORAGE) — bypasses the SAF
+	 * stream path entirely. On Samsung devices the SAF stream path has been observed to silently corrupt
+	 * writes: openOutputStream("w") returns success and reports the correct post-write byte count, but the
+	 * actual disk content never changes. The provider buffers the write in memory and never flushes,
+	 * leaving the placeholder document with stale bytes that downstream Replace strategies then propagate
+	 * onto the target (round-40 follow-up — user reproduced byte-identical re-exports via Replace after a
+	 * clean rebuild that should have shifted the gainmap encoding). Direct file I/O sidesteps the entire
+	 * SAF write path: bytes land via the kernel filesystem layer where the provider's caching can't
+	 * intercept. The fsync after write forces durability before close. Trailing MediaScannerConnection.scanFile
+	 * triggers MediaStore reindex so Gallery / Photos sees the new content (without it, the on-disk file is
+	 * correct but every MediaStore consumer keeps showing the pre-write thumbnail).
+	 *
+	 * Two direct-write modes (Codex round-45 F1):
+	 *   - preserveOnFailure=true (exportToOverwrite, exportToPreserving): the URI may already contain user
+	 *     data. Routes through tryDirectAtomicWrite — temp sibling + fsync + atomic rename — so a mid-write
+	 *     failure leaves the original intact. Without this, FileOutputStream(target) truncated the target
+	 *     at open time and a disk-full error after open would zero the user's original.
+	 *   - preserveOnFailure=false (Replace placeholder, Save As to a known-fresh document): truncate-mode
+	 *     direct write is safe because the destination has no prior data to lose; uses the simpler
+	 *     FileOutputStream path that doesn't need a sibling write + rename round-trip.
+	 *
+	 * Falls back to SAF stream when fileFromSafUri returns null (cloud / opaque-ID providers, or
+	 * non-primary volumes the helper can't resolve) — those paths don't exhibit the silent corruption
+	 * pattern because they're not Samsung MediaStore.
+	 *
+	 * Uses try-with-resources so close() runs after writeReturned=true and a close-only failure can't
+	 * invalidate a successful write. Returns the outcome so phase 3 can decide whether to trust it or fall
 	 * through to a readback.
 	 */
-	private WriteOutcome writePhase(Uri uri, byte[] data)
+	private WriteOutcome writePhase(Uri uri, byte[] data, boolean preserveOnFailure)
 	{
+		File directPath = safFiles.fileFromSafUri(uri);
+		if (directPath != null)
+		{
+			if (preserveOnFailure)
+			{
+				WriteOutcome atomic = tryDirectAtomicWrite(directPath, data);
+				if (atomic != null)
+				{
+					return atomic;
+				}
+				// Atomic path couldn't deliver — fall through to SAF stream rather than fall through
+				// to the truncate-mode direct write below, which would defeat the whole point of
+				// taking the preserveOnFailure branch.
+			}
+			else
+			{
+				try (FileOutputStream fos = new FileOutputStream(directPath))
+				{
+					fos.write(data);
+					fos.getFD().sync();
+					Log.d(TAG, "Direct file I/O wrote " + data.length + " bytes to " + directPath);
+					// Force mtime update even when the new bytes match the old bytes. Samsung's
+					// FUSE-backed scoped storage skips mtime refresh on content-identical writes
+					// (likely dedup at the FUSE layer) — userspace observers see the old mtime,
+					// creating ambiguity about whether the save actually ran. setLastModified after
+					// the write + sync forces the timestamp regardless of dedup behaviour, so the
+					// user always has a concrete signal that the save landed (round-40 follow-up —
+					// deterministic encode of identical inputs produces identical bytes, but mtime
+					// should still reflect the save).
+					if (!directPath.setLastModified(System.currentTimeMillis()))
+					{
+						Log.w(TAG, "setLastModified failed on " + directPath);
+					}
+					// Trigger MediaStore reindex so the new content surfaces in gallery apps. Use
+					// the application context so a config-change race during the scan doesn't keep
+					// a destroyed Activity alive (mirrors ReplaceStrategy.replaceViaFileIo's
+					// pattern).
+					MediaScannerConnection.scanFile(host.getActivity().getApplicationContext(),
+						new String[] { directPath.getAbsolutePath() }, null, null);
+					return new WriteOutcome(null, directPath, true);
+				}
+				catch (Exception e)
+				{
+					Log.w(TAG, "Direct file I/O failed; falling through to SAF stream: "
+						+ e.getMessage());
+				}
+			}
+		}
 		boolean writeReturned = false;
 		Exception writeException = null;
 		try (OutputStream os = host.getActivity().getContentResolver().openOutputStream(uri, "w"))
@@ -490,6 +688,6 @@ final class ExportPipeline
 			writeException = e;
 			Log.w(TAG, "Write path threw (may still have persisted)", e);
 		}
-		return new WriteOutcome(writeException, writeReturned);
+		return new WriteOutcome(writeException, null, writeReturned);
 	}
 }

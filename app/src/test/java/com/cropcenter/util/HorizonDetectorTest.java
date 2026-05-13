@@ -12,7 +12,6 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.List;
 
 /**
  * Tests the pure-Java precision refinements inside HorizonDetector. The bitmap edge pipeline itself depends on

@@ -19,6 +19,14 @@ import java.util.List;
  */
 public final class CropEngine
 {
+	// Minimum crop dimension in pixels. Below this, locked-AR snap collapses similar-tiny ARs to 1×1 at
+	// the lower edge, and free-form crops would render as a single bilinear-filtered row that's visually
+	// noise. 4 px gives the smallest meaningful "this is still a crop" shape; the constant is consumed
+	// cross-file by AspectRatio.snap to enforce the same floor on the snapped result that the per-axis
+	// clamps enforce on the pre-snap dims (Codex round-35 style-audit P2: hoisted to a single
+	// chokepoint so a future "raise the floor" change doesn't drift between the two files).
+	public static final int MIN_CROP_DIMENSION_PX = 4;
+
 	private CropEngine() {}
 
 	/**
@@ -122,8 +130,8 @@ public final class CropEngine
 			}
 		}
 
-		int roundedCropW = Math.max(4, Math.round(Math.max(4, cropW)));
-		int roundedCropH = Math.max(4, Math.round(Math.max(4, cropH)));
+		int roundedCropW = Math.max(MIN_CROP_DIMENSION_PX, Math.round(Math.max(MIN_CROP_DIMENSION_PX, cropW)));
+		int roundedCropH = Math.max(MIN_CROP_DIMENSION_PX, Math.round(Math.max(MIN_CROP_DIMENSION_PX, cropH)));
 		// Snap to exact-integer aspect ratio — eliminates the per-axis ½-pixel drift that produced
 		// 0.79989 instead of 0.80000 on locked 4:5 (round(2990.4)=2990, round(3737.5)=3738; the pair
 		// drifts off the locked AR even though the float dims were exact). Pass the rounded dims as
@@ -297,10 +305,10 @@ public final class CropEngine
 			{
 				float loScale = 0.01f;           // min 1% to avoid degenerate 0-size crops
 				float hiScale = 1f;
-				// 25 iterations — matches RotatedCropClamp.binarySearchAxis. Previously 20, which
-				// resolved to ~1ppm of the search range vs 25's ~30ppb. The drift produced visible
-				// jitter on thin crop slices at high zoom under continuous rotation drag.
-				for (int i = 0; i < 25; i++)
+				// Iteration cap matches RotatedCropClamp.binarySearchAxis via the shared
+				// BINARY_SEARCH_ITERATIONS constant; both bisections need to converge to the same
+				// resolution so the rotation-fit guarantees they jointly enforce stay consistent.
+				for (int i = 0; i < RotatedCropClamp.BINARY_SEARCH_ITERATIONS; i++)
 				{
 					float midScale = (loScale + hiScale) / 2f;
 					float testCornerX = centerX + offset[0] * cropW * midScale;
@@ -345,8 +353,8 @@ public final class CropEngine
 		}
 		float cropW = state.getCropW() * recheck;
 		float cropH = state.getCropH() * recheck;
-		int refinedCropW = Math.max(4, Math.round(cropW));
-		int refinedCropH = Math.max(4, Math.round(cropH));
+		int refinedCropW = Math.max(MIN_CROP_DIMENSION_PX, Math.round(cropW));
+		int refinedCropH = Math.max(MIN_CROP_DIMENSION_PX, Math.round(cropH));
 		// Snap to exact-integer AR while forbidding growth — pass refinedCropW / refinedCropH as the
 		// max bounds so the snap rounds DOWN to the nearest (Wr·k, Hr·k) that fits the just-shrunk
 		// dims. Up-snapping here would re-violate the rotation fit this method exists to enforce.

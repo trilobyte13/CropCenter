@@ -71,12 +71,12 @@ public final class SeftExtractor
 				return null;
 			}
 			byte[] gainMapSlice = Arrays.copyOfRange(file, primaryEnd, sliceEnd);
-			int gmEoiInSlice = JpegMarkerWalker.findPrimaryEoi(gainMapSlice, gainMapSlice.length);
-			if (gmEoiInSlice < 0)
+			int gainMapEoiInSlice = JpegMarkerWalker.findPrimaryEoi(gainMapSlice, gainMapSlice.length);
+			if (gainMapEoiInSlice < 0)
 			{
 				return null;
 			}
-			trailerStart = primaryEnd + gmEoiInSlice;
+			trailerStart = primaryEnd + gainMapEoiInSlice;
 		}
 		else
 		{

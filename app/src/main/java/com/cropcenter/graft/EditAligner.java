@@ -237,7 +237,18 @@ public final class EditAligner
 			// Same alias logic for inDisplay → inOrigStored.
 			inDisplay = null;
 			ByteArrayOutputStream bos = new ByteArrayOutputStream();
-			inOrigStored.compress(Bitmap.CompressFormat.JPEG, 100, bos);
+			// Bitmap.compress returns false on Skia encoder rejection (extreme dims, corrupt native state,
+			// unsupported config). The previous code ignored the return and shipped whatever partial bytes
+			// landed in the stream — downstream GraftWriter then bailed with a generic "Edit is not a JPEG"
+			// because the result had no SOI marker, leaving the user with a confusing "graft failed" error
+			// when the actual cause was the re-encode (Codex round-40 logic-agent finding). Detect here so
+			// the caller (align) can surface a specific "couldn't re-encode the edit during reorientation"
+			// remediation matching the existing decode-failure phrasing.
+			if (!inOrigStored.compress(Bitmap.CompressFormat.JPEG, 100, bos))
+			{
+				Log.w(TAG, "reorientEdit Bitmap.compress(JPEG, 100) returned false");
+				return null;
+			}
 			return bos.toByteArray();
 		}
 		finally

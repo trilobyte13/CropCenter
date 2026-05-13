@@ -23,7 +23,7 @@ public final class JpegFixtures
 	public static byte[] appSegment(int marker, byte[] payload) throws IOException
 	{
 		ByteArrayOutputStream out = new ByteArrayOutputStream();
-		out.write(0xFF);
+		out.write(JpegMarker.PREFIX);
 		out.write(marker);
 		// segLen INCLUDES the 2 length bytes themselves per JPEG spec.
 		int segLen = 2 + payload.length;
@@ -52,7 +52,7 @@ public final class JpegFixtures
 	 */
 	public static byte[] eoi()
 	{
-		return new byte[] { (byte) 0xFF, (byte) 0xD9 };
+		return new byte[] { (byte) JpegMarker.PREFIX, (byte) JpegMarker.EOI };
 	}
 
 	/**
@@ -87,14 +87,14 @@ public final class JpegFixtures
 	public static byte[] minimalScanAndEoi() throws IOException
 	{
 		ByteArrayOutputStream out = new ByteArrayOutputStream();
-		out.write(0xFF);
-		out.write(0xDA);                // SOS
+		out.write(JpegMarker.PREFIX);
+		out.write(JpegMarker.SOS);
 		out.write(0x00);
 		out.write(0x06);                // length = 6
 		out.write(new byte[]{ 0x01, 0x00, 0x00, 0x00 });   // scan header body
 		out.write(new byte[]{ 0x77, 0x77, 0x77 });          // entropy-coded payload
-		out.write(0xFF);
-		out.write(0xD9);                // EOI
+		out.write(JpegMarker.PREFIX);
+		out.write(JpegMarker.EOI);
 		return out.toByteArray();
 	}
 
@@ -103,6 +103,6 @@ public final class JpegFixtures
 	 */
 	public static byte[] soi()
 	{
-		return new byte[] { (byte) 0xFF, (byte) 0xD8 };
+		return new byte[] { (byte) JpegMarker.PREFIX, (byte) JpegMarker.SOI };
 	}
 }

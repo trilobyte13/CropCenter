@@ -337,4 +337,37 @@ public final class CropStateTest
 		state.reset();
 		assertEquals(AspectRatio.R16_9, state.getAspectRatio());
 	}
+
+	@Test
+	public void beginBatchDelegatesToBusSoMultipleSettersCoalesceToOneListenerFire()
+	{
+		// CropState.beginBatch / endBatch route to the underlying StateBus instance and the field setters call
+		// bus.notifyChanged(). A regression that wired a setter to fire the listener directly (bypassing the
+		// bus) — or that broke the delegation entirely — would surface as either zero fires (no notify reached
+		// the bus) or N fires (each setter bypassing the batch). Pin the contract that three setter calls
+		// inside one batch produce exactly one fire on endBatch (Codex round-40 test-coverage P3 gap).
+		CropState state = new CropState();
+		int[] fireCount = { 0 };
+		state.setListener(() -> fireCount[0]++);
+		state.beginBatch();
+		state.setRotationDegrees(15f);
+		state.setAspectRatio(AspectRatio.R16_9);
+		state.setEditorMode(EditorMode.MOVE);
+		assertEquals("setters inside batch must not fire the listener", 0, fireCount[0]);
+		state.endBatch();
+		assertEquals("endBatch must flush the coalesced batch as one fire", 1, fireCount[0]);
+	}
+
+	@Test
+	public void settersOutsideBatchFireListenerImmediately()
+	{
+		// Counter-test to the above: outside a batch each setter fires the listener directly. A regression that
+		// always-batches (forgetting to clear the dirty flag, say) would coalesce N fires into 1 here.
+		CropState state = new CropState();
+		int[] fireCount = { 0 };
+		state.setListener(() -> fireCount[0]++);
+		state.setRotationDegrees(15f);
+		state.setAspectRatio(AspectRatio.R16_9);
+		assertEquals("each setter outside a batch fires the listener", 2, fireCount[0]);
+	}
 }

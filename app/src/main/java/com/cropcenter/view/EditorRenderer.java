@@ -12,6 +12,7 @@ import com.cropcenter.model.CropState;
 import com.cropcenter.model.GridConfig;
 import com.cropcenter.model.SelectionPoint;
 import com.cropcenter.util.BitmapUtils;
+import com.cropcenter.util.DpToPx;
 import com.cropcenter.util.ThemeColors;
 
 import java.util.List;
@@ -29,15 +30,7 @@ final class EditorRenderer
 	private static final int POINT_LABEL_COLOR = ThemeColors.CRUST;
 
 	private final GridRenderer gridRenderer = new GridRenderer();
-	// Cached per-draw scratch — reset / overwritten at the top of each use so onDraw does no allocation.
-	private final int[] aabbScratch = new int[4];
 	private final Matrix bitmapMatrix = new Matrix();
-	// Single shared 2-float scratch used by the visible-bounds AABB walk (4 corner reads, sequentially used
-	// for min/max — single buffer is safe because we don't need to keep all 4 corners alive at once) and the
-	// selection-label imageToScreenRotatedInto calls in drawSelectionLabels (single label position consumed
-	// immediately by drawText). Both paths run on the UI thread and don't overlap with each other within a
-	// single draw call.
-	private final float[] coordScratch = new float[2];
 	private final Paint cropBorderPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 	private final Paint crosshairPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 	private final Paint dimPaint = new Paint();
@@ -49,6 +42,15 @@ final class EditorRenderer
 	private final Path selectionPolygonPath = new Path();
 	private final View view;
 	private final ViewportMath viewport;
+	// Cached per-draw scratch — reset / overwritten at the top of each use so onDraw does no allocation.
+	// Sorted into the lowercase-primitive sub-block per CLAUDE.md's uppercase-before-lowercase rule.
+	private final int[] aabbScratch = new int[4];
+	// Single shared 2-float scratch used by the visible-bounds AABB walk (4 corner reads, sequentially used
+	// for min/max — single buffer is safe because we don't need to keep all 4 corners alive at once) and the
+	// selection-label imageToScreenRotatedInto calls in drawSelectionLabels (single label position consumed
+	// immediately by drawText). Both paths run on the UI thread and don't overlap with each other within a
+	// single draw call.
+	private final float[] coordScratch = new float[2];
 
 	private float density = 1f;
 
@@ -62,9 +64,10 @@ final class EditorRenderer
 		cropBorderPaint.setColor(ThemeColors.MAUVE);
 		cropBorderPaint.setStrokeWidth(2f);
 		cropBorderPaint.setStyle(Paint.Style.STROKE);
-		crosshairPaint.setColor(withAlpha(ThemeColors.MAUVE, 0xCC));
 		crosshairPaint.setStrokeWidth(1f);
-		// Point / polygon / horizon colors are set per-draw from GridConfig.selectionColor.
+		// crosshair / point / polygon / horizon colors are set per-draw from GridConfig — crosshair tracks
+		// grid.color() so the centerpoint marker stays visually consistent with the grid lines around it
+		// (user reported the mismatch as a bug when the grid was recoloured but the crosshair stayed mauve).
 		pointPaint.setStyle(Paint.Style.FILL);
 		polygonPaint.setStyle(Paint.Style.FILL);
 		infoPaint.setColor(ThemeColors.TEXT);
@@ -140,7 +143,7 @@ final class EditorRenderer
 			gridImgY = state.getCropImageYFloat();
 			gridW = cropW;
 			gridH = cropH;
-			drawCropOverlay(canvas, state, gridImgX, gridImgY, cropW, cropH);
+			drawCropOverlay(canvas, state, grid, gridImgX, gridImgY, cropW, cropH);
 		}
 		else
 		{
@@ -179,9 +182,11 @@ final class EditorRenderer
 	/**
 	 * Draw the crop-rectangle overlay: 4 dim rectangles outside the crop, the grid lines inside, and the
 	 * center-of-crop crosshair. Crop coordinates arrive in image-space; converted to screen-space via the viewport
-	 * before drawing.
+	 * before drawing. The crosshair colour is taken from `grid.color()` (with 0xCC alpha) so the centerpoint
+	 * marker visually matches the grid lines the user picked — earlier the crosshair was a hard-coded mauve
+	 * and stayed mauve even after the user recoloured the grid (user-reported bug).
 	 */
-	private void drawCropOverlay(Canvas canvas, CropState state,
+	private void drawCropOverlay(Canvas canvas, CropState state, GridConfig grid,
 		float gridImgX, float gridImgY, int cropW, int cropH)
 	{
 		float cropLeft = viewport.imageToScreenX(gridImgX);
@@ -201,7 +206,8 @@ final class EditorRenderer
 
 		float screenCenterX = viewport.imageToScreenX(state.getCenterX());
 		float screenCenterY = viewport.imageToScreenY(state.getCenterY());
-		float crosshairArmLength = 15;
+		crosshairPaint.setColor(withAlpha(grid.color(), 0xCC));
+		float crosshairArmLength = DpToPx.toPx(8, density);
 		canvas.drawLine(screenCenterX - crosshairArmLength, screenCenterY,
 			screenCenterX + crosshairArmLength, screenCenterY, crosshairPaint);
 		canvas.drawLine(screenCenterX, screenCenterY - crosshairArmLength,
@@ -210,7 +216,8 @@ final class EditorRenderer
 		infoPaint.setTextAlign(Paint.Align.LEFT);
 		infoPaint.setTextSize(11f * density);
 		infoPaint.setColor(withAlpha(ThemeColors.SUBTEXT0, 0xAA));
-		canvas.drawText(cropW + " x " + cropH, cropLeft + 4, cropTop - 6, infoPaint);
+		canvas.drawText(cropW + " x " + cropH,
+			cropLeft + DpToPx.toPx(2, density), cropTop - DpToPx.toPx(3, density), infoPaint);
 	}
 
 	private void drawEmptyHint(Canvas canvas)

@@ -41,8 +41,6 @@ public final class ExtendedXmpReassembler
 	{
 	}
 
-	private static final String EXT_PREFIX = "http://ns.adobe.com/xmp/extension/\0";
-
 	private ExtendedXmpReassembler() {}
 
 	/**
@@ -59,7 +57,7 @@ public final class ExtendedXmpReassembler
 		{
 			return new byte[0];
 		}
-		int extPrefixLen = EXT_PREFIX.length();
+		int extPrefixLen = JpegSegment.EXTENDED_XMP_HEADER.length();
 		// FF E1 LL LL (4) + namespace prefix + 32-byte GUID + 4-byte total len + 4-byte offset
 		int minHeaderLen = 4 + extPrefixLen + 32 + 4 + 4;
 
@@ -74,7 +72,7 @@ public final class ExtendedXmpReassembler
 			boolean prefixMatches = true;
 			for (int i = 0; i < extPrefixLen; i++)
 			{
-				if ((data[4 + i] & 0xFF) != EXT_PREFIX.charAt(i))
+				if ((data[4 + i] & 0xFF) != JpegSegment.EXTENDED_XMP_HEADER.charAt(i))
 				{
 					prefixMatches = false;
 					break;

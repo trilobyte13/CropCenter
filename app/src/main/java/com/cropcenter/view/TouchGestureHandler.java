@@ -105,9 +105,22 @@ public final class TouchGestureHandler
 		gestureDetector = new GestureDetector(context, new GestureDetector.SimpleOnGestureListener()
 		{
 			@Override
+			public boolean onDoubleTap(MotionEvent event)
+			{
+				callback.onDoubleTap();
+				return true;
+			}
+
+			@Override
 			public boolean onDown(MotionEvent event)
 			{
 				return true;
+			}
+
+			@Override
+			public void onLongPress(MotionEvent event)
+			{
+				callback.onLongPress(event.getX(), event.getY());
 			}
 
 			@Override
@@ -127,19 +140,6 @@ public final class TouchGestureHandler
 			{
 				callback.onTap(event.getX(), event.getY());
 				return true;
-			}
-
-			@Override
-			public boolean onDoubleTap(MotionEvent event)
-			{
-				callback.onDoubleTap();
-				return true;
-			}
-
-			@Override
-			public void onLongPress(MotionEvent event)
-			{
-				callback.onLongPress(event.getX(), event.getY());
 			}
 		});
 	}

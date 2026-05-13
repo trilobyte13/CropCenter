@@ -222,8 +222,10 @@ stays load-bearing:
   `"image/jpeg"`; never compare format with `String.equals`.
 - **`crop/CropFitContext.of(...)`** — the rotated-clamp's pre-computed sin/cos/half-extents bundle. Replaced an
   11-parameter signature; reuse rather than passing the values through individually.
-- **`crop/CropRender`** — bundle of (centerX, centerY, cropW/H, imgW/H, rotation) for the export pipeline. Has derived
-  `srcX()` / `srcY()`.
+- **`crop/CropRender.of(...)`** — factory bundling (centerX, centerY, cropW, cropH, imgW, imgH, rotation) for the
+  export pipeline. Final class with a private constructor; the public `of(...)` factory is the only construction path
+  (private ctor closes the (W, H)-vs-(H, W) transposition footgun that a public record's positional canonical
+  constructor would re-open). Has derived `srcX()` / `srcY()`.
 - **`util/SafPaths`** — pure-string SAF document-ID parsing (`parentDocIdOf`, `lastSegmentSeparatorEnd`,
   `hasImageSignature`). Static, no Context — testable directly.
 - **`model/StateBus`** — listener-dispatch + batch-suppression. CropState delegates here; never re-implement the batch
@@ -344,9 +346,12 @@ Inside a class:
 
 A class may become a `record` when **every field is effectively immutable** in practice — no setters, no internal
 mutation, no external `.field = x;` assignments. `AspectRatio`, `ExportConfig`, `GridConfig`, `SelectionPoint`,
-`JpegSegment`, `Graft`, `CropFitContext`, `CropRender`, and `AiRegionDetector.AiMask` qualify; classes with internal
-state machines or shared mutable buffers (`CropState`, the controller layer, `RotationRulerView`) do not. Mutable
-"config" records should expose `withXxx(value)` transformers alongside their accessors so callers can fold a
+`JpegSegment`, `Graft`, `CropFitContext`, and `AiRegionDetector.AiMask` qualify; classes with internal state machines or
+shared mutable buffers (`CropState`, the controller layer, `RotationRulerView`) do not. `CropRender` was record-eligible
+but converted to a `public final class` with a private constructor + public `of(...)` factory after the record's public
+canonical constructor (forced into (cropH, cropW, imgH, imgW) alphabetical order) became a transposition footgun
+against the codebase's (W, H) convention — when factory ergonomics rule out a positional constructor, drop the record.
+Mutable "config" records should expose `withXxx(value)` transformers alongside their accessors so callers can fold a
 single-field change through `CropState.updateExportConfig` / `updateGridConfig` without building a fresh instance by
 hand.
 
@@ -416,7 +421,16 @@ When in doubt, stay imperative. Streams are a clarity tool, not a goal.
 
 ## Self-audit
 
-Before declaring a change done, these checks should come back empty:
+Before declaring a change done, these checks should come back empty. The fastest path is the
+consolidated runner:
+
+```bash
+python scripts/audit.py   # runs over-cols, ignored-catches, static-first, final-classes, lsloc
+```
+
+Individual subcommands (`python scripts/audit.py <name>`) are listed below alongside the awk
+one-liners they replace. The awk forms are canonical under bash; the Python audit runner is the
+cross-shell equivalent (Windows / PowerShell where escaping awk quoting is fragile).
 
 ```bash
 # Double-indent continuations (any line that starts with an operator and is
@@ -486,7 +500,7 @@ awk '{ n=0; for (i=1;i<=length($0);i++) { c=substr($0,i,1); if (c=="\t") n=int(n
 # Python equivalent of the awk above for environments where escaping the awk
 # quoting is fragile (Windows / PowerShell). Same tab=8 expansion, same output
 # format. Either runner is canonical — pick the one that works in your shell.
-python scripts/scan_over_120.py app/src
+python scripts/audit.py over-cols app/src
 
 # // comments directly above a class or method declaration (use Javadoc instead):
 awk '
@@ -508,7 +522,7 @@ grep -rnE '/\*[^*\n/][^\n]*\*/' app/src/main/java
 # (violates the static-before-instance rule under Method ordering). Reports
 # class, access tier, and the offending method names + line numbers. Empty
 # output = clean.
-python scripts/audit_static_first.py app/src/main/java app/src/test/java
+python scripts/audit.py static-first app/src/main/java app/src/test/java
 
 # Catches that swallow an exception without explaining why. Flags any catch
 # whose parameter is named `ignored` or whose body is empty AND that has no
@@ -516,7 +530,7 @@ python scripts/audit_static_first.py app/src/main/java app/src/test/java
 # exceptions" rule under Android / Java idioms — a reader should see at a
 # glance which throws are expected by design (mid-keystroke parse failure,
 # missing optional EXIF tag) versus accidentally lost. Empty output = clean.
-python scripts/audit_ignored_catches.py app/src/main/java app/src/test/java
+python scripts/audit.py ignored-catches app/src/main/java app/src/test/java
 
 # Concrete classes that should be `final` per Effective Java item 19. The
 # scanner flags any class that is not abstract, not already final, and not
@@ -524,7 +538,7 @@ python scripts/audit_ignored_catches.py app/src/main/java app/src/test/java
 # anonymous-inner subclassing). The "SHOULD BE FINAL" section should be
 # empty after each pass; entries there mean a new class was introduced
 # without the modifier and isn't designed for extension.
-python scripts/audit_final_classes.py app/src/main/java app/src/test/java
+python scripts/audit.py final-classes app/src/main/java app/src/test/java
 
 # Identifiers containing a run of ≥ 2 uppercase letters mid-word (likely an
 # acronym that should be camelCase — e.g. scanIFD → scanIfd, spinnerAR →

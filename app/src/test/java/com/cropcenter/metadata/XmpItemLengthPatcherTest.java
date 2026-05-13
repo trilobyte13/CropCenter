@@ -459,6 +459,103 @@ public final class XmpItemLengthPatcherTest
 	}
 
 	@Test
+	public void patchFailClosedOnFirstSegmentSkipsSecondSegment() throws IOException
+	{
+		// Codex round-29 A4.1 — when the first standard XMP segment carries an unpatchable Item:Length
+		// (over-cap, malformed, etc), patch() must short-circuit with null and NOT inspect the second
+		// segment. Verifies the contract "any failClosed result short-circuits" against the multi-
+		// segment walker. Otherwise a regression that continued the loop would silently patch the
+		// second segment and ship a file where segment #1's malformed attribute remains stale.
+		byte[] standardXmp1 = (JpegSegment.XMP_HEADER + "<rdf:Description Item:Length=\"\"/>")
+			.getBytes(StandardCharsets.US_ASCII);   // empty digit run → failClosed
+		byte[] standardXmp2 = xmpPacketWithLength("43099");
+		byte[] primary = JpegFixtures.concat(JpegFixtures.soi(),
+			JpegFixtures.appSegment(0xE1, standardXmp1),
+			JpegFixtures.appSegment(0xE1, standardXmp2),
+			JpegFixtures.minimalScanAndEoi());
+
+		assertNull("failClosed on segment #1 must short-circuit before segment #2 is reached",
+			XmpItemLengthPatcher.patch(primary, 82606));
+	}
+
+	@Test
+	public void patchOnFirstSegmentSkipsSecondSegment() throws IOException
+	{
+		// Codex round-29 A4.3 — when the first standard XMP segment patches successfully, the loop
+		// must return immediately without re-applying patchInSegment to a second standard XMP segment
+		// that also carries Item:Length. A regression that didn't short-circuit on success would emit
+		// double-patched output (or worse, attempt to patch the SAME byte range twice with stale
+		// offsets).
+		byte[] standardXmp1 = xmpPacketWithLength("43099");
+		byte[] standardXmp2 = xmpPacketWithLength("99999");   // also matchable but should be ignored
+		byte[] primary = JpegFixtures.concat(JpegFixtures.soi(),
+			JpegFixtures.appSegment(0xE1, standardXmp1),
+			JpegFixtures.appSegment(0xE1, standardXmp2),
+			JpegFixtures.minimalScanAndEoi());
+
+		byte[] patched = XmpItemLengthPatcher.patch(primary, 82606);
+		assertNotNull("first matching segment must patch successfully", patched);
+		String patchedStr = new String(patched, StandardCharsets.US_ASCII);
+		// The first segment's 43099 → 82606. The second segment's 99999 must remain untouched.
+		assertNotEquals("first segment patched", -1, patchedStr.indexOf("Item:Length=\"82606\""));
+		assertNotEquals("second segment kept its 99999 verbatim", -1,
+			patchedStr.indexOf("Item:Length=\"99999\""));
+		assertEquals("source 43099 fully replaced", -1, patchedStr.indexOf("43099"));
+	}
+
+	@Test
+	public void patchHonorsFillBytesBeforeExtendedXmpFailClosed() throws IOException
+	{
+		// Codex round-32 T1 — fill-byte handling on the Extended-XMP fail-closed path. Standard XMP
+		// has no Item:Length; the Extended XMP chunk is preceded by a fill byte (`FF FF E1 ...`) and
+		// carries Item:Length in its body. The walker must route through skipFillBytes so the
+		// fail-closed gate fires. A regression to direct `primary[off+1]` reads here would let the
+		// stale Item:Length ship and silently truncate HDR boost — the very leak round-25/26/27
+		// fail-closed paths exist to prevent. Pins extendedXmpContainsItemLength's walker fix.
+		byte[] standardXmp = (JpegSegment.XMP_HEADER + "<x:xmpmeta>"
+			+ "<hdrgm:Version>1.0</hdrgm:Version></x:xmpmeta>")
+			.getBytes(StandardCharsets.US_ASCII);
+		byte[] extXmpBody = extendedXmpChunkBody(
+			"<rdf:Description Item:Length=\"43099\" Item:Mime=\"image/jpeg\"/>");
+		ByteArrayOutputStream withFill = new ByteArrayOutputStream();
+		withFill.write(JpegFixtures.soi());
+		withFill.write(JpegFixtures.appSegment(0xE1, standardXmp));
+		// Insert a fill byte before the Extended XMP segment's FF E1.
+		withFill.write(0xFF);
+		withFill.write(JpegFixtures.appSegment(0xE1, extXmpBody));
+		withFill.write(JpegFixtures.minimalScanAndEoi());
+		byte[] primary = withFill.toByteArray();
+
+		assertNull("fill-byte-prefixed Extended XMP carrying Item:Length must fail closed",
+			XmpItemLengthPatcher.patch(primary, 82606));
+	}
+
+	@Test
+	public void patchHonorsFillBytesBeforeXmpApp1Marker() throws IOException
+	{
+		// Codex round-31 F2 — legal JPEG fill bytes (extra 0xFF before the marker code, ITU-T T.81
+		// §B.1.1.2) must not break the multi-segment walker. Fixture: SOI, then a `FF FF E1 ...` XMP
+		// segment carrying GContainer Item:Length. A regression that reads primary[off+1] directly
+		// (treating the second 0xFF as a stuck marker) would advance past the segment without
+		// reading it, leaving Item:Length unpatched. The fixed walker routes through
+		// JpegMarkerWalker.skipFillBytes and patches correctly.
+		byte[] xmpBody = xmpPacketWithLength("43099");
+		ByteArrayOutputStream withFill = new ByteArrayOutputStream();
+		withFill.write(JpegFixtures.soi());
+		// Insert a fill byte before the FF E1 marker pair so the segment is `FF FF E1 LL LL ...`
+		// (canonical FF + the marker code follows).
+		withFill.write(0xFF);
+		withFill.write(JpegFixtures.appSegment(0xE1, xmpBody));
+		withFill.write(JpegFixtures.minimalScanAndEoi());
+		byte[] primary = withFill.toByteArray();
+
+		byte[] patched = XmpItemLengthPatcher.patch(primary, 82606);
+		assertNotNull("fill-byte-prefixed XMP must still patch (no walker-stall regression)", patched);
+		String patchedStr = new String(patched, StandardCharsets.US_ASCII);
+		assertNotEquals(-1, patchedStr.indexOf("Item:Length=\"82606\""));
+	}
+
+	@Test
 	public void patchReturnsPrimaryWhenStandardMissesAndExtendedXmpInnocent() throws IOException
 	{
 		// Codex round-28 A4.5 — reciprocal of patchSucceedsWhenStandardXmpHasItemLengthEvenWith-

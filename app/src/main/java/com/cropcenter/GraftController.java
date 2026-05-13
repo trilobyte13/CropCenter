@@ -433,12 +433,7 @@ final class GraftController
 	 */
 	private void confirmOversizedThenApply(Graft graft, int maskedPixelCount, int maskTotal)
 	{
-		Runnable releaseBusy = () ->
-		{
-			host.getBusy().set(false);
-			host.setBusyUi(false);
-			host.hideProgress();
-		};
+		Runnable releaseBusy = this::releaseBusyAndHideProgress;
 		if (host.isDestroyed())
 		{
 			Log.w(TAG, "skipping oversized-edit dialog on destroyed activity");
@@ -495,12 +490,7 @@ final class GraftController
 		// oversized-edit and normal paths route through applyConfirmedGraft so the isDestroyed + try/catch
 		// cleanup applies uniformly — a separate `onGraftReady.onReady(graft)` direct call would leave the
 		// normal path missing the cleanup applyConfirmedGraft provides.
-		Runnable releaseBusy = () ->
-		{
-			host.getBusy().set(false);
-			host.setBusyUi(false);
-			host.hideProgress();
-		};
+		Runnable releaseBusy = this::releaseBusyAndHideProgress;
 		if (host.isDestroyed())
 		{
 			Log.w(TAG, "skipping graft handoff on destroyed activity");
@@ -515,6 +505,21 @@ final class GraftController
 		{
 			applyConfirmedGraft(graft, releaseBusy);
 		}
+	}
+
+	/**
+	 * Release the held busy flag, clear the UI's busy indicator, and hide the progress overlay. Used as the
+	 * cleanup tail by the graft pipeline whenever an Activity-destroyed guard fires, the user cancels the
+	 * oversized-edit confirm dialog, or the dialog plumbing throws — anywhere the busy ownership the graft
+	 * pipeline holds must be relinquished without proceeding to applyBytes. Hoisted out of two parallel
+	 * lambda bodies in confirmOversizedThenApply / dispatchGraftToUi (round-34 style audit P2) so the
+	 * three-step cleanup contract (busy flag, busy UI, progress overlay) lives at one chokepoint.
+	 */
+	private void releaseBusyAndHideProgress()
+	{
+		host.getBusy().set(false);
+		host.setBusyUi(false);
+		host.hideProgress();
 	}
 
 	/**

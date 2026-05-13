@@ -25,6 +25,24 @@ public record JpegSegment(int marker, byte[] data)
 	public static final String XMP_HEADER = "http://ns.adobe.com/xap/1.0/\0";
 
 	/**
+	 * Canonical Extended XMP namespace identifier — Adobe's continuation-chunk header that lives on each APP1
+	 * segment of a multi-chunk Extended XMP packet (used when the standard XMP body exceeds 64 KiB and has to be
+	 * split across several APP1 segments). Centralised here so ExtendedXmpReassembler, HdrSignature, and
+	 * XmpItemLengthPatcher all reference the same string rather than redeclaring it three different ways with
+	 * three different constant names (Codex round-46 style-agent F1).
+	 */
+	public static final String EXTENDED_XMP_HEADER = "http://ns.adobe.com/xmp/extension/\0";
+
+	/**
+	 * Cap on a JPEG APP segment's total byte length, INCLUDING the 2-byte length field itself. The segLen field
+	 * is u16, so 65535 is the absolute spec ceiling. Centralised here so ExifPatcher and XmpItemLengthPatcher
+	 * both reference the same constant rather than declaring near-duplicate copies with different names (Codex
+	 * round-46 style-agent F2). Note: this is the spec cap; some encoders cap practical segments lower (e.g.
+	 * Samsung writes EXIF at 65535 but XMP at 65533 to leave room for stuffing bytes).
+	 */
+	public static final int MAX_SEGMENT_BYTES = 65535;
+
+	/**
 	 * Check if this is an EXIF APP1 segment (starts with "Exif\0\0").
 	 */
 	public boolean isExif()

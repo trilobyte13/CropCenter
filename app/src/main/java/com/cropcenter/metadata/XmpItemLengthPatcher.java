@@ -69,36 +69,38 @@ public final class XmpItemLengthPatcher
 		}
 	}
 
-	// JPEG APP segment max — segLen field is u16 (max 65535), and segLen INCLUDES the 2 length bytes
-	// themselves. A patched XMP that would push the segment field past 65535 can't be emitted as a
-	// single APP1 — refuse to patch in that case rather than truncate (Codex round-25 F2: previous
-	// 65533 was the body cap, not the segLen field cap, and unnecessarily rejected segLen 65534-65535).
-	private static final int APP_MAX_SEG_LEN_FIELD = 65535;
-	private static final byte[] EXTENDED_XMP_HEADER_BYTES =
-		"http://ns.adobe.com/xmp/extension/\0".getBytes(StandardCharsets.US_ASCII);
-	private static final byte[] PATTERN = "Item:Length=".getBytes(StandardCharsets.US_ASCII);
 	private static final String TAG = "XmpItemLengthPatcher";
+	private static final byte[] EXTENDED_XMP_HEADER_BYTES =
+		JpegSegment.EXTENDED_XMP_HEADER.getBytes(StandardCharsets.US_ASCII);
+	private static final byte[] PATTERN = "Item:Length=".getBytes(StandardCharsets.US_ASCII);
 	private static final byte[] XMP_HEADER_BYTES = JpegSegment.XMP_HEADER.getBytes(StandardCharsets.US_ASCII);
 
 	private XmpItemLengthPatcher() {}
 
 	/**
 	 * Patch the GContainer Item:Length attribute in primary's standard XMP packet to match gainMapSize.
-	 * Returns input unchanged when no XMP segment is found, no Item:Length attribute is present in
-	 * either the standard or the Extended XMP packets, the value is already correct, or the patched
-	 * segment would exceed the APP1 length-field cap.
 	 *
-	 * Returns null (fail-closed) when Item:Length lives in an Extended XMP chunk — patching across
-	 * chunk-boundary reassembly headers is beyond this helper's scope, and shipping with a stale
-	 * Item:Length would silently truncate the gain map for strict GContainer-respecting decoders.
-	 * Caller (GainMapComposer) must check for null and drop HDR rather than ship the inconsistent file.
+	 * Three return classes — callers (GainMapComposer in particular) must distinguish all three:
+	 *   1. New byte array (length may differ from input by the digit-count delta of the new size) —
+	 *      the standard-XMP segment was successfully patched.
+	 *   2. Input reference unchanged — no Item:Length attribute exists in either the standard XMP
+	 *      packet or any Extended XMP chunk (e.g. SDR file, or HDR file whose source XMP simply
+	 *      omits the GContainer item-length declaration). Caller may safely append the gain map.
+	 *   3. **null (fail-closed)** — Item:Length is present somewhere but cannot be safely rewritten:
+	 *        a. lives in an Extended XMP chunk (per-chunk reassembly headers can't be patched
+	 *           in-place; round-25 F1 / round-26 F1), OR
+	 *        b. lives in standard XMP but the segment is unpatchable — patched segLen would exceed
+	 *           the APP1 u16 cap, value is non-quoted, digit run is empty / unterminated, or closing
+	 *           quote doesn't match (round-27 F2).
+	 *      Caller (GainMapComposer) MUST treat null as "drop HDR" — shipping the gain map with stale
+	 *      Item:Length silently truncates the gain map in strict GContainer-respecting decoders
+	 *      (Google's libUltraHdr is one).
 	 *
-	 * @param primary     primary JPEG bytes (must start with SOI)
-	 * @param gainMapSize size in bytes of the gain map JPEG that will be appended after primary
-	 * @return new byte array with Item:Length updated and APP1 segLen patched (length may differ from
-	 *         input by the digit-count delta of the new size); the input array reference unchanged
-	 *         when no patch was applied; or null when Extended XMP carries Item:Length and the caller
-	 *         should drop HDR
+	 * @param primary     primary JPEG bytes (must start with SOI); null returns null verbatim
+	 * @param gainMapSize size in bytes of the gain map JPEG that will be appended after primary;
+	 *                    negative values are treated as a caller bug and return primary unchanged
+	 * @return patched primary bytes (success); the input array reference (Item:Length absent or
+	 *         already correct); or null (fail-closed — caller must drop HDR)
 	 */
 	public static byte[] patch(byte[] primary, int gainMapSize)
 	{
@@ -187,41 +189,17 @@ public final class XmpItemLengthPatcher
 	private static List<JpegSegment> collectApp1Segments(byte[] primary)
 	{
 		List<JpegSegment> out = new ArrayList<>();
-		int off = 2;
-		while (off < primary.length - 4)
+		for (int[] range : walkApp1Ranges(primary))
 		{
-			if ((primary[off] & 0xFF) != 0xFF)
-			{
-				break;
-			}
-			int marker = primary[off + 1] & 0xFF;
-			if (marker == JpegMarker.EOI || marker == JpegMarker.SOS)
-			{
-				break;
-			}
-			if (marker == JpegMarker.STUFFING || marker == JpegMarker.TEM || marker == 0xFF
-				|| (marker >= JpegMarker.RST_FIRST && marker <= JpegMarker.RST_LAST))
-			{
-				off += 2;
-				continue;
-			}
-			if (off + 4 > primary.length)
-			{
-				break;
-			}
-			int segLen = ByteBufferUtils.readU16BE(primary, off + 2);
-			if (segLen < 2 || off + 2 + segLen > primary.length)
-			{
-				break;
-			}
-			if (marker == 0xE1)
-			{
-				int segTotal = 2 + segLen;
-				byte[] segData = new byte[segTotal];
-				System.arraycopy(primary, off, segData, 0, segTotal);
-				out.add(new JpegSegment(marker, segData));
-			}
-			off += 2 + segLen;
+			// Slice from the canonical leading FF (range[0]) through end-of-segment so
+			// JpegSegment.data()[0..3] matches the standard FF MARKER + segLen layout that
+			// ExtendedXmpReassembler's namespace-prefix check at data[4] depends on.
+			int segStart = range[0];
+			int bodyEnd = range[2];
+			int segTotal = bodyEnd - segStart;
+			byte[] segData = new byte[segTotal];
+			System.arraycopy(primary, segStart, segData, 0, segTotal);
+			out.add(new JpegSegment(0xE1, segData));
 		}
 		return out;
 	}
@@ -236,46 +214,17 @@ public final class XmpItemLengthPatcher
 	 */
 	private static boolean extendedXmpContainsItemLength(byte[] primary)
 	{
-		int off = 2;
-		while (off < primary.length - 4)
+		for (int[] range : walkApp1Ranges(primary))
 		{
-			if ((primary[off] & 0xFF) != 0xFF)
+			int bodyStart = range[1];
+			int bodyEnd = range[2];
+			if (bodyStart + EXTENDED_XMP_HEADER_BYTES.length <= bodyEnd
+				&& bytesEqual(primary, bodyStart, EXTENDED_XMP_HEADER_BYTES, 0,
+					EXTENDED_XMP_HEADER_BYTES.length)
+				&& findPattern(primary, bodyStart, bodyEnd, PATTERN) >= 0)
 			{
-				break;
+				return true;
 			}
-			int marker = primary[off + 1] & 0xFF;
-			if (marker == JpegMarker.EOI || marker == JpegMarker.SOS)
-			{
-				break;
-			}
-			if (marker == JpegMarker.STUFFING || marker == JpegMarker.TEM || marker == 0xFF
-				|| (marker >= JpegMarker.RST_FIRST && marker <= JpegMarker.RST_LAST))
-			{
-				off += 2;
-				continue;
-			}
-			if (off + 4 > primary.length)
-			{
-				break;
-			}
-			int segLen = ByteBufferUtils.readU16BE(primary, off + 2);
-			if (segLen < 2 || off + 2 + segLen > primary.length)
-			{
-				break;
-			}
-			if (marker == 0xE1)
-			{
-				int bodyStart = off + 4;
-				int bodyEnd = off + 2 + segLen;
-				if (bodyStart + EXTENDED_XMP_HEADER_BYTES.length <= bodyEnd
-					&& bytesEqual(primary, bodyStart, EXTENDED_XMP_HEADER_BYTES, 0,
-						EXTENDED_XMP_HEADER_BYTES.length)
-					&& findPattern(primary, bodyStart, bodyEnd, PATTERN) >= 0)
-				{
-					return true;
-				}
-			}
-			off += 2 + segLen;
 		}
 		return false;
 	}
@@ -294,6 +243,39 @@ public final class XmpItemLengthPatcher
 	private static List<int[]> findAllXmpApp1Segments(byte[] primary, byte[] headerBytes)
 	{
 		List<int[]> matches = new ArrayList<>();
+		for (int[] range : walkApp1Ranges(primary))
+		{
+			int bodyStart = range[1];
+			int bodyEnd = range[2];
+			if (bodyStart + headerBytes.length <= bodyEnd
+				&& bytesEqual(primary, bodyStart, headerBytes, 0, headerBytes.length))
+			{
+				matches.add(range);
+			}
+		}
+		return matches;
+	}
+
+	/**
+	 * Walk the JPEG marker chain and return every APP1 (FF E1) segment as a {segStart, bodyStart,
+	 * bodyEnd} int[] range. Single chokepoint replacing three near-identical inline walkers in this
+	 * class (Codex round-32 S1: the duplication surfaced as a real bug class in round-31 F2 when one
+	 * walker missed the fill-byte fix that was applied to the others). Stops at SOS / EOI; tolerates
+	 * fill bytes (`FF FF MARKER ...`), standalone markers (RST / STUFFING / TEM), and short /
+	 * truncated segments by bailing rather than throwing — adversarial inputs return a partial list,
+	 * never an exception.
+	 *
+	 * `segStart` is the canonical leading FF byte of the FF MARKER pair (the byte just before the
+	 * marker code), so consumers' `data[segStart .. segStart+1]` is always `[FF, marker]` regardless
+	 * of how many fill bytes preceded the marker. `bodyStart` and `bodyEnd` bracket the segment body
+	 * that follows the 2-byte segLen field.
+	 *
+	 * @param primary JPEG bytes starting with SOI
+	 * @return ordered list of APP1 ranges; empty when no APP1 is present before SOS / EOI
+	 */
+	private static List<int[]> walkApp1Ranges(byte[] primary)
+	{
+		List<int[]> ranges = new ArrayList<>();
 		int off = 2;
 		while (off < primary.length - 4)
 		{
@@ -301,39 +283,49 @@ public final class XmpItemLengthPatcher
 			{
 				break;
 			}
-			int marker = primary[off + 1] & 0xFF;
+			// Honor legal fill bytes (ITU-T T.81 §B.1.1.2) by routing through the canonical walker so
+			// a `FF FF E1 ...` shape doesn't break the walk on the second 0xFF (Codex round-31 F2).
+			int markerByteOff = JpegMarkerWalker.skipFillBytes(primary, off, primary.length);
+			if (markerByteOff < 0)
+			{
+				break;
+			}
+			int marker = primary[markerByteOff] & 0xFF;
+			int afterMarker = markerByteOff + 1;
 			if (marker == JpegMarker.EOI || marker == JpegMarker.SOS)
 			{
 				break;
 			}
-			if (marker == JpegMarker.STUFFING || marker == JpegMarker.TEM || marker == 0xFF
+			if (marker == JpegMarker.STUFFING || marker == JpegMarker.TEM
 				|| (marker >= JpegMarker.RST_FIRST && marker <= JpegMarker.RST_LAST))
 			{
-				off += 2;
+				off = afterMarker;
 				continue;
 			}
-			if (off + 4 > primary.length)
+			if (afterMarker + 2 > primary.length)
 			{
 				break;
 			}
-			int segLen = ByteBufferUtils.readU16BE(primary, off + 2);
-			if (segLen < 2 || off + 2 + segLen > primary.length)
+			int segLen = ByteBufferUtils.readU16BE(primary, afterMarker);
+			// `next < off` guards against `afterMarker + segLen` wrapping int-negative on adversarial
+			// inputs whose primary.length is near Integer.MAX_VALUE — SafFileHelper's MAX_READ_BYTES
+			// cap (128 MB) keeps real inputs well below the overflow range, but the sister walkers
+			// (JpegMetadataExtractor.extract, JpegMarkerWalker.findPrimaryEoi, MpfPatcher.patch,
+			// BitmapUtils.readExifOrientationInternal) all carry the same defensive check so this
+			// walker stays consistent with them and won't silently regress if the cap is ever raised
+			// (Codex round-35 logic-audit P2).
+			int next = afterMarker + segLen;
+			if (segLen < 2 || next < afterMarker || next > primary.length)
 			{
 				break;
 			}
 			if (marker == 0xE1)
 			{
-				int bodyStart = off + 4;
-				int bodyEnd = off + 2 + segLen;
-				if (bodyStart + headerBytes.length <= bodyEnd
-					&& bytesEqual(primary, bodyStart, headerBytes, 0, headerBytes.length))
-				{
-					matches.add(new int[] { off, bodyStart, bodyEnd });
-				}
+				ranges.add(new int[] { markerByteOff - 1, afterMarker + 2, next });
 			}
-			off += 2 + segLen;
+			off = next;
 		}
-		return matches;
+		return ranges;
 	}
 
 	/**
@@ -426,9 +418,14 @@ public final class XmpItemLengthPatcher
 
 		int oldSegLen = ByteBufferUtils.readU16BE(primary, xmpSegStart + 2);
 		int newSegLen = oldSegLen + (newLen - oldLen);
-		if (newSegLen > APP_MAX_SEG_LEN_FIELD)
+		// Symmetric defensive guard against newSegLen falling below the spec-minimum (a JPEG segment
+		// length field includes the 2 length bytes themselves, so the absolute minimum is 2). Currently
+		// unreachable on real input — even an empty XMP body still carries the 29-byte namespace prefix
+		// — but the asymmetry with the upper-bound check would let a future caller passing a deliberately
+		// short-bodied segment write a malformed segLen (Codex round-29 logic).
+		if (newSegLen < 2 || newSegLen > JpegSegment.MAX_SEGMENT_BYTES)
 		{
-			Log.w(TAG, "Patched XMP segLen field would exceed " + APP_MAX_SEG_LEN_FIELD + " ("
+			Log.w(TAG, "Patched XMP segLen field out of range [2, " + JpegSegment.MAX_SEGMENT_BYTES + "] ("
 				+ newSegLen + "); refusing to patch");
 			return SegmentPatchResult.failClosed();
 		}

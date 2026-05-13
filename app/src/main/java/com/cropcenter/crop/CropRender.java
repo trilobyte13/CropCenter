@@ -5,27 +5,45 @@ package com.cropcenter.crop;
  * audit flagged in UltraHdrCompat.compressWithGainmap (12-param method) and the analogous threading through
  * CropExporter.export → buildCroppedGainMap → compressWithGainmap.
  *
- * @param centerX  crop center X in un-rotated image coords
- * @param centerY  crop center Y in un-rotated image coords
- * @param cropH    crop height in image pixels
- * @param cropW    crop width in image pixels
- * @param imgH     source image height in pixels
- * @param imgW     source image width in pixels
- * @param rotation user-applied rotation in degrees (the rotation baked into the export)
+ * Implemented as a final class with a private constructor + public static `of(...)` factory, NOT a record, because a
+ * record's canonical constructor must be at least as accessible as the record itself — making the all-positional raw
+ * constructor reachable to every caller. The footgun: a maintainer using the codebase's (W, H) convention everywhere
+ * else (CropState.getCropW() / .getCropH(), CropFitContext.of(imgW, imgH, ...), RotatedCropClamp, CropEngine,
+ * EditorRenderer) would write `new CropRender(cx, cy, cropW, cropH, imgW, imgH, rot)` and silently transpose each pair
+ * — all int, no compile error, but the gain-map output would carry visible HDR halos around every cropped export.
+ * Converting from `public record` to `public final class` + `private` ctor closes that hole at compile time: the only
+ * way to construct a CropRender is through `of(...)`, whose parameter order matches the rest of the codebase (Codex
+ * round-43 F4).
+ *
+ * Components are stored in alphabetical-by-name order per CLAUDE.md's field-ordering rule (cropH before cropW, imgH
+ * before imgW); the `of(...)` factory accepts them in (W, H) order and threads the swap internally so the public API
+ * surface follows the codebase convention without rearranging storage.
  */
-public record CropRender(float centerX, float centerY, int cropH, int cropW, int imgH, int imgW, float rotation)
+public final class CropRender
 {
+	private final float centerX;
+	private final float centerY;
+	private final float rotation;
+	private final int cropH;
+	private final int cropW;
+	private final int imgH;
+	private final int imgW;
+
+	private CropRender(float centerX, float centerY, int cropW, int cropH, int imgW, int imgH, float rotation)
+	{
+		this.centerX = centerX;
+		this.centerY = centerY;
+		this.cropH = cropH;
+		this.cropW = cropW;
+		this.imgH = imgH;
+		this.imgW = imgW;
+		this.rotation = rotation;
+	}
+
 	/**
-	 * Construct a CropRender using the codebase's canonical (W, H) parameter convention.
-	 *
-	 * The record's component order is (cropH, cropW, imgH, imgW) because CLAUDE.md sorts record components
-	 * alphabetically by name and `cropH` < `cropW` / `imgH` < `imgW`. But the rest of the codebase uses
-	 * (W, H) ordering everywhere — `getCropW()` then `getCropH()` on CropState, `(imgW, imgH)` parameters
-	 * on CropFitContext.of, RotatedCropClamp, CropEngine, EditorRenderer. Calling the canonical record
-	 * constructor positionally is a footgun: a maintainer copying the codebase convention would write
-	 * `new CropRender(cx, cy, cropW, cropH, imgW, imgH, rot)` and silently swap each pair (all `int`, no
-	 * compile error). This factory takes parameters in (W, H) order and forwards to the canonical
-	 * constructor with the swap applied.
+	 * Construct a CropRender using the codebase's canonical (W, H) parameter convention. The only way to
+	 * construct a CropRender — the all-int positional constructor is private so a maintainer can't accidentally
+	 * call `new CropRender(...)` with arguments transposed against the storage's (H, W) alphabetical order.
 	 *
 	 * @param centerX  crop center X in un-rotated image coords
 	 * @param centerY  crop center Y in un-rotated image coords
@@ -34,12 +52,47 @@ public record CropRender(float centerX, float centerY, int cropH, int cropW, int
 	 * @param imgW     source image width in pixels
 	 * @param imgH     source image height in pixels
 	 * @param rotation user-applied rotation in degrees
-	 * @return CropRender with components in their canonical alphabetical order
+	 * @return CropRender carrying the supplied geometry
 	 */
 	public static CropRender of(float centerX, float centerY, int cropW, int cropH,
 		int imgW, int imgH, float rotation)
 	{
-		return new CropRender(centerX, centerY, cropH, cropW, imgH, imgW, rotation);
+		return new CropRender(centerX, centerY, cropW, cropH, imgW, imgH, rotation);
+	}
+
+	public float centerX()
+	{
+		return centerX;
+	}
+
+	public float centerY()
+	{
+		return centerY;
+	}
+
+	public int cropH()
+	{
+		return cropH;
+	}
+
+	public int cropW()
+	{
+		return cropW;
+	}
+
+	public int imgH()
+	{
+		return imgH;
+	}
+
+	public int imgW()
+	{
+		return imgW;
+	}
+
+	public float rotation()
+	{
+		return rotation;
 	}
 
 	/**

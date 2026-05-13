@@ -38,7 +38,13 @@ public final class CropState
 	// otherwise see stale null without a happens-before. Cheap insurance.
 	private volatile AiMask aiMask;
 	private AspectRatio aspectRatio = AspectRatio.R4_5;
-	private Bitmap sourceImage;
+	// volatile to match the sister fields (jpegMeta, selectionPoints, pngExifTiff, aiMask, graftApplied)
+	// that publish cross-thread: bg-thread reset() writer (in ImageLoadController.load) → UI-thread
+	// readers (EditorRenderer.draw, ViewportMath, MainActivity.applyStateToUi, gesture handlers). The
+	// per-frame snapshot in EditorRenderer.draw protects a single frame from a mid-walk null swap, but
+	// without volatile the UI thread isn't guaranteed to OBSERVE a bg-thread null/replace write on weak-
+	// memory devices and could keep reading a stale Bitmap reference across multiple frames.
+	private volatile Bitmap sourceImage;
 	private CenterMode centerMode = CenterMode.BOTH;
 	private EditorMode editorMode = EditorMode.SELECT_FEATURE;
 	// Mutated only via updateExportConfig / updateGridConfig — the record types themselves are immutable, so state
@@ -663,9 +669,9 @@ public final class CropState
 	 * Store the raw Ultra HDR gain-map bytes for later export. No listener fire — gain map never drives UI changes
 	 * directly.
 	 */
-	public void setGainMap(byte[] gm)
+	public void setGainMap(byte[] gainMap)
 	{
-		this.gainMap = gm;
+		this.gainMap = gainMap;
 	}
 
 	/**

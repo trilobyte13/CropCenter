@@ -139,6 +139,15 @@ public final class GraftWriter
 		out.write(0xFF);
 		out.write(0xD8);
 
+		// When the assembled output won't carry a gain map (origGainMap == null AND editGainMap == null —
+		// i.e., a non-HDR original whose MPF describes a non-HDR multi-picture layout like Samsung "Best
+		// Photo" burst / focus-stacked panorama), passing source's MPF verbatim into the output leaves it
+		// pointing at secondary images that no longer exist in the grafted file. Strict decoders' MPF
+		// pre-flight rejects the orphan, lenient decoders walk past malformed entries. Drop MPF in that
+		// case so the output's metadata stays honest about what it actually carries (Codex round-45 F2).
+		// HDR grafts (gainMapToWrite != null) preserve MPF — MpfPatcher.patch below rewrites the entries
+		// for the post-graft primary size and gain-map offset.
+		boolean dropOrphanMpf = gainMapToWrite == null;
 		boolean wroteEditExif = false;
 		boolean wroteEditMpf = false;
 		boolean wroteEditIcc = false;
@@ -154,6 +163,11 @@ public final class GraftWriter
 			{
 				out.write(editMpfSeg.data(), 0, editMpfSeg.data().length);
 				wroteEditMpf = true;
+			}
+			else if (dropOrphanMpf && seg.isMpf())
+			{
+				Log.d(TAG, "Dropping orphan MPF segment — no gain map / secondary image to anchor");
+				continue;
 			}
 			else if (editIccSeg != null && seg.isIcc())
 			{
@@ -211,7 +225,11 @@ public final class GraftWriter
 		// based on the actual primarySize and the gain map's position right after it. Other entry fields
 		// (attribute, dependent images) are preserved — that's where the edit's MPF differs from original's
 		// when SWAP_HDR_MPF is on.
-		boolean haveMpfInOutput = (editMpfSeg != null) || hasMpf(origSegments);
+		// Reflect the dropOrphanMpf decision above — `hasMpf(origSegments)` looks at the source's segment
+		// list, but the output skips original's MPF when dropOrphanMpf is true. Keeping haveMpfInOutput
+		// honest matters for the MpfPatcher.patch guard below: patching an MPF that isn't in the output
+		// would fail-closed inside the patcher rather than fall through to the no-MPF warning branch.
+		boolean haveMpfInOutput = (editMpfSeg != null) || (hasMpf(origSegments) && !dropOrphanMpf);
 		if (gainMapToWrite != null && !haveMpfInOutput)
 		{
 			// Degenerate config: gain map written but no MPF segment to anchor it. Strict-MPF decoders

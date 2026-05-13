@@ -2,6 +2,7 @@ package com.cropcenter.view;
 
 import android.app.AlertDialog;
 import android.content.Context;
+import android.content.DialogInterface;
 import android.content.res.ColorStateList;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -51,17 +52,32 @@ public final class SettingsDialog
 	 * dialog and dismisses it from ImageLoadController.load's UI-thread entry before any bg work begins
 	 * (Codex round-16 F2).
 	 *
-	 * The OnCancelListener also cancels any open ColorPickerDialog (Codex round-17 F2): the picker is a
-	 * separate AlertDialog that mutates state.gridConfig through its own OK button, so without forced
-	 * cancellation a stale picker outliving SettingsDialog could keep applying colors to the new image's
-	 * state. The Done path leaves the picker alone — user-initiated parent dismissal isn't a state-leak
-	 * race, just a UX choice.
+	 * Both the OnCancelListener AND the OnDismissListener cancel any open ColorPickerDialog: the picker
+	 * is a separate AlertDialog that mutates state.gridConfig through its own OK button, so without
+	 * forced cancellation a stale picker outliving SettingsDialog could keep applying colors to the new
+	 * image's state. Codex round-17 F2 introduced the cancel-hook for user-initiated cancels; the
+	 * round-35 logic audit extended the cleanup to the dismiss path too — the Done button, the
+	 * Activity-destroyed-at-config-change path, and any future dialog-API dismissal all reach
+	 * dismiss-but-not-cancel, and leaving the picker alone on those paths leaks the destroyed window
+	 * through the static `activePicker` reference until the next show() defensively clears it.
 	 *
-	 * @param ctx   Activity context for inflation
-	 * @param state CropState whose gridConfig is mutated as the user interacts
+	 * `hostDismissListener` is the host's own cleanup (typically the activity-tracking clear that
+	 * `MainActivity.registerTransientDialog` would otherwise install). SettingsDialog installs ONE
+	 * `setOnDismissListener` that calls `cancelActivePicker` AND then the host's callback —
+	 * `AlertDialog.setOnDismissListener` replaces rather than chains, so the host cannot install its
+	 * own listener separately without clobbering the embedded-picker cleanup (Codex round-38 F1: the
+	 * prior `registerTransientDialog(SettingsDialog.show(...))` shape silently discarded the picker
+	 * cleanup on Done / config-change dismissals). Pass `null` when the caller doesn't need a host
+	 * dismiss hook.
+	 *
+	 * @param ctx                 Activity context for inflation
+	 * @param state               CropState whose gridConfig is mutated as the user interacts
+	 * @param hostDismissListener additional cleanup composed with cancelActivePicker on dismiss; may
+	 *                            be null
 	 * @return the shown AlertDialog (caller tracks it for cross-load dismissal)
 	 */
-	public static AlertDialog show(Context ctx, CropState state)
+	public static AlertDialog show(Context ctx, CropState state,
+		DialogInterface.OnDismissListener hostDismissListener)
 	{
 		// Reset the cross-dialog tracker so a previous SettingsDialog instance's stale picker reference
 		// can't survive into this new one. The previous instance's OnCancelListener / picker dismiss
@@ -88,22 +104,32 @@ public final class SettingsDialog
 
 		Runnable applyDimensions = () -> applyDimensionInputs(state, dimensionInputs[0], dimensionInputs[1]);
 
-		return new AlertDialog.Builder(ctx)
+		// Outer dialog reference qualified as `settingsDialog` so the lambda parameters below can use
+		// the canonical CLAUDE.md `dialog` / `(dialog, which)` names without shadowing.
+		AlertDialog settingsDialog = new AlertDialog.Builder(ctx)
 			.setTitle("Settings")
 			.setView(scroll)
 			.setPositiveButton("Done", (dialog, which) -> applyDimensions.run())
-			.setOnCancelListener(dialog ->
+			.setOnCancelListener(dialog -> cancelActivePicker())
+			.create();
+		// Dismiss listener covers paths the cancel listener misses: the "Done" button (no cancel fires
+		// when the user commits), the Activity-destroyed-mid-dialog config-change path (the parent
+		// window goes away before any user event reaches the cancel hook), and any future dialog-API
+		// dismissal. Without this, a SettingsDialog + ColorPicker stack open at config-change time
+		// leaked the destroyed Activity's window through the static `activePicker` reference until the
+		// next `show()` call defensively cleared it (round-35 logic-audit P1). Compose with the host's
+		// optional cleanup so a caller's host-tracking listener doesn't clobber cancelActivePicker
+		// (Codex round-38 F1).
+		settingsDialog.setOnDismissListener(dialog ->
+		{
+			cancelActivePicker();
+			if (hostDismissListener != null)
 			{
-				// Forced cancel (load arrived) / back-press / outside-touch: cancel any open picker so
-				// its OK listener can't mutate gridConfig after the parent is gone (Codex round-17 F2).
-				AlertDialog picker = activePicker;
-				activePicker = null;
-				if (picker != null && picker.isShowing())
-				{
-					picker.cancel();
-				}
-			})
-			.show();
+				hostDismissListener.onDismiss(dialog);
+			}
+		});
+		settingsDialog.show();
+		return settingsDialog;
 	}
 
 	private static void addLabel(LinearLayout parent, String text)
@@ -155,6 +181,14 @@ public final class SettingsDialog
 	/**
 	 * Build the "Grid" card — column / row dimensions, presets, line color, line width. Stores the Cols / Rows
 	 * EditTexts in dimensionInputs so the OK button can commit them.
+	 *
+	 * @param ctx             Activity context for view inflation
+	 * @param state           CropState whose gridConfig is mutated as the user interacts
+	 * @param cfg             snapshot of the initial gridConfig used to seed control values
+	 * @param density         display density used by DpToPx for sizing
+	 * @param dimensionInputs out parameter — the Cols / Rows EditTexts are stored at indices [0] and [1] so
+	 *                        the dialog's OK button can commit them via applyDimensionInputs
+	 * @return the assembled card LinearLayout, ready for the dialog root
 	 */
 	private static LinearLayout buildGridCard(Context ctx, CropState state, GridConfig cfg,
 		float density, EditText[] dimensionInputs)
@@ -205,6 +239,10 @@ public final class SettingsDialog
 	/**
 	 * Build the "Build" info card — shows the BUILD_TIME constant from BuildConfig so testers can verify which
 	 * build is running without Logcat.
+	 *
+	 * @param ctx     Activity context for view inflation
+	 * @param density display density used by DpToPx for sizing
+	 * @return the assembled card LinearLayout
 	 */
 	private static LinearLayout buildInfoCard(Context ctx, float density)
 	{
@@ -224,6 +262,12 @@ public final class SettingsDialog
 	/**
 	 * Build the "Pixel Grid" card — checkbox to toggle the per-pixel overlay + color picker for the pixel-grid
 	 * stroke.
+	 *
+	 * @param ctx     Activity context for view inflation
+	 * @param state   CropState whose gridConfig is mutated by the toggle / color picker
+	 * @param cfg     snapshot of the initial gridConfig used to seed control values
+	 * @param density display density used by DpToPx for sizing
+	 * @return the assembled card LinearLayout
 	 */
 	private static LinearLayout buildPixelGridCard(Context ctx, CropState state, GridConfig cfg, float density)
 	{
@@ -251,6 +295,13 @@ public final class SettingsDialog
 	/**
 	 * Build the 2×2..8×8 equal-weight preset chip row. Tapping a chip syncs both the GridConfig and the Cols / Rows
 	 * EditTexts (so the user sees the new values).
+	 *
+	 * @param ctx      Activity context for view inflation
+	 * @param state    CropState whose gridConfig is mutated when a preset chip is tapped
+	 * @param editCols Columns input — chip taps reflect the new value back so the user sees it
+	 * @param editRows Rows input — same as editCols
+	 * @param density  display density used by DpToPx for sizing
+	 * @return the assembled chip row LinearLayout
 	 */
 	private static LinearLayout buildPresetRow(Context ctx, CropState state,
 		EditText editCols, EditText editRows, float density)
@@ -285,6 +336,12 @@ public final class SettingsDialog
 	/**
 	 * Build the "Selection & Paint" card — shared color for selection markers, polygon fill, and horizon paint
 	 * strokes.
+	 *
+	 * @param ctx     Activity context for view inflation
+	 * @param state   CropState whose gridConfig is mutated by the color picker
+	 * @param cfg     snapshot of the initial gridConfig used to seed the swatch
+	 * @param density display density used by DpToPx for sizing
+	 * @return the assembled card LinearLayout
 	 */
 	private static LinearLayout buildSelectionCard(Context ctx, CropState state, GridConfig cfg, float density)
 	{
@@ -308,7 +365,13 @@ public final class SettingsDialog
 
 	/**
 	 * Build the "Width" seek-bar row — user drags to pick a grid stroke width (1-20 image pixels). The zero
-	 * position clamps up to 1 so the grid never invisible.
+	 * position clamps up to 1 so the grid is never invisible.
+	 *
+	 * @param ctx     Activity context for view inflation
+	 * @param state   CropState whose gridConfig.lineWidth is mutated as the seek-bar drags
+	 * @param cfg     snapshot of the initial gridConfig used to seed the seek-bar position
+	 * @param density display density used by DpToPx for sizing
+	 * @return the assembled row LinearLayout
 	 */
 	private static LinearLayout buildWidthRow(Context ctx, CropState state, GridConfig cfg, float density)
 	{
@@ -325,7 +388,7 @@ public final class SettingsDialog
 			@Override
 			public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser)
 			{
-				int clamped = Math.max(1, progress);
+				int clamped = Math.clamp(progress, 1, 20);
 				state.updateGridConfig(g -> g.withLineWidth(clamped));
 				widthValueText.setText(String.valueOf(clamped));
 			}
@@ -343,6 +406,24 @@ public final class SettingsDialog
 		widthRow.addView(widthSeekBar, seekBarLayoutParams);
 		widthRow.addView(widthValueText);
 		return widthRow;
+	}
+
+	/**
+	 * Dismiss any open ColorPickerDialog and clear the tracker. Called by the parent SettingsDialog's
+	 * OnCancelListener (forced cancel from a load arrival, back-press, or outside-touch) so the
+	 * picker's OK button can't mutate gridConfig after the parent is gone (Codex round-17 F2).
+	 * Hoisted out of the inline cancel-listener lambda to keep the body under the CLAUDE.md 3-line
+	 * cap (Codex round-35 F1). Snapshot the field before clearing so a re-entrant cancel from
+	 * picker.cancel()'s own OnCancelListener doesn't see a half-cleared state.
+	 */
+	private static void cancelActivePicker()
+	{
+		AlertDialog picker = activePicker;
+		activePicker = null;
+		if (picker != null && picker.isShowing())
+		{
+			picker.cancel();
+		}
 	}
 
 	/**
@@ -376,11 +457,11 @@ public final class SettingsDialog
 		int swatchSize = DpToPx.toPx(26, density);
 		final int[] tracked = { currentColor };
 		LinearLayout row = row(ctx);
-		TextView lbl = new TextView(ctx);
-		lbl.setText(label);
-		lbl.setTextSize(13);
-		lbl.setTextColor(ThemeColors.TEXT);
-		row.addView(lbl);
+		TextView labelView = new TextView(ctx);
+		labelView.setText(label);
+		labelView.setTextSize(13);
+		labelView.setTextColor(ThemeColors.TEXT);
+		row.addView(labelView);
 
 		View spacer = new View(ctx);
 		LinearLayout.LayoutParams spacerLayoutParams = new LinearLayout.LayoutParams(0, 1, 1f);
@@ -395,7 +476,6 @@ public final class SettingsDialog
 		swatch.setBackground(swatchBg);
 		row.addView(swatch, new LinearLayout.LayoutParams(swatchSize, swatchSize));
 
-		// Edit text-button
 		TextView btn = new TextView(ctx);
 		btn.setText("Edit");
 		btn.setTextSize(12);

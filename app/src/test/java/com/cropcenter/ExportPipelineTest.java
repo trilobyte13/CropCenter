@@ -3,14 +3,18 @@ package com.cropcenter;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
+import com.cropcenter.metadata.ExifPatcher;
+import com.cropcenter.metadata.JpegSegment;
 import com.cropcenter.model.CropState;
 import com.cropcenter.model.Format;
-import com.cropcenter.model.GridConfig;
 import com.cropcenter.model.Graft;
 import com.cropcenter.util.AiRegionDetector.AiMask;
 import com.cropcenter.util.BitmapUtils;
 
 import org.junit.Test;
+
+import java.util.Collections;
+import java.util.List;
 
 /**
  * Tests for ExportPipeline.canBypassEncode — the gate that decides whether a save writes state.originalFileBytes
@@ -79,10 +83,12 @@ public final class ExportPipelineTest
 		// Sub-epsilon rotation snaps to exactly 0 in setRotationDegrees, so the renderer treats it as no
 		// rotation. Bypass should be allowed (assuming all other gates pass) — anything else would force a
 		// needless re-encode. hasCenter is false (default), so we don't need a Bitmap to reach the happy-path
-		// return.
+		// return. State must carry an EXIF segment with an IFD1 thumbnail; the round-36 gate disqualifies
+		// bypass when the source has no pre-computed thumbnail so the re-encode path can synthesise one.
 		CropState state = new CropState();
 		state.setSourceFormat(Format.JPEG);
 		state.setOriginalFileBytes(new byte[]{ (byte) 0xFF, (byte) 0xD8 });
+		state.setJpegMeta(metaWithThumbnail());
 		state.setRotationDegrees(BitmapUtils.ROTATION_EPSILON / 2f);
 		assertTrue(ExportPipeline.canBypassEncode(state, false));
 	}
@@ -110,11 +116,38 @@ public final class ExportPipelineTest
 	@Test
 	public void permitsBypassWhenAllGatesClearAndNoCrop()
 	{
-		// Happy path: JPEG source + JPEG output, no graft, no rotation, no grid bake, bytes available, no crop
-		// center seeded yet. Bypass returns true.
+		// Happy path: JPEG source + JPEG output, no graft, no rotation, no grid bake, bytes available, no
+		// crop center seeded yet, AND the source carries an IFD1 thumbnail to round-trip verbatim. Bypass
+		// returns true.
 		CropState state = new CropState();
 		state.setSourceFormat(Format.JPEG);
 		state.setOriginalFileBytes(new byte[]{ (byte) 0xFF, (byte) 0xD8 });
+		state.setJpegMeta(metaWithThumbnail());
 		assertTrue(ExportPipeline.canBypassEncode(state, false));
+	}
+
+	@Test
+	public void rejectsBypassWhenSourceHasNoPreComputedThumbnail()
+	{
+		// Round-36 user-reported bug: when the source has no IFD1 thumbnail (screenshot, generated image,
+		// minimal-EXIF re-encode), the verbatim-write bypass would preserve the empty-IFD1 state. The new
+		// gate forces re-encode so `CropExporter` can synthesise a thumbnail. State satisfies every other
+		// bypass condition; ONLY the missing-thumbnail gate must trip the rejection.
+		CropState state = new CropState();
+		state.setSourceFormat(Format.JPEG);
+		state.setOriginalFileBytes(new byte[]{ (byte) 0xFF, (byte) 0xD8 });
+		// Default jpegMeta is empty — no EXIF segment, no thumbnail.
+		assertFalse(ExportPipeline.canBypassEncode(state, false));
+	}
+
+	/**
+	 * Build a minimal `jpegMeta` list containing a single EXIF segment with an IFD1 thumbnail entry,
+	 * which is what `canBypassEncode` now demands of the source. The thumbnail content itself is a
+	 * 10-byte placeholder — the gate checks only that JPEGInterchangeFormat reaches a non-zero offset.
+	 */
+	private static List<JpegSegment> metaWithThumbnail()
+	{
+		JpegSegment exif = ExifPatcher.buildMinimalExifSegment(100, 100, new byte[10]);
+		return Collections.singletonList(exif);
 	}
 }

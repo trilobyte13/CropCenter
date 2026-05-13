@@ -31,14 +31,6 @@ import java.util.List;
  */
 public final class HdrSignature
 {
-	// Adobe's "Extended XMP" namespace identifier. Vendors split a > 64 KB XMP packet across multiple APP1
-	// segments: the first carries the standard XMP_HEADER + xmpNote:HasExtendedXMP property, subsequent
-	// segments use this extension prefix (followed by a 32-byte MD5 signature, 32-bit total length, 32-bit
-	// offset). HorizonDetector.detectFromMetadata already walks both kinds; the round-20 F3 fix mirrors the
-	// pattern here so a vendor whose hdrgm declaration spilled into the extension segment isn't mis-
-	// classified as SDR.
-	private static final String EXTENDED_XMP_HEADER = "http://ns.adobe.com/xmp/extension/\0";
-
 	private HdrSignature() {}
 
 	/**
@@ -152,13 +144,13 @@ public final class HdrSignature
 	private static boolean isExtendedXmp(JpegSegment seg)
 	{
 		byte[] data = seg.data();
-		if (seg.marker() != 0xE1 || data.length < 4 + EXTENDED_XMP_HEADER.length())
+		if (seg.marker() != 0xE1 || data.length < 4 + JpegSegment.EXTENDED_XMP_HEADER.length())
 		{
 			return false;
 		}
-		for (int i = 0; i < EXTENDED_XMP_HEADER.length(); i++)
+		for (int i = 0; i < JpegSegment.EXTENDED_XMP_HEADER.length(); i++)
 		{
-			if ((data[4 + i] & 0xFF) != EXTENDED_XMP_HEADER.charAt(i))
+			if ((data[4 + i] & 0xFF) != JpegSegment.EXTENDED_XMP_HEADER.charAt(i))
 			{
 				return false;
 			}

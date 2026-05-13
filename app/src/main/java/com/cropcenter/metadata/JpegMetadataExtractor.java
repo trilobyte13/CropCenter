@@ -13,6 +13,18 @@ public final class JpegMetadataExtractor
 {
 	private JpegMetadataExtractor() {}
 
+	/**
+	 * Walk the JPEG marker chain from SOI to SOS / EOI and return every APPn / COM segment as a
+	 * JpegSegment record carrying the marker code and the full segment bytes (FF + marker + 2-byte
+	 * length + body). Stops at the first SOS (entropy data follows) or EOI; tolerates fill bytes,
+	 * standalone markers (RST, STUFFING, TEM), and short / truncated segments by bailing rather
+	 * than throwing — adversarial inputs return a partial list, never an exception.
+	 *
+	 * @param jpeg full JPEG file bytes; non-JPEG inputs (missing SOI) return an empty list
+	 * @return ordered list of APPn / COM segments seen before SOS / EOI; raw bytes are sliced into
+	 *         each JpegSegment.data() and not defensively copied per the JpegSegment immutability
+	 *         convention (see JpegSegment Javadoc)
+	 */
 	public static List<JpegSegment> extract(byte[] jpeg)
 	{
 		List<JpegSegment> segments = new ArrayList<>();

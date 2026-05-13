@@ -369,6 +369,14 @@ final class ReplaceStrategy
 		{
 			Log.w(TAG, "replaceViaFileIo: target written but couldn't delete placeholder " + placeholder);
 		}
+		// Force mtime update even when the temp's bytes matched the prior target bytes. Samsung's
+		// FUSE-backed storage has been observed to skip mtime refresh on dedup-detected
+		// content-identical moves — leaving userspace observers convinced the save didn't run.
+		// Mirrors the explicit setLastModified in ExportPipeline.writePhase (round-40 follow-up).
+		if (!target.setLastModified(System.currentTimeMillis()))
+		{
+			Log.w(TAG, "setLastModified failed on " + target + " — mtime may show stale");
+		}
 		// Direct FileOutputStream writes bypass MediaStore, so its cached metadata (thumbnails, date-modified
 		// used by Gallery / Files / Photos apps) doesn't refresh on its own for same-path overwrites. Trigger a
 		// scan so the new content appears immediately in those apps — without this, the on-disk file is correct

@@ -168,8 +168,9 @@ public final class SafFileHelper
 				// pointing outside the volume root. The getFilePathAndId branch (the
 				// MediaStore-Documents path) already applies this same guard; missing it here let the
 				// shorter primary-handler reach the raw filesystem on a rooted device. Reject anything
-				// that looks like it would escape the volume.
-				if (tail.contains("..") || tail.startsWith("/"))
+				// that looks like it would escape the volume. Segment-aware ".." check so legitimate
+				// filenames containing ".." characters (Samsung's "IMG..edited.jpg" pattern) pass.
+				if (SafPaths.hasParentTraversalSegment(tail) || tail.startsWith("/"))
 				{
 					Log.w(TAG, "fileFromSafUri rejected suspicious docId tail: " + tail);
 					return null;
@@ -178,13 +179,13 @@ public final class SafFileHelper
 				return new File(primaryRoot, tail);
 			}
 			// DownloadStorageProvider "raw:<absolute path>" — use the path as-is. The "raw" form is by spec
-			// an absolute path, so we don't reject "/" here, but we still guard against ".." which has no
-			// legitimate use in a docId.
+			// an absolute path, so we don't reject "/" here, but we still guard against ".." path segments
+			// which have no legitimate use in a docId. Substring ".." is allowed (filename).
 			if ("raw".equalsIgnoreCase(volume))
 			{
-				if (tail.contains(".."))
+				if (SafPaths.hasParentTraversalSegment(tail))
 				{
-					Log.w(TAG, "fileFromSafUri rejected raw docId with ..: " + tail);
+					Log.w(TAG, "fileFromSafUri rejected raw docId with .. segment: " + tail);
 					return null;
 				}
 				return new File(tail);
@@ -299,12 +300,13 @@ public final class SafFileHelper
 				{
 					String volumeId = docId.substring(0, colon);
 					String relPath = docId.substring(colon + 1);
-					// Defensive: reject paths that try to escape the volume root via ".." or that
-					// pretend to be absolute. The SAF picker doesn't produce such docIds for
-					// legitimate user picks, but a malicious app could pass one via a Share intent.
-					// Fall through to null → caller takes the SAF stream path which uses the URI
-					// verbatim through the ContentResolver (whose own access checks gate the read).
-					if (relPath.contains("..") || relPath.startsWith("/"))
+					// Defensive: reject paths that escape via ".." segment or claim to be absolute.
+					// SAF picker doesn't produce such docIds for legitimate picks; a malicious app
+					// could via Share intent. Fall through to null → caller takes the SAF stream
+					// path which uses the URI verbatim via ContentResolver (its own access checks
+					// gate the read). Segment-aware so "IMG..edited.jpg" — a legit Samsung name —
+					// survives.
+					if (SafPaths.hasParentTraversalSegment(relPath) || relPath.startsWith("/"))
 					{
 						return null;
 					}
@@ -411,74 +413,6 @@ public final class SafFileHelper
 			// catch.
 			return -1;
 		}
-	}
-
-	/**
-	 * Stream-only core of readbackByteCount, exposed package-private for unit testing (tests can pass a
-	 * ByteArrayInputStream subclass that throws on close / read to exercise error paths without an Android
-	 * Context).
-	 *
-	 * Returns the same value classes documented on readbackByteCount: expected.length for clean match + EOF, total
-	 * + trailing or total + n for trailing bytes, total + i for mismatch, total for short stream, -1 if the
-	 * EOF-check read throws after the byte-by-byte comparison passed.
-	 *
-	 * Throws IOException when the main read loop (NOT the EOF check) errors. The outer caller catches and returns
-	 * -1.
-	 */
-	static long readbackByteCountFromStream(InputStream is, byte[] expected) throws IOException
-	{
-		long total = 0;
-		byte[] buf = new byte[ByteBufferUtils.IO_BUFFER];
-		int n;
-		while ((n = is.read(buf)) != -1)
-		{
-			if (total + n > expected.length)
-			{
-				// Trailing bytes beyond what we wrote — treat as corruption. Return total + n (a value
-				// strictly > expected.length) so callers checking `verifiedBytes == expected.length`
-				// see the mismatch via the same idiom as the EOF-check branch below.
-				Log.w(TAG, "readback: provider returned more bytes than written");
-				return total + n;
-			}
-			for (int i = 0; i < n; i++)
-			{
-				if (buf[i] != expected[(int) total + i])
-				{
-					Log.w(TAG, "readback: byte mismatch at offset " + (total + i));
-					return total + i;
-				}
-			}
-			total += n;
-			if (total == expected.length)
-			{
-				// All bytes matched. Confirm EOF — trailing bytes would mean a stale longer payload
-				// wasn't truncated. Wrap the EOF-check read in its OWN try so a throw here doesn't
-				// propagate to the helper's caller, which would return total (== expected.length) via
-				// the outer success path and falsely claim the save is verified despite never
-				// confirming EOF.
-				int trailing;
-				try
-				{
-					trailing = is.read(buf);
-				}
-				catch (Exception eofException)
-				{
-					Log.w(TAG, "readback: EOF-check threw, treating as unverified: "
-						+ eofException.getMessage());
-					return -1;
-				}
-				if (trailing > 0)
-				{
-					// Provider served MORE than we wrote — stale trailing bytes that never got
-					// truncated. Return a value > expected.length so equality fails; verifyPhase
-					// then reports the save as lost.
-					Log.w(TAG, "readback: unexpected trailing " + trailing + " bytes");
-					return total + trailing;
-				}
-				return total;
-			}
-		}
-		return total;
 	}
 
 	/**
@@ -597,6 +531,78 @@ public final class SafFileHelper
 			Log.d(TAG, "ContentResolver.delete fallback path: " + e.getClass().getSimpleName());
 		}
 		return false;
+	}
+
+	/**
+	 * Stream-only core of readbackByteCount, exposed package-private for unit testing (tests can pass a
+	 * ByteArrayInputStream subclass that throws on close / read to exercise error paths without an Android
+	 * Context).
+	 *
+	 * Returns the same value classes documented on readbackByteCount: expected.length for clean match + EOF, total
+	 * + trailing or total + n for trailing bytes, total + i for mismatch, total for short stream, -1 if the
+	 * EOF-check read throws after the byte-by-byte comparison passed.
+	 *
+	 * @param is       input stream to drain
+	 * @param expected expected bytes to compare against
+	 * @return verified byte count, or a sentinel value indicating mismatch / trailing / short — see
+	 *         readbackByteCount Javadoc for the full classification
+	 * @throws IOException when the main read loop (NOT the EOF check) errors; the outer caller
+	 *                     catches and returns -1
+	 */
+	static long readbackByteCountFromStream(InputStream is, byte[] expected) throws IOException
+	{
+		long total = 0;
+		byte[] buf = new byte[ByteBufferUtils.IO_BUFFER];
+		int n;
+		while ((n = is.read(buf)) != -1)
+		{
+			if (total + n > expected.length)
+			{
+				// Trailing bytes beyond what we wrote — treat as corruption. Return total + n (a value
+				// strictly > expected.length) so callers checking `verifiedBytes == expected.length`
+				// see the mismatch via the same idiom as the EOF-check branch below.
+				Log.w(TAG, "readback: provider returned more bytes than written");
+				return total + n;
+			}
+			for (int i = 0; i < n; i++)
+			{
+				if (buf[i] != expected[(int) total + i])
+				{
+					Log.w(TAG, "readback: byte mismatch at offset " + (total + i));
+					return total + i;
+				}
+			}
+			total += n;
+			if (total == expected.length)
+			{
+				// All bytes matched. Confirm EOF — trailing bytes would mean a stale longer payload
+				// wasn't truncated. Wrap the EOF-check read in its OWN try so a throw here doesn't
+				// propagate to the helper's caller, which would return total (== expected.length) via
+				// the outer success path and falsely claim the save is verified despite never
+				// confirming EOF.
+				int trailing;
+				try
+				{
+					trailing = is.read(buf);
+				}
+				catch (Exception eofException)
+				{
+					Log.w(TAG, "readback: EOF-check threw, treating as unverified: "
+						+ eofException.getMessage());
+					return -1;
+				}
+				if (trailing > 0)
+				{
+					// Provider served MORE than we wrote — stale trailing bytes that never got
+					// truncated. Return a value > expected.length so equality fails; verifyPhase
+					// then reports the save as lost.
+					Log.w(TAG, "readback: unexpected trailing " + trailing + " bytes");
+					return total + trailing;
+				}
+				return total;
+			}
+		}
+		return total;
 	}
 
 	/**

@@ -374,16 +374,6 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 	}
 
 	@Override
-	public boolean performClick()
-	{
-		// Required by the View / accessibility contract for any view that overrides onTouchEvent —
-		// the editor's primary interactions (selection-point taps, drag-to-pan, pinch-zoom, horizon
-		// paint) are dispatched via gestureHandler / horizon above; this hook just delegates to super
-		// for the standard click sound + accessibility events.
-		return super.performClick();
-	}
-
-	@Override
 	public void onZoom(float scaleFactor, float focusX, float focusY)
 	{
 		viewport.zoomAt(scaleFactor, focusX, focusY, state);
@@ -392,6 +382,16 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 		{
 			onZoomChanged.run();
 		}
+	}
+
+	@Override
+	public boolean performClick()
+	{
+		// Required by the View / accessibility contract for any view that overrides onTouchEvent —
+		// the editor's primary interactions (selection-point taps, drag-to-pan, pinch-zoom, horizon
+		// paint) are dispatched via gestureHandler / horizon above; this hook just delegates to super
+		// for the standard click sound + accessibility events.
+		return super.performClick();
 	}
 
 	/**
@@ -443,18 +443,18 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 	 * Subscribe to "selection points changed" events — fired whenever the user adds, removes, or restores a
 	 * selection point. The host uses this to refresh undo / redo / clear button enablement.
 	 */
-	public void setOnPointsChangedListener(Runnable r)
+	public void setOnPointsChangedListener(Runnable listener)
 	{
-		this.onPointsChanged = r;
+		this.onPointsChanged = listener;
 	}
 
 	/**
 	 * Subscribe to zoom-changed events — fired on every pinch-zoom gesture step. The host uses this to update the
 	 * zoom badge in the info bar.
 	 */
-	public void setOnZoomChangedListener(Runnable r)
+	public void setOnZoomChangedListener(Runnable listener)
 	{
-		this.onZoomChanged = r;
+		this.onZoomChanged = listener;
 	}
 
 	/**

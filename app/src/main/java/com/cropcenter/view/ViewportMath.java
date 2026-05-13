@@ -200,10 +200,10 @@ final class ViewportMath
 		// Reuse `out` as the temp un-rotated screen-coords buffer, then convert in-place to image coords.
 		// RotationMath.inverse writes into the buffer; screenToImageX/Y read its values before overwriting.
 		RotationMath.inverse(screenX, screenY, screenCenterX, screenCenterY, rotation, out);
-		float imgX = screenToImageX(out[0]);
-		float imgY = screenToImageY(out[1]);
-		out[0] = imgX;
-		out[1] = imgY;
+		float imageX = screenToImageX(out[0]);
+		float imageY = screenToImageY(out[1]);
+		out[0] = imageX;
+		out[1] = imageY;
 		return out;
 	}
 

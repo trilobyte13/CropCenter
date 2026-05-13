@@ -1,5 +1,7 @@
 package com.cropcenter.model;
 
+import com.cropcenter.crop.CropEngine;
+
 /**
  * Immutable aspect-ratio specification for the crop box. Dimensions are arbitrary unit — only their ratio is used;
  * `(16, 9)` and `(160, 90)` mean the same thing. The FREE constant (dimensions ≤ 0) signals "no constraint" and lets
@@ -55,8 +57,8 @@ public record AspectRatio(float width, float height)
 	 *
 	 * The snap is capped at (maxW, maxH) so the result never exceeds the image's actual bounds — caller
 	 * passes imgW / imgH (or, in a never-grow context, the input cropW / cropH) to bound the search.
-	 * k is also floored at the smallest value that keeps both axes ≥ 4 pixels, mirroring the rest of
-	 * CropEngine's 4-pixel minimum (so a 1:1 lock at the bottom end yields 4×4, not 1×1).
+	 * k is also floored at the smallest value that keeps both axes ≥ `CropEngine.MIN_CROP_DIMENSION_PX`
+	 * (so a 1:1 lock at the bottom end yields 4×4, not 1×1).
 	 *
 	 * @param cropW pre-snap width in image pixels (output of CropEngine's per-axis Math.round)
 	 * @param cropH pre-snap height in image pixels (same)
@@ -87,10 +89,12 @@ public record AspectRatio(float width, float height)
 		long num = (long) wInt * cropW + (long) hInt * cropH;
 		long den = (long) wInt * wInt + (long) hInt * hInt;
 		int k = Math.round((float) num / den);
-		// Floor k so both axes land at ≥ 4 pixels — keeps 1:1 / 2:1 / similar-tiny ARs from collapsing
-		// to 1×1 at the lower edge of the optimisation. ceil(4/wInt) is the smallest k that makes
-		// wInt·k ≥ 4; same for hInt.
-		int kMin = Math.max(1, Math.max((4 + wInt - 1) / wInt, (4 + hInt - 1) / hInt));
+		// Floor k so both axes land at ≥ MIN_CROP_DIMENSION_PX pixels — keeps 1:1 / 2:1 / similar-tiny
+		// ARs from collapsing to 1×1 at the lower edge of the optimisation. ceil(floor/wInt) is the
+		// smallest k that makes wInt·k ≥ floor; same for hInt. The floor constant is shared with
+		// CropEngine via cross-file reference so a future "raise the floor" change lands once.
+		int floor = CropEngine.MIN_CROP_DIMENSION_PX;
+		int kMin = Math.max(1, Math.max((floor + wInt - 1) / wInt, (floor + hInt - 1) / hInt));
 		// Cap k at the supplied bounds — never snap larger than the image (or no-grow caller) allows.
 		int kMax = Math.min(maxW / wInt, maxH / hInt);
 		if (kMax < kMin)
@@ -116,9 +120,9 @@ public record AspectRatio(float width, float height)
 	{
 		while (b != 0)
 		{
-			int t = b;
+			int prevB = b;
 			b = a % b;
-			a = t;
+			a = prevB;
 		}
 		return a;
 	}

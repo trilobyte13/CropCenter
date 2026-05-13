@@ -28,6 +28,15 @@ public final class StoragePermissionHelper
 		return Environment.isExternalStorageManager();
 	}
 
+	/**
+	 * Launch the system Settings page where the user can grant MANAGE_EXTERNAL_STORAGE for this app.
+	 * Used by ReplaceStrategy.showReplaceFailureDialog as the recovery path when a collision-overwrite
+	 * Replace hits an SAF-permission failure and the file-I/O fallback is the only remaining strategy.
+	 *
+	 * Catches any Intent dispatch failure (no Settings app on the device, ActivityNotFoundException
+	 * on heavily-skinned OEMs) so the caller's UX flow doesn't crash — failure is logged and the
+	 * Replace dialog stays open so the user can pick a different name instead.
+	 */
 	public void openStoragePermissionSettings()
 	{
 		try

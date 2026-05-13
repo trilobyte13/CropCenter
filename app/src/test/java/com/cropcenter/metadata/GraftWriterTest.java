@@ -172,6 +172,28 @@ public final class GraftWriterTest
 	}
 
 	@Test
+	public void graftStripsOrphanMpfWhenSourceHasMpfButNoGainMap() throws IOException
+	{
+		// Round-45 F2 regression test. Source carries an MPF segment but NO gain map (e.g. Samsung "Best
+		// Photo" burst, focus-stacked panorama, ZSL — multi-picture JPEGs that pre-date Ultra HDR and
+		// don't carry the hdrgm namespace). The graft preserves source's metadata verbatim into the
+		// output, but the spliced primary doesn't carry the secondary images source's MPF describes —
+		// strict-MPF decoders (Samsung Gallery's Revert pre-flight) reject the orphan-MPF shape, lenient
+		// decoders walk past malformed entries. Output must NOT contain the "MPF\0" signature when
+		// gainMapToWrite == null. The dropOrphanMpf branch in GraftWriter.graft fires the strip; this
+		// test pins it so a "simplify the segment loop" refactor that removes the branch silently
+		// reintroduces the orphan.
+		byte[] orig = JpegFixtures.concat(JpegFixtures.soi(),
+			JpegFixtures.appSegment(0xE2, mpfPayloadWithSignature()),
+			DQT_STUB, JpegFixtures.minimalScanAndEoi());
+		byte[] edit = JpegFixtures.concat(JpegFixtures.soi(), DQT_STUB, JpegFixtures.minimalScanAndEoi());
+
+		byte[] result = GraftWriter.graft(orig, edit);
+		assertFalse("orphan MPF must be stripped when no gain map anchors it",
+			containsMpfSignature(result));
+	}
+
+	@Test
 	public void graftReAppendsSourceSeftTrailerVerbatim() throws IOException
 	{
 		// Source has a SEFT trailer; edit doesn't. Output must end with source's SEFT trailer (Samsung Revert
@@ -186,6 +208,23 @@ public final class GraftWriterTest
 		assertEquals('E', result[result.length - 3]);
 		assertEquals('F', result[result.length - 2]);
 		assertEquals('T', result[result.length - 1]);
+	}
+
+	/**
+	 * True when `data` contains the 4-byte ASCII "MPF\0" signature anywhere — the segment-body identifier that
+	 * follows the APP2 marker + length in any MPF segment. Used by graftStripsOrphanMpfWhenSourceHasMpfButNoGainMap
+	 * to confirm the dropOrphanMpf branch actually removed source's MPF segment from the assembled output.
+	 */
+	private static boolean containsMpfSignature(byte[] data)
+	{
+		for (int i = 0; i + 3 < data.length; i++)
+		{
+			if (data[i] == 'M' && data[i + 1] == 'P' && data[i + 2] == 'F' && data[i + 3] == 0)
+			{
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/**
@@ -235,6 +274,25 @@ public final class GraftWriterTest
 		out.write(sentinel);
 		out.write(sentinel);
 		out.write(sentinel);
+		return out.toByteArray();
+	}
+
+	/**
+	 * Build a minimal MPF APP2 payload — the 4-byte "MPF\0" signature followed by 24 bytes of stubbed MPF body.
+	 * Sufficient for GraftWriter's JpegSegment.isMpf check to match; the body bytes don't need to parse as a real
+	 * MPF index for the orphan-strip test, which only asserts the signature is absent from the output.
+	 */
+	private static byte[] mpfPayloadWithSignature()
+	{
+		ByteArrayOutputStream out = new ByteArrayOutputStream();
+		out.write('M');
+		out.write('P');
+		out.write('F');
+		out.write(0);
+		for (int i = 0; i < 24; i++)
+		{
+			out.write(0);
+		}
 		return out.toByteArray();
 	}
 

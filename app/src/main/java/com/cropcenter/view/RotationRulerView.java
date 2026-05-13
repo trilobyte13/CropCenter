@@ -51,11 +51,6 @@ public final class RotationRulerView extends View
 		new TickConfig(0.5f,  1f), new TickConfig(0.1f,  0.5f),
 		new TickConfig(0.05f, 0.1f), new TickConfig(0.01f, 0.1f),
 	};
-	// Sticky detent values — release-snap pulls a near-detent rotation onto the exact value within the
-	// per-zoom detent threshold (see snapToDetentOrTick) so the user can land cleanly on 0°, ±45°, ±90°,
-	// ±180° without fighting finer ticks. Listed sorted ascending; the snap walks the list and picks the
-	// first within threshold.
-	private static final float[] DETENTS = { -180f, -90f, -45f, 0f, 45f, 90f, 180f };
 	// Hard ceiling on the detent snap window (used at coarse zoom where minor ticks are wide and detent
 	// values like ±45° aren't part of the tick grid). At fine zoom the window shrinks proportionally to
 	// the minor tick — a fixed 0.8° window at max zoom (0.01° ticks) creates a 1.6° dead zone around every
@@ -77,6 +72,11 @@ public final class RotationRulerView extends View
 	private static final float SCROLL_SUBPIXEL_SCALE = 1000f; // int scroller → preserve fractional degrees
 	private static final float TAP_SLOP = 8f;                 // pixels — tap vs drag threshold
 	private static final float ZERO_MARKER_MARGIN = 5f;       // px — tighter cull than ticks for the 0° line
+	// Sticky detent values — release-snap pulls a near-detent rotation onto the exact value within the
+	// per-zoom detent threshold (see snapToDetentOrTick) so the user can land cleanly on 0°, ±45°, ±90°,
+	// ±180° without fighting finer ticks. Listed sorted ascending; the snap walks the list and picks the
+	// first within threshold.
+	private static final float[] DETENTS = { -180f, -90f, -45f, 0f, 45f, 90f, 180f };
 	private static final float[] TICK_THRESHOLDS = {
 		270f, 90f, 30f, 10f, 3f, 1f, 0.3f, 0f,
 	};
@@ -102,6 +102,10 @@ public final class RotationRulerView extends View
 	private float basePixelsPerDegree;
 	private float currentDegrees = 0f;
 	private float downX; // where finger touched down
+	private float gestureStartDegrees; // currentDegrees at ACTION_DOWN — used by drag-release to skip the
+	                                   // detent the user is dragging AWAY from (so 0° → 0.4° release doesn't
+	                                   // re-snap to 0° at coarse zoom where the 0.5° detent window swallows
+	                                   // small intentional drags). Codex round-35 bug-1 fix.
 	private float lastTouchX;
 	private float pixelsPerDegree;
 	private float totalDragDx; // cumulative drag distance since touchdown
@@ -495,6 +499,7 @@ public final class RotationRulerView extends View
 		downX = lastTouchX = event.getX();
 		totalDragDx = 0;
 		scalingOccurred = false;
+		gestureStartDegrees = currentDegrees;
 		ViewParent parent = getParent();
 		if (parent != null)
 		{
@@ -582,7 +587,19 @@ public final class RotationRulerView extends View
 			}
 			else
 			{
-				commitSnappedDegrees(currentDegrees);
+				// Slow drag-release: skip the detent the gesture started on so a deliberate small drag
+				// away from 0° (e.g. setting 0.4° at coarse zoom where the 0.5° detent threshold would
+				// otherwise swallow the move) actually lands at the new value rather than re-snapping
+				// back. Fast flings land wherever the trajectory dictates and tap snaps normally, so
+				// only this slow-drag-release path passes a skipDetent (Codex round-35 bug-1 fix).
+				float snapped = Math.clamp(snapToDetentOrTick(currentDegrees, gestureStartDegrees),
+					MIN_DEG, MAX_DEG);
+				if (snapped != currentDegrees)
+				{
+					currentDegrees = snapped;
+					notifyChanged();
+					invalidate();
+				}
 			}
 		}
 		velocityTracker.recycle();
@@ -615,12 +632,33 @@ public final class RotationRulerView extends View
 	 */
 	private float snapToDetentOrTick(float deg)
 	{
+		return snapToDetentOrTick(deg, Float.NaN);
+	}
+
+	/**
+	 * Drag-release variant of `snapToDetentOrTick` that ignores the detent the gesture STARTED at, so a
+	 * drag-from-0° to a small angle (e.g., 0.4°) doesn't re-snap to 0° when the user clearly intended
+	 * to leave it (Codex round-35 bug-1 fix). The skipped value is compared with a tight tolerance
+	 * because gestureStartDegrees is a previously-snapped value — exact equality to the detent it
+	 * landed on is the common case. Passing `Float.NaN` for `skipDetent` falls back to the original
+	 * snap-to-any-detent behaviour (used by tap, which has no "previous state" to escape from).
+	 *
+	 * @param deg        ruler reading at gesture release / tap
+	 * @param skipDetent detent value to skip (NaN to skip none)
+	 * @return detent value when within threshold (excluding `skipDetent`); nearest minor tick otherwise
+	 */
+	private float snapToDetentOrTick(float deg, float skipDetent)
+	{
 		float degreesVisible = getWidth() > 0 ? getWidth() / pixelsPerDegree : 30f;
 		TickConfig tickConfig = chooseTickConfig(degreesVisible);
 		float detentThreshold = Math.min(tickConfig.minor() * DETENT_SNAP_MINOR_FACTOR,
 			DETENT_SNAP_MAX_DEGREES);
 		for (float detent : DETENTS)
 		{
+			if (!Float.isNaN(skipDetent) && Math.abs(detent - skipDetent) < 0.001f)
+			{
+				continue;
+			}
 			if (Math.abs(deg - detent) <= detentThreshold)
 			{
 				return detent;

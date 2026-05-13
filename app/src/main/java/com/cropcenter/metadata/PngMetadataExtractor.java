@@ -187,13 +187,19 @@ public final class PngMetadataExtractor
 		}
 		int ifd0 = (int) ifd0AbsLong;
 		int entryCount = ByteBufferUtils.readU16(png, ifd0, isLittleEndian);
+		long tiffEndLong = (long) tiffStart + tiffLen;
 		for (int i = 0; i < entryCount; i++)
 		{
-			int entry = ifd0 + 2 + i * 12;
-			if (entry + 12 > tiffStart + tiffLen)
+			// Long-arithmetic stride matches the round-35/37 ExifPatcher hardening; reachable on the
+			// uncapped PNG eXIf path where tiffLen can be u31 (~2 GB) and ifd0 can be near MAX_INT.
+			// Without this, the int stride would wrap and the bound check evaluate wrap-negative ≯
+			// positive, silently falling back to orientation = 1 instead of reading the real entry.
+			long entryLong = (long) ifd0 + 2 + (long) i * 12;
+			if (entryLong + 12 > tiffEndLong)
 			{
 				break;
 			}
+			int entry = (int) entryLong;
 			int tag = ByteBufferUtils.readU16(png, entry, isLittleEndian);
 			if (tag == TiffTag.ORIENTATION)
 			{

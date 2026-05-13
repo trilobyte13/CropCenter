@@ -15,6 +15,14 @@ package com.cropcenter.crop;
  */
 public final class RotatedCropClamp
 {
+	// Binary-search iteration cap shared with CropEngine.maxScaleForRotation — both walk the same
+	// half-and-half interval-bisection pattern and need to converge to the same resolution so the
+	// rotation-fit guarantees they jointly enforce stay numerically consistent. 25 iterations resolves
+	// to ~30 ppb of the search range; 20 (the previous value) resolved to ~1 ppm, which produced
+	// visible jitter on thin crop slices at high zoom under continuous rotation drag (Codex round-35
+	// style-audit P2: hoisted to a single chokepoint so a future "tune the convergence" change lands
+	// in one place rather than two files drifting apart).
+	static final int BINARY_SEARCH_ITERATIONS = 25;
 	// Sign multipliers for the four corner offsets relative to crop center: TL, TR, BL, BR. Hoisted as static
 	// constants because cornersInside runs ~25 iterations per axis × 2 axes per binary search × ~50 calls per
 	// second during a fling-rotation drag — allocating two 4-element float arrays per call (the previous
@@ -122,7 +130,7 @@ public final class RotatedCropClamp
 		float safeEndpoint = clampX ? ctx.imageMidX() : ctx.imageMidY();
 		float requestedEndpoint = clampX ? x : y;
 		float validPosition = safeEndpoint;
-		for (int i = 0; i < 25; i++)
+		for (int i = 0; i < BINARY_SEARCH_ITERATIONS; i++)
 		{
 			float midFraction = (loFraction + hiFraction) / 2f;
 			float candidate = safeEndpoint + (requestedEndpoint - safeEndpoint) * midFraction;

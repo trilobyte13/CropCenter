@@ -292,11 +292,15 @@ public final class BitmapUtils
 				int count = ByteBufferUtils.readU16(jpeg, ifd, isLittleEndian);
 				for (int i = 0; i < count; i++)
 				{
-					int entry = ifd + 2 + i * 12;
-					if (entry + 12 > jpeg.length)
+					// Long-arithmetic stride matches sister walkers in ExifPatcher / MpfPatcher /
+					// PngMetadataExtractor (round-35/37/38 sweep). JPEG inputs are 128 MB capped
+					// so int stride is unreachable in practice; kept for cross-walker symmetry.
+					long entryLong = (long) ifd + 2 + (long) i * 12;
+					if (entryLong + 12 > jpeg.length)
 					{
 						break;
 					}
+					int entry = (int) entryLong;
 					int tag = ByteBufferUtils.readU16(jpeg, entry, isLittleEndian);
 					if (tag == TiffTag.ORIENTATION)
 					{

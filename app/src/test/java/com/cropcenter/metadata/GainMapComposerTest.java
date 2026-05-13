@@ -113,6 +113,29 @@ public final class GainMapComposerTest
 	}
 
 	@Test
+	public void composeReturnsPrimaryWhenStandardItemLengthIsUnpatchable() throws IOException
+	{
+		// Codex round-29 A4.2 — pin GainMapComposer's null-return handling for the OTHER trigger:
+		// XmpItemLengthPatcher returns null because standard XMP carries Item:Length but the segment
+		// is unpatchable (here: malformed empty digit run). Existing
+		// composeReturnsPrimaryWhenItemLengthInExtendedXmp covers the Extended XMP trigger; this
+		// pins the symmetric standard-XMP-unpatchable path so a regression that only checks the
+		// Extended XMP case (or NPEs on null `patched.length`) gets caught.
+		byte[] standardXmp = (JpegSegment.XMP_HEADER + "<rdf:Description Item:Length=\"\"/>")
+			.getBytes(StandardCharsets.US_ASCII);
+		byte[] primary = buildPrimaryWithStandardXmpAndMpf(standardXmp);
+		byte[] gainMap = new byte[40];
+		for (int i = 0; i < gainMap.length; i++)
+		{
+			gainMap[i] = 0x42;
+		}
+
+		byte[] result = GainMapComposer.compose(primary, gainMap);
+		assertSame("standard-XMP unpatchable Item:Length must drop the gain map (patcher null return)",
+			primary, result);
+	}
+
+	@Test
 	public void composeReturnsPrimaryWhenMpfMissingEvenWithGainMap() throws IOException
 	{
 		// Variant of the patch-failure test using a real-looking JPEG (SOI + DQT + minimal scan + EOI) that has
@@ -217,6 +240,41 @@ public final class GainMapComposerTest
 		out.write(JpegFixtures.soi());
 		out.write(JpegFixtures.appSegment(0xE1, standardXmp));
 		out.write(JpegFixtures.appSegment(0xE1, extXmp));
+		out.write(JpegFixtures.appSegment(0xE2, prefixMpfMagic(payload.toByteArray())));
+		out.write(JpegFixtures.minimalScanAndEoi());
+		return out.toByteArray();
+	}
+
+	private static byte[] buildPrimaryWithStandardXmpAndMpf(byte[] standardXmp) throws IOException
+	{
+		// Variant of buildPrimaryWithMpfAndExtraXmp that adds only a single standard XMP segment +
+		// the MPF segment. Used by the standard-XMP-unpatchable test where Extended XMP must NOT be
+		// present so the patcher's null return is unambiguously triggered by the standard-XMP body.
+		ByteArrayOutputStream payload = new ByteArrayOutputStream();
+		payload.write('I'); payload.write('I'); payload.write('*'); payload.write(0);
+		writeU32Le(payload, 8L);
+		writeU16Le(payload, 2);
+		writeU16Le(payload, 0xB000);
+		writeU16Le(payload, 7);
+		writeU32Le(payload, 4L);
+		payload.write(new byte[] { '0', '1', '0', '0' });
+		writeU16Le(payload, 0xB002);
+		writeU16Le(payload, 7);
+		writeU32Le(payload, 2L * 16L);
+		writeU32Le(payload, 38L);
+		writeU32Le(payload, 0L);
+		writeU32Le(payload, 0x20000000L);
+		writeU32Le(payload, 999L);
+		writeU32Le(payload, 0L);
+		writeU32Le(payload, 0L);
+		writeU32Le(payload, 0x00010005L);
+		writeU32Le(payload, 0L);
+		writeU32Le(payload, 0L);
+		writeU32Le(payload, 0L);
+
+		ByteArrayOutputStream out = new ByteArrayOutputStream();
+		out.write(JpegFixtures.soi());
+		out.write(JpegFixtures.appSegment(0xE1, standardXmp));
 		out.write(JpegFixtures.appSegment(0xE2, prefixMpfMagic(payload.toByteArray())));
 		out.write(JpegFixtures.minimalScanAndEoi());
 		return out.toByteArray();
