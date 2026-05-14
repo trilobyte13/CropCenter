@@ -34,8 +34,8 @@ final class ExportPipeline
 	 * when close() succeeded (close-after-write is the final barrier between "written" and "thrown"). directPath
 	 * is non-null when phase 2 took the direct java.io.FileOutputStream branch — set so verifyPhase can confirm
 	 * the write via the resolved filesystem path instead of querying SAF provider metadata that may not have
-	 * flushed yet (round-43 follow-up: a direct write that bypassed the provider would otherwise verify against
-	 * a stale provider-cached SIZE / cached input stream, false-failing a correct write and then deleting it).
+	 * flushed yet: a direct write that bypassed the provider would otherwise verify against a stale
+	 * provider-cached SIZE / cached input stream, false-failing a correct write and then deleting it.
 	 * Field order follows CLAUDE.md's uppercase-type-before-primitive rule (Exception < File alphabetically).
 	 */
 	private record WriteOutcome(Exception exception, File directPath, boolean writeReturned)
@@ -189,17 +189,24 @@ final class ExportPipeline
 	/**
 	 * Export pipeline: encode → write → verify → report.
 	 *
-	 * Success signal hierarchy:
-	 *   1. Write path completes without exception → definitively saved.
-	 *   2. Write path threw → read the file back to count persisted bytes. Many SAF providers
-	 *      throw harmless EPIPE/IOException on close yet persist the full payload, so readback is
-	 *      the ground truth.
-	 *   3. Neither → genuine failure; delete the partial file.
+	 * Success signal hierarchy (matched by verifyPhase):
+	 *   1. Direct file I/O branch (`WriteOutcome.directPath != null`, writeReturned=true) — kernel-level
+	 *      `File.length()` matches payload length. The fsync-before-close in `writePhase` /
+	 *      `tryDirectAtomicWrite` commits the inode, so length is ground truth.
+	 *   2. SAF stream branch, clean write — query `OpenableColumns.SIZE` via SafFileHelper. When the
+	 *      query returns the payload length, trust it. When it returns a different value or fails
+	 *      (provider omits SIZE), fall through to content readback.
+	 *   3. SAF stream branch, threw on close — many SAF providers throw harmless EPIPE / IOException
+	 *      on close yet persist the full payload, so route through byte-by-byte content readback
+	 *      (`SafFileHelper.readbackByteCount`) as the ground truth.
+	 *   4. None of the above → genuine failure; reportFailure deletes the partial file unless
+	 *      preserveOnFailure is set.
 	 * Returns the exact bytes written when the file on disk is verified to hold the full payload,
 	 * or null on failure. Callers that need to run a post-write step (e.g. Replace's File-I/O
 	 * swap) use the returned bytes so they don't have to re-read the placeholder from the
 	 * filesystem — that read can go through FUSE/MediaStore layers that aren't necessarily in
-	 * sync with the SAF write we just did.
+	 * sync with the SAF write we just did. The contract is "verified by size + readback", not
+	 * "definitively saved" — the latter would falsely imply the kernel cache has flushed.
 	 *
 	 * `isReplaceSave` — true when this export is the placeholder write of a Replace flow. Suppresses doExport's
 	 * "Saved" toast because the Replace swap that follows fires its own outcome message.
@@ -282,9 +289,8 @@ final class ExportPipeline
 			// Widened to OOM as well as Exception so a primary-bitmap or HDR-render allocation failure on
 			// a multi-MP source still surfaces a user-facing "Export failed" toast — without OOM in the
 			// catch, runExportBg's finally would hide the progress overlay while the worker died with an
-			// uncaught Error, leaving the user staring at an unresponsive editor with no feedback (Codex
-			// round-17 F5). Mirrors the load path's OOM handling and CropExporter.generateThumbnail's
-			// catch widening.
+			// uncaught Error, leaving the user staring at an unresponsive editor with no feedback.
+			// Mirrors the load path's OOM handling and CropExporter.generateThumbnail's catch widening.
 			Log.e(TAG, "Encode failed", e);
 			final String emsg = "Export failed: " + e.getMessage();
 			host.runOnUiThread(() -> host.toastIfAlive(emsg, Toast.LENGTH_SHORT));
@@ -371,7 +377,7 @@ final class ExportPipeline
 	 * actually appended the Ultra HDR gain map, false on the HDR-drop path (gain-map render failed, MPF
 	 * patch rejected, etc.) and on the bypass path when srcHadHdr is false. Replaces an earlier full-file
 	 * substring scan for "hdrgm" that false-positive'd on preserved trailers, stale metadata, and
-	 * Extended-XMP segments (Codex round-20 F2).
+	 * Extended-XMP segments.
 	 *
 	 * @param data         encoded output bytes (used for the size component of the toast)
 	 * @param srcHadHdr    true when the source carried a gain map (gates whether to show any HDR suffix)
@@ -443,95 +449,22 @@ final class ExportPipeline
 	}
 
 	/**
-	 * Phase 3 — verify. Trust a clean write only after a cheap size-query confirms the file
-	 * on disk matches the payload length. Some SAF providers don't truncate on "w" mode, so a
-	 * write that's shorter than a prior version leaves stale trailing bytes behind — the
-	 * write returns cleanly but the file is corrupt. Three fall-through conditions drop to
-	 * byte-by-byte content readback:
-	 *   - size query disagrees with payload length (likely un-truncated prior version)
-	 *   - size query fails / provider doesn't expose SIZE (can't fast-path, must verify)
-	 *   - write path threw (many providers throw harmless EPIPE on close yet persist the
-	 *     full payload — readback is the ground truth)
-	 * Returns true when the save is good, false when it's genuinely lost.
-	 *
-	 * Direct-file shortcut (Codex round-43 F2): when writePhase took the direct
-	 * java.io.FileOutputStream + fsync branch, the SAF provider's cached metadata may not have
-	 * caught up with the on-disk bytes yet — the MediaScannerConnection.scanFile fired after the
-	 * write is asynchronous and almost certainly hasn't reindexed by the time this verify runs.
-	 * Querying SIZE through the SAF URI in that window can return the pre-write byte count even
-	 * though the bytes ARE on disk, causing verifyPhase to false-fail and reportFailure to then
-	 * delete a correctly-written file. Skip the SAF query entirely when directPath is set and
-	 * verify via File.length() — the fsync after write guarantees the inode is committed before
-	 * we read its length.
-	 *
-	 * Deliberate trade-off (Codex round-30 F2 acknowledged + accepted): when the write didn't throw
-	 * AND SIZE matches the payload length, we trust the provider and skip content readback. A
-	 * misbehaving provider that returned success + correct byte count but stored same-length wrong
-	 * content would slip through as a false-positive save. We accept this because: (a) it requires
-	 * active provider corruption, not a real-world failure mode for any major SAF / MediaStore /
-	 * cloud provider; (b) always-content-verify would double the I/O on every replace save, a
-	 * measurable hot-path tax for a hypothetical bug; (c) the readback path IS exercised on every
-	 * SIZE-omitted / SIZE-mismatched / write-threw branch, which covers all real provider failure
-	 * modes we've seen in the wild.
-	 */
-	private boolean verifyPhase(Uri uri, byte[] data, WriteOutcome write)
-	{
-		if (write.directPath() != null && write.writeReturned())
-		{
-			// Direct file I/O path: fos.getFD().sync() before close committed the bytes to the
-			// inode; trust the kernel-level length over the SAF provider's cached metadata.
-			long fileLen = write.directPath().length();
-			boolean directOk = fileLen == data.length;
-			Log.d(TAG, "Direct-path verify: file=" + write.directPath() + " length=" + fileLen
-				+ " expected=" + data.length + " → savedOk=" + directOk);
-			return directOk;
-		}
-		boolean savedOk = write.writeReturned();
-		long sizeCheck = -1;
-		long verifiedBytes = -1;
-		if (savedOk)
-		{
-			sizeCheck = safFiles.querySafFileSize(uri);
-			if (sizeCheck < 0)
-			{
-				Log.d(TAG, "Clean write but provider omits SIZE; verifying content");
-				savedOk = false;
-			}
-			else if (sizeCheck != data.length)
-			{
-				Log.w(TAG, "Clean write but size " + sizeCheck + " != expected "
-					+ data.length + " — provider may not have truncated; verifying content");
-				savedOk = false;
-			}
-		}
-		if (!savedOk)
-		{
-			verifiedBytes = safFiles.readbackByteCount(uri, data);
-			savedOk = verifiedBytes == data.length;
-			if (savedOk)
-			{
-				Log.d(TAG, "Recovered via content-verified readback: " + verifiedBytes + " bytes");
-			}
-		}
-		Log.d(TAG, "Save result: writeReturned=" + write.writeReturned()
-			+ " sizeCheck=" + sizeCheck + " verifiedBytes=" + verifiedBytes
-			+ " expected=" + data.length + " → savedOk=" + savedOk);
-		return savedOk;
-	}
-
-	/**
 	 * Direct file I/O via a temp sibling + fsync + atomic rename. Used when the caller flagged
 	 * `preserveOnFailure=true` — the target URI may already contain user data, so opening it in truncate
 	 * mode is unsafe (a disk-full / I/O error between open and full-write would leave the original
 	 * zeroed). Writes the payload to `.<name>.cropcenter-tmp-<nanos>` in the same parent directory, fsyncs,
 	 * confirms byte count, and atomic-moves the temp onto the target via Files.move with
 	 * ATOMIC_MOVE + REPLACE_EXISTING. Mirrors the proven pattern in ReplaceStrategy.replaceViaFileIo and
-	 * keeps the target file content intact on any pre-move failure (Codex round-45 F1).
+	 * keeps the target file content intact on any pre-move failure.
 	 *
-	 * Returns the WriteOutcome on success, or null when any step failed — caller falls through to the SAF
-	 * stream path on null (the SAF path doesn't truncate either: openOutputStream "w" is append-then-
-	 * replace semantically and a mid-stream failure leaves the SAF provider's stale prior content rather
-	 * than zeroing the target).
+	 * Returns the WriteOutcome on success, or null when any step failed. Caller's fall-through behavior
+	 * depends on the preserveOnFailure mode: when preserveOnFailure=true, writePhase converts a null
+	 * return into a synthetic failed WriteOutcome rather than falling through to the SAF stream path —
+	 * SAF "w" truncation behavior is provider-dependent (some truncate at open time), so a mid-stream
+	 * failure after fall-through could zero the user's original. Surfaces as a clean "Export failed"
+	 * toast with the target intact. When preserveOnFailure=false, this method isn't called at all —
+	 * writePhase takes the simpler truncate-mode direct write since the URI is a known-fresh
+	 * placeholder (Replace flow, plain Save As).
 	 */
 	private WriteOutcome tryDirectAtomicWrite(File target, byte[] data)
 	{
@@ -592,20 +525,97 @@ final class ExportPipeline
 	}
 
 	/**
+	 * Phase 3 — verify. Trust a clean write only after a cheap size-query confirms the file
+	 * on disk matches the payload length. Some SAF providers don't truncate on "w" mode, so a
+	 * write that's shorter than a prior version leaves stale trailing bytes behind — the
+	 * write returns cleanly but the file is corrupt. Three fall-through conditions drop to
+	 * byte-by-byte content readback:
+	 *   - size query disagrees with payload length (likely un-truncated prior version)
+	 *   - size query fails / provider doesn't expose SIZE (can't fast-path, must verify)
+	 *   - write path threw (many providers throw harmless EPIPE on close yet persist the
+	 *     full payload — readback is the ground truth)
+	 * Returns true when the save is good, false when it's genuinely lost.
+	 *
+	 * Direct-file shortcut: when writePhase took the direct
+	 * java.io.FileOutputStream + fsync branch, the SAF provider's cached metadata may not have
+	 * caught up with the on-disk bytes yet — the MediaScannerConnection.scanFile fired after the
+	 * write is asynchronous and almost certainly hasn't reindexed by the time this verify runs.
+	 * Querying SIZE through the SAF URI in that window can return the pre-write byte count even
+	 * though the bytes ARE on disk, causing verifyPhase to false-fail and reportFailure to then
+	 * delete a correctly-written file. Skip the SAF query entirely when directPath is set and
+	 * verify via File.length() — the fsync after write guarantees the inode is committed before
+	 * we read its length.
+	 *
+	 * Deliberate trade-off: when the write didn't throw AND SIZE matches the payload length, we
+	 * trust the provider and skip content readback. A misbehaving provider that returned success + correct byte
+	 * count but stored same-length wrong content would slip through as a false-positive save. We accept this
+	 * because: (a) it requires
+	 * active provider corruption, not a real-world failure mode for any major SAF / MediaStore /
+	 * cloud provider; (b) always-content-verify would double the I/O on every replace save, a
+	 * measurable hot-path tax for a hypothetical bug; (c) the readback path IS exercised on every
+	 * SIZE-omitted / SIZE-mismatched / write-threw branch, which covers all real provider failure
+	 * modes we've seen in the wild.
+	 */
+	private boolean verifyPhase(Uri uri, byte[] data, WriteOutcome write)
+	{
+		if (write.directPath() != null && write.writeReturned())
+		{
+			// Direct file I/O path: fos.getFD().sync() before close committed the bytes to the
+			// inode; trust the kernel-level length over the SAF provider's cached metadata.
+			long fileLen = write.directPath().length();
+			boolean directOk = fileLen == data.length;
+			Log.d(TAG, "Direct-path verify: file=" + write.directPath() + " length=" + fileLen
+				+ " expected=" + data.length + " → savedOk=" + directOk);
+			return directOk;
+		}
+		boolean savedOk = write.writeReturned();
+		long sizeCheck = -1;
+		long verifiedBytes = -1;
+		if (savedOk)
+		{
+			sizeCheck = safFiles.querySafFileSize(uri);
+			if (sizeCheck < 0)
+			{
+				Log.d(TAG, "Clean write but provider omits SIZE; verifying content");
+				savedOk = false;
+			}
+			else if (sizeCheck != data.length)
+			{
+				Log.w(TAG, "Clean write but size " + sizeCheck + " != expected "
+					+ data.length + " — provider may not have truncated; verifying content");
+				savedOk = false;
+			}
+		}
+		if (!savedOk)
+		{
+			verifiedBytes = safFiles.readbackByteCount(uri, data);
+			savedOk = verifiedBytes == data.length;
+			if (savedOk)
+			{
+				Log.d(TAG, "Recovered via content-verified readback: " + verifiedBytes + " bytes");
+			}
+		}
+		Log.d(TAG, "Save result: writeReturned=" + write.writeReturned()
+			+ " sizeCheck=" + sizeCheck + " verifiedBytes=" + verifiedBytes
+			+ " expected=" + data.length + " → savedOk=" + savedOk);
+		return savedOk;
+	}
+
+	/**
 	 * Phase 2 — write. Tries direct java.io.FileOutputStream first when the URI resolves to a real filesystem
 	 * path via SafFileHelper.fileFromSafUri (typically requires MANAGE_EXTERNAL_STORAGE) — bypasses the SAF
 	 * stream path entirely. On Samsung devices the SAF stream path has been observed to silently corrupt
 	 * writes: openOutputStream("w") returns success and reports the correct post-write byte count, but the
 	 * actual disk content never changes. The provider buffers the write in memory and never flushes,
 	 * leaving the placeholder document with stale bytes that downstream Replace strategies then propagate
-	 * onto the target (round-40 follow-up — user reproduced byte-identical re-exports via Replace after a
+	 * onto the target (observed in user repros: byte-identical re-exports via Replace persisted across a
 	 * clean rebuild that should have shifted the gainmap encoding). Direct file I/O sidesteps the entire
 	 * SAF write path: bytes land via the kernel filesystem layer where the provider's caching can't
 	 * intercept. The fsync after write forces durability before close. Trailing MediaScannerConnection.scanFile
 	 * triggers MediaStore reindex so Gallery / Photos sees the new content (without it, the on-disk file is
 	 * correct but every MediaStore consumer keeps showing the pre-write thumbnail).
 	 *
-	 * Two direct-write modes (Codex round-45 F1):
+	 * Two direct-write modes:
 	 *   - preserveOnFailure=true (exportToOverwrite, exportToPreserving): the URI may already contain user
 	 *     data. Routes through tryDirectAtomicWrite — temp sibling + fsync + atomic rename — so a mid-write
 	 *     failure leaves the original intact. Without this, FileOutputStream(target) truncated the target
@@ -634,9 +644,20 @@ final class ExportPipeline
 				{
 					return atomic;
 				}
-				// Atomic path couldn't deliver — fall through to SAF stream rather than fall through
-				// to the truncate-mode direct write below, which would defeat the whole point of
-				// taking the preserveOnFailure branch.
+				// Atomic path failed AND preserveOnFailure is true — surface as a clean save failure
+				// rather than falling through to openOutputStream("w") on the SAME possibly-existing
+				// target. SAF "w" truncation behavior is provider-dependent: some providers truncate
+				// the file at open time, so a write that fails mid-stream after the truncate-on-open
+				// leaves the user's original zeroed or partially overwritten. That defeats the whole
+				// point of taking the preserveOnFailure branch — the caller (exportToOverwrite /
+				// exportToPreserving) flagged the URI as possibly containing user data we don't want
+				// to destroy. Synthesizing a writeException + writeReturned=false routes through
+				// verifyPhase's failure path, which calls reportFailure with preserveOnFailure=true
+				// (per doExport's argument-passing), so the target on disk stays intact.
+				return new WriteOutcome(new IOException(
+					"Atomic direct-write to " + directPath + " failed; refusing to fall through to "
+						+ "SAF truncate-mode write on preserveOnFailure=true target"),
+					null, false);
 			}
 			else
 			{
@@ -650,9 +671,9 @@ final class ExportPipeline
 					// (likely dedup at the FUSE layer) — userspace observers see the old mtime,
 					// creating ambiguity about whether the save actually ran. setLastModified after
 					// the write + sync forces the timestamp regardless of dedup behaviour, so the
-					// user always has a concrete signal that the save landed (round-40 follow-up —
-					// deterministic encode of identical inputs produces identical bytes, but mtime
-					// should still reflect the save).
+					// user always has a concrete signal that the save landed — deterministic
+					// encode of identical inputs produces identical bytes, but mtime should still
+					// reflect the save.
 					if (!directPath.setLastModified(System.currentTimeMillis()))
 					{
 						Log.w(TAG, "setLastModified failed on " + directPath);

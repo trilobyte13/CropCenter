@@ -78,7 +78,7 @@ def find_seft_trailer(data):
 	at embedded thumbnails / depth maps / motion-photo segments. Earlier versions of this helper
 	returned just the 4-byte 'SEFT' magic, which left every byte of the SEFH...SEFT body inside
 	whatever the caller treated as "pre-trailer data" — for hdr_dump that meant the gainmap.jpg
-	slice picked up SEFT payload bytes appended after the gainmap's actual EOI (Codex round-43 F3).
+	slice picked up SEFT payload bytes appended after the gainmap's actual EOI.
 	Walk backward from SEFT looking for SEFH and report the full span. Cap the backward scan at
 	1 MiB so a megabyte-scale gain-map JPEG can't false-match an inline SEFH literal in its entropy
 	data; real Samsung SEF trailers run a few hundred bytes (depth-map directory entries are tiny).
@@ -101,7 +101,7 @@ def find_last_eoi(data, start):
 	(SEFT, scratch padding, manufacturer-specific footers) that may sit after the gain map's EOI.
 	Samsung writes a SEFH...SEFT block between the gain-map EOI and the file end; relying on the
 	SEFT magic's position would silently include that trailer in the gainmap.jpg dump. The last
-	FF D9 in the file is unambiguously the gain map's EOI for Ultra HDR JPEGs (Codex round-43 F3).
+	FF D9 in the file is unambiguously the gain map's EOI for Ultra HDR JPEGs.
 	"""
 	pos = data.rfind(b'\xff\xd9', start)
 	if pos < 0:
@@ -221,7 +221,7 @@ def main(argv):
 	# Find primary EOI and SEFT trailer first so we know the boundaries of the gain-map slice.
 	# Bound the gain-map slice by the LAST FF D9 in the file rather than the SEFT trailer's start
 	# offset — Samsung's SEFH...SEFT block sits AFTER the gain-map JPEG's EOI, so using SEFT as the
-	# upper bound would include the trailer in the gainmap.jpg dump (Codex round-43 F3).
+	# upper bound would include the trailer in the gainmap.jpg dump.
 	seft_pos = find_seft_trailer(data)
 	primary_eoi = find_primary_eoi(data, len(data))
 	gainmap_eoi_search_start = primary_eoi if primary_eoi > 0 else 0

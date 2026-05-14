@@ -34,7 +34,7 @@ public final class ImageLoadControllerDispatchFailureTest
 	@Test
 	public void loadDismissesTransientDialogsBeforeBusyCheck()
 	{
-		// Codex round-16 F2 contract: dismissTransientDialogs runs BEFORE busy.compareAndSet so an open
+		// Contract: dismissTransientDialogs runs BEFORE busy.compareAndSet so an open
 		// SettingsDialog (which mutates state.gridConfig on the UI thread) is closed regardless of whether
 		// a parallel load is already in flight. Pre-set busy=true to fail the cas, then assert the
 		// dismiss still ran. A regression that moved the dismiss into the post-cas block would let an
@@ -103,10 +103,10 @@ public final class ImageLoadControllerDispatchFailureTest
 	{
 		final AtomicBoolean busy = new AtomicBoolean(false);
 		Boolean lastSetBusyUiArg;
-		// Counter for dismissTransientDialogs invocations. Codex round-16 F2 placed the dismiss call
-		// BEFORE the busy gate so an open SettingsDialog is closed regardless of whether a parallel load
-		// is in flight; T17-1 / T17-2 verify the dismiss runs even when the busy.cas rejects and even
-		// when runInBackground throws.
+		// Counter for dismissTransientDialogs invocations. The dismiss call runs BEFORE the busy gate so
+		// an open SettingsDialog is closed regardless of whether a parallel load is in flight; the two
+		// test cases verify the dismiss runs even when the busy.cas rejects and even when
+		// runInBackground throws.
 		int dismissTransientDialogsCount;
 		boolean hideProgressCalled;
 		boolean runInBackgroundThrows;

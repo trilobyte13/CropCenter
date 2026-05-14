@@ -31,6 +31,17 @@ public final class GridConfigTest
 	}
 
 	@Test
+	public void withIncludeInExportTogglesIndependently()
+	{
+		// Bake-in is the per-save toggle that defaults() enforces off. The transformer must round-trip
+		// without affecting other fields.
+		GridConfig baked = GridConfig.defaults().withIncludeInExport(true);
+		assertTrue(baked.includeInExport());
+		assertEquals("columns must survive bake-in toggle", 4, baked.columns());
+		assertEquals("color must survive bake-in toggle", 0xFFFFFFFF, baked.color());
+	}
+
+	@Test
 	public void withTransformersChainCorrectly()
 	{
 		// Pin that withXxx transformers preserve all unrelated fields. Without this, a regression that
@@ -44,16 +55,5 @@ public final class GridConfigTest
 		assertEquals("pixelGridColor must survive column / row / color updates",
 			0xFFFF0000, changed.pixelGridColor());
 		assertEquals("selectionColor must survive", original.selectionColor(), changed.selectionColor());
-	}
-
-	@Test
-	public void withIncludeInExportTogglesIndependently()
-	{
-		// Bake-in is the per-save toggle that defaults() enforces off. The transformer must round-trip
-		// without affecting other fields.
-		GridConfig baked = GridConfig.defaults().withIncludeInExport(true);
-		assertTrue(baked.includeInExport());
-		assertEquals("columns must survive bake-in toggle", 4, baked.columns());
-		assertEquals("color must survive bake-in toggle", 0xFFFFFFFF, baked.color());
 	}
 }

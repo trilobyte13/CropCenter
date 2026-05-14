@@ -2,8 +2,6 @@ package com.cropcenter.metadata;
 
 import android.util.Log;
 
-import java.util.Arrays;
-
 /**
  * Extracts the HDR gain map from a Samsung Ultra HDR JPEG file. The gain map is a secondary JPEG stored between the
  * primary image's EOI and any trailing data (e.g., Samsung SEFT trailer).
@@ -26,13 +24,12 @@ public final class GainMapExtractor
 	 *                     GraftWriter.graft) use HdrSignature.hasHdrgmInXmp(meta) which scans XMP
 	 *                     segment bodies only; HdrSignature.isHdrSource(byte[]) is a full-file scan
 	 *                     reserved for UltraHdrCompat's post-compress diagnostic where the freshly-
-	 *                     emitted JPEG can only carry the marker in XMP (Codex round-19 F1 narrowed the
-	 *                     load-time scan from full-file to XMP-only to close the false-positive class
-	 *                     where stray "hdrgm" bytes in MakerNote / COM / vendor blob / SEFT history
-	 *                     would mis-classify SDR files as HDR). When false the extractor returns null
-	 *                     without inspecting post-primary FF D8 bytes — without this gate, an SDR
-	 *                     Samsung file whose SEFT data block begins with an embedded JPEG thumbnail's
-	 *                     FF D8 would be mis-extracted as a gain map (Codex round-18 F1).
+	 *                     emitted JPEG can only carry the marker in XMP. The XMP-only narrowing closes
+	 *                     a false-positive class where stray "hdrgm" bytes in MakerNote / COM / vendor
+	 *                     blob / SEFT history would mis-classify SDR files as HDR. When false the
+	 *                     extractor returns null without inspecting post-primary FF D8 bytes — without
+	 *                     this gate, an SDR Samsung file whose SEFT data block begins with an embedded
+	 *                     JPEG thumbnail's FF D8 would be mis-extracted as a gain map.
 	 * @return gain map JPEG bytes (starting with FFD8), or null if not found
 	 */
 	public static byte[] extract(byte[] file, boolean isHdrSource)
@@ -44,8 +41,8 @@ public final class GainMapExtractor
 		if (!isHdrSource)
 		{
 			// No HDR signature (caller said so) — even if FF D8 follows primary EOI, those bytes are SEFT
-			// data (embedded thumbnail / history blob), not a gain map. Pre-Codex-round-18 the extractor
-			// trusted the FF D8 alone and would mis-extract a thumbnail as a gain map.
+			// data (embedded thumbnail / history blob), not a gain map. Trusting the FF D8 alone would
+			// mis-extract a thumbnail as a gain map.
 			return null;
 		}
 
@@ -82,18 +79,24 @@ public final class GainMapExtractor
 		{
 			return null;
 		}
-		byte[] gainMapSlice = Arrays.copyOfRange(file, primaryEnd, sliceEnd);
-		int gainMapEoiInSlice = JpegMarkerWalker.findPrimaryEoi(gainMapSlice, gainMapSlice.length);
-		if (gainMapEoiInSlice < 0)
+		// Walk the gain-map's marker chain directly on `file` between [primaryEnd, sliceEnd) — no
+		// intermediate Arrays.copyOfRange slice. A 100 MB HDR source with gain map starting at byte 30 MB
+		// would otherwise allocate a ~70 MB transient byte[] just to give findPrimaryEoi a buffer whose
+		// offset 0 is the gain-map SOI; findEoi(file, primaryEnd, sliceEnd) achieves the same walk on the
+		// original array. Return value is absolute (relative to file's byte 0), so the gain-map length is
+		// (eoiOff - primaryEnd).
+		int gainMapEoiAbs = JpegMarkerWalker.findEoi(file, primaryEnd, sliceEnd);
+		if (gainMapEoiAbs < 0)
 		{
 			Log.w(TAG, "gain map between primary EOI " + primaryEnd + " and " + sliceEnd
 				+ " doesn't parse as a JPEG; treating as no-gain-map");
 			return null;
 		}
 
-		byte[] gainMap = new byte[gainMapEoiInSlice];
-		System.arraycopy(file, primaryEnd, gainMap, 0, gainMapEoiInSlice);
-		Log.d(TAG, "Extracted gain map: " + gainMapEoiInSlice + " bytes after primary EOI");
+		int gainMapLen = gainMapEoiAbs - primaryEnd;
+		byte[] gainMap = new byte[gainMapLen];
+		System.arraycopy(file, primaryEnd, gainMap, 0, gainMapLen);
+		Log.d(TAG, "Extracted gain map: " + gainMapLen + " bytes after primary EOI");
 		return gainMap;
 	}
 

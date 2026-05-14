@@ -22,46 +22,6 @@ import java.util.List;
 public final class JpegMetadataInjectorTest
 {
 	@Test
-	public void injectRejectsNonJpegInput()
-	{
-		byte[] notJpeg = { 0x12, 0x34, 0x56, 0x78 };
-		try
-		{
-			JpegMetadataInjector.inject(notJpeg, Collections.emptyList());
-			fail("expected IOException for non-JPEG input");
-		}
-		catch (IOException e)
-		{
-			assertTrue("message should mention valid JPEG: " + e.getMessage(),
-				e.getMessage().contains("valid JPEG"));
-		}
-	}
-
-	@Test
-	public void injectThrowsOnAppSegmentClaimingLengthPastEof() throws IOException
-	{
-		// Re-encoded JPEG where the APP0 segment claims a 65535-byte length but only 4 bytes follow. Older code
-		// silently fell back to scanStart = 2, producing a stitched output with duplicate APP markers; the fix
-		// throws so the caller's toast matches the actual failure mode.
-		byte[] reencoded = {
-			(byte) 0xFF, (byte) 0xD8,                         // SOI
-			(byte) 0xFF, (byte) 0xE0, (byte) 0xFF, (byte) 0xFF, // APP0 with segLen 0xFFFF
-			0x00, 0x01, 0x02, 0x03,                           // 4 garbage bytes
-		};
-
-		try
-		{
-			JpegMetadataInjector.inject(reencoded, Collections.emptyList());
-			fail("expected IOException for APP segment past EOF");
-		}
-		catch (IOException e)
-		{
-			assertTrue("message should mention claims length: " + e.getMessage(),
-				e.getMessage().contains("claims length"));
-		}
-	}
-
-	@Test
 	public void injectAcceptsValidReencodedJpegAndPreservesSegmentBytes() throws IOException
 	{
 		// Reencoded = SOI + small APP0 + DQT + SOS + EOI. Original metadata = single EXIF segment. Output
@@ -146,6 +106,22 @@ public final class JpegMetadataInjectorTest
 	}
 
 	@Test
+	public void injectRejectsNonJpegInput()
+	{
+		byte[] notJpeg = { 0x12, 0x34, 0x56, 0x78 };
+		try
+		{
+			JpegMetadataInjector.inject(notJpeg, Collections.emptyList());
+			fail("expected IOException for non-JPEG input");
+		}
+		catch (IOException e)
+		{
+			assertTrue("message should mention valid JPEG: " + e.getMessage(),
+				e.getMessage().contains("valid JPEG"));
+		}
+	}
+
+	@Test
 	public void injectRejectsTruncatedReencodedJpeg()
 	{
 		// Reencoded = just SOI (2 bytes). Length check: < 4, so the up-front "Not a valid JPEG" guard catches
@@ -160,6 +136,30 @@ public final class JpegMetadataInjectorTest
 		{
 			assertTrue("message should mention valid JPEG: " + e.getMessage(),
 				e.getMessage().contains("valid JPEG"));
+		}
+	}
+
+	@Test
+	public void injectThrowsOnAppSegmentClaimingLengthPastEof() throws IOException
+	{
+		// Re-encoded JPEG where the APP0 segment claims a 65535-byte length but only 4 bytes follow. Older code
+		// silently fell back to scanStart = 2, producing a stitched output with duplicate APP markers; the fix
+		// throws so the caller's toast matches the actual failure mode.
+		byte[] reencoded = {
+			(byte) 0xFF, (byte) 0xD8,                         // SOI
+			(byte) 0xFF, (byte) 0xE0, (byte) 0xFF, (byte) 0xFF, // APP0 with segLen 0xFFFF
+			0x00, 0x01, 0x02, 0x03,                           // 4 garbage bytes
+		};
+
+		try
+		{
+			JpegMetadataInjector.inject(reencoded, Collections.emptyList());
+			fail("expected IOException for APP segment past EOF");
+		}
+		catch (IOException e)
+		{
+			assertTrue("message should mention claims length: " + e.getMessage(),
+				e.getMessage().contains("claims length"));
 		}
 	}
 }

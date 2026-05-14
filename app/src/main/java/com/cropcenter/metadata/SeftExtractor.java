@@ -2,8 +2,6 @@ package com.cropcenter.metadata;
 
 import android.util.Log;
 
-import java.util.Arrays;
-
 /**
  * Extracts the Samsung SEFT trailer from a JPEG file. The SEFT trailer is appended after the last JPEG EOI (after gain
  * map if present). Layout: [SEFT data blocks][SEFH directory][4-byte size LE][4-byte "SEFT" magic]
@@ -14,7 +12,7 @@ public final class SeftExtractor
 	 * Byte size of the SEFT footer at the end of the file: 4-byte little-endian size value + 4-byte "SEFT"
 	 * ASCII magic. Centralised so the gain-map walker's `file.length - FOOTER_SIZE` slice cap (in
 	 * GainMapExtractor) and the SEFT extractor's own `file.length - FOOTER_SIZE` aren't two unconnected
-	 * `8` magic literals (Codex round-19 R19-1).
+	 * `8` magic literals.
 	 */
 	public static final int FOOTER_SIZE = 8;
 
@@ -32,8 +30,7 @@ public final class SeftExtractor
 	 *                    gain map. Without this hint, an SDR Samsung file whose SEFT data block starts with
 	 *                    an embedded JPEG thumbnail's FF D8 would have its trailer truncated — the
 	 *                    extractor would walk past the thumbnail's FF D9 as if it were a gain-map EOI, and
-	 *                    the saved file's re-appended SEFT would be missing the thumbnail block (Codex
-	 *                    round-18 F1).
+	 *                    the saved file's re-appended SEFT would be missing the thumbnail block.
 	 * @return SEFT trailer bytes, or null if not present
 	 */
 	public static byte[] extract(byte[] file, boolean hasGainMap)
@@ -64,19 +61,23 @@ public final class SeftExtractor
 		if (hasGainMap && primaryEnd + 1 < file.length
 			&& (file[primaryEnd] & 0xFF) == 0xFF && (file[primaryEnd + 1] & 0xFF) == 0xD8)
 		{
-			// Gain map present — walk it to find its EOI; SEFT trailer starts right after.
+			// Gain map present — walk it to find its EOI; SEFT trailer starts right after. findEoi
+			// scans `file` directly in [primaryEnd, sliceEnd) without allocating a Arrays.copyOfRange
+			// slice. On a 100 MB HDR source with gain map at byte 30 MB, the previous slice form
+			// allocated ~70 MB of transient byte[] just to give findPrimaryEoi a buffer whose offset 0
+			// was the gain-map SOI. Sister site GainMapExtractor.extract migrated to findEoi earlier
+			// for the same reason.
 			int sliceEnd = file.length - FOOTER_SIZE;
 			if (sliceEnd <= primaryEnd)
 			{
 				return null;
 			}
-			byte[] gainMapSlice = Arrays.copyOfRange(file, primaryEnd, sliceEnd);
-			int gainMapEoiInSlice = JpegMarkerWalker.findPrimaryEoi(gainMapSlice, gainMapSlice.length);
-			if (gainMapEoiInSlice < 0)
+			int gainMapEoiAbs = JpegMarkerWalker.findEoi(file, primaryEnd, sliceEnd);
+			if (gainMapEoiAbs < 0)
 			{
 				return null;
 			}
-			trailerStart = primaryEnd + gainMapEoiInSlice;
+			trailerStart = gainMapEoiAbs;
 		}
 		else
 		{

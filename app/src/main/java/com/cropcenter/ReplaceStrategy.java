@@ -35,8 +35,12 @@ final class ReplaceStrategy
 	 * One failure outcome of verifyReplace — a (title, message) pair that the caller logs and surfaces in a dialog.
 	 * Built by per-case factory methods (truncated, twoFiles, etc.) that own the wording for each
 	 * branch; verifyReplace itself becomes a clean router from "what's on disk" to a factory call.
+	 *
+	 * Package-private so ReplaceStrategyClassifierTest can assert the right factory ran for each disk-state
+	 * branch — checking the title/message wording at the test layer is the only way to distinguish (e.g.) "two
+	 * files" from "placeholder only" from "truncated" without mocking dialogs.
 	 */
-	private record VerifyFailure(String title, String message) {}
+	record VerifyFailure(String title, String message) {}
 
 	private static final String TAG = "ReplaceStrategy";
 	// Smart-quoted "All files access" — the exact wording Android's Settings UI uses for the
@@ -56,6 +60,60 @@ final class ReplaceStrategy
 		this.exportPipeline = exportPipeline;
 		this.safFiles = safFiles;
 		this.permissions = permissions;
+	}
+
+	/**
+	 * Filesystem-authoritative classifier. Handles two structural cases: Strategy-C rename (placeholder == target
+	 * on disk) and the general two-files / one-missing fan-out. Deletes the corrupt target on truncation paths so
+	 * the user isn't offered "Replace" on a bad file next save.
+	 *
+	 * Package-private + static so ReplaceStrategyClassifierTest can pin all six disk-state outcomes (clean,
+	 * truncated, missingAfterRename, twoFiles, placeholderOnly, bothMissing) without instantiating
+	 * ReplaceStrategy. The method only reads files and calls private static factories, so `this` was never
+	 * load-bearing. A mis-classification would either ship a corrupt file as "saved" or strand orphan
+	 * auto-renames the user has to clean up manually.
+	 */
+	static VerifyFailure classifyFilesystemOutcome(File placeholder, String requestedName, int expectedLength)
+	{
+		File parent = placeholder.getParentFile();
+		File target = (parent != null) ? new File(parent, requestedName) : null;
+		// Strategy C path: rename moved placeholder onto target's path. placeholder == target on disk.
+		if (target != null && placeholder.getName().equals(target.getName()))
+		{
+			if (target.exists() && target.length() == expectedLength)
+			{
+				return null; // clean replace via Strategy C rename
+			}
+			if (target.exists())
+			{
+				long targetLen = target.length();
+				deleteCorruptTarget(target);
+				return truncated(requestedName, targetLen, expectedLength);
+			}
+			return missingAfterRename(requestedName);
+		}
+		boolean placeholderExists = placeholder.exists();
+		boolean targetOk = target != null && target.exists() && target.length() == expectedLength;
+		if (targetOk && !placeholderExists)
+		{
+			return null; // clean replace
+		}
+		boolean targetExists = target != null && target.exists();
+		long targetLen = targetExists ? target.length() : -1;
+		if (targetExists && !placeholderExists)
+		{
+			deleteCorruptTarget(target);
+			return truncated(requestedName, targetLen, expectedLength);
+		}
+		if (placeholderExists && targetExists)
+		{
+			return twoFiles(requestedName, placeholder.getName());
+		}
+		if (placeholderExists)
+		{
+			return placeholderOnly(requestedName, placeholder.getName());
+		}
+		return bothMissing(requestedName, placeholder.getName());
 	}
 
 	/**
@@ -167,54 +225,6 @@ final class ReplaceStrategy
 	}
 
 	/**
-	 * Filesystem-authoritative classifier. Handles two structural cases: Strategy-C rename (placeholder == target
-	 * on disk) and the general two-files / one-missing fan-out. Deletes the corrupt target on truncation paths so
-	 * the user isn't offered "Replace" on a bad file next save.
-	 */
-	private VerifyFailure classifyFilesystemOutcome(File placeholder, String requestedName, int expectedLength)
-	{
-		File parent = placeholder.getParentFile();
-		File target = (parent != null) ? new File(parent, requestedName) : null;
-		// Strategy C path: rename moved placeholder onto target's path. placeholder == target on disk.
-		if (target != null && placeholder.getName().equals(target.getName()))
-		{
-			if (target.exists() && target.length() == expectedLength)
-			{
-				return null; // clean replace via Strategy C rename
-			}
-			if (target.exists())
-			{
-				long targetLen = target.length();
-				deleteCorruptTarget(target);
-				return truncated(requestedName, targetLen, expectedLength);
-			}
-			return missingAfterRename(requestedName);
-		}
-		boolean placeholderExists = placeholder.exists();
-		boolean targetOk = target != null && target.exists() && target.length() == expectedLength;
-		if (targetOk && !placeholderExists)
-		{
-			return null; // clean replace
-		}
-		boolean targetExists = target != null && target.exists();
-		long targetLen = targetExists ? target.length() : -1;
-		if (targetExists && !placeholderExists)
-		{
-			deleteCorruptTarget(target);
-			return truncated(requestedName, targetLen, expectedLength);
-		}
-		if (placeholderExists && targetExists)
-		{
-			return twoFiles(requestedName, placeholder.getName());
-		}
-		if (placeholderExists)
-		{
-			return placeholderOnly(requestedName, placeholder.getName());
-		}
-		return bothMissing(requestedName, placeholder.getName());
-	}
-
-	/**
 	 * SAF-only fallback when no filesystem path is available (cloud / SAF-only providers without
 	 * MANAGE_EXTERNAL_STORAGE). Uses the placeholder URI's SAF display name to detect auto-rename.
 	 */
@@ -283,7 +293,7 @@ final class ReplaceStrategy
 			// showExtensionMismatchDialog / GraftController.confirmOversizedThenApply — config-change
 			// races can land between the isDestroyed pre-check and the actual show() call (the Activity
 			// finishes after the pre-check but before WindowManager accepts the dialog). The catch keeps
-			// the warning best-effort instead of crashing the UI thread (Codex round-20 F1).
+			// the warning best-effort instead of crashing the UI thread.
 			builder.show();
 		}
 		catch (RuntimeException e)
@@ -372,7 +382,7 @@ final class ReplaceStrategy
 		// Force mtime update even when the temp's bytes matched the prior target bytes. Samsung's
 		// FUSE-backed storage has been observed to skip mtime refresh on dedup-detected
 		// content-identical moves — leaving userspace observers convinced the save didn't run.
-		// Mirrors the explicit setLastModified in ExportPipeline.writePhase (round-40 follow-up).
+		// Mirrors the explicit setLastModified in ExportPipeline.writePhase.
 		if (!target.setLastModified(System.currentTimeMillis()))
 		{
 			Log.w(TAG, "setLastModified failed on " + target + " — mtime may show stale");

@@ -24,11 +24,6 @@ import java.util.List;
  */
 public final class SelectionHistoryTest
 {
-	private static SelectionPoint pt(float x, float y)
-	{
-		return new SelectionPoint(x, y);
-	}
-
 	@Test
 	public void canRedoAndCanUndoStartFalseOnFreshHistory()
 	{
@@ -118,6 +113,39 @@ public final class SelectionHistoryTest
 	}
 
 	@Test
+	public void redoTrimsUndoStackToMaxDepth()
+	{
+		// Symmetric regression: undoStack growth on the redo path was unbounded. Pin the cap with the same
+		// "exactly MAX_DEPTH drains" assertion shape.
+		SelectionHistory history = new SelectionHistory();
+		// Build undoStack to 60 (cap applied) then drain into redoStack via 60 undo()s.
+		for (int i = 0; i < 60; i++)
+		{
+			history.push(Arrays.asList(pt(i, i)));
+		}
+		for (int i = 0; i < 60; i++)
+		{
+			history.undo(Arrays.asList(pt(99, 99)));
+		}
+		// Now redoStack holds at most MAX_DEPTH = 50 frames (already verified above). Redo all of them —
+		// each redo() pushes onto undoStack via the cap-trimmed path. If the trim is missing, undoStack
+		// would grow to 51 (50 from the redo path + the 1 most recent that survived the 60-push trim).
+		while (history.canRedo())
+		{
+			history.redo(Arrays.asList(pt(0, 0)));
+		}
+		// Drain undoStack and count.
+		int undoCount = 0;
+		while (history.canUndo() && undoCount < 200)
+		{
+			history.undo(Arrays.asList(pt(0, 0)));
+			undoCount++;
+		}
+		assertEquals("undoStack must drain in exactly MAX_DEPTH (50) calls",
+			50, undoCount);
+	}
+
+	@Test
 	public void undoPushesCurrentOntoRedo()
 	{
 		// Round-trip: push frame A, then undo with current = B. Expect: undo returns A; redo returns B.
@@ -136,13 +164,6 @@ public final class SelectionHistoryTest
 	}
 
 	@Test
-	public void undoReturnsNullWhenStackEmpty()
-	{
-		SelectionHistory history = new SelectionHistory();
-		assertNull(history.undo(Arrays.asList(pt(1, 1))));
-	}
-
-	@Test
 	public void undoRedoRoundTripPreservesEmptyState()
 	{
 		// Edge case: pushing an empty list, undoing back to empty, must keep canUndo false and the snapshot
@@ -153,6 +174,13 @@ public final class SelectionHistoryTest
 		assertEquals(0, restored.size());
 		assertFalse(history.canUndo());
 		assertTrue(history.canRedo());
+	}
+
+	@Test
+	public void undoReturnsNullWhenStackEmpty()
+	{
+		SelectionHistory history = new SelectionHistory();
+		assertNull(history.undo(Arrays.asList(pt(1, 1))));
 	}
 
 	@Test
@@ -185,36 +213,8 @@ public final class SelectionHistoryTest
 			50, redoCount);
 	}
 
-	@Test
-	public void redoTrimsUndoStackToMaxDepth()
+	private static SelectionPoint pt(float x, float y)
 	{
-		// Symmetric regression: undoStack growth on the redo path was unbounded. Pin the cap with the same
-		// "exactly MAX_DEPTH drains" assertion shape.
-		SelectionHistory history = new SelectionHistory();
-		// Build undoStack to 60 (cap applied) then drain into redoStack via 60 undo()s.
-		for (int i = 0; i < 60; i++)
-		{
-			history.push(Arrays.asList(pt(i, i)));
-		}
-		for (int i = 0; i < 60; i++)
-		{
-			history.undo(Arrays.asList(pt(99, 99)));
-		}
-		// Now redoStack holds at most MAX_DEPTH = 50 frames (already verified above). Redo all of them —
-		// each redo() pushes onto undoStack via the cap-trimmed path. If the trim is missing, undoStack
-		// would grow to 51 (50 from the redo path + the 1 most recent that survived the 60-push trim).
-		while (history.canRedo())
-		{
-			history.redo(Arrays.asList(pt(0, 0)));
-		}
-		// Drain undoStack and count.
-		int undoCount = 0;
-		while (history.canUndo() && undoCount < 200)
-		{
-			history.undo(Arrays.asList(pt(0, 0)));
-			undoCount++;
-		}
-		assertEquals("undoStack must drain in exactly MAX_DEPTH (50) calls",
-			50, undoCount);
+		return new SelectionPoint(x, y);
 	}
 }

@@ -15,7 +15,7 @@ interface ImageLoadHost extends SaveHost
 	 * ImageLoadController on the UI thread immediately before busy.compareAndSet so an already-open
 	 * SettingsDialog can't keep committing state.gridConfig writes against a bg state.reset() — without this
 	 * forced dismissal, an open SettingsDialog at the moment a Share/View intent fires races the reset's
-	 * gridConfig clear with the user's still-active color / width / preset interactions (Codex round-16 F2).
+	 * gridConfig clear with the user's still-active color / width / preset interactions.
 	 * No-op when no transient dialog is open.
 	 */
 	void dismissTransientDialogs();
@@ -27,9 +27,8 @@ interface ImageLoadHost extends SaveHost
 	 * the info-bar text views with sizeInfo and metaInfo, and clear the editor's undo history. Implementer must
 	 * also guard with isDestroyed() — the bg dispatch may have queued this Runnable before onDestroy ran.
 	 *
-	 * @param bmp      decoded + EXIF-oriented bitmap (ownership transfers to the
-	 *                 implementer; the controller will not reference it after this
-	 *                 call)
+	 * @param bmp      decoded + EXIF-oriented bitmap (ownership transfers to the implementer; the controller
+	 *                 will not reference it after this call)
 	 * @param sizeInfo "WIDTH×HEIGHT" formatted string for the dimensions readout
 	 * @param metaInfo human-readable format string ("EXIF+ICC+HDR+Samsung", etc.)
 	 */

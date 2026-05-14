@@ -42,7 +42,7 @@ public final class SafPaths
 	 * `String.contains("..")` which rejected legitimate filenames whose characters happened to include `..` —
 	 * `IMG..edited.jpg` is a single legitimate segment, not a parent-directory escape, so callers like Samsung's
 	 * ExternalStorageProvider relPath were losing the direct-filesystem path and falling back to provider streams
-	 * (Codex round-40 F2). Segments around the substring keep their literal text; only an exact `..` between
+	 * onto provider streams. Segments around the substring keep their literal text; only an exact `..` between
 	 * `/` boundaries (or as the whole string) trips the guard.
 	 *
 	 * @param relativePath SAF docId tail or relPath to check ("DCIM/Camera/IMG.jpg",

@@ -43,6 +43,19 @@ public final class JpegMarkerWalkerTest
 	}
 
 	@Test
+	public void findPrimaryEoiAcceptsMinimalSosLenOfTwo() throws IOException
+	{
+		// sosLen = 2 = the 2 length bytes themselves, no body. Legal per ITU-T T.81 §B.1.1.4. The
+		// `sosLen < 2` reject guard exists; pin the accept side of the inclusive boundary so a regression that
+		// flipped `< 2` to `<= 2` (or `< 3`) — which would reject every legal minimal SOS — surfaces here.
+		byte[] file = JpegFixtures.concat(
+			JpegFixtures.soi(),
+			new byte[] { (byte) 0xFF, (byte) 0xDA, 0x00, 0x02,
+				(byte) 0xFF, (byte) 0xD9 });
+		assertEquals(file.length, JpegMarkerWalker.findPrimaryEoi(file, file.length));
+	}
+
+	@Test
 	public void findPrimaryEoiHandlesFillBytesBeforeSos() throws IOException
 	{
 		// FF FF DA — SOS with one fill byte. The walker must locate the marker, scan SOS entropy, and find
@@ -88,66 +101,6 @@ public final class JpegMarkerWalkerTest
 	}
 
 	@Test
-	public void findPrimaryEoiReturnsMinusOneWhenFileEndsExactlyOnLeadingFf() throws IOException
-	{
-		// File ends with a lone 0xFF — no marker code follows. The outer loop's `off < endBound - 1` guard
-		// must reject this without indexing OOB. A regression that flipped the predicate to `off < endBound`
-		// would let `markerByteOff` slide past file end and read garbage as a marker. Pin to catch.
-		byte[] file = JpegFixtures.concat(JpegFixtures.soi(), new byte[] { (byte) 0xFF });
-		assertEquals(-1, JpegMarkerWalker.findPrimaryEoi(file, file.length));
-	}
-
-	@Test
-	public void findPrimaryEoiReturnsMinusOneOnSosLenBelowTwo() throws IOException
-	{
-		// SOS segments share the segLen<2 invariant with normal segments — sosLen=0 lands scanOff inside
-		// the length field, sosLen=1 lands it inside the SOS header body. Without the guard the entropy
-		// walk treats those header bytes as scan content and accepts a coincidental FF D9 there as a
-		// valid EOI. Pin both boundary values: sosLen=0 and sosLen=1 must reject.
-		byte[] zero = JpegFixtures.concat(
-			JpegFixtures.soi(),
-			new byte[] { (byte) 0xFF, (byte) 0xDA, 0x00, 0x00,
-				(byte) 0xFF, (byte) 0xD9 });
-		assertEquals(-1, JpegMarkerWalker.findPrimaryEoi(zero, zero.length));
-
-		byte[] one = JpegFixtures.concat(
-			JpegFixtures.soi(),
-			new byte[] { (byte) 0xFF, (byte) 0xDA, 0x00, 0x01,
-				(byte) 0xFF, (byte) 0xD9 });
-		assertEquals(-1, JpegMarkerWalker.findPrimaryEoi(one, one.length));
-	}
-
-	@Test
-	public void findPrimaryEoiAcceptsMinimalSosLenOfTwo() throws IOException
-	{
-		// sosLen = 2 = the 2 length bytes themselves, no body. Legal per ITU-T T.81 §B.1.1.4. Round 12 added
-		// the `sosLen < 2` reject guard; pin the accept side of the inclusive boundary so a regression that
-		// flipped `< 2` to `<= 2` (or `< 3`) — which would reject every legal minimal SOS — surfaces here.
-		byte[] file = JpegFixtures.concat(
-			JpegFixtures.soi(),
-			new byte[] { (byte) 0xFF, (byte) 0xDA, 0x00, 0x02,
-				(byte) 0xFF, (byte) 0xD9 });
-		assertEquals(file.length, JpegMarkerWalker.findPrimaryEoi(file, file.length));
-	}
-
-	@Test
-	public void findPrimaryEoiReturnsMinusOneOnSosLenClaimingPastEndBound() throws IOException
-	{
-		// SOS-side wrap-overflow guard at scanSosEntropy line 182 (`scanOff < off || scanOff > endBound`).
-		// Currently exercised only indirectly via GraftWriterTest; this pins the canonical helper directly
-		// so a regression in just this guard isn't masked by the GraftWriter test continuing to pass via a
-		// different code path.
-		byte[] file = JpegFixtures.concat(
-			JpegFixtures.soi(),
-			new byte[] {
-				(byte) 0xFF, (byte) 0xDA,                    // SOS marker
-				(byte) 0xFF, (byte) 0xFF,                    // sosLen = 0xFFFF
-				0x01, 0x02, 0x03, 0x04                       // 4 bytes — way under 0xFFFF
-			});
-		assertEquals(-1, JpegMarkerWalker.findPrimaryEoi(file, file.length));
-	}
-
-	@Test
 	public void findPrimaryEoiReturnsMinusOneOnSegLenBelowTwo() throws IOException
 	{
 		// Per ITU-T T.81, segment length includes the 2 length bytes themselves — segLen<2 is malformed.
@@ -174,6 +127,53 @@ public final class JpegMarkerWalkerTest
 				(byte) 0xFF, (byte) 0xFE,                    // segLen = 0xFFFE
 				0x00, 0x00                                    // 2 bytes after (way under 0xFFFE)
 			});
+		assertEquals(-1, JpegMarkerWalker.findPrimaryEoi(file, file.length));
+	}
+
+	@Test
+	public void findPrimaryEoiReturnsMinusOneOnSosLenBelowTwo() throws IOException
+	{
+		// SOS segments share the segLen<2 invariant with normal segments — sosLen=0 lands scanOff inside
+		// the length field, sosLen=1 lands it inside the SOS header body. Without the guard the entropy
+		// walk treats those header bytes as scan content and accepts a coincidental FF D9 there as a
+		// valid EOI. Pin both boundary values: sosLen=0 and sosLen=1 must reject.
+		byte[] zero = JpegFixtures.concat(
+			JpegFixtures.soi(),
+			new byte[] { (byte) 0xFF, (byte) 0xDA, 0x00, 0x00,
+				(byte) 0xFF, (byte) 0xD9 });
+		assertEquals(-1, JpegMarkerWalker.findPrimaryEoi(zero, zero.length));
+
+		byte[] one = JpegFixtures.concat(
+			JpegFixtures.soi(),
+			new byte[] { (byte) 0xFF, (byte) 0xDA, 0x00, 0x01,
+				(byte) 0xFF, (byte) 0xD9 });
+		assertEquals(-1, JpegMarkerWalker.findPrimaryEoi(one, one.length));
+	}
+
+	@Test
+	public void findPrimaryEoiReturnsMinusOneOnSosLenClaimingPastEndBound() throws IOException
+	{
+		// SOS-side wrap-overflow guard at scanSosEntropy line 182 (`scanOff < off || scanOff > endBound`).
+		// Currently exercised only indirectly via GraftWriterTest; this pins the canonical helper directly
+		// so a regression in just this guard isn't masked by the GraftWriter test continuing to pass via a
+		// different code path.
+		byte[] file = JpegFixtures.concat(
+			JpegFixtures.soi(),
+			new byte[] {
+				(byte) 0xFF, (byte) 0xDA,                    // SOS marker
+				(byte) 0xFF, (byte) 0xFF,                    // sosLen = 0xFFFF
+				0x01, 0x02, 0x03, 0x04                       // 4 bytes — way under 0xFFFF
+			});
+		assertEquals(-1, JpegMarkerWalker.findPrimaryEoi(file, file.length));
+	}
+
+	@Test
+	public void findPrimaryEoiReturnsMinusOneWhenFileEndsExactlyOnLeadingFf() throws IOException
+	{
+		// File ends with a lone 0xFF — no marker code follows. The outer loop's `off < endBound - 1` guard
+		// must reject this without indexing OOB. A regression that flipped the predicate to `off < endBound`
+		// would let `markerByteOff` slide past file end and read garbage as a marker. Pin to catch.
+		byte[] file = JpegFixtures.concat(JpegFixtures.soi(), new byte[] { (byte) 0xFF });
 		assertEquals(-1, JpegMarkerWalker.findPrimaryEoi(file, file.length));
 	}
 
@@ -205,20 +205,20 @@ public final class JpegMarkerWalkerTest
 	}
 
 	@Test
-	public void skipFillBytesReturnsMinusOneWhenRunOffEndBound()
-	{
-		// All FFs to end of bound — no marker byte found.
-		byte[] file = { (byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF };
-		int markerByte = JpegMarkerWalker.skipFillBytes(file, 0, file.length);
-		assertEquals(-1, markerByte);
-	}
-
-	@Test
 	public void skipFillBytesRespectsTighterEndBound()
 	{
 		byte[] file = { (byte) 0xFF, (byte) 0xFF, (byte) 0xE1 };
 		// endBound = 2 forces the search to stop before reaching the 0xE1 at index 2.
 		int markerByte = JpegMarkerWalker.skipFillBytes(file, 0, 2);
+		assertEquals(-1, markerByte);
+	}
+
+	@Test
+	public void skipFillBytesReturnsMinusOneWhenRunOffEndBound()
+	{
+		// All FFs to end of bound — no marker byte found.
+		byte[] file = { (byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF };
+		int markerByte = JpegMarkerWalker.skipFillBytes(file, 0, file.length);
 		assertEquals(-1, markerByte);
 	}
 }

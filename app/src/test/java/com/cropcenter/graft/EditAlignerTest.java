@@ -20,37 +20,6 @@ import org.junit.Test;
 public final class EditAlignerTest
 {
 	@Test
-	public void resultOkBuildsSuccessResult()
-	{
-		byte[] bytes = { 0x01, 0x02, 0x03 };
-		EditAligner.Result result = EditAligner.Result.ok(bytes);
-		assertArrayEquals(bytes, result.alignedBytes());
-		assertNull(result.errorMessage());
-	}
-
-	@Test
-	public void resultErrorBuildsFailureResult()
-	{
-		EditAligner.Result result = EditAligner.Result.error("dimensions mismatch");
-		assertNull(result.alignedBytes());
-		assertEquals("dimensions mismatch", result.errorMessage());
-	}
-
-	@Test
-	public void alignReturnsErrorWhenOriginalDecodeFails()
-	{
-		// Under unitTests.returnDefaultValues=true, BitmapFactory.decodeByteArray returns null and never sets
-		// outWidth/outHeight, so decodeStoredDims sees 0×0 and returns null on the source. The error message
-		// must point at the source ("reload") not the edit, since the source was loaded successfully earlier
-		// and only became un-decodable later (memory pressure, race).
-		byte[] notRealJpeg = { (byte) 0xFF, (byte) 0xD8, 0x00, 0x00 };
-		EditAligner.Result result = EditAligner.align(notRealJpeg, notRealJpeg);
-		assertNotNull(result.errorMessage());
-		assertEquals("Source image is corrupt — reload it", result.errorMessage());
-		assertNull(result.alignedBytes());
-	}
-
-	@Test
 	public void alignChecksSourceDecodeBeforeEditDecode()
 	{
 		// Pin the source-then-edit probe ordering with DIFFERENTIATING fixtures so a refactor that
@@ -82,6 +51,14 @@ public final class EditAlignerTest
 	}
 
 	@Test
+	public void alignRejectsNullEditAtSoiCheck()
+	{
+		byte[] originalSoi = { (byte) 0xFF, (byte) 0xD8, 0x00, 0x00 };
+		EditAligner.Result result = EditAligner.align(originalSoi, null);
+		assertEquals("Selected file is not a JPEG", result.errorMessage());
+	}
+
+	@Test
 	public void alignRejectsTooShortEditAtSoiCheck()
 	{
 		// 0-3 byte input can't carry SOI — the gate handles it without an AIOOBE. Same SOI-mismatch error
@@ -93,11 +70,27 @@ public final class EditAlignerTest
 	}
 
 	@Test
-	public void alignRejectsNullEditAtSoiCheck()
+	public void alignReturnsErrorWhenOriginalDecodeFails()
 	{
-		byte[] originalSoi = { (byte) 0xFF, (byte) 0xD8, 0x00, 0x00 };
-		EditAligner.Result result = EditAligner.align(originalSoi, null);
-		assertEquals("Selected file is not a JPEG", result.errorMessage());
+		// Under unitTests.returnDefaultValues=true, BitmapFactory.decodeByteArray returns null and never sets
+		// outWidth/outHeight, so decodeStoredDims sees 0×0 and returns null on the source. The error message
+		// must point at the source ("reload") not the edit, since the source was loaded successfully earlier
+		// and only became un-decodable later (memory pressure, race).
+		byte[] notRealJpeg = { (byte) 0xFF, (byte) 0xD8, 0x00, 0x00 };
+		EditAligner.Result result = EditAligner.align(notRealJpeg, notRealJpeg);
+		assertNotNull(result.errorMessage());
+		assertEquals("Source image is corrupt — reload it", result.errorMessage());
+		assertNull(result.alignedBytes());
+	}
+
+	@Test
+	public void displayDimsLeavesAxesUnchangedForFlipOrientations()
+	{
+		// Orientations 2/3/4 are mirror / rotate-180 / mirror — no axis swap.
+		int[] stored = { 100, 50 };
+		assertArrayEquals(new int[]{ 100, 50 }, EditAligner.displayDims(stored, 2));
+		assertArrayEquals(new int[]{ 100, 50 }, EditAligner.displayDims(stored, 3));
+		assertArrayEquals(new int[]{ 100, 50 }, EditAligner.displayDims(stored, 4));
 	}
 
 	@Test
@@ -110,13 +103,15 @@ public final class EditAlignerTest
 	}
 
 	@Test
-	public void displayDimsSwapsAxesForOrientationSix()
+	public void displayDimsReturnsFreshArrayNotAliasOfInput()
 	{
-		// Orientation 6 is the canonical Samsung "rotated 90° CW" — landscape stored, displays portrait. Width
-		// and height swap.
-		int[] stored = { 4000, 3000 };
-		int[] display = EditAligner.displayDims(stored, 6);
-		assertArrayEquals(new int[]{ 3000, 4000 }, display);
+		// Caller mutability invariant: the helper docs promise a fresh int[2] so callers can mutate without
+		// aliasing. Pin it so a future refactor that returns the input directly (e.g. as a no-op for orient=1)
+		// doesn't break any caller that stashes the array and assumes ownership.
+		int[] stored = { 100, 50 };
+		int[] display = EditAligner.displayDims(stored, 1);
+		display[0] = 999;
+		assertEquals("input array must not alias output", 100, stored[0]);
 	}
 
 	@Test
@@ -131,25 +126,13 @@ public final class EditAlignerTest
 	}
 
 	@Test
-	public void displayDimsLeavesAxesUnchangedForFlipOrientations()
+	public void displayDimsSwapsAxesForOrientationSix()
 	{
-		// Orientations 2/3/4 are mirror / rotate-180 / mirror — no axis swap.
-		int[] stored = { 100, 50 };
-		assertArrayEquals(new int[]{ 100, 50 }, EditAligner.displayDims(stored, 2));
-		assertArrayEquals(new int[]{ 100, 50 }, EditAligner.displayDims(stored, 3));
-		assertArrayEquals(new int[]{ 100, 50 }, EditAligner.displayDims(stored, 4));
-	}
-
-	@Test
-	public void displayDimsReturnsFreshArrayNotAliasOfInput()
-	{
-		// Caller mutability invariant: the helper docs promise a fresh int[2] so callers can mutate without
-		// aliasing. Pin it so a future refactor that returns the input directly (e.g. as a no-op for orient=1)
-		// doesn't break any caller that stashes the array and assumes ownership.
-		int[] stored = { 100, 50 };
-		int[] display = EditAligner.displayDims(stored, 1);
-		display[0] = 999;
-		assertEquals("input array must not alias output", 100, stored[0]);
+		// Orientation 6 is the canonical Samsung "rotated 90° CW" — landscape stored, displays portrait. Width
+		// and height swap.
+		int[] stored = { 4000, 3000 };
+		int[] display = EditAligner.displayDims(stored, 6);
+		assertArrayEquals(new int[]{ 3000, 4000 }, display);
 	}
 
 	@Test
@@ -172,5 +155,22 @@ public final class EditAlignerTest
 		// identity.
 		assertEquals(8, EditAligner.inverseOrientation(6));
 		assertEquals(6, EditAligner.inverseOrientation(8));
+	}
+
+	@Test
+	public void resultErrorBuildsFailureResult()
+	{
+		EditAligner.Result result = EditAligner.Result.error("dimensions mismatch");
+		assertNull(result.alignedBytes());
+		assertEquals("dimensions mismatch", result.errorMessage());
+	}
+
+	@Test
+	public void resultOkBuildsSuccessResult()
+	{
+		byte[] bytes = { 0x01, 0x02, 0x03 };
+		EditAligner.Result result = EditAligner.Result.ok(bytes);
+		assertArrayEquals(bytes, result.alignedBytes());
+		assertNull(result.errorMessage());
 	}
 }

@@ -17,17 +17,6 @@ public final class RotatedCropClampTest
 {
 	private static final float TOL = 1e-3f;
 
-	// ── clampAxisAligned ──
-
-	@Test
-	public void clampAxisAlignedReturnsRequestedPositionWhenInBounds()
-	{
-		// Crop 200x150 inside image 1000x800; center (500, 400) is well within bounds. Should pass through
-		// unchanged.
-		float[] result = RotatedCropClamp.clampAxisAligned(500f, 400f, 200, 150, 1000, 800);
-		assertArrayEquals(new float[] { 500f, 400f }, result, TOL);
-	}
-
 	@Test
 	public void clampAxisAlignedClampsXToLowerBound()
 	{
@@ -58,6 +47,35 @@ public final class RotatedCropClampTest
 	}
 
 	@Test
+	public void clampAxisAlignedHandlesCropEqualImageEdgeCase()
+	{
+		// cropW == imgW — predicate is `cropW < imgW` (strict), so this hits the snap-to-mid branch. Pin this
+		// down as intentional (the strict-less guards against Math.clamp on equal bounds).
+		float[] result = RotatedCropClamp.clampAxisAligned(0f, 400f, 1000, 150, 1000, 800);
+		assertEquals(500f, result[0], TOL);
+		assertEquals(400f, result[1], TOL);
+	}
+
+	// ── clampAxisAligned ──
+
+	@Test
+	public void clampAxisAlignedReturnsRequestedPositionWhenInBounds()
+	{
+		// Crop 200x150 inside image 1000x800; center (500, 400) is well within bounds. Should pass through
+		// unchanged.
+		float[] result = RotatedCropClamp.clampAxisAligned(500f, 400f, 200, 150, 1000, 800);
+		assertArrayEquals(new float[] { 500f, 400f }, result, TOL);
+	}
+
+	@Test
+	public void clampAxisAlignedSnapsBothAxesWhenCropExceedsImageOnBoth()
+	{
+		// Both cropW > imgW and cropH > imgH — both axes snap to image center regardless of requested position.
+		float[] result = RotatedCropClamp.clampAxisAligned(0f, 0f, 1200, 900, 1000, 800);
+		assertArrayEquals(new float[] { 500f, 400f }, result, TOL);
+	}
+
+	@Test
 	public void clampAxisAlignedSnapsXToImageMidWhenCropExceedsImageWidth()
 	{
 		// cropW (1200) > imgW (1000) — Math.clamp would throw on inverted bounds; instead snap to imgW/2.
@@ -76,19 +94,11 @@ public final class RotatedCropClampTest
 	}
 
 	@Test
-	public void clampAxisAlignedSnapsBothAxesWhenCropExceedsImageOnBoth()
+	public void clampRotatedAcceptsInBoundsRequestUnchanged()
 	{
-		// Both cropW > imgW and cropH > imgH — both axes snap to image center regardless of requested position.
-		float[] result = RotatedCropClamp.clampAxisAligned(0f, 0f, 1200, 900, 1000, 800);
-		assertArrayEquals(new float[] { 500f, 400f }, result, TOL);
-	}
-
-	@Test
-	public void clampAxisAlignedHandlesCropEqualImageEdgeCase()
-	{
-		// cropW == imgW — predicate is `cropW < imgW` (strict), so this hits the snap-to-mid branch. Pin this
-		// down as intentional (the strict-less guards against Math.clamp on equal bounds).
-		float[] result = RotatedCropClamp.clampAxisAligned(0f, 400f, 1000, 150, 1000, 800);
+		// Center well inside image at modest rotation — corners fit even after un-rotation, so no search fires
+		// and the requested position passes through unchanged.
+		float[] result = RotatedCropClamp.clampRotated(500f, 400f, 100, 100, 5f, 1000, 800);
 		assertEquals(500f, result[0], TOL);
 		assertEquals(400f, result[1], TOL);
 	}
@@ -114,13 +124,16 @@ public final class RotatedCropClampTest
 	}
 
 	@Test
-	public void clampRotatedAcceptsInBoundsRequestUnchanged()
+	public void clampRotatedConvergesNearOptimalAfter25Iterations()
 	{
-		// Center well inside image at modest rotation — corners fit even after un-rotation, so no search fires
-		// and the requested position passes through unchanged.
-		float[] result = RotatedCropClamp.clampRotated(500f, 400f, 100, 100, 5f, 1000, 800);
-		assertEquals(500f, result[0], TOL);
-		assertEquals(400f, result[1], TOL);
+		// With 25 binary-search iterations starting from [0, 1] fraction, the resolution is 2^-25 ≈ 3e-8 of the
+		// requested-to-mid range. For a 1000-px image that's ~3e-5 px — well below the float-rounding noise of
+		// the corner check itself. Verify convergence by constructing a case with a known-correct answer: at 0°
+		// the optimal X is exactly the axis-aligned clamp boundary (cropW/2 = 50 for cropW 100).
+		float[] result = RotatedCropClamp.clampRotated(0f, 400f, 100, 100, 0f, 1000, 800);
+		// Center request (0, 400) → un-rotated corners would have X = -50, outside. Search pulls X toward 500
+		// (image-mid) until corners fit. With 0° rotation the optimal X is exactly 50.
+		assertEquals(50f, result[0], 0.5f);   // 0.5px slop accommodates float-rounding in corner check
 	}
 
 	@Test
@@ -132,6 +145,16 @@ public final class RotatedCropClampTest
 		float[] result = RotatedCropClamp.clampRotated(500f, 400f, 700, 700, 45f, 1000, 800);
 		assertEquals(500f, result[0], TOL);   // image-center fallback
 		assertEquals(400f, result[1], TOL);
+	}
+
+	@Test
+	public void clampRotatedHandlesNegativeRotationSymmetrically()
+	{
+		// Negative rotation is the un-rotation direction; the math should handle it the same as positive.
+		float[] posRot = RotatedCropClamp.clampRotated(950f, 400f, 200, 200, 20f, 1000, 800);
+		float[] negRot = RotatedCropClamp.clampRotated(950f, 400f, 200, 200, -20f, 1000, 800);
+		// Symmetric: the X clamp converges to (approximately) the same value regardless of sign.
+		assertEquals(posRot[0], negRot[0], 1f);
 	}
 
 	@Test
@@ -157,28 +180,5 @@ public final class RotatedCropClampTest
 		assertEquals(500f, result[0], TOL);
 		assertTrue("expected Y pulled back toward 400 from 750, got " + result[1],
 			result[1] < 750f && result[1] >= 400f);
-	}
-
-	@Test
-	public void clampRotatedHandlesNegativeRotationSymmetrically()
-	{
-		// Negative rotation is the un-rotation direction; the math should handle it the same as positive.
-		float[] posRot = RotatedCropClamp.clampRotated(950f, 400f, 200, 200, 20f, 1000, 800);
-		float[] negRot = RotatedCropClamp.clampRotated(950f, 400f, 200, 200, -20f, 1000, 800);
-		// Symmetric: the X clamp converges to (approximately) the same value regardless of sign.
-		assertEquals(posRot[0], negRot[0], 1f);
-	}
-
-	@Test
-	public void clampRotatedConvergesNearOptimalAfter25Iterations()
-	{
-		// With 25 binary-search iterations starting from [0, 1] fraction, the resolution is 2^-25 ≈ 3e-8 of the
-		// requested-to-mid range. For a 1000-px image that's ~3e-5 px — well below the float-rounding noise of
-		// the corner check itself. Verify convergence by constructing a case with a known-correct answer: at 0°
-		// the optimal X is exactly the axis-aligned clamp boundary (cropW/2 = 50 for cropW 100).
-		float[] result = RotatedCropClamp.clampRotated(0f, 400f, 100, 100, 0f, 1000, 800);
-		// Center request (0, 400) → un-rotated corners would have X = -50, outside. Search pulls X toward 500
-		// (image-mid) until corners fit. With 0° rotation the optimal X is exactly 50.
-		assertEquals(50f, result[0], 0.5f);   // 0.5px slop accommodates float-rounding in corner check
 	}
 }

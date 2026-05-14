@@ -246,7 +246,7 @@ public final class CropStateTest
 	@Test
 	public void setSourceFormatSeedsExportConfig()
 	{
-		// Codex round-26 T4 — `setSourceFormat(PNG)` must seed `exportConfig.format()` to PNG so the
+		// `setSourceFormat(PNG)` must seed `exportConfig.format()` to PNG so the
 		// SaveDialog's format toggle defaults to "save as PNG" for PNG sources without an intervening
 		// `updateExportConfig` call. A regression that drops the seed (only stores `sourceFormat` and
 		// forgets the `withFormat`) would silently change the user's save format from PNG to JPEG —
@@ -345,7 +345,7 @@ public final class CropStateTest
 		// bus.notifyChanged(). A regression that wired a setter to fire the listener directly (bypassing the
 		// bus) — or that broke the delegation entirely — would surface as either zero fires (no notify reached
 		// the bus) or N fires (each setter bypassing the batch). Pin the contract that three setter calls
-		// inside one batch produce exactly one fire on endBatch (Codex round-40 test-coverage P3 gap).
+		// inside one batch produce exactly one fire on endBatch.
 		CropState state = new CropState();
 		int[] fireCount = { 0 };
 		state.setListener(() -> fireCount[0]++);

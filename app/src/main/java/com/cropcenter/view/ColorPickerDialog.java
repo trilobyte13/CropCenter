@@ -237,9 +237,9 @@ public final class ColorPickerDialog
 	 * Build and show the picker. Constructs a fresh ColorPickerDialog instance to hold per-dialog state, then
 	 * delegates to its private buildAndShow.
 	 *
-	 * Returns the AlertDialog so the caller can track and cancel it — SettingsDialog opens pickers from
-	 * its swatch click handlers and needs to cancel any open picker when the parent dialog is cancelled
-	 * (Codex round-17 F2). Without that propagation, a stale picker outliving SettingsDialog could fire
+	 * Returns the AlertDialog so the caller can track and cancel it — SettingsDialog opens pickers from its
+	 * swatch click handlers and needs to cancel any open picker when the parent dialog is cancelled to keep
+	 * transient state coherent. Without that propagation, a stale picker outliving SettingsDialog could fire
 	 * its OK listener and mutate state.gridConfig after the parent dialog had been forced-cancelled by an
 	 * inbound load.
 	 *

@@ -1,11 +1,14 @@
 package com.cropcenter.util;
 
+import android.app.ActivityManager;
+import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Matrix;
 import android.graphics.Paint;
 import android.graphics.Rect;
 
+import com.cropcenter.metadata.JpegMarker;
 import com.cropcenter.metadata.JpegMarkerWalker;
 import com.cropcenter.metadata.TiffTag;
 
@@ -22,6 +25,24 @@ public final class BitmapUtils
 	// burn a bilinear pass for no visible benefit. On a 4000-px-wide image, 0.01° corresponds to a corner shift of
 	// ~0.7 px, which is observable on fine vertical/horizontal lines.
 	public static final float ROTATION_EPSILON = 0.005f;
+
+	// Safe floor for the decode-pixel cap on devices we haven't queried yet (or on test runs where no
+	// Context is available). 32 MP (~33.5M pixels) keeps the decoded bitmap under ~128 MB ARGB which fits
+	// comfortably on the ~256-512 MB heap a low-end Android device gives an app. The device-adaptive
+	// path raises this for high-RAM devices via initialize(Context) — see computeMaxDecodePixels.
+	private static final int DECODE_PIXELS_FLOOR = 32 * 1024 * 1024;
+
+	// Hard ceiling on the device-adaptive cap. 512 MP × 4 bytes ARGB ≈ 2 GB; even on a 16 GB Samsung
+	// flagship with native bitmap memory, holding more than this in a single bitmap risks crowding out
+	// other apps and pushing CropCenter into the low-memory-killer's kill list. The current Samsung
+	// max-resolution mode is 200 MP (16384×12288 ≈ 201M pixels), so 512 MP leaves room for one round of
+	// future sensor upgrades.
+	private static final int DECODE_PIXELS_CEILING = 512 * 1024 * 1024;
+
+	// Cached cap. Defaults to the floor so callers running before initialize(Context) (e.g., a background-thread
+	// bg-init race, a JUnit test) get the safe value. Set once at MainActivity.onCreate time via initialize;
+	// reads are unsynchronised (volatile) since the value is set-once per process.
+	private static volatile int cachedMaxDecodePixels = DECODE_PIXELS_FLOOR;
 
 	private BitmapUtils() {}
 
@@ -49,6 +70,69 @@ public final class BitmapUtils
 			bmp.recycle();
 		}
 		return rotated;
+	}
+
+	/**
+	 * Compute the largest power-of-2 inSampleSize that fits (outWidth × outHeight) within `maxPixels` total
+	 * after subsampling — i.e., the smallest sample size that ensures `(outWidth / s) × (outHeight / s) <=
+	 * maxPixels`. Returns 1 when the un-subsampled image already fits; doubles until the constraint holds.
+	 *
+	 * Used by ImageLoadController.applyBytes and UltraHdrCompat.decodeHdrBitmap to bound peak decode memory
+	 * on very-large sources (Samsung's 200 MP mode produces 16384×12288 captures ≈ 200M pixels = ~800 MB
+	 * ARGB). On a 12 GB-RAM flagship the device-adaptive cap (`getMaxDecodePixels`) returns ~187 MP, so
+	 * those sources decode at `inSampleSize=1` (no quality loss). On a 4 GB-RAM device the cap floors at
+	 * 32 MP and subsampling kicks in. The trade-off when sampleSize > 1 is that the saved crop uses the
+	 * subsampled bitmap as its source, so output resolution scales down — preferable to instant OOM.
+	 *
+	 * Android's BitmapFactory.Options.inSampleSize requires a power of 2 (any other value is rounded down
+	 * to the nearest power of 2 internally), so this helper produces 1, 2, 4, 8, ... rather than the exact
+	 * minimum ratio.
+	 *
+	 * @param outWidth  decoded image width before subsampling (from BitmapFactory bounds pre-pass)
+	 * @param outHeight decoded image height before subsampling
+	 * @param maxPixels total subsampled-pixel budget (e.g., 32_000_000 for ~32 MP)
+	 * @return power-of-2 sample size such that the subsampled bitmap fits within maxPixels
+	 */
+	public static int computeInSampleSize(int outWidth, int outHeight, int maxPixels)
+	{
+		if (outWidth <= 0 || outHeight <= 0 || maxPixels <= 0)
+		{
+			return 1;
+		}
+		int sampleSize = 1;
+		long subsampledPixels = (long) outWidth * outHeight;
+		while (subsampledPixels > maxPixels)
+		{
+			sampleSize *= 2;
+			subsampledPixels /= 4;
+		}
+		return sampleSize;
+	}
+
+	/**
+	 * Compute the device-adaptive decode-pixel cap from total device RAM
+	 * (`ActivityManager.getMemoryInfo().totalMem`). Budgets 1/16 of total system RAM for the largest single
+	 * bitmap, clamped to `[DECODE_PIXELS_FLOOR, DECODE_PIXELS_CEILING]` so a 4 GB-RAM phone gets a sensible cap
+	 * (~64 MP) and a 12 GB Samsung flagship gets a much higher cap (~187 MP, enough to handle a 200 MP capture
+	 * at `inSampleSize=1`). The 1/16 fraction leaves room for the export pipeline's working bitmaps
+	 * (primary canvas + gain-map render + EXIF-rotation temporary + Bitmap.compress encoder buffer)
+	 * — peak HDR-save allocation is roughly 4× the source bitmap, so 1/16 keeps all 4 within 1/4 of RAM
+	 * even before the kernel's bitmap-native-memory headroom kicks in.
+	 *
+	 * Separate from `initialize(Context)` so the pure-math piece is testable without an Android Context.
+	 *
+	 * @param totalMemBytes device's total RAM in bytes (from ActivityManager.MemoryInfo.totalMem)
+	 * @return pixel-count cap, clamped to [DECODE_PIXELS_FLOOR, DECODE_PIXELS_CEILING]
+	 */
+	public static int computeMaxDecodePixels(long totalMemBytes)
+	{
+		// Long arithmetic: totalMemBytes can be 16 GB+ on flagship devices (16 * 1024^3 = 17.2 billion bytes,
+		// far past int range). Divide by 16 to get the bitmap budget in bytes, then by 4 to convert bytes to
+		// ARGB pixels. Math.clamp(long, int, int) is a Java 21 overload that returns int directly; the cast
+		// on the result is structural (the compiler picks the right overload from the int bounds) and the
+		// returned int is guaranteed to fit because the ceiling is < Integer.MAX_VALUE.
+		long pixelBudget = totalMemBytes / 16L / 4L;
+		return Math.clamp(pixelBudget, DECODE_PIXELS_FLOOR, DECODE_PIXELS_CEILING);
 	}
 
 	/**
@@ -128,6 +212,49 @@ public final class BitmapUtils
 	}
 
 	/**
+	 * Current decoded-bitmap pixel-count cap. Returned value is the device-adaptive cap set by
+	 * `initialize(Context)` at app startup, or `DECODE_PIXELS_FLOOR` (32 MP) when initialize hasn't run yet
+	 * (test runs, early bg-thread decode before the Activity's onCreate completed).
+	 *
+	 * Used by `ImageLoadController.applyBytes` and `UltraHdrCompat.decodeHdrBitmap` as the budget threshold for
+	 * the inSampleSize pre-pass — anything larger gets subsampled at the smallest power-of-2 that fits the
+	 * pixel count under the cap. `EditAligner.reorientEdit` deliberately does NOT route through this cap because
+	 * `GraftWriter.graft` splices the edit's primary scan into the original's full-resolution EXIF / MPF / gainmap
+	 * / SEFT package — a downsampled edit primary would disagree with the full-resolution metadata describing
+	 * dimensions and gainmap offsets, silently corrupting Samsung Revert chains and HDR alignment. For graft
+	 * inputs that genuinely don't fit, `reorientEdit` catches `OutOfMemoryError` and returns null, surfacing
+	 * a clean "Couldn't decode the edit during reorientation" toast instead of a stale-metadata graft.
+	 *
+	 * @return current decoded-bitmap pixel-count cap (always in [DECODE_PIXELS_FLOOR, DECODE_PIXELS_CEILING])
+	 */
+	public static int getMaxDecodePixels()
+	{
+		return cachedMaxDecodePixels;
+	}
+
+	/**
+	 * Set the decoded-bitmap pixel-count cap based on the device's total RAM. Idempotent — calling more than once
+	 * with the same Context produces the same cap (totalMem is constant per device boot). Designed to be called
+	 * once from `MainActivity.onCreate` so every subsequent decode site picks up the device-adaptive value.
+	 *
+	 * @param ctx any Context; only used to obtain ActivityManager.MemoryInfo (no reference is retained)
+	 */
+	public static void initialize(Context ctx)
+	{
+		ActivityManager am = (ActivityManager) ctx.getSystemService(Context.ACTIVITY_SERVICE);
+		if (am == null)
+		{
+			// Robolectric / unit-test contexts can return null for ACTIVITY_SERVICE on minimal stub
+			// configurations. Fall back to the floor — safer than running with no cap, and the same
+			// outcome as if initialize was never called.
+			return;
+		}
+		ActivityManager.MemoryInfo info = new ActivityManager.MemoryInfo();
+		am.getMemoryInfo(info);
+		cachedMaxDecodePixels = computeMaxDecodePixels(info.totalMem);
+	}
+
+	/**
 	 * True when `rotation` is within ROTATION_EPSILON of ±90°, 180°, or ±270° (mod 360). Cardinal rotations map
 	 * integer source pixels to integer destination pixels and are therefore losslessly expressible with
 	 * nearest-neighbor sampling. Non-cardinal rotations require bilinear filtering.
@@ -149,10 +276,8 @@ public final class BitmapUtils
 	/**
 	 * Build a Matrix for the given EXIF orientation value (1-8).
 	 *
-	 * @param orientation EXIF orientation tag (1..8); values outside that range
-	 *                    return an identity matrix
-	 * @return transformation matrix that, when applied, brings stored pixels to
-	 *         display orientation
+	 * @param orientation EXIF orientation tag (1..8); values outside that range return an identity matrix
+	 * @return transformation matrix that, when applied, brings stored pixels to display orientation
 	 */
 	public static Matrix orientationMatrix(int orientation)
 	{
@@ -228,11 +353,12 @@ public final class BitmapUtils
 			}
 			int marker = jpeg[markerByteOff] & 0xFF;
 			int afterMarker = markerByteOff + 1;
-			if (marker == 0xDA || marker == 0xD9)
+			if (marker == JpegMarker.SOS || marker == JpegMarker.EOI)
 			{
-				break; // SOS or EOI
+				break;
 			}
-			if (marker == 0x00 || marker == 0x01 || (marker >= 0xD0 && marker <= 0xD7))
+			if (marker == JpegMarker.STUFFING || marker == JpegMarker.TEM
+				|| (marker >= JpegMarker.RST_FIRST && marker <= JpegMarker.RST_LAST))
 			{
 				off = afterMarker;
 				continue;
@@ -242,6 +368,17 @@ public final class BitmapUtils
 				return 1;
 			}
 			int segLen = ByteBufferUtils.readU16BE(jpeg, afterMarker);
+			if (segLen < 2)
+			{
+				// Segment length MUST include the 2 length bytes themselves (JPEG spec). Zero or one
+				// would advance off by 0 or 1 instead of the real segment size, getting stuck
+				// mid-segment and mis-reading payload as the next marker. Matches the defensive guard
+				// in every sister walker (JpegMarkerWalker.findPrimaryEoi,
+				// JpegMetadataExtractor.extract, JpegMetadataInjector.inject, MpfPatcher.patch,
+				// GraftWriter.findFirstNonAppNonCom, XmpItemLengthPatcher.walkApp1Ranges) — the
+				// cross-walker invariant kept consistent.
+				return 1;
+			}
 
 			// APP1 with Exif header
 			if (marker == 0xE1 && segLen > 14 && afterMarker + 8 <= jpeg.length
@@ -293,7 +430,7 @@ public final class BitmapUtils
 				for (int i = 0; i < count; i++)
 				{
 					// Long-arithmetic stride matches sister walkers in ExifPatcher / MpfPatcher /
-					// PngMetadataExtractor (round-35/37/38 sweep). JPEG inputs are 128 MB capped
+					// PngMetadataExtractor. JPEG inputs are 128 MB capped
 					// so int stride is unreachable in practice; kept for cross-walker symmetry.
 					long entryLong = (long) ifd + 2 + (long) i * 12;
 					if (entryLong + 12 > jpeg.length)

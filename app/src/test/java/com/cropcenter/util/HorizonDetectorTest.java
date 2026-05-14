@@ -137,7 +137,7 @@ public final class HorizonDetectorTest
 	@Test
 	public void detectFromMetadataFindsRollInAdobeExtendedXmpChunkPastFirst() throws IOException
 	{
-		// Codex round-21 F1 contract: a > 64 KB XMP packet split across multiple Adobe Extended XMP
+		// A > 64 KB XMP packet split across multiple Adobe Extended XMP
 		// chunks (different namespace prefix from standard XMP, plus 32-byte GUID + 4-byte total length
 		// + 4-byte offset header) must be reassembled by GUID + offset before Roll/Tilt scanning.
 		// Pre-fix the per-segment substring scan would have missed Roll attributes split across chunk
@@ -158,12 +158,12 @@ public final class HorizonDetectorTest
 	@Test
 	public void detectFromMetadataFindsTiltInReassembledExtendedXmp() throws IOException
 	{
-		// Round-22 test coverage A: pin the Tilt branch within the Extended XMP reassembly pass. The
-		// existing detectFromMetadataFindsTiltInExtendedXmp test exercises the pass-3 non-canonical APP1
-		// fallback (its segment has no Adobe extension namespace prefix), NOT the reassembly path. A
-		// regression that dropped the Tilt scan from the reassembled-XMP block would still pass that
-		// test plus the round-21 Roll-only reassembly tests. Force the reassembly path by splitting a
-		// Tilt attribute across two extension chunks so the per-segment scan in pass-3 can't recover it.
+		// Pin the Tilt branch within the Extended XMP reassembly pass. The existing
+		// detectFromMetadataFindsTiltInExtendedXmp test exercises the pass-3 non-canonical APP1 fallback
+		// (its segment has no Adobe extension namespace prefix), NOT the reassembly path. A regression
+		// that dropped the Tilt scan from the reassembled-XMP block would still pass that test plus the
+		// Roll-only reassembly tests. Force the reassembly path by splitting a Tilt attribute across
+		// two extension chunks so the per-segment scan in pass-3 can't recover it.
 		String guid = "ABCDEF0123456789ABCDEF0123456789";
 		String chunk0Body = "<rdf:Description xmlns:c='c' c:Ti";
 		String chunk1Body = "lt=\"2.50\"/>";
@@ -348,8 +348,8 @@ public final class HorizonDetectorTest
 	/**
 	 * Build a synthetic Adobe Extended XMP APP1 chunk: namespace prefix + 32-byte GUID + 4-byte total
 	 * length (placeholder zero — extractor doesn't validate it) + 4-byte big-endian offset + chunk body.
-	 * Used by the round-21 F1 reassembly tests to compose multi-chunk payloads that the round-21
-	 * reassembler must merge by GUID + offset before scanning for Roll/Tilt.
+	 * Used by the reassembly tests to compose multi-chunk payloads that ExtendedXmpReassembler must
+	 * merge by GUID + offset before HorizonDetector scans for Roll/Tilt.
 	 */
 	private static JpegSegment buildExtendedXmpChunk(String guid, int offset, String body)
 		throws IOException

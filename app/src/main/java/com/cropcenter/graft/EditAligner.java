@@ -36,17 +36,6 @@ public final class EditAligner
 	public record Result(byte[] alignedBytes, String errorMessage)
 	{
 		/**
-		 * Build a success Result. Caller's invariant: alignedBytes is non-null and decodes cleanly.
-		 *
-		 * @param bytes edit bytes whose stored layout matches the original's
-		 * @return a success Result wrapping the bytes
-		 */
-		public static Result ok(byte[] bytes)
-		{
-			return new Result(bytes, null);
-		}
-
-		/**
 		 * Build a failure Result. Caller surfaces errorMessage and aborts.
 		 *
 		 * @param message user-facing error text
@@ -55,6 +44,17 @@ public final class EditAligner
 		public static Result error(String message)
 		{
 			return new Result(null, message);
+		}
+
+		/**
+		 * Build a success Result. Caller's invariant: alignedBytes is non-null and decodes cleanly.
+		 *
+		 * @param bytes edit bytes whose stored layout matches the original's
+		 * @return a success Result wrapping the bytes
+		 */
+		public static Result ok(byte[] bytes)
+		{
+			return new Result(bytes, null);
 		}
 	}
 
@@ -139,32 +139,12 @@ public final class EditAligner
 	}
 
 	/**
-	 * Decode-cheap dimension probe: returns the JPEG's stored width and height without allocating pixel data.
-	 * Returns null when BitmapFactory rejects the byte array.
-	 *
-	 * @param bytes raw JPEG bytes
-	 * @return [width, height] in stored coordinates, or null on decode failure
-	 */
-	private static int[] decodeStoredDims(byte[] bytes)
-	{
-		BitmapFactory.Options opts = new BitmapFactory.Options();
-		opts.inJustDecodeBounds = true;
-		BitmapFactory.decodeByteArray(bytes, 0, bytes.length, opts);
-		if (opts.outWidth <= 0 || opts.outHeight <= 0)
-		{
-			return null;
-		}
-		return new int[] { opts.outWidth, opts.outHeight };
-	}
-
-	/**
 	 * Apply EXIF orientation to stored dims to get display dims. EXIF tags 5/6/7/8 swap the axes (90° rotations +
 	 * transpose / transverse); 1/2/3/4 leave them alone. Returns a fresh int[2] so callers can mutate without
 	 * aliasing.
 	 *
 	 * @param stored [width, height] in stored coordinates
-	 * @param orient EXIF orientation tag (1..8); values outside that range pass through
-	 *               as identity
+	 * @param orient EXIF orientation tag (1..8); values outside that range pass through as identity
 	 * @return [width, height] in display coordinates
 	 */
 	static int[] displayDims(int[] stored, int orient)
@@ -195,6 +175,25 @@ public final class EditAligner
 	}
 
 	/**
+	 * Decode-cheap dimension probe: returns the JPEG's stored width and height without allocating pixel data.
+	 * Returns null when BitmapFactory rejects the byte array.
+	 *
+	 * @param bytes raw JPEG bytes
+	 * @return [width, height] in stored coordinates, or null on decode failure
+	 */
+	private static int[] decodeStoredDims(byte[] bytes)
+	{
+		BitmapFactory.Options opts = new BitmapFactory.Options();
+		opts.inJustDecodeBounds = true;
+		BitmapFactory.decodeByteArray(bytes, 0, bytes.length, opts);
+		if (opts.outWidth <= 0 || opts.outHeight <= 0)
+		{
+			return null;
+		}
+		return new int[] { opts.outWidth, opts.outHeight };
+	}
+
+	/**
 	 * Re-encode the edit so its stored pixel layout matches the original's. Pipeline:
 	 * decode raw (BitmapFactory does not apply orientation) → apply edit's orientation
 	 * to land in display orientation → apply the inverse of original's orientation to
@@ -209,7 +208,37 @@ public final class EditAligner
 	 */
 	private static byte[] reorientEdit(byte[] editBytes, int editOrient, int origOrient)
 	{
-		Bitmap raw = BitmapFactory.decodeByteArray(editBytes, 0, editBytes.length);
+		// Full-resolution decode — NOT subsampled. GraftWriter.graft splices the edit's primary scan into
+		// the original's full-resolution EXIF / MPF / gainmap / SEFT package — if reorientEdit
+		// downsampled the primary while the original's metadata still described the full-resolution
+		// gainmap, the assembled file would have SOF dimensions disagreeing with EXIF, and (for HDR
+		// sources) the MPF entries pointing at a gainmap whose pixel coordinates no longer match the
+		// spliced primary. The result is silent HDR misalignment with no failure toast.
+		//
+		// The trade-off: on a 200 MP source + edit pair, this decode CAN OOM. The OutOfMemoryError catch
+		// below converts it into a clean null return; align() then surfaces the same
+		// "Couldn't decode the edit during reorientation — try exporting again" toast that the
+		// decode-null path produces, which is the right user-facing message — graft is the one workflow
+		// where downsampling would corrupt the output rather than just trade quality.
+		Bitmap raw;
+		try
+		{
+			raw = BitmapFactory.decodeByteArray(editBytes, 0, editBytes.length);
+		}
+		catch (RuntimeException | OutOfMemoryError e)
+		{
+			// Widened to RuntimeException as well as OutOfMemoryError so a truly malformed JPEG (Skia
+			// can throw IllegalArgumentException / RuntimeException from decodeByteArray on bad
+			// Huffman tables, truncated DQT, etc.) surfaces the same "Couldn't decode the edit during
+			// reorientation — try exporting again" toast as the OOM and decode-null paths. Without
+			// this widening, the throw escapes to GraftController.assembleGraftOnBg's catch and
+			// reports the generic "Graft failed: …" instead of the more accurate decode-failure
+			// message.
+			Log.w(TAG, "reorientEdit failed on full-resolution decode of "
+				+ editBytes.length + "-byte edit; graft will surface "
+				+ "'Couldn't decode the edit during reorientation' toast", e);
+			return null;
+		}
 		if (raw == null)
 		{
 			return null;
@@ -241,9 +270,9 @@ public final class EditAligner
 			// unsupported config). The previous code ignored the return and shipped whatever partial bytes
 			// landed in the stream — downstream GraftWriter then bailed with a generic "Edit is not a JPEG"
 			// because the result had no SOI marker, leaving the user with a confusing "graft failed" error
-			// when the actual cause was the re-encode (Codex round-40 logic-agent finding). Detect here so
-			// the caller (align) can surface a specific "couldn't re-encode the edit during reorientation"
-			// remediation matching the existing decode-failure phrasing.
+			// when the actual cause was the re-encode. Detect here so the caller (align) can surface a
+			// specific "couldn't re-encode the edit during reorientation" remediation matching the existing
+			// decode-failure phrasing.
 			if (!inOrigStored.compress(Bitmap.CompressFormat.JPEG, 100, bos))
 			{
 				Log.w(TAG, "reorientEdit Bitmap.compress(JPEG, 100) returned false");

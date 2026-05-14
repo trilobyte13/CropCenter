@@ -21,24 +21,109 @@ public final class BitmapUtilsTest
 	private static final float EPS = BitmapUtils.ROTATION_EPSILON;
 
 	@Test
+	public void computeInSampleSizeDoublesUntilFits()
+	{
+		// 200 MP source (16384×12288 = 201,326,592 pixels). At 32 MP cap, sampleSize=2 → 50 MP (still over).
+		// sampleSize=4 → 12.6 MP (fits). Pin the exact result so a regression that uses a non-power-of-2
+		// stepping or stops too early is caught.
+		assertEquals(4, BitmapUtils.computeInSampleSize(16384, 12288, 32 * 1024 * 1024));
+		// 8192×8192 = 67 MP. sampleSize=2 → 16 MP (fits at 32 MP cap).
+		assertEquals(2, BitmapUtils.computeInSampleSize(8192, 8192, 32 * 1024 * 1024));
+	}
+
+	@Test
+	public void computeInSampleSizeProducesPowerOfTwo()
+	{
+		// Android's BitmapFactory.Options.inSampleSize must be a power of 2 (other values round DOWN
+		// internally — a sampleSize=3 would decode at sampleSize=2, blowing the memory budget). Sweep across
+		// pixel counts and assert the result is always 1, 2, 4, 8, ... A regression that returned 3 or 5
+		// would silently re-introduce the OOM the helper exists to prevent.
+		int[][] cases =
+		{
+			{ 100, 100 }, { 1000, 1000 }, { 5000, 5000 }, { 10000, 10000 },
+			{ 20000, 15000 }, { 16384, 12288 }, { 50000, 50000 },
+		};
+		for (int[] dim : cases)
+		{
+			int s = BitmapUtils.computeInSampleSize(dim[0], dim[1], 32 * 1024 * 1024);
+			// Power-of-2 check: s & (s − 1) == 0 AND s > 0.
+			assertTrue("sample size " + s + " for " + dim[0] + "x" + dim[1] + " must be power of 2",
+				s > 0 && (s & (s - 1)) == 0);
+		}
+	}
+
+	@Test
+	public void computeInSampleSizeReturnsOneForDegenerateInput()
+	{
+		// Defensive guards: zero/negative dims (from a corrupt header bounds-decode where outWidth=-1) and
+		// zero/negative maxPixels (from a mistaken caller config) all return 1 rather than entering an
+		// infinite loop. The caller's downstream decode will fail-out on a real bad header; this helper
+		// just doesn't make things worse.
+		assertEquals(1, BitmapUtils.computeInSampleSize(0, 100, 1000));
+		assertEquals(1, BitmapUtils.computeInSampleSize(100, 0, 1000));
+		assertEquals(1, BitmapUtils.computeInSampleSize(-100, 100, 1000));
+		assertEquals(1, BitmapUtils.computeInSampleSize(100, 100, 0));
+		assertEquals(1, BitmapUtils.computeInSampleSize(100, 100, -1));
+	}
+
+	@Test
+	public void computeInSampleSizeReturnsOneWhenAlreadyUnderCap()
+	{
+		// Source already fits within maxPixels → no subsampling needed. 4000×3000 = 12 MP, well under 32 MP.
+		assertEquals(1, BitmapUtils.computeInSampleSize(4000, 3000, 32 * 1024 * 1024));
+		// Exact-match at cap: 5000×6000 = 30M pixels, under 32 MP.
+		assertEquals(1, BitmapUtils.computeInSampleSize(5000, 6000, 32 * 1024 * 1024));
+	}
+
+	@Test
+	public void computeMaxDecodePixelsClampsHighRamDownToCeiling()
+	{
+		// 64 GB RAM (hypothetical workstation-class Android device, or someone running CropCenter on a
+		// Pixel Tablet variant). 64 GB / 16 / 4 = 1 GP, which would let us decode a 1-gigapixel bitmap if we
+		// trusted the formula blindly. Clamp at 512 MP so a single bitmap doesn't push the app into
+		// low-memory-killer territory even on devices that nominally could afford it.
+		assertEquals(512 * 1024 * 1024, BitmapUtils.computeMaxDecodePixels(64L * 1024 * 1024 * 1024));
+	}
+
+	@Test
+	public void computeMaxDecodePixelsClampsLowRamDownToFloor()
+	{
+		// 2 GB RAM (e.g., an old budget Android device). 2 * 1024^3 / 16 / 4 = 32M pixels exactly — the floor.
+		// 1 GB RAM (a pathological ancient device): would compute to 16M, below the floor. Both clamp UP to
+		// the 32 MP floor so the cap never drops below what the audit + REQUIREMENTS contract documents.
+		assertEquals(32 * 1024 * 1024, BitmapUtils.computeMaxDecodePixels(2L * 1024 * 1024 * 1024));
+		assertEquals(32 * 1024 * 1024, BitmapUtils.computeMaxDecodePixels(1L * 1024 * 1024 * 1024));
+		// Zero / negative RAM (defensive against an ActivityManager that returns garbage on a misconfigured
+		// emulator) — still clamp to the floor, never below.
+		assertEquals(32 * 1024 * 1024, BitmapUtils.computeMaxDecodePixels(0L));
+		assertEquals(32 * 1024 * 1024, BitmapUtils.computeMaxDecodePixels(-1L));
+	}
+
+	@Test
+	public void computeMaxDecodePixelsScalesLinearlyInTheMiddle()
+	{
+		// 12 GB RAM (Samsung S23 Ultra / S24 Ultra / similar flagship). 12 * 1024^3 / 16 / 4 = 201_326_592
+		// pixels (~192 MP). Comfortably above 200 MP captures, so 200 MP sources decode at inSampleSize=1.
+		long twelveGb = 12L * 1024 * 1024 * 1024;
+		int expected = (int) (twelveGb / 16L / 4L);
+		assertEquals(expected, BitmapUtils.computeMaxDecodePixels(twelveGb));
+		// 8 GB RAM (a Pixel 8 / older flagship). 8 * 1024^3 / 16 / 4 = 134_217_728 pixels (~128 MP). A 200 MP
+		// source would still need inSampleSize=2 at this cap.
+		long eightGb = 8L * 1024 * 1024 * 1024;
+		assertEquals((int) (eightGb / 16L / 4L), BitmapUtils.computeMaxDecodePixels(eightGb));
+		// 4 GB RAM (a mid-range device). 4 * 1024^3 / 16 / 4 = 67_108_864 pixels (~64 MP). 200 MP needs
+		// inSampleSize=4 (decode at 12.6 MP).
+		long fourGb = 4L * 1024 * 1024 * 1024;
+		assertEquals((int) (fourGb / 16L / 4L), BitmapUtils.computeMaxDecodePixels(fourGb));
+	}
+
+	@Test
 	public void epsilonValueIsHalfOfFinestRulerStep()
 	{
 		// Ruler's finest tick is 0.01°; epsilon sits at 0.005° so every nonzero value the ruler can produce
 		// survives the snap in CropState.setRotationDegrees. A regression that bumped epsilon back to 0.05f
 		// would silently turn 0.01°-0.04° rotations into no-ops — the bug we just spent a session fixing.
 		assertEquals(0.005f, EPS, 0f);
-	}
-
-	@Test
-	public void isCardinalRotationAcceptsNegativeCardinal()
-	{
-		// Negative multiples of 90 normalize through the ((x % 360) + 360) % 360 dance to positive 270 / 180 /
-		// 90 — same cardinal set, same result. Note that -360 normalizes to 0, which the predicate does NOT
-		// treat as cardinal (see the "exact multiples" test) — that's pinned down separately.
-		assertTrue(BitmapUtils.isCardinalRotation(-90f));
-		assertTrue(BitmapUtils.isCardinalRotation(-180f));
-		assertTrue(BitmapUtils.isCardinalRotation(-270f));
-		assertFalse(BitmapUtils.isCardinalRotation(-360f));   // normalizes to 0
 	}
 
 	@Test
@@ -53,6 +138,18 @@ public final class BitmapUtilsTest
 		assertTrue(BitmapUtils.isCardinalRotation(270f));
 		assertFalse(BitmapUtils.isCardinalRotation(360f));
 		assertTrue(BitmapUtils.isCardinalRotation(450f));   // = 90
+	}
+
+	@Test
+	public void isCardinalRotationAcceptsNegativeCardinal()
+	{
+		// Negative multiples of 90 normalize through the ((x % 360) + 360) % 360 dance to positive 270 / 180 /
+		// 90 — same cardinal set, same result. Note that -360 normalizes to 0, which the predicate does NOT
+		// treat as cardinal (see the "exact multiples" test) — that's pinned down separately.
+		assertTrue(BitmapUtils.isCardinalRotation(-90f));
+		assertTrue(BitmapUtils.isCardinalRotation(-180f));
+		assertTrue(BitmapUtils.isCardinalRotation(-270f));
+		assertFalse(BitmapUtils.isCardinalRotation(-360f));   // normalizes to 0
 	}
 
 	@Test
@@ -91,21 +188,69 @@ public final class BitmapUtilsTest
 	}
 
 	@Test
-	public void readExifOrientationReturnsLittleEndianOrientation() throws IOException
+	public void readExifOrientationHandlesFillBytesBeforeApp1() throws IOException
 	{
-		// Baseline: a valid little-endian ("II") EXIF segment with Orientation=6 produces the expected u16
-		// value. Pinning the baseline lets the mismatched-byte-order test below distinguish "1 because
-		// rejected" from "1 because no orientation tag found".
+		// JPEG spec ITU-T T.81 §B.1.1.2: any marker may be preceded by any number of 0xFF fill bytes. Without
+		// fill-byte handling the walker would mis-read the second 0xFF as marker code 0xFF and return 1
+		// (upright) without finding the EXIF segment. Splice 2 fill bytes in front of the APP1 to pin the fix.
 		byte[] jpeg = buildJpegWithOrientation(true, 6);
-		assertEquals(6, BitmapUtils.readExifOrientation(jpeg));
+		// SOI is at [0..1]. APP1 starts at index 2 (FF E1). Insert two fill 0xFF bytes between SOI and APP1.
+		byte[] padded = new byte[jpeg.length + 2];
+		padded[0] = jpeg[0];
+		padded[1] = jpeg[1];
+		padded[2] = (byte) 0xFF;     // fill
+		padded[3] = (byte) 0xFF;     // fill
+		System.arraycopy(jpeg, 2, padded, 4, jpeg.length - 2);
+		assertEquals(6, BitmapUtils.readExifOrientation(padded));
 	}
 
 	@Test
-	public void readExifOrientationReturnsBigEndianOrientation() throws IOException
+	public void readExifOrientationRejectsOutOfRangeValues() throws IOException
 	{
-		// Symmetric baseline for "MM" big-endian EXIF.
-		byte[] jpeg = buildJpegWithOrientation(false, 6);
-		assertEquals(6, BitmapUtils.readExifOrientation(jpeg));
+		// EXIF orientation is defined for values 1..8. A coincidental byte sequence that resolves to 9
+		// (or 0, or 0xFFFF) must map to upright (1) — never returned verbatim — because downstream code
+		// assumes the value is in-range.
+		byte[] jpeg = buildJpegWithOrientation(true, 9);
+		assertEquals(1, BitmapUtils.readExifOrientation(jpeg));
+		byte[] jpegZero = buildJpegWithOrientation(true, 0);
+		assertEquals(1, BitmapUtils.readExifOrientation(jpegZero));
+	}
+
+	@Test
+	public void readExifOrientationRejectsWrongEntryCount() throws IOException
+	{
+		// Count != 1 means the value field stores an offset to an array, not the value itself. A coincidental
+		// orientation entry with count=2 would otherwise have us read the offset's low u16 as orientation.
+		byte[] jpeg = buildJpegWithOrientation(true, 6);
+		// Entry count sits at offset 26..29 (u32, little-endian). Overwrite low byte with 2.
+		jpeg[26] = 2;
+		assertEquals(1, BitmapUtils.readExifOrientation(jpeg));
+	}
+
+	@Test
+	public void readExifOrientationRejectsWrongEntryType() throws IOException
+	{
+		// Real EXIF emits Orientation as type SHORT (3). Anything else means we'd be sampling the value field
+		// under the wrong type interpretation — typically reading a different number of bytes than the entry
+		// actually stores.
+		byte[] jpeg = buildJpegWithOrientation(true, 6);
+		// Entry type sits at offset 24, 25 (IFD entry: tag=22..23, type=24..25, count=26..29, value=30..31).
+		jpeg[24] = 4; // LONG instead of SHORT
+		jpeg[25] = 0;
+		assertEquals(1, BitmapUtils.readExifOrientation(jpeg));
+	}
+
+	@Test
+	public void readExifOrientationRejectsWrongTiffMagic() throws IOException
+	{
+		// TIFF magic must be 42 (0x002A). A coincidental II/MM byte-order match without the magic field means
+		// the payload isn't actually TIFF — refuse to read further so a malformed APP1 with plausible offsets
+		// and a tag-0x0112 byte sequence can't make us return a non-1 orientation from random bytes.
+		byte[] jpeg = buildJpegWithOrientation(true, 6);
+		// TIFF magic sits at offset 14, 15 (after II at 12, 13). Overwrite with 0xABCD.
+		jpeg[14] = (byte) 0xCD;
+		jpeg[15] = (byte) 0xAB;
+		assertEquals(1, BitmapUtils.readExifOrientation(jpeg));
 	}
 
 	@Test
@@ -125,21 +270,21 @@ public final class BitmapUtilsTest
 	}
 
 	@Test
-	public void readExifOrientationHandlesFillBytesBeforeApp1() throws IOException
+	public void readExifOrientationReturnsBigEndianOrientation() throws IOException
 	{
-		// JPEG spec ITU-T T.81 §B.1.1.2: any marker may be preceded by any number of 0xFF fill bytes. Without
-		// fill-byte handling the walker would mis-read the second 0xFF as marker code 0xFF and return 1
-		// (upright) without finding the EXIF segment. Splice 2 fill bytes in front of the APP1 to pin the
-		// fix.
+		// Symmetric baseline for "MM" big-endian EXIF.
+		byte[] jpeg = buildJpegWithOrientation(false, 6);
+		assertEquals(6, BitmapUtils.readExifOrientation(jpeg));
+	}
+
+	@Test
+	public void readExifOrientationReturnsLittleEndianOrientation() throws IOException
+	{
+		// Baseline: a valid little-endian ("II") EXIF segment with Orientation=6 produces the expected u16
+		// value. Pinning the baseline lets the mismatched-byte-order test below distinguish "1 because
+		// rejected" from "1 because no orientation tag found".
 		byte[] jpeg = buildJpegWithOrientation(true, 6);
-		// SOI is at [0..1]. APP1 starts at index 2 (FF E1). Insert two fill 0xFF bytes between SOI and APP1.
-		byte[] padded = new byte[jpeg.length + 2];
-		padded[0] = jpeg[0];
-		padded[1] = jpeg[1];
-		padded[2] = (byte) 0xFF;     // fill
-		padded[3] = (byte) 0xFF;     // fill
-		System.arraycopy(jpeg, 2, padded, 4, jpeg.length - 2);
-		assertEquals(6, BitmapUtils.readExifOrientation(padded));
+		assertEquals(6, BitmapUtils.readExifOrientation(jpeg));
 	}
 
 	@Test
@@ -163,55 +308,6 @@ public final class BitmapUtilsTest
 		// "MM" sits at offset 12, 13. Change second byte to 'I'.
 		jpeg[13] = 'I';
 		assertEquals(1, BitmapUtils.readExifOrientation(jpeg));
-	}
-
-	@Test
-	public void readExifOrientationRejectsWrongTiffMagic() throws IOException
-	{
-		// TIFF magic must be 42 (0x002A). A coincidental II/MM byte-order match without the magic field means
-		// the payload isn't actually TIFF — refuse to read further so a malformed APP1 with plausible offsets
-		// and a tag-0x0112 byte sequence can't make us return a non-1 orientation from random bytes.
-		byte[] jpeg = buildJpegWithOrientation(true, 6);
-		// TIFF magic sits at offset 14, 15 (after II at 12, 13). Overwrite with 0xABCD.
-		jpeg[14] = (byte) 0xCD;
-		jpeg[15] = (byte) 0xAB;
-		assertEquals(1, BitmapUtils.readExifOrientation(jpeg));
-	}
-
-	@Test
-	public void readExifOrientationRejectsWrongEntryType() throws IOException
-	{
-		// Real EXIF emits Orientation as type SHORT (3). Anything else means we'd be sampling the value field
-		// under the wrong type interpretation — typically reading a different number of bytes than the entry
-		// actually stores.
-		byte[] jpeg = buildJpegWithOrientation(true, 6);
-		// Entry type sits at offset 24, 25 (IFD entry: tag=22..23, type=24..25, count=26..29, value=30..31).
-		jpeg[24] = 4; // LONG instead of SHORT
-		jpeg[25] = 0;
-		assertEquals(1, BitmapUtils.readExifOrientation(jpeg));
-	}
-
-	@Test
-	public void readExifOrientationRejectsWrongEntryCount() throws IOException
-	{
-		// Count != 1 means the value field stores an offset to an array, not the value itself. A coincidental
-		// orientation entry with count=2 would otherwise have us read the offset's low u16 as orientation.
-		byte[] jpeg = buildJpegWithOrientation(true, 6);
-		// Entry count sits at offset 26..29 (u32, little-endian). Overwrite low byte with 2.
-		jpeg[26] = 2;
-		assertEquals(1, BitmapUtils.readExifOrientation(jpeg));
-	}
-
-	@Test
-	public void readExifOrientationRejectsOutOfRangeValues() throws IOException
-	{
-		// EXIF orientation is defined for values 1..8. A coincidental byte sequence that resolves to 9
-		// (or 0, or 0xFFFF) must map to upright (1) — never returned verbatim — because downstream code
-		// assumes the value is in-range.
-		byte[] jpeg = buildJpegWithOrientation(true, 9);
-		assertEquals(1, BitmapUtils.readExifOrientation(jpeg));
-		byte[] jpegZero = buildJpegWithOrientation(true, 0);
-		assertEquals(1, BitmapUtils.readExifOrientation(jpegZero));
 	}
 
 	/**

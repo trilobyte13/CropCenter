@@ -134,22 +134,22 @@ public final class GainMapInpainterTest
 	}
 
 	@Test
-	public void roundingBiasRegression_useNearestInt_notFloor()
+	public void inpaintIterativeMaskedSpanAcrossGradientPreservesMonotonicity()
 	{
-		// REGRESSION: an earlier implementation used `sum / count` (floor toward zero), which produced
-		// ⌊(7 * 100) / 8⌋ = 87 instead of round-half-up's 88 for an 8-neighbor average of 7×100 + 1×x
-		// configurations. Compounded across hundreds of passes on a real AI fill this drifted the
-		// inpainted region ~50 LSBs darker than its surroundings — a visible darker HDR boost patch over
-		// the Generative Remove fill area.
-		//
-		// Worst-case fixture: a 5x1 strip with masked pixel at index 2. Neighbors of index 2 in a 5x1 are
-		// index 1 (val=99) and index 3 (val=100). Average = 199 / 2 = 99 (floor) or 99.5 → 100
-		// (round-half-up). Pin the rounded result.
-		int[] values = { 100, 99, 0, 100, 100 };
-		boolean[] mask = { false, false, true, false, false };
+		// 5×1 strip with masked indices 1..3, values 100/?/?/?/200. The fill must be monotonic
+		// non-decreasing — a regression in the rounding direction would manifest as direction-dependent
+		// drift (lower-valued side bleeds further than higher-valued side, breaking monotonicity).
+		// Existing rounding-bias tests pin worst-case symmetric 2-neighbor / 8-neighbor averages; this
+		// test pins the asymmetric gradient case where the inpainted patch SPANS a value range.
+		int[] values = { 100, 0, 0, 0, 200 };
+		boolean[] mask = { false, true, true, true, false };
 		GainMapInpainter.inpaintIterative(values, mask, 5, 1);
-		assertEquals("rounded average of 99 + 100 = 99.5 → 100 (round-half-up), not 99 (floor)",
-			100, values[2]);
+		assertTrue("inpainted span must be monotonic non-decreasing across the gradient: "
+			+ values[1] + " <= " + values[2] + " <= " + values[3],
+			values[1] <= values[2] && values[2] <= values[3]);
+		assertTrue("inpainted values must lie within the source-anchor bounds: "
+			+ "100 <= " + values[1] + " and " + values[3] + " <= 200",
+			values[1] >= 100 && values[3] <= 200);
 	}
 
 	@Test
@@ -169,21 +169,21 @@ public final class GainMapInpainterTest
 	}
 
 	@Test
-	public void inpaintIterativeMaskedSpanAcrossGradientPreservesMonotonicity()
+	public void roundingBiasRegression_useNearestInt_notFloor()
 	{
-		// 5×1 strip with masked indices 1..3, values 100/?/?/?/200. The fill must be monotonic
-		// non-decreasing — a regression in the rounding direction would manifest as direction-dependent
-		// drift (lower-valued side bleeds further than higher-valued side, breaking monotonicity).
-		// Existing rounding-bias tests pin worst-case symmetric 2-neighbor / 8-neighbor averages; this
-		// test pins the asymmetric gradient case where the inpainted patch SPANS a value range.
-		int[] values = { 100, 0, 0, 0, 200 };
-		boolean[] mask = { false, true, true, true, false };
+		// REGRESSION: an earlier implementation used `sum / count` (floor toward zero), which produced
+		// ⌊(7 * 100) / 8⌋ = 87 instead of round-half-up's 88 for an 8-neighbor average of 7×100 + 1×x
+		// configurations. Compounded across hundreds of passes on a real AI fill this drifted the
+		// inpainted region ~50 LSBs darker than its surroundings — a visible darker HDR boost patch over
+		// the Generative Remove fill area.
+		//
+		// Worst-case fixture: a 5x1 strip with masked pixel at index 2. Neighbors of index 2 in a 5x1 are
+		// index 1 (val=99) and index 3 (val=100). Average = 199 / 2 = 99 (floor) or 99.5 → 100
+		// (round-half-up). Pin the rounded result.
+		int[] values = { 100, 99, 0, 100, 100 };
+		boolean[] mask = { false, false, true, false, false };
 		GainMapInpainter.inpaintIterative(values, mask, 5, 1);
-		assertTrue("inpainted span must be monotonic non-decreasing across the gradient: "
-			+ values[1] + " <= " + values[2] + " <= " + values[3],
-			values[1] <= values[2] && values[2] <= values[3]);
-		assertTrue("inpainted values must lie within the source-anchor bounds: "
-			+ "100 <= " + values[1] + " and " + values[3] + " <= 200",
-			values[1] >= 100 && values[3] <= 200);
+		assertEquals("rounded average of 99 + 100 = 99.5 → 100 (round-half-up), not 99 (floor)",
+			100, values[2]);
 	}
 }

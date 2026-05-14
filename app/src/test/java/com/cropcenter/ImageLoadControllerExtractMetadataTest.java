@@ -32,69 +32,6 @@ public final class ImageLoadControllerExtractMetadataTest
 	private static final byte[] JPEG_SOI = { (byte) 0xFF, (byte) 0xD8 };
 	private static final byte[] JPEG_EOI = { (byte) 0xFF, (byte) 0xD9 };
 
-	private static byte[] concat(byte[]... parts) throws IOException
-	{
-		ByteArrayOutputStream out = new ByteArrayOutputStream();
-		for (byte[] p : parts)
-		{
-			out.write(p);
-		}
-		return out.toByteArray();
-	}
-
-	@Test
-	public void extractRoutesBareJpegAsJpegWithEmptyDisplay() throws IOException
-	{
-		// Bare SOI+EOI — no APP/COM segments, no HDR / SEFT trailer. Format must be JPEG and the display string
-		// empty (no "EXIF" / "ICC" / "XMP" / "HDR" / "Samsung" components).
-		byte[] jpeg = concat(JPEG_SOI, JPEG_EOI);
-		var extracted = ImageLoadController.extractMetadata(jpeg);
-		assertEquals(Format.JPEG, extracted.sourceFormat());
-		assertEquals("", extracted.displayString());
-		// pngExifTiff is the PNG-only carrier for the round-trip; must be null on the JPEG branch.
-		assertNull("JPEG path must not populate pngExifTiff", extracted.pngExifTiff());
-		// jpegMeta is non-null but may be empty — the segment list, not the EXIF-payload byte array.
-		assertNotNull(extracted.jpegMeta());
-	}
-
-	@Test
-	public void extractRoutesPngWithoutExifAsPngOnly() throws IOException
-	{
-		// PNG with IHDR but no eXIf chunk — display string is "PNG" alone, pngExifTiff is null.
-		byte[] png = concat(PNG_SIGNATURE, buildIhdrChunk());
-		var extracted = ImageLoadController.extractMetadata(png);
-		assertEquals(Format.PNG, extracted.sourceFormat());
-		assertEquals("PNG", extracted.displayString());
-		assertNull("PNG without eXIf must have null pngExifTiff", extracted.pngExifTiff());
-		// HDR / SEFT only apply to JPEG.
-		assertNull(extracted.gainMap());
-		assertNull(extracted.seftTrailer());
-	}
-
-	@Test
-	public void extractRoutesPngWithExifAsPngPlusExif() throws IOException
-	{
-		// PNG with a valid eXIf chunk — display string promotes to "PNG+EXIF" and pngExifTiff carries the raw
-		// TIFF bytes uncapped. Pin the second contract: the synthetic APP1 segment list also fires (1 segment)
-		// so the JPEG-side patcher path can find EXIF when the user saves PNG → JPEG.
-		byte[] tiff = {
-			'I', 'I', 0x2A, 0x00,           // little-endian TIFF magic
-			0x08, 0x00, 0x00, 0x00          // IFD0 offset = 8
-		};
-		byte[] png = concat(PNG_SIGNATURE, buildIhdrChunk(), buildChunk("eXIf", tiff));
-		var extracted = ImageLoadController.extractMetadata(png);
-		assertEquals(Format.PNG, extracted.sourceFormat());
-		assertEquals("PNG+EXIF", extracted.displayString());
-		assertNotNull("PNG with eXIf must populate pngExifTiff", extracted.pngExifTiff());
-		assertEquals("pngExifTiff carries the raw TIFF bytes uncapped",
-			tiff.length, extracted.pngExifTiff().length);
-		// Synthetic APP1 segment present in jpegMeta so the JPEG-side patcher path can use it on PNG → JPEG
-		// export.
-		assertEquals(1, extracted.jpegMeta().size());
-		JpegSegment seg = extracted.jpegMeta().get(0);
-		assertTrue("synthetic APP1 must satisfy isExif()", seg.isExif());
-	}
-
 	@Test
 	public void extractEmitsHdrAndSamsungInDisplayWhenGainMapAndSeftPresent() throws IOException
 	{
@@ -107,8 +44,8 @@ public final class ImageLoadControllerExtractMetadataTest
 			new byte[] { 'I', 'I', '*', 0x00 });
 		byte[] mpfSeg = appSegment(0xE2, mpfPayload);
 		// XMP segment carrying the hdrgm namespace — HdrSignature.hasHdrgmInXmp scans XMP segment
-		// bodies only, so the marker must live INSIDE an XMP APP1 segment to fire the gate (Codex
-		// round-19 F1). 28 bytes of canonical XMP_HEADER + a body that mentions hdrgm.
+		// bodies only, so the marker must live INSIDE an XMP APP1 segment to fire the gate. 28 bytes
+		// of canonical XMP_HEADER + a body that mentions hdrgm.
 		byte[] xmpPayload = concat(
 			"http://ns.adobe.com/xap/1.0/\0".getBytes(StandardCharsets.US_ASCII),
 			"<x:xmpmeta xmlns:hdrgm=\"http://ns.adobe.com/hdr-gain-map/1.0/\"/>"
@@ -129,6 +66,21 @@ public final class ImageLoadControllerExtractMetadataTest
 		assertTrue("display must contain HDR for an Ultra HDR file: " + display, display.contains("HDR"));
 		assertTrue("display must contain Samsung for a SEFT-trailing file: " + display,
 			display.contains("Samsung"));
+	}
+
+	@Test
+	public void extractRoutesBareJpegAsJpegWithEmptyDisplay() throws IOException
+	{
+		// Bare SOI+EOI — no APP/COM segments, no HDR / SEFT trailer. Format must be JPEG and the display string
+		// empty (no "EXIF" / "ICC" / "XMP" / "HDR" / "Samsung" components).
+		byte[] jpeg = concat(JPEG_SOI, JPEG_EOI);
+		var extracted = ImageLoadController.extractMetadata(jpeg);
+		assertEquals(Format.JPEG, extracted.sourceFormat());
+		assertEquals("", extracted.displayString());
+		// pngExifTiff is the PNG-only carrier for the round-trip; must be null on the JPEG branch.
+		assertNull("JPEG path must not populate pngExifTiff", extracted.pngExifTiff());
+		// jpegMeta is non-null but may be empty — the segment list, not the EXIF-payload byte array.
+		assertNotNull(extracted.jpegMeta());
 	}
 
 	@Test
@@ -159,6 +111,44 @@ public final class ImageLoadControllerExtractMetadataTest
 	}
 
 	@Test
+	public void extractRoutesPngWithExifAsPngPlusExif() throws IOException
+	{
+		// PNG with a valid eXIf chunk — display string promotes to "PNG+EXIF" and pngExifTiff carries the raw
+		// TIFF bytes uncapped. Pin the second contract: the synthetic APP1 segment list also fires (1 segment)
+		// so the JPEG-side patcher path can find EXIF when the user saves PNG → JPEG.
+		byte[] tiff = {
+			'I', 'I', 0x2A, 0x00,           // little-endian TIFF magic
+			0x08, 0x00, 0x00, 0x00          // IFD0 offset = 8
+		};
+		byte[] png = concat(PNG_SIGNATURE, buildIhdrChunk(), buildChunk("eXIf", tiff));
+		var extracted = ImageLoadController.extractMetadata(png);
+		assertEquals(Format.PNG, extracted.sourceFormat());
+		assertEquals("PNG+EXIF", extracted.displayString());
+		assertNotNull("PNG with eXIf must populate pngExifTiff", extracted.pngExifTiff());
+		assertEquals("pngExifTiff carries the raw TIFF bytes uncapped",
+			tiff.length, extracted.pngExifTiff().length);
+		// Synthetic APP1 segment present in jpegMeta so the JPEG-side patcher path can use it on PNG → JPEG
+		// export.
+		assertEquals(1, extracted.jpegMeta().size());
+		JpegSegment seg = extracted.jpegMeta().get(0);
+		assertTrue("synthetic APP1 must satisfy isExif()", seg.isExif());
+	}
+
+	@Test
+	public void extractRoutesPngWithoutExifAsPngOnly() throws IOException
+	{
+		// PNG with IHDR but no eXIf chunk — display string is "PNG" alone, pngExifTiff is null.
+		byte[] png = concat(PNG_SIGNATURE, buildIhdrChunk());
+		var extracted = ImageLoadController.extractMetadata(png);
+		assertEquals(Format.PNG, extracted.sourceFormat());
+		assertEquals("PNG", extracted.displayString());
+		assertNull("PNG without eXIf must have null pngExifTiff", extracted.pngExifTiff());
+		// HDR / SEFT only apply to JPEG.
+		assertNull(extracted.gainMap());
+		assertNull(extracted.seftTrailer());
+	}
+
+	@Test
 	public void extractTreatsJpegWithHdrgmStringButNoMpfAsNonHdr() throws IOException
 	{
 		// Round-19 F-A: the HDR gate at extractMetadata is `hasMpf && HdrSignature.hasHdrgmInXmp(meta)`.
@@ -178,9 +168,30 @@ public final class ImageLoadControllerExtractMetadataTest
 	}
 
 	@Test
+	public void extractTreatsJpegWithMpfButNoHdrgmAsNonHdr() throws IOException
+	{
+		// Even when MPF is present, the absence of the hdrgm namespace marker means the file is non-HDR
+		// (MPF can describe focus-stacked / panorama / ZSL bursts, not just Ultra HDR). Pin: a JPEG
+		// with MPF + a post-primary FF D8 thumbnail but no "hdrgm" anywhere must NOT extract that
+		// thumbnail as a gain map — the symmetric false-positive on the MPF-but-not-HDR path.
+		byte[] mpfPayload = concat(
+			"MPF\0".getBytes(StandardCharsets.US_ASCII),
+			new byte[] { 'I', 'I', '*', 0x00 });
+		byte[] mpfSeg = appSegment(0xE2, mpfPayload);
+		byte[] thumbnail = concat(JPEG_SOI, scanBody(), JPEG_EOI);
+		byte[] jpeg = concat(JPEG_SOI, mpfSeg, scanBody(), JPEG_EOI, thumbnail);
+
+		var extracted = ImageLoadController.extractMetadata(jpeg);
+		assertEquals(Format.JPEG, extracted.sourceFormat());
+		assertNull("MPF without hdrgm must not extract a gain map", extracted.gainMap());
+		assertFalse("display must not advertise HDR without the hdrgm marker: " + extracted.displayString(),
+			extracted.displayString().contains("HDR"));
+	}
+
+	@Test
 	public void extractTreatsJpegWithMpfPlusHdrgmOutsideXmpAsNonHdr() throws IOException
 	{
-		// Codex round-19 F1: even when MPF AND the literal "hdrgm" 5-byte sequence are both present,
+		// Even when MPF AND the literal "hdrgm" 5-byte sequence are both present,
 		// the file is NOT HDR unless the marker lives inside an XMP APP1 segment. A pre-fix full-file
 		// scan would false-positive on "hdrgm" in MakerNote / COM / vendor blob / SEFT history /
 		// entropy. Pin the precise XMP-only contract: MPF + COM-with-hdrgm + post-primary FF D8
@@ -204,28 +215,6 @@ public final class ImageLoadControllerExtractMetadataTest
 			+ extracted.displayString(), extracted.displayString().contains("HDR"));
 	}
 
-	@Test
-	public void extractTreatsJpegWithMpfButNoHdrgmAsNonHdr() throws IOException
-	{
-		// Round-19 F-A: even when MPF is present, the absence of the hdrgm namespace marker means the
-		// file is non-HDR (MPF can describe focus-stacked / panorama / ZSL bursts, not just Ultra HDR).
-		// Pin: a JPEG with MPF + a post-primary FF D8 thumbnail but no "hdrgm" anywhere must NOT
-		// extract that thumbnail as a gain map — the symmetric Codex-round-18-F1 false-positive on the
-		// MPF-but-not-HDR path.
-		byte[] mpfPayload = concat(
-			"MPF\0".getBytes(StandardCharsets.US_ASCII),
-			new byte[] { 'I', 'I', '*', 0x00 });
-		byte[] mpfSeg = appSegment(0xE2, mpfPayload);
-		byte[] thumbnail = concat(JPEG_SOI, scanBody(), JPEG_EOI);
-		byte[] jpeg = concat(JPEG_SOI, mpfSeg, scanBody(), JPEG_EOI, thumbnail);
-
-		var extracted = ImageLoadController.extractMetadata(jpeg);
-		assertEquals(Format.JPEG, extracted.sourceFormat());
-		assertNull("MPF without hdrgm must not extract a gain map", extracted.gainMap());
-		assertFalse("display must not advertise HDR without the hdrgm marker: " + extracted.displayString(),
-			extracted.displayString().contains("HDR"));
-	}
-
 	private static byte[] appSegment(int marker, byte[] payload) throws IOException
 	{
 		ByteArrayOutputStream out = new ByteArrayOutputStream();
@@ -236,6 +225,16 @@ public final class ImageLoadControllerExtractMetadataTest
 		out.write((segLen >> 8) & 0xFF);
 		out.write(segLen & 0xFF);
 		out.write(payload);
+		return out.toByteArray();
+	}
+
+	private static byte[] concat(byte[]... parts) throws IOException
+	{
+		ByteArrayOutputStream out = new ByteArrayOutputStream();
+		for (byte[] p : parts)
+		{
+			out.write(p);
+		}
 		return out.toByteArray();
 	}
 

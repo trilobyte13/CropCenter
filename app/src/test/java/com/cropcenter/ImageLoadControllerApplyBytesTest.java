@@ -28,6 +28,21 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public final class ImageLoadControllerApplyBytesTest
 {
 	@Test
+	public void applyBytesRejectsEmptyInput()
+	{
+		// Zero-length array — both signature checks short-circuit on the length predicate. Pin the
+		// rejection so a future change that loosens the length guard still surfaces as a user-visible
+		// rejection rather than a silent state mutation on whatever default Bitmap.decodeByteArray returns
+		// for empty bytes.
+		FakeImageLoadHost fake = new FakeImageLoadHost();
+		ImageLoadController controller = new ImageLoadController(fake, null);
+
+		boolean result = controller.applyBytes(new byte[0], "empty.jpg");
+
+		assertFalse("empty bytes must not be accepted", result);
+	}
+
+	@Test
 	public void applyBytesRejectsHeicWithUnsupportedFormatToast()
 	{
 		// HEIC ftyp box: 4-byte length + "ftyp" + brand. Falls outside both signature checks.
@@ -61,21 +76,6 @@ public final class ImageLoadControllerApplyBytesTest
 
 		assertFalse("WebP bytes must not be accepted as a JPEG / PNG source", result);
 		assertNotNull("rejection toast must fire so the user knows what happened", fake.lastToastMessage);
-	}
-
-	@Test
-	public void applyBytesRejectsEmptyInput()
-	{
-		// Zero-length array — both signature checks short-circuit on the length predicate. Pin the
-		// rejection so a future change that loosens the length guard still surfaces as a user-visible
-		// rejection rather than a silent state mutation on whatever default Bitmap.decodeByteArray returns
-		// for empty bytes.
-		FakeImageLoadHost fake = new FakeImageLoadHost();
-		ImageLoadController controller = new ImageLoadController(fake, null);
-
-		boolean result = controller.applyBytes(new byte[0], "empty.jpg");
-
-		assertFalse("empty bytes must not be accepted", result);
 	}
 
 	/**

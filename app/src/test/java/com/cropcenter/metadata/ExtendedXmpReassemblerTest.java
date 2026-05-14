@@ -15,57 +15,20 @@ import org.junit.Test;
 
 /**
  * Tests for ExtendedXmpReassembler — the single chokepoint that reassembles Adobe Extended XMP chunks split across
- * multiple APP1 segments. Used transitively by HorizonDetector (roll/tilt scanning across chunk boundaries — Codex
- * round-21 F1) and HdrSignature (hdrgm marker scanning — Codex round-22 logic F2), so a regression here silently
- * breaks Auto Rotate horizon detection AND Ultra HDR gating on real-world Samsung Ultra HDR sources whose XMP
- * body exceeds the JPEG APP1 ~64 KB cap.
+ * multiple APP1 segments. Used transitively by HorizonDetector (roll/tilt scanning across chunk boundaries) and
+ * HdrSignature (hdrgm marker scanning), so a regression here silently breaks Auto Rotate horizon detection AND
+ * Ultra HDR gating on real-world Samsung Ultra HDR sources whose XMP body exceeds the JPEG APP1 ~64 KB cap.
  *
- * The unsigned-offset sort (Codex round-22 logic F3) is the load-bearing invariant — a regression that switches to
+ * The unsigned-offset sort is the load-bearing invariant — a regression that switches to
  * signed comparison would let a top-bit-set adversarial offset sort BEFORE the legitimate offset 0, producing a
  * reassembled body whose tag-attribute scanners find nothing (Roll/Tilt detection and hdrgm detection both silently
  * fail). Pinned here so a future "simplify the comparator" refactor catches itself.
  */
 public final class ExtendedXmpReassemblerTest
 {
-	private static final byte[] CHUNK_A_BODY = "<chunk-A-content>".getBytes(StandardCharsets.US_ASCII);
-	private static final byte[] CHUNK_B_BODY = "<chunk-B-content>".getBytes(StandardCharsets.US_ASCII);
 	private static final String GUID_A = "A1B2C3D4E5F60718293A4B5C6D7E8F90";
+
 	private static final String GUID_B = "B1B2C3D4E5F60718293A4B5C6D7E8F90";
-
-	@Test
-	public void emptyMetaReturnsEmptyArray()
-	{
-		assertEquals(0, ExtendedXmpReassembler.reassemble(null).length);
-		assertEquals(0, ExtendedXmpReassembler.reassemble(Collections.emptyList()).length);
-	}
-
-	@Test
-	public void noExtendedXmpChunksReturnsEmptyArray() throws IOException
-	{
-		// Non-extended-XMP segments (a plain EXIF segment) are skipped, so reassembly produces empty output.
-		List<JpegSegment> meta = new ArrayList<>();
-		meta.add(new JpegSegment(0xE1, JpegFixtures.appSegment(0xE1, JpegFixtures.exifAppPayload())));
-		assertEquals(0, ExtendedXmpReassembler.reassemble(meta).length);
-	}
-
-	@Test
-	public void topBitSetOffsetSortsAfterZeroUnderUnsignedComparison() throws IOException
-	{
-		// Codex round-22 logic F3 regression test. Two chunks of the same GUID — one at offset 0 (legit
-		// chunk-zero of any well-formed Extended XMP packet), the other at offset 0x80000010 (top-bit set).
-		// Under signed int comparison 0x80000010 sorts BEFORE 0 (as the negative int -2_147_483_632), which
-		// would corrupt the reassembled body's order — chunk-A's content would appear AFTER chunk-B's
-		// content even though chunk-A is at the legitimate file-start offset. Unsigned comparison treats
-		// 0x80000010 as the larger value and preserves the chunk-A-then-chunk-B order.
-		List<JpegSegment> meta = new ArrayList<>();
-		meta.add(extendedXmpSegment(GUID_A, 0, CHUNK_A_BODY));
-		meta.add(extendedXmpSegment(GUID_A, 0x80000010L, CHUNK_B_BODY));
-
-		byte[] reassembled = ExtendedXmpReassembler.reassemble(meta);
-		assertNotNull(reassembled);
-		// Chunk-A's body MUST appear before chunk-B's body in the reassembled output.
-		assertArrayEquals(concat(CHUNK_A_BODY, CHUNK_B_BODY), reassembled);
-	}
 
 	@Test
 	public void chunksReassembleInUnsignedOffsetOrderWithinGuid() throws IOException
@@ -82,6 +45,13 @@ public final class ExtendedXmpReassemblerTest
 	}
 
 	@Test
+	public void emptyMetaReturnsEmptyArray()
+	{
+		assertEquals(0, ExtendedXmpReassembler.reassemble(null).length);
+		assertEquals(0, ExtendedXmpReassembler.reassemble(Collections.emptyList()).length);
+	}
+
+	@Test
 	public void multipleGuidGroupsReassembleSeparatelyInGuidOrder() throws IOException
 	{
 		// Two GUID groups (rare but spec-legal). Each GUID's chunks reassemble independently, and GUID groups
@@ -92,6 +62,34 @@ public final class ExtendedXmpReassemblerTest
 		meta.add(extendedXmpSegment(GUID_A, 0, CHUNK_A_BODY));
 
 		byte[] reassembled = ExtendedXmpReassembler.reassemble(meta);
+		assertArrayEquals(concat(CHUNK_A_BODY, CHUNK_B_BODY), reassembled);
+	}
+
+	@Test
+	public void noExtendedXmpChunksReturnsEmptyArray() throws IOException
+	{
+		// Non-extended-XMP segments (a plain EXIF segment) are skipped, so reassembly produces empty output.
+		List<JpegSegment> meta = new ArrayList<>();
+		meta.add(new JpegSegment(0xE1, JpegFixtures.appSegment(0xE1, JpegFixtures.exifAppPayload())));
+		assertEquals(0, ExtendedXmpReassembler.reassemble(meta).length);
+	}
+
+	@Test
+	public void topBitSetOffsetSortsAfterZeroUnderUnsignedComparison() throws IOException
+	{
+		// Unsigned-offset regression test. Two chunks of the same GUID — one at offset 0 (legit
+		// chunk-zero of any well-formed Extended XMP packet), the other at offset 0x80000010 (top-bit set).
+		// Under signed int comparison 0x80000010 sorts BEFORE 0 (as the negative int -2_147_483_632), which
+		// would corrupt the reassembled body's order — chunk-A's content would appear AFTER chunk-B's
+		// content even though chunk-A is at the legitimate file-start offset. Unsigned comparison treats
+		// 0x80000010 as the larger value and preserves the chunk-A-then-chunk-B order.
+		List<JpegSegment> meta = new ArrayList<>();
+		meta.add(extendedXmpSegment(GUID_A, 0, CHUNK_A_BODY));
+		meta.add(extendedXmpSegment(GUID_A, 0x80000010L, CHUNK_B_BODY));
+
+		byte[] reassembled = ExtendedXmpReassembler.reassemble(meta);
+		assertNotNull(reassembled);
+		// Chunk-A's body MUST appear before chunk-B's body in the reassembled output.
 		assertArrayEquals(concat(CHUNK_A_BODY, CHUNK_B_BODY), reassembled);
 	}
 
@@ -133,4 +131,8 @@ public final class ExtendedXmpReassemblerTest
 		payload.write(body);
 		return new JpegSegment(0xE1, JpegFixtures.appSegment(0xE1, payload.toByteArray()));
 	}
+
+	private static final byte[] CHUNK_A_BODY = "<chunk-A-content>".getBytes(StandardCharsets.US_ASCII);
+
+	private static final byte[] CHUNK_B_BODY = "<chunk-B-content>".getBytes(StandardCharsets.US_ASCII);
 }

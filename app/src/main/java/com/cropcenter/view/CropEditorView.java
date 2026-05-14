@@ -1,6 +1,7 @@
 package com.cropcenter.view;
 
 import android.content.Context;
+import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.util.AttributeSet;
 import android.view.MotionEvent;
@@ -218,6 +219,17 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 	 * borders land exactly on pixel boundaries and the rule-of-thirds lines hit pixel
 	 * centers when cropW is divisible by 3. Viewport-pan releases (not moving the crop)
 	 * skip the snap entirely.
+	 *
+	 * Tie-preserving snap: when centerX sits exactly half-way between two valid snap targets (e.g., centerX
+	 * is at P+0.5 with even cropW; both P and P+1 are 0.5 px away), the previous Math.round / floor+0.5
+	 * formulas always biased toward one side (half-up). On a SELECT-then-MOVE flow that's a real
+	 * user-visible bug — the SELECT-mode tap snaps the selection point to P+0.5 so the grid central line
+	 * passes through the marker square's center, but a subsequent MOVE-mode no-op pan would shift the
+	 * center by exactly 0.5 px in a fixed direction, leaving the grid offset from the selection dot the
+	 * user originally placed. snapAxisPreservingTies returns the current center on the equidistant
+	 * tie-case and snaps normally otherwise; cropImageX may then be fractional but the exporter handles
+	 * that via bilinear sampling in BitmapUtils.drawCropped (the integer-cropImageX property is for
+	 * crispness, not correctness).
 	 */
 	@Override
 	public void onPanRelease()
@@ -230,12 +242,8 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 		int cropH = state.getCropH();
 		float centerX = state.getCenterX();
 		float centerY = state.getCenterY();
-		float snappedX = ((cropW & 1) == 0)
-			? Math.round(centerX)
-			: (float) Math.floor(centerX) + 0.5f;
-		float snappedY = ((cropH & 1) == 0)
-			? Math.round(centerY)
-			: (float) Math.floor(centerY) + 0.5f;
+		float snappedX = snapAxisPreservingTies(centerX, cropW);
+		float snappedY = snapAxisPreservingTies(centerY, cropH);
 		if (snappedX == centerX && snappedY == centerY)
 		{
 			return;
@@ -263,6 +271,20 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 		{
 			return;
 		}
+		// Snapshot the source bitmap reference once. The volatile sourceImage field can be swapped to null by
+		// a bg-thread state.reset() (Share/View intent's load that arrived mid-tap) between this read and the
+		// imgW / imgH reads further down. Without the snapshot, a race between `isInsideRotatedImage`'s
+		// non-null check and the later getImageWidth() call yields imgW=0; Math.clamp(value, 0.5f, -0.5f) then
+		// throws IllegalArgumentException (Java 21 enforces min ≤ max) and propagates uncaught to the touch
+		// dispatcher, crashing the UI thread.
+		Bitmap sourceImage = state.getSourceImage();
+		if (sourceImage == null)
+		{
+			return;
+		}
+		int imgW = sourceImage.getWidth();
+		int imgH = sourceImage.getHeight();
+
 		// Un-rotate: same reasoning as onLongPress — selection points are stored in un-rotated image coords, so
 		// the tap location must be converted through the inverse rotation before comparing to existing points
 		// or adding a new one.
@@ -311,8 +333,6 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 			// isInsideRotatedImage accepts coords equal to imgW / imgH (inclusive bounds), but floor(imgW)
 			// + 0.5 = imgW + 0.5 which is outside the source. Rotated-tap float precision can also push
 			// marginal taps just past the edge; the clamp absorbs both.
-			int imgW = state.getImageWidth();
-			int imgH = state.getImageHeight();
 			float snappedX = Math.clamp((float) Math.floor(imageX) + 0.5f, 0.5f, imgW - 0.5f);
 			float snappedY = Math.clamp((float) Math.floor(imageY) + 0.5f, 0.5f, imgH - 0.5f);
 			state.addSelectionPoint(new SelectionPoint(snappedX, snappedY));
@@ -497,6 +517,44 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 	}
 
 	/**
+	 * Snap a centerX or centerY value to the parity-valid pixel grid for the given crop dim, but preserve the
+	 * input when both candidate snap targets are equidistant. Even dim → integer center; odd dim → half-integer.
+	 *
+	 * Tie-preservation: when center sits exactly half-way between two valid targets (e.g., center = P+0.5 with
+	 * even dim — both P and P+1 are 0.5 px away, OR center = integer P with odd dim — both P-0.5 and P+0.5 are
+	 * 0.5 px away), the previous Math.round / floor+0.5 formulas always biased toward one side (half-up). On
+	 * a SELECT-then-MOVE flow that's a real user-visible bug: SELECT-mode taps snap selection points to
+	 * pixel-half-integer positions so the grid central line passes through the marker square's center, but a
+	 * subsequent no-op MOVE-mode pan would shift the center 0.5 px in a fixed direction, leaving the grid
+	 * offset from the selection dot the user originally placed. Returning the input on the equidistant case
+	 * preserves that alignment; cropImageX may then be fractional but the exporter handles fractional origin
+	 * via bilinear sampling (BitmapUtils.drawCropped) — the integer-cropImageX property is for crispness, not
+	 * correctness.
+	 *
+	 * Package-private for direct unit-test access — onPanRelease itself is wired through view machinery
+	 * (gesture handler, listener) that's awkward to drive from a JUnit 4 test, but the snap math is pure.
+	 *
+	 * @param center current axis-center value (post-drag)
+	 * @param dim    crop dim along that axis (cropW for X, cropH for Y); parity drives the target type
+	 * @return the nearest parity-valid snap target, OR `center` itself when both candidates are equidistant
+	 */
+	static float snapAxisPreservingTies(float center, int dim)
+	{
+		float target = ((dim & 1) == 0)
+			? Math.round(center)
+			: (float) Math.floor(center) + 0.5f;
+		// Equidistant tie-case: the snap shift would be exactly 0.5 px in a fixed direction (half-up bias
+		// from Math.round, or floor+0.5 jumping a half-step from an integer input). Use 0.499f as the
+		// epsilon-tolerant threshold so float precision noise around 0.5 still resolves to "tied" rather
+		// than to a sub-half snap that mimics the half-up bias we're trying to avoid.
+		if (Math.abs(center - target) > 0.499f)
+		{
+			return center;
+		}
+		return target;
+	}
+
+	/**
 	 * True when the locked axis moved more than 0.5 px between preDrag* and the current state.centerX/centerY —
 	 * i.e. the joint clamp in setCenter pushed the locked axis. Used to reject moves on a locked axis and restore
 	 * via recomputeCrop.
@@ -540,6 +598,31 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 			// rotation clamp moving the locked axis.
 			float preDragCenterX = state.getCenterX();
 			float preDragCenterY = state.getCenterY();
+
+			// When H or V lock is active AND selection points are present, the LOCKED axis is pinned to
+			// the selection midpoint regardless of anchor drift. Without this override, resyncAnchorIfStale
+			// (just above) snaps the anchor to whatever the current center is — so any prior shift
+			// (rotation, AR change, axis-free drag, lock-toggle) bakes the drifted position into the anchor
+			// and the locked axis stays at that drifted value rather than at the selection. The user
+			// expectation reported as a bug: "with H or V active, the drag should keep the crop centered on
+			// the selection along the locked axis." Recompute the locked axis from rotated selection
+			// midpoint here so it always tracks the selection — recenterOnSelection (run on H/V toggle in
+			// the toolbar handler) only fires once on click; this catches every subsequent drag frame.
+			var points = state.getSelectionPoints();
+			if (!points.isEmpty() && (lock == CenterMode.HORIZONTAL || lock == CenterMode.VERTICAL))
+			{
+				float[] selectionMid = CropEngine.rotatedSelectionMidpoint(
+					points, state.getImageWidth(), state.getImageHeight(),
+					state.getRotationDegrees());
+				if (lock == CenterMode.HORIZONTAL)
+				{
+					newCenterY = selectionMid[1];
+				}
+				else
+				{
+					newCenterX = selectionMid[0];
+				}
+			}
 
 			if (lock == CenterMode.HORIZONTAL)
 			{

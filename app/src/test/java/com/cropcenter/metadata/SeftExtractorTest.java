@@ -82,7 +82,7 @@ public final class SeftExtractorTest
 	@Test
 	public void returnsNullWhenGainMapPresentButSliceUnparseable() throws IOException
 	{
-		// Round 8 forward-walk fix: when primary's EOI is followed by FFD8 (gain-map SOI) but the slice
+		// Forward-walk fix: when primary's EOI is followed by FFD8 (gain-map SOI) but the slice
 		// has no clean EOI before the SEFT footer, JpegMarkerWalker.findPrimaryEoi(slice, ...) returns -1
 		// and the extractor must return null. A regression that fell back to trailerStart=primaryEnd on
 		// gmEoiInSlice<0 would mis-locate the trailer start IN THE MIDDLE OF the broken gain map and ship
@@ -102,7 +102,7 @@ public final class SeftExtractorTest
 	@Test
 	public void sdrFileWithEmbeddedThumbnailInSeftKeepsThumbnailInTrailer() throws IOException
 	{
-		// Codex round-18 F1: an SDR Samsung file's SEFT data block can begin with FF D8 (embedded JPEG
+		// An SDR Samsung file's SEFT data block can begin with FF D8 (embedded JPEG
 		// thumbnail). With hasGainMap=false the extractor must NOT walk past those bytes as if they were
 		// a gain-map EOI — the trailer must include the thumbnail bytes verbatim. Pre-fix, the extractor
 		// trusted the FF D8 alone and would mis-walk to the thumbnail's FF D9, dropping the thumbnail

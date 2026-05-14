@@ -210,6 +210,21 @@ stays load-bearing:
   tick marks invisible. The Self-audit grep below catches any new `(int) (N * density)` regression.
 - **`util/RotationMath.rotate / inverse`** — every 2D rotation around the image center. Sub-epsilon residual handling
   lives here.
+- **`util/BitmapUtils.getMaxDecodePixels()` + `BitmapUtils.computeInSampleSize` + `BitmapUtils.initialize(Context)`**
+  — the consistent-subsampling `BitmapFactory` decode sites route through this trio (load in
+  `ImageLoadController.applyBytes` and HDR-save re-decode in `UltraHdrCompat.decodeHdrBitmap`). The cap is
+  **device-adaptive**: `initialize` runs once from `MainActivity.onCreate`, reads
+  `ActivityManager.getMemoryInfo().totalMem`, budgets 1/16 of total RAM (4 bytes per ARGB pixel), and clamps to
+  `[32 MP, 512 MP]`. A 12 GB-RAM Samsung flagship gets ~187 MP (200 MP captures decode at `inSampleSize=1`,
+  no quality loss); a 4 GB phone gets ~64 MP; a hypothetical 2 GB phone floors at 32 MP. Two-pass decode:
+  bounds-only pre-pass reads the SOF dims, `computeInSampleSize` picks the smallest power-of-2 sample size
+  that fits the subsampled bitmap within the cap. Power-of-2 contract matters — Android rounds non-power-of-2
+  sampleSize values down internally, blowing the memory budget if a caller hand-rolls a "3" or "5". Both load
+  and HDR-save re-decode sites pull from `state.getOriginalFileBytes()`, so they land on identical
+  `inSampleSize` values — the HDR re-decode's coordinates stay self-consistent with the load-time subsampled
+  `CropRender.cropW/cropH`. `EditAligner.reorientEdit` deliberately does NOT route through this trio: the
+  graft splice requires full-resolution edit primary to match original's full-res metadata / gainmap; OOM
+  is caught and surfaced as a clean "Couldn't decode the edit during reorientation" toast instead.
 - **`metadata/JpegMarker`** — every JPEG marker byte (`SOI` / `EOI` / `SOS` / `RST_FIRST` / `RST_LAST` / `STUFFING` /
   `TEM`). Don't repeat the hex literal with an explanatory comment.
 - **`metadata/JpegMarkerWalker.findPrimaryEoi(file, endBound)`** — every walk to find the byte just past the primary
@@ -217,7 +232,7 @@ stays load-bearing:
   near-identical implementations across `CropExporter`, `GraftWriter`, and `GainMapExtractor`. Hardened against `segLen
   < 2`, `off + 2 + segLen` wrap-overflow, and truncated SOS headers.
 - **`metadata/JpegSegment.XMP_HEADER`** — the canonical `"http://ns.adobe.com/xap/1.0/\0"` namespace identifier consumed
-  by both `isXmp()` and `HorizonDetector`.
+  by `isXmp()`, `HorizonDetector`, and `XmpItemLengthPatcher`.
 - **`model/Format`** — JPEG / PNG enum carrying `extension()` and `mimeType()`. Never re-derive `".jpg"` /
   `"image/jpeg"`; never compare format with `String.equals`.
 - **`crop/CropFitContext.of(...)`** — the rotated-clamp's pre-computed sin/cos/half-extents bundle. Replaced an
@@ -227,7 +242,7 @@ stays load-bearing:
   (private ctor closes the (W, H)-vs-(H, W) transposition footgun that a public record's positional canonical
   constructor would re-open). Has derived `srcX()` / `srcY()`.
 - **`util/SafPaths`** — pure-string SAF document-ID parsing (`parentDocIdOf`, `lastSegmentSeparatorEnd`,
-  `hasImageSignature`). Static, no Context — testable directly.
+  `hasImageSignature`, `hasParentTraversalSegment`). Static, no Context — testable directly.
 - **`model/StateBus`** — listener-dispatch + batch-suppression. CropState delegates here; never re-implement the batch
   protocol.
 
@@ -373,6 +388,16 @@ hand.
   follow. Within the static and instance sub-blocks, alphabetical sort still applies.
 - Android lifecycle overrides (`onCreate`, `onDestroy`, `onNewIntent`, `onDraw`, `onTouchEvent`) are ordinary protected
   methods — they sort alphabetically in their access-level section.
+- **Sort order is case-sensitive ASCII** (`compareTo` on `String`, not `compareToIgnoreCase`). Uppercase letters
+  sort before lowercase in the ASCII table — capital `'A'` (0x41) precedes lowercase `'a'` (0x61), so methods or
+  fields whose names start with an uppercase letter come before their lowercase-prefix siblings within the same
+  access tier. Concretely: `readU16` (capital `U` = 0x55) sorts BEFORE `readback...` (lowercase `b` = 0x62)
+  because after the shared `read` prefix the next character favours uppercase. Pick this convention so the audit
+  script and the IDE's default `Ctrl-F`/`Ctrl-Shift-F` ordering agree, and so a hand-edit can't oscillate between
+  case-insensitive and case-sensitive readings of "alphabetical" depending on which side of `Aa` the next
+  character lands on. The `scripts/audit.py method-order` check enforces this; section dividers that group
+  related members (endian-dispatched routers in `ByteBufferUtils`, image-processing primitives in
+  `HorizonDetector`) are explicit exceptions documented in their own files.
 
 ### Method references vs lambdas
 
@@ -425,7 +450,7 @@ Before declaring a change done, these checks should come back empty. The fastest
 consolidated runner:
 
 ```bash
-python scripts/audit.py   # runs over-cols, ignored-catches, static-first, final-classes, lsloc
+python scripts/audit.py   # runs over-cols, ignored-catches, static-first, method-order, adjacent-comment-styles, final-classes, lsloc
 ```
 
 Individual subcommands (`python scripts/audit.py <name>`) are listed below alongside the awk

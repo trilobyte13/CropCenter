@@ -583,11 +583,18 @@ public final class CropState
 	 */
 	public void setCenter(float x, float y)
 	{
+		// Snapshot the volatile sourceImage reference once. A bg-thread reset() that writes
+		// sourceImage = null between this read and the getWidth()/getHeight() reads below would NPE
+		// the UI thread on setCenter calls reached from drag / clamp / programmatic recenter paths
+		// (dragCropCenter, onPanRelease, recomputeCrop, etc.). The busy gate prevents most racing
+		// loads, but Share/View intents can dismiss transient dialogs mid-drag and still race the
+		// next pan callback. CropEditorView.onTap already snapshots for the same reason.
+		Bitmap snapshot = sourceImage;
 		// Clamp so crop rect stays fully inside the (possibly rotated) image.
-		if (sourceImage != null && cropW > 0 && cropH > 0)
+		if (snapshot != null && cropW > 0 && cropH > 0)
 		{
-			int imgW = sourceImage.getWidth();
-			int imgH = sourceImage.getHeight();
+			int imgW = snapshot.getWidth();
+			int imgH = snapshot.getHeight();
 			float[] clamped = Math.abs(rotationDegrees) < BitmapUtils.ROTATION_EPSILON
 				? RotatedCropClamp.clampAxisAligned(x, y, cropW, cropH, imgW, imgH)
 				: RotatedCropClamp.clampRotated(x, y, cropW, cropH, rotationDegrees, imgW, imgH);

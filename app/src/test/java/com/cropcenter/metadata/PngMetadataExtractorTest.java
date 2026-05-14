@@ -28,139 +28,6 @@ import java.util.List;
  */
 public final class PngMetadataExtractorTest
 {
-	private static byte[] concat(byte[]... parts) throws IOException
-	{
-		ByteArrayOutputStream out = new ByteArrayOutputStream();
-		for (byte[] p : parts)
-		{
-			out.write(p);
-		}
-		return out.toByteArray();
-	}
-
-	@Test
-	public void extractReturnsEmptyForNonPngBytes()
-	{
-		byte[] notPng = { 0x12, 0x34, 0x56, 0x78, 0x00, 0x00, 0x00, 0x00 };
-		assertTrue(PngMetadataExtractor.extract(notPng).isEmpty());
-	}
-
-	@Test
-	public void extractReturnsEmptyForNullInput()
-	{
-		assertTrue(PngMetadataExtractor.extract(null).isEmpty());
-	}
-
-	@Test
-	public void extractReturnsEmptyForTooShortInput()
-	{
-		// Less than the 8-byte signature.
-		assertTrue(PngMetadataExtractor.extract(new byte[]{ (byte) 0x89, 'P' }).isEmpty());
-	}
-
-	@Test
-	public void extractReturnsEmptyForPngWithoutExifChunk() throws IOException
-	{
-		// Valid PNG with just signature + IHDR chunk + no eXIf.
-		byte[] png = concat(PNG_SIGNATURE, buildIhdrChunk());
-		assertTrue(PngMetadataExtractor.extract(png).isEmpty());
-	}
-
-	@Test
-	public void extractReturnsEmptyWhenChunkLengthExceedsFile() throws IOException
-	{
-		// Chunk header claims length 0x7FFFFFFF (~2GB) but only 4 actual bytes follow. Bounds check should
-		// reject and break the loop.
-		byte[] bogusChunk = {
-			0x7F, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF, // length
-			'e', 'X', 'I', 'f',                            // type
-			0x00, 0x00, 0x00, 0x00                          // 4 bytes (much less than claimed)
-		};
-		byte[] png = concat(PNG_SIGNATURE, bogusChunk);
-		assertTrue(PngMetadataExtractor.extract(png).isEmpty());
-	}
-
-	@Test
-	public void extractWrapsExifChunkAsApp1Segment() throws IOException
-	{
-		// Build a PNG with signature + IHDR + eXIf chunk holding minimal TIFF (8-byte header).
-		byte[] tiffData = {
-			'I', 'I', 0x2A, 0x00,           // little-endian TIFF magic
-			0x08, 0x00, 0x00, 0x00          // IFD0 offset = 8
-		};
-		byte[] png = concat(PNG_SIGNATURE, buildIhdrChunk(), buildChunk("eXIf", tiffData));
-		List<JpegSegment> segs = PngMetadataExtractor.extract(png);
-		assertEquals(1, segs.size());
-		JpegSegment seg = segs.get(0);
-		assertEquals(0xE1, seg.marker());
-		assertTrue("synthetic APP1 should be recognised by isExif()", seg.isExif());
-
-		// Layout pin: data[0..1] = FF E1, data[2..3] = segLen big-endian, data[4..9] = "Exif\0\0", data[10..]
-		// = TIFF bytes verbatim.
-		byte[] data = seg.data();
-		assertEquals((byte) 0xFF, data[0]);
-		assertEquals((byte) 0xE1, data[1]);
-		int segLen = ((data[2] & 0xFF) << 8) | (data[3] & 0xFF);
-		assertEquals("segLen = 2 (length bytes) + 6 (Exif\\0\\0) + tiff.length",
-			2 + 6 + tiffData.length, segLen);
-		assertEquals('E', data[4]);
-		assertEquals('x', data[5]);
-		assertEquals('i', data[6]);
-		assertEquals('f', data[7]);
-		assertEquals(0, data[8]);
-		assertEquals(0, data[9]);
-		byte[] tiffSlice = new byte[tiffData.length];
-		System.arraycopy(data, 10, tiffSlice, 0, tiffData.length);
-		assertArrayEquals(tiffData, tiffSlice);
-	}
-
-	@Test
-	public void extractFindsExifAfterMultiplePrecedingChunks() throws IOException
-	{
-		// Walk doesn't bail on chunks before eXIf. PNG ordering puts IHDR first, then various ancillary
-		// chunks in any order, then IDAT, then IEND. Place eXIf after a stub iCCP-like chunk to verify the
-		// loop traverses past unrelated chunks.
-		byte[] iccp = buildChunk("iCCP", new byte[]{ 0x12, 0x34, 0x56 });
-		byte[] tiff = { 'M', 'M', 0x00, 0x2A, 0x00, 0x00, 0x00, 0x08 };
-		byte[] png = concat(PNG_SIGNATURE, buildIhdrChunk(), iccp, buildChunk("eXIf", tiff));
-		List<JpegSegment> segs = PngMetadataExtractor.extract(png);
-		assertEquals(1, segs.size());
-		assertTrue(segs.get(0).isExif());
-	}
-
-	@Test
-	public void extractTakesFirstExifWhenMultiplePresent() throws IOException
-	{
-		// PNG spec says SHOULD be at most one eXIf, but defensive: the parser takes the first match and
-		// stops, matching the JPEG injector's "break on first EXIF segment" convention.
-		byte[] tiff1 = { 'I', 'I', 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00 };
-		byte[] tiff2 = { 'M', 'M', 0x00, 0x2A, 0x00, 0x00, 0x00, 0x08 };
-		byte[] png = concat(PNG_SIGNATURE, buildIhdrChunk(),
-			buildChunk("eXIf", tiff1), buildChunk("eXIf", tiff2));
-		List<JpegSegment> segs = PngMetadataExtractor.extract(png);
-		assertEquals(1, segs.size());
-		// First eXIf carried tiff1 (II header).
-		assertEquals('I', segs.get(0).data()[10]);
-	}
-
-	@Test
-	public void extractSkipsOversizedExifChunkToAvoidJpegApp1Truncation() throws IOException
-	{
-		// JPEG APP1 segment length is u16 (max 65535). The extractor wraps a PNG eXIf chunk as a synthetic
-		// APP1 segment — emitting one whose claimed segLen overflows the u16 cap would corrupt every JPEG
-		// produced from PNG → JPEG conversion (the truncated length field misaligns all downstream parsers).
-		// Pinned regression: an eXIf with > 65527-byte TIFF payload (the cap minus the 2 length + 6
-		// "Exif\\0\\0" overhead bytes) returns an empty list rather than producing a poison segment.
-		byte[] hugeTiff = new byte[65528]; // 1 byte over the safe cap
-		hugeTiff[0] = 'I';
-		hugeTiff[1] = 'I';
-		hugeTiff[2] = 0x2A;
-		hugeTiff[3] = 0x00;
-		byte[] png = concat(PNG_SIGNATURE, buildIhdrChunk(), buildChunk("eXIf", hugeTiff));
-		List<JpegSegment> segs = PngMetadataExtractor.extract(png);
-		assertTrue("oversize eXIf must not be wrapped as a malformed APP1 segment", segs.isEmpty());
-	}
-
 	@Test
 	public void extractAcceptsExifAtExactlyTheJpegApp1Cap() throws IOException
 	{
@@ -181,6 +48,35 @@ public final class PngMetadataExtractorTest
 	}
 
 	@Test
+	public void extractFindsExifAfterIdatChunk() throws IOException
+	{
+		// PNG spec recommends ancillary chunks like eXIf appear before IDAT, but doesn't strictly require it.
+		// Some encoders produce eXIf-after-IDAT; the parser walks the entire chunk stream so order doesn't
+		// matter. Pinned to rule out a regression where someone adds an "ordered scan" optimisation that
+		// breaks early.
+		byte[] tiff = { 'I', 'I', 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00 };
+		byte[] idatStub = buildChunk("IDAT", new byte[]{ 0x78, (byte) 0x9C });
+		byte[] png = concat(PNG_SIGNATURE, buildIhdrChunk(), idatStub, buildChunk("eXIf", tiff));
+		List<JpegSegment> segs = PngMetadataExtractor.extract(png);
+		assertEquals(1, segs.size());
+		assertTrue(segs.get(0).isExif());
+	}
+
+	@Test
+	public void extractFindsExifAfterMultiplePrecedingChunks() throws IOException
+	{
+		// Walk doesn't bail on chunks before eXIf. PNG ordering puts IHDR first, then various ancillary
+		// chunks in any order, then IDAT, then IEND. Place eXIf after a stub iCCP-like chunk to verify the
+		// loop traverses past unrelated chunks.
+		byte[] iccp = buildChunk("iCCP", new byte[]{ 0x12, 0x34, 0x56 });
+		byte[] tiff = { 'M', 'M', 0x00, 0x2A, 0x00, 0x00, 0x00, 0x08 };
+		byte[] png = concat(PNG_SIGNATURE, buildIhdrChunk(), iccp, buildChunk("eXIf", tiff));
+		List<JpegSegment> segs = PngMetadataExtractor.extract(png);
+		assertEquals(1, segs.size());
+		assertTrue(segs.get(0).isExif());
+	}
+
+	@Test
 	public void extractHandlesZeroLengthExifChunk() throws IOException
 	{
 		// PNG spec doesn't forbid a zero-length eXIf; the parser produces a synthetic APP1 with empty TIFF
@@ -197,26 +93,21 @@ public final class PngMetadataExtractorTest
 	}
 
 	@Test
-	public void extractFindsExifAfterIdatChunk() throws IOException
+	public void extractOrientationReadsBigEndianTiffOrientationTag() throws IOException
 	{
-		// PNG spec recommends ancillary chunks like eXIf appear before IDAT, but doesn't strictly require it.
-		// Some encoders produce eXIf-after-IDAT; the parser walks the entire chunk stream so order doesn't
-		// matter. Pinned to rule out a regression where someone adds an "ordered scan" optimisation that
-		// breaks early.
-		byte[] tiff = { 'I', 'I', 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00 };
-		byte[] idatStub = buildChunk("IDAT", new byte[]{ 0x78, (byte) 0x9C });
-		byte[] png = concat(PNG_SIGNATURE, buildIhdrChunk(), idatStub, buildChunk("eXIf", tiff));
-		List<JpegSegment> segs = PngMetadataExtractor.extract(png);
-		assertEquals(1, segs.size());
-		assertTrue(segs.get(0).isExif());
-	}
-
-	@Test
-	public void extractReturnsEmptyForSignatureOnlyFile()
-	{
-		// Just the 8-byte PNG signature, no chunks at all. The walker's `off + 8 <= png.length` check exits
-		// the loop immediately without throwing.
-		assertTrue(PngMetadataExtractor.extract(PNG_SIGNATURE).isEmpty());
+		// MM (big-endian) variant: tag value of 8 (rotate 90 CCW) at the same byte position.
+		byte[] tiff = {
+			'M', 'M',                               // big-endian
+			0x00, 0x2A,                             // TIFF magic 42
+			0x00, 0x00, 0x00, 0x08,                 // IFD0 offset = 8
+			0x00, 0x01,                             // entry count = 1
+			0x01, 0x12,                             // tag 0x0112 (Orientation)
+			0x00, 0x03,                             // type SHORT
+			0x00, 0x00, 0x00, 0x01,                 // count = 1
+			0x00, 0x08, 0x00, 0x00                  // value = 8 (high 2 bytes)
+		};
+		byte[] png = concat(PNG_SIGNATURE, buildIhdrChunk(), buildChunk("eXIf", tiff));
+		assertEquals(8, PngMetadataExtractor.extractOrientation(png));
 	}
 
 	// ── extractOrientation ── PNG sources need orientation parsed at load time so applyOrientation rotates
@@ -243,52 +134,6 @@ public final class PngMetadataExtractorTest
 	}
 
 	@Test
-	public void extractOrientationReadsBigEndianTiffOrientationTag() throws IOException
-	{
-		// MM (big-endian) variant: tag value of 8 (rotate 90 CCW) at the same byte position.
-		byte[] tiff = {
-			'M', 'M',                               // big-endian
-			0x00, 0x2A,                             // TIFF magic 42
-			0x00, 0x00, 0x00, 0x08,                 // IFD0 offset = 8
-			0x00, 0x01,                             // entry count = 1
-			0x01, 0x12,                             // tag 0x0112 (Orientation)
-			0x00, 0x03,                             // type SHORT
-			0x00, 0x00, 0x00, 0x01,                 // count = 1
-			0x00, 0x08, 0x00, 0x00                  // value = 8 (high 2 bytes)
-		};
-		byte[] png = concat(PNG_SIGNATURE, buildIhdrChunk(), buildChunk("eXIf", tiff));
-		assertEquals(8, PngMetadataExtractor.extractOrientation(png));
-	}
-
-	@Test
-	public void extractOrientationReturnsOneForNonPng()
-	{
-		// Non-PNG inputs return the upright fallback rather than throwing — matches the
-		// BitmapUtils.readExifOrientation contract for malformed JPEG.
-		assertEquals(1, PngMetadataExtractor.extractOrientation(new byte[]{ 0x12, 0x34, 0x56 }));
-		assertEquals(1, PngMetadataExtractor.extractOrientation(null));
-	}
-
-	@Test
-	public void extractOrientationReturnsOneForPngWithoutExifChunk() throws IOException
-	{
-		byte[] png = concat(PNG_SIGNATURE, buildIhdrChunk());
-		assertEquals(1, PngMetadataExtractor.extractOrientation(png));
-	}
-
-	@Test
-	public void extractOrientationReturnsOneForMissingOrientationTag() throws IOException
-	{
-		// Valid TIFF header + IFD0 entry-count=0 (no entries). No orientation tag → upright fallback.
-		byte[] tiff = {
-			'I', 'I', 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00,
-			0x00, 0x00                              // entry count = 0
-		};
-		byte[] png = concat(PNG_SIGNATURE, buildIhdrChunk(), buildChunk("eXIf", tiff));
-		assertEquals(1, PngMetadataExtractor.extractOrientation(png));
-	}
-
-	@Test
 	public void extractOrientationRejectsOutOfRangeValues() throws IOException
 	{
 		// EXIF orientation is defined for values 1..8. A value of 9 is malformed and must map to upright (1)
@@ -306,31 +151,15 @@ public final class PngMetadataExtractorTest
 	}
 
 	@Test
-	public void extractOrientationReturnsOneOnMalformedByteOrder() throws IOException
+	public void extractOrientationRejectsWrongEntryCount() throws IOException
 	{
-		// Neither "II" nor "MM" — defensive fallback rather than guessing endianness.
+		// Tag 0x0112 with type SHORT (3) but count != 1 — value field then stores an offset, not a value.
 		byte[] tiff = {
-			0x12, 0x34, 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00,
+			'I', 'I', 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00,
 			0x01, 0x00,
-			0x12, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00,
+			0x12, 0x01, 0x03, 0x00,
+			0x02, 0x00, 0x00, 0x00,                 // count = 2 — wrong
 			0x06, 0x00, 0x00, 0x00
-		};
-		byte[] png = concat(PNG_SIGNATURE, buildIhdrChunk(), buildChunk("eXIf", tiff));
-		assertEquals(1, PngMetadataExtractor.extractOrientation(png));
-	}
-
-	@Test
-	public void extractOrientationRejectsWrongTiffMagic() throws IOException
-	{
-		// II byte-order field but TIFF magic != 42 — corrupt eXIf payload that happens to start with II
-		// would otherwise read entry+8 as orientation. Real TIFF always carries magic 42 at offset 2.
-		byte[] tiff = {
-			'I', 'I',                               // II byte-order
-			(byte) 0xAB, (byte) 0xCD,               // wrong magic (not 42)
-			0x08, 0x00, 0x00, 0x00,                 // IFD0 offset = 8
-			0x01, 0x00,                             // entry count = 1
-			0x12, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00,
-			0x06, 0x00, 0x00, 0x00                  // would-be orientation = 6
 		};
 		byte[] png = concat(PNG_SIGNATURE, buildIhdrChunk(), buildChunk("eXIf", tiff));
 		assertEquals(1, PngMetadataExtractor.extractOrientation(png));
@@ -355,37 +184,62 @@ public final class PngMetadataExtractorTest
 	}
 
 	@Test
-	public void extractOrientationRejectsWrongEntryCount() throws IOException
+	public void extractOrientationRejectsWrongTiffMagic() throws IOException
 	{
-		// Tag 0x0112 with type SHORT (3) but count != 1 — value field then stores an offset, not a value.
+		// II byte-order field but TIFF magic != 42 — corrupt eXIf payload that happens to start with II
+		// would otherwise read entry+8 as orientation. Real TIFF always carries magic 42 at offset 2.
 		byte[] tiff = {
-			'I', 'I', 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00,
-			0x01, 0x00,
-			0x12, 0x01, 0x03, 0x00,
-			0x02, 0x00, 0x00, 0x00,                 // count = 2 — wrong
-			0x06, 0x00, 0x00, 0x00
+			'I', 'I',                               // II byte-order
+			(byte) 0xAB, (byte) 0xCD,               // wrong magic (not 42)
+			0x08, 0x00, 0x00, 0x00,                 // IFD0 offset = 8
+			0x01, 0x00,                             // entry count = 1
+			0x12, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00,
+			0x06, 0x00, 0x00, 0x00                  // would-be orientation = 6
 		};
 		byte[] png = concat(PNG_SIGNATURE, buildIhdrChunk(), buildChunk("eXIf", tiff));
 		assertEquals(1, PngMetadataExtractor.extractOrientation(png));
 	}
 
-	// ── extractRawTiff ── Used by the PNG → PNG round-trip path. Must return the eXIf chunk's bytes
-	// regardless of size — no JPEG APP1 cap applies, and the PNG output's eXIf chunk has a u31 length field.
-
 	@Test
-	public void extractRawTiffReturnsExifChunkBytesUnconditionally() throws IOException
+	public void extractOrientationReturnsOneForMissingOrientationTag() throws IOException
 	{
-		byte[] tiff = { 'I', 'I', 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00 };
+		// Valid TIFF header + IFD0 entry-count=0 (no entries). No orientation tag → upright fallback.
+		byte[] tiff = {
+			'I', 'I', 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00,
+			0x00, 0x00                              // entry count = 0
+		};
 		byte[] png = concat(PNG_SIGNATURE, buildIhdrChunk(), buildChunk("eXIf", tiff));
-		byte[] result = PngMetadataExtractor.extractRawTiff(png);
-		assertArrayEquals(tiff, result);
+		assertEquals(1, PngMetadataExtractor.extractOrientation(png));
 	}
 
 	@Test
-	public void extractRawTiffReturnsNullWhenNoExifChunk() throws IOException
+	public void extractOrientationReturnsOneForNonPng()
+	{
+		// Non-PNG inputs return the upright fallback rather than throwing — matches the
+		// BitmapUtils.readExifOrientation contract for malformed JPEG.
+		assertEquals(1, PngMetadataExtractor.extractOrientation(new byte[]{ 0x12, 0x34, 0x56 }));
+		assertEquals(1, PngMetadataExtractor.extractOrientation(null));
+	}
+
+	@Test
+	public void extractOrientationReturnsOneForPngWithoutExifChunk() throws IOException
 	{
 		byte[] png = concat(PNG_SIGNATURE, buildIhdrChunk());
-		assertEquals(null, PngMetadataExtractor.extractRawTiff(png));
+		assertEquals(1, PngMetadataExtractor.extractOrientation(png));
+	}
+
+	@Test
+	public void extractOrientationReturnsOneOnMalformedByteOrder() throws IOException
+	{
+		// Neither "II" nor "MM" — defensive fallback rather than guessing endianness.
+		byte[] tiff = {
+			0x12, 0x34, 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00,
+			0x01, 0x00,
+			0x12, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00,
+			0x06, 0x00, 0x00, 0x00
+		};
+		byte[] png = concat(PNG_SIGNATURE, buildIhdrChunk(), buildChunk("eXIf", tiff));
+		assertEquals(1, PngMetadataExtractor.extractOrientation(png));
 	}
 
 	@Test
@@ -424,6 +278,18 @@ public final class PngMetadataExtractorTest
 		assertArrayEquals(capTiff, result);
 	}
 
+	// ── extractRawTiff ── Used by the PNG → PNG round-trip path. Must return the eXIf chunk's bytes
+	// regardless of size — no JPEG APP1 cap applies, and the PNG output's eXIf chunk has a u31 length field.
+
+	@Test
+	public void extractRawTiffReturnsExifChunkBytesUnconditionally() throws IOException
+	{
+		byte[] tiff = { 'I', 'I', 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00 };
+		byte[] png = concat(PNG_SIGNATURE, buildIhdrChunk(), buildChunk("eXIf", tiff));
+		byte[] result = PngMetadataExtractor.extractRawTiff(png);
+		assertArrayEquals(tiff, result);
+	}
+
 	@Test
 	public void extractRawTiffReturnsNullForNonPngBytes()
 	{
@@ -453,6 +319,13 @@ public final class PngMetadataExtractorTest
 	}
 
 	@Test
+	public void extractRawTiffReturnsNullWhenNoExifChunk() throws IOException
+	{
+		byte[] png = concat(PNG_SIGNATURE, buildIhdrChunk());
+		assertEquals(null, PngMetadataExtractor.extractRawTiff(png));
+	}
+
+	@Test
 	public void extractRejectsChunkLengthWithTopBitSet() throws IOException
 	{
 		// PNG chunk length is u31 per spec (top bit reserved 0). The reader uses long arithmetic specifically
@@ -469,5 +342,132 @@ public final class PngMetadataExtractorTest
 			null, PngMetadataExtractor.extractRawTiff(png));
 		assertEquals("extractOrientation must reject u31-invalid length",
 			1, PngMetadataExtractor.extractOrientation(png));
+	}
+
+	@Test
+	public void extractReturnsEmptyForNonPngBytes()
+	{
+		byte[] notPng = { 0x12, 0x34, 0x56, 0x78, 0x00, 0x00, 0x00, 0x00 };
+		assertTrue(PngMetadataExtractor.extract(notPng).isEmpty());
+	}
+
+	@Test
+	public void extractReturnsEmptyForNullInput()
+	{
+		assertTrue(PngMetadataExtractor.extract(null).isEmpty());
+	}
+
+	@Test
+	public void extractReturnsEmptyForPngWithoutExifChunk() throws IOException
+	{
+		// Valid PNG with just signature + IHDR chunk + no eXIf.
+		byte[] png = concat(PNG_SIGNATURE, buildIhdrChunk());
+		assertTrue(PngMetadataExtractor.extract(png).isEmpty());
+	}
+
+	@Test
+	public void extractReturnsEmptyForSignatureOnlyFile()
+	{
+		// Just the 8-byte PNG signature, no chunks at all. The walker's `off + 8 <= png.length` check exits
+		// the loop immediately without throwing.
+		assertTrue(PngMetadataExtractor.extract(PNG_SIGNATURE).isEmpty());
+	}
+
+	@Test
+	public void extractReturnsEmptyForTooShortInput()
+	{
+		// Less than the 8-byte signature.
+		assertTrue(PngMetadataExtractor.extract(new byte[]{ (byte) 0x89, 'P' }).isEmpty());
+	}
+
+	@Test
+	public void extractReturnsEmptyWhenChunkLengthExceedsFile() throws IOException
+	{
+		// Chunk header claims length 0x7FFFFFFF (~2GB) but only 4 actual bytes follow. Bounds check should
+		// reject and break the loop.
+		byte[] bogusChunk = {
+			0x7F, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF, // length
+			'e', 'X', 'I', 'f',                            // type
+			0x00, 0x00, 0x00, 0x00                          // 4 bytes (much less than claimed)
+		};
+		byte[] png = concat(PNG_SIGNATURE, bogusChunk);
+		assertTrue(PngMetadataExtractor.extract(png).isEmpty());
+	}
+
+	@Test
+	public void extractSkipsOversizedExifChunkToAvoidJpegApp1Truncation() throws IOException
+	{
+		// JPEG APP1 segment length is u16 (max 65535). The extractor wraps a PNG eXIf chunk as a synthetic
+		// APP1 segment — emitting one whose claimed segLen overflows the u16 cap would corrupt every JPEG
+		// produced from PNG → JPEG conversion (the truncated length field misaligns all downstream parsers).
+		// Pinned regression: an eXIf with > 65527-byte TIFF payload (the cap minus the 2 length + 6
+		// "Exif\\0\\0" overhead bytes) returns an empty list rather than producing a poison segment.
+		byte[] hugeTiff = new byte[65528]; // 1 byte over the safe cap
+		hugeTiff[0] = 'I';
+		hugeTiff[1] = 'I';
+		hugeTiff[2] = 0x2A;
+		hugeTiff[3] = 0x00;
+		byte[] png = concat(PNG_SIGNATURE, buildIhdrChunk(), buildChunk("eXIf", hugeTiff));
+		List<JpegSegment> segs = PngMetadataExtractor.extract(png);
+		assertTrue("oversize eXIf must not be wrapped as a malformed APP1 segment", segs.isEmpty());
+	}
+
+	@Test
+	public void extractTakesFirstExifWhenMultiplePresent() throws IOException
+	{
+		// PNG spec says SHOULD be at most one eXIf, but defensive: the parser takes the first match and
+		// stops, matching the JPEG injector's "break on first EXIF segment" convention.
+		byte[] tiff1 = { 'I', 'I', 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00 };
+		byte[] tiff2 = { 'M', 'M', 0x00, 0x2A, 0x00, 0x00, 0x00, 0x08 };
+		byte[] png = concat(PNG_SIGNATURE, buildIhdrChunk(),
+			buildChunk("eXIf", tiff1), buildChunk("eXIf", tiff2));
+		List<JpegSegment> segs = PngMetadataExtractor.extract(png);
+		assertEquals(1, segs.size());
+		// First eXIf carried tiff1 (II header).
+		assertEquals('I', segs.get(0).data()[10]);
+	}
+
+	@Test
+	public void extractWrapsExifChunkAsApp1Segment() throws IOException
+	{
+		// Build a PNG with signature + IHDR + eXIf chunk holding minimal TIFF (8-byte header).
+		byte[] tiffData = {
+			'I', 'I', 0x2A, 0x00,           // little-endian TIFF magic
+			0x08, 0x00, 0x00, 0x00          // IFD0 offset = 8
+		};
+		byte[] png = concat(PNG_SIGNATURE, buildIhdrChunk(), buildChunk("eXIf", tiffData));
+		List<JpegSegment> segs = PngMetadataExtractor.extract(png);
+		assertEquals(1, segs.size());
+		JpegSegment seg = segs.get(0);
+		assertEquals(0xE1, seg.marker());
+		assertTrue("synthetic APP1 should be recognised by isExif()", seg.isExif());
+
+		// Layout pin: data[0..1] = FF E1, data[2..3] = segLen big-endian, data[4..9] = "Exif\0\0", data[10..]
+		// = TIFF bytes verbatim.
+		byte[] data = seg.data();
+		assertEquals((byte) 0xFF, data[0]);
+		assertEquals((byte) 0xE1, data[1]);
+		int segLen = ((data[2] & 0xFF) << 8) | (data[3] & 0xFF);
+		assertEquals("segLen = 2 (length bytes) + 6 (Exif\\0\\0) + tiff.length",
+			2 + 6 + tiffData.length, segLen);
+		assertEquals('E', data[4]);
+		assertEquals('x', data[5]);
+		assertEquals('i', data[6]);
+		assertEquals('f', data[7]);
+		assertEquals(0, data[8]);
+		assertEquals(0, data[9]);
+		byte[] tiffSlice = new byte[tiffData.length];
+		System.arraycopy(data, 10, tiffSlice, 0, tiffData.length);
+		assertArrayEquals(tiffData, tiffSlice);
+	}
+
+	private static byte[] concat(byte[]... parts) throws IOException
+	{
+		ByteArrayOutputStream out = new ByteArrayOutputStream();
+		for (byte[] p : parts)
+		{
+			out.write(p);
+		}
+		return out.toByteArray();
 	}
 }

@@ -16,31 +16,10 @@ public final class ThemeColorsTest
 	@Test
 	public void backgroundConstantMatchesXmlValue()
 	{
-		// Round 12 renamed APP_BG → BACKGROUND to match @color/background. The Javadoc on the constant
+		// APP_BG was renamed to BACKGROUND to match @color/background. The Javadoc on the constant
 		// commits to 0xFF111318 matching res/values/colors.xml's `<color name="background">#FF111318`. Pin
 		// the value so a future tweak to one side without the other gets caught here.
 		assertEquals(0xFF111318, ThemeColors.BACKGROUND);
-	}
-
-	@Test
-	public void mauveConstantMatchesXmlValue()
-	{
-		// Pin Catppuccin mauve — used heavily by EditorRenderer / dialog accents.
-		assertEquals(0xFFCBA6F7, ThemeColors.MAUVE);
-	}
-
-	@Test
-	public void redConstantMatchesXmlValue()
-	{
-		// Pin red — used by the Cancel button / paint-mode signal.
-		assertEquals(0xFFF38BA8, ThemeColors.RED);
-	}
-
-	@Test
-	public void textConstantMatchesXmlValue()
-	{
-		// Pin text fg — appears in dialog body text and info-bar labels.
-		assertEquals(0xFFCDD6F4, ThemeColors.TEXT);
 	}
 
 	@Test
@@ -48,6 +27,13 @@ public final class ThemeColorsTest
 	{
 		// Pin crust — the darkest Catppuccin surface, used as button-active text color.
 		assertEquals(0xFF11111B, ThemeColors.CRUST);
+	}
+
+	@Test
+	public void mauveConstantMatchesXmlValue()
+	{
+		// Pin Catppuccin mauve — used heavily by EditorRenderer / dialog accents.
+		assertEquals(0xFFCBA6F7, ThemeColors.MAUVE);
 	}
 
 	@Test
@@ -62,6 +48,13 @@ public final class ThemeColorsTest
 	}
 
 	@Test
+	public void redConstantMatchesXmlValue()
+	{
+		// Pin red — used by the Cancel button / paint-mode signal.
+		assertEquals(0xFFF38BA8, ThemeColors.RED);
+	}
+
+	@Test
 	public void surfaceConstantsMatchXmlValues()
 	{
 		// Pin the three Catppuccin surface tiers — load-bearing across DialogCards backgrounds (SURFACE0),
@@ -71,5 +64,12 @@ public final class ThemeColorsTest
 		assertEquals(0xFF313244, ThemeColors.SURFACE0);
 		assertEquals(0xFF45475A, ThemeColors.SURFACE1);
 		assertEquals(0xFF585B70, ThemeColors.SURFACE2);
+	}
+
+	@Test
+	public void textConstantMatchesXmlValue()
+	{
+		// Pin text fg — appears in dialog body text and info-bar labels.
+		assertEquals(0xFFCDD6F4, ThemeColors.TEXT);
 	}
 }

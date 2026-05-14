@@ -27,6 +27,7 @@ import com.cropcenter.model.CropState;
 import com.cropcenter.model.EditorMode;
 import com.cropcenter.model.Format;
 import com.cropcenter.model.Graft;
+import com.cropcenter.util.BitmapUtils;
 import com.cropcenter.util.SafFileHelper;
 import com.cropcenter.util.StoragePermissionHelper;
 import com.cropcenter.view.CropEditorView;
@@ -77,7 +78,7 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 	// Currently-open state-mutating dialog (SettingsDialog) tracked so an inbound load can dismiss it
 	// before its own bg dispatch starts. Cleared via the dialog's OnDismissListener so the field doesn't
 	// outlive the dialog. Touched only from the UI thread (showSettingsDialog, OnDismissListener,
-	// dismissTransientDialogs are all on UI). Codex round-16 F2.
+	// dismissTransientDialogs are all on UI).
 	private AlertDialog activeTransientDialog;
 	private CenterMode moveLockPref = CenterMode.VERTICAL;
 	private CenterMode selectLockPref = CenterMode.BOTH;
@@ -104,7 +105,7 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 		AlertDialog dialog = activeTransientDialog;
 		// Use cancel() not dismiss() so the dialog's OnCancelListener fires too — Custom AR's
 		// spinner-position restore, Replace dialog's placeholder cleanup, and SaveDialog's priorSnapshot
-		// clear all live in OnCancelListener (Codex round-17 F3). dismiss() would only fire
+		// clear all live in OnCancelListener. dismiss() would only fire
 		// OnDismissListener and skip these. cancel() also fires OnDismissListener afterward, so
 		// activeTransientDialog still gets cleared via the registerTransientDialog listener.
 		if (dialog != null && dialog.isShowing())
@@ -220,6 +221,15 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 		if (isDestroyed())
 		{
 			bmp.recycle();
+			// ImageLoadController.applyBytes committed originalFileBytes (~5-50 MB on a multi-MP JPEG),
+			// gainMap (~1-10 MB on HDR), jpegMeta, pngExifTiff, and seftTrailer to state BEFORE posting
+			// this UI runnable. Without an explicit reset here, those heavy fields stay reachable through
+			// the destroyed Activity's CropState until the whole Activity is GC'd — on a config-change
+			// race with a 200 MP HDR source that's 30-50 MB pinned in a Bitmap-detached state.
+			// state.reset() from the UI thread is safe here because applyBytes has already returned (the
+			// runnable is only posted after the bg-side commits complete) and the busy gate prevents
+			// another bg load from racing this UI-thread reset.
+			state.reset();
 			return;
 		}
 		// CropState.reset() restored editorMode and centerMode to defaults (Select + Both) and cleared
@@ -402,6 +412,13 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 	protected void onCreate(Bundle savedInstanceState)
 	{
 		super.onCreate(savedInstanceState);
+		// Bind the device-adaptive decode-pixel cap from ActivityManager.MemoryInfo.totalMem ONCE per
+		// process. Every subsequent ImageLoadController / UltraHdrCompat decode site reads via
+		// BitmapUtils.getMaxDecodePixels(), so 12 GB-RAM phones lift the cap to ~187 MP (handling 200 MP
+		// captures at inSampleSize=1) while 4 GB phones stay floored at 32 MP. Must run before
+		// installImageOnUi / runLoadBg / any save path can fire — placed first in onCreate so even an
+		// onNewIntent-driven SEND/VIEW image load picks up the right cap.
+		BitmapUtils.initialize(this);
 		setContentView(R.layout.activity_main);
 
 		// Handle edge-to-edge: apply system bar insets as padding to root layout
@@ -531,8 +548,7 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 		//     and rethrows.
 		// Dismiss any open state-mutating dialog (SettingsDialog) BEFORE the bg dispatch — applyBytes runs
 		// state.reset() on bg, and an open Settings dialog would race the reset with its in-dialog
-		// updateGridConfig commits. Mirrors ImageLoadController.load's UI-thread pre-dispatch dismiss
-		// (Codex round-16 F2).
+		// updateGridConfig commits. Mirrors ImageLoadController.load's UI-thread pre-dispatch dismiss.
 		dismissTransientDialogs();
 		runInBackground(() -> applyGraftedBytesOnBg(graft));
 	}
@@ -580,8 +596,8 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 			// Widened to include OutOfMemoryError — graft bytes carry the source's HDR + SEFT, so the
 			// applyBytes decode + applyOrientation pass is the second-largest allocation peak in the
 			// app (after primary export). Without OOM in the catch, a low-memory device would see the
-			// progress overlay vanish with no signal that the graft apply died. Mirrors round-17 F5 in
-			// ExportPipeline and the parallel widening in ImageLoadController.runLoadBg.
+			// progress overlay vanish with no signal that the graft apply died. Mirrors the catch
+			// widening in ExportPipeline.encodePhase and ImageLoadController.runLoadBg.
 			Log.e(TAG, "Apply graft failed", e);
 			runOnUiThread(() -> toastIfAlive("Apply failed: " + e.getMessage(), Toast.LENGTH_SHORT));
 		}
@@ -708,7 +724,7 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 	 * Result handler for the Save As SAF picker. Extracted from the registerForActivityResult call-site
 	 * lambda for the same reason as onGraftPickerResult — exceeded the 3-line cap, plus the success
 	 * path must run tryTakePersistable BEFORE handleSaveAsResult so a busy-thrown SAF re-read of the
-	 * just-created document can succeed (R17-3 contract).
+	 * just-created document can succeed.
 	 *
 	 * @param uri SAF document URI committed by the user; null when the picker was cancelled
 	 */
@@ -756,8 +772,8 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 	 *
 	 * The complementary already-open-dialog race is closed by dismissTransientDialogs(): the dialog
 	 * reference is tracked here and dismissed from ImageLoadController.load's UI-thread entry before any
-	 * bg work begins (Codex round-16 F2). The OnDismissListener clears the tracked reference so a normal
-	 * "Done" dismissal doesn't leave a stale handle behind.
+	 * bg work begins. The OnDismissListener clears the tracked reference so a normal "Done" dismissal
+	 * doesn't leave a stale handle behind.
 	 */
 	private void showSettingsDialog()
 	{
@@ -766,10 +782,28 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 			showBusyToast();
 			return;
 		}
-		// Can't use `registerTransientDialog(SettingsDialog.show(...))` here because that wraps with
-		// `setOnDismissListener` which REPLACES SettingsDialog's own cancelActivePicker cleanup (Codex
-		// round-38 F1). Pass the activity-tracking clear as SettingsDialog.show's hostDismissListener
-		// parameter so the dialog installs ONE composed listener that runs both cleanups.
-		activeTransientDialog = SettingsDialog.show(this, state, this::clearActiveTransientDialogIfMatches);
+		// BadTokenException guard mirrors SaveController.openSaveOptionsDialog / showReplaceDialog /
+		// showExtensionMismatchDialog and GraftController.confirmOversizedThenApply — config-change
+		// races can land between the Settings tap and the dialog show (Activity finishes after the
+		// tap but before WindowManager accepts the dialog). isDestroyed is the first line of defense;
+		// the try/catch around .show is the second (the race window between the check and the actual
+		// show is still open).
+		if (isDestroyed())
+		{
+			return;
+		}
+		try
+		{
+			// Can't use `registerTransientDialog(SettingsDialog.show(...))` here because that wraps
+			// with `setOnDismissListener` which REPLACES SettingsDialog's own cancelActivePicker
+			// cleanup. Pass the activity-tracking clear as SettingsDialog.show's hostDismissListener
+			// parameter so the dialog installs ONE composed listener that runs both cleanups.
+			activeTransientDialog = SettingsDialog.show(this, state,
+				this::clearActiveTransientDialogIfMatches);
+		}
+		catch (RuntimeException e)
+		{
+			Log.w(TAG, "settings dialog failed to show", e);
+		}
 	}
 }

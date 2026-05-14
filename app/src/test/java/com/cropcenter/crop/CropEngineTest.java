@@ -35,6 +35,21 @@ public final class CropEngineTest
 	}
 
 	@Test
+	public void multiPointMidpointDiffersFromSinglePointSnap()
+	{
+		// Sanity: a 2-point bbox midpoint should NOT pixel-snap. Use input that produces a non-half-integer
+		// midpoint and assert it survives unrounded.
+		List<SelectionPoint> points = Arrays.asList(
+			new SelectionPoint(0.0f, 0.0f), new SelectionPoint(7.0f, 11.0f));
+		float[] mid = CropEngine.rotatedSelectionMidpoint(points, 100, 100, 0f);
+		assertEquals(3.5f, mid[0], TOL);
+		assertEquals(5.5f, mid[1], TOL);
+		// Verify these are NOT the floor+0.5 snap output (which would be (0.5, 0.5) for the single-point branch
+		// on the first input).
+		assertNotEquals(0.5f, mid[0], TOL);
+	}
+
+	@Test
 	public void rotationAppliedBeforeBboxComputation()
 	{
 		// 90° clockwise rotation around image center (50, 50). A point at (50, 0) — top- edge midpoint — should
@@ -95,20 +110,5 @@ public final class CropEngineTest
 		float[] sub = CropEngine.rotatedSelectionMidpoint(points, 100, 100, 0.001f);
 		assertEquals(zero[0], sub[0], 0f);
 		assertEquals(zero[1], sub[1], 0f);
-	}
-
-	@Test
-	public void multiPointMidpointDiffersFromSinglePointSnap()
-	{
-		// Sanity: a 2-point bbox midpoint should NOT pixel-snap. Use input that produces a non-half-integer
-		// midpoint and assert it survives unrounded.
-		List<SelectionPoint> points = Arrays.asList(
-			new SelectionPoint(0.0f, 0.0f), new SelectionPoint(7.0f, 11.0f));
-		float[] mid = CropEngine.rotatedSelectionMidpoint(points, 100, 100, 0f);
-		assertEquals(3.5f, mid[0], TOL);
-		assertEquals(5.5f, mid[1], TOL);
-		// Verify these are NOT the floor+0.5 snap output (which would be (0.5, 0.5) for the single-point branch
-		// on the first input).
-		assertNotEquals(0.5f, mid[0], TOL);
 	}
 }

@@ -19,8 +19,8 @@ final class StateBus
 	// pair had each field atomic in isolation but their PAIR was not: a bg-thread notifyChanged could read
 	// batchDepth > 0, the UI thread could endBatch through zero and observe batchDirty == false (the bg thread
 	// hadn't set it yet), then the bg thread set batchDirty = true after the flush window had closed. The
-	// stranded dirty flag survived until the next batch — listeners missed the just-completed change (Codex
-	// round-40 F1). Putting depth check, depth mutation, and dirty read/write in one synchronized section
+	// stranded dirty flag survived until the next batch — listeners missed the just-completed change.
+	// Putting depth check, depth mutation, and dirty read/write in one synchronized section
 	// makes the (depth, dirty) transition atomic, so endBatch either flushes a dirty flag set during this
 	// batch or none was set; there is no "set just after the flush window" window. `fire()` runs outside the
 	// lock so a slow listener can't block bg setters; double-fire on a racing fire path remains acceptable
@@ -101,7 +101,7 @@ final class StateBus
 	 * Invoke the registered listener if one is set. No-op when no listener has been attached (e.g. between Activity
 	 * onDestroy clearing the listener and a bg thread finishing its in-flight task).
 	 *
-	 * Snapshot the volatile field to a local before the null check + invoke (Codex round-44 F1): re-reading
+	 * Snapshot the volatile field to a local before the null check + invoke: re-reading
 	 * `this.listener` twice would let a setListener(null) racing between the check and the call dereference a
 	 * cleared listener. Activity.onDestroy clears via setListener(null) precisely to detach before the View
 	 * tree is gone, and bg load / save / graft worker threads can still fire notifyChanged → fire() on the

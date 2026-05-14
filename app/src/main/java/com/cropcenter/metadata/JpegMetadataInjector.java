@@ -89,9 +89,8 @@ public final class JpegMetadataInjector
 
 		ByteArrayOutputStream out = new ByteArrayOutputStream(reencoded.length + 65536);
 
-		// SOI
-		out.write(0xFF);
-		out.write(0xD8);
+		out.write(JpegMarker.PREFIX);
+		out.write(JpegMarker.SOI);
 
 		// Original metadata segments
 		for (JpegSegment seg : segments)

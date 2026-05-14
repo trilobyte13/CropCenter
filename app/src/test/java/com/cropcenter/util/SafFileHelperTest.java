@@ -18,71 +18,6 @@ import java.io.InputStream;
  */
 public final class SafFileHelperTest
 {
-	@Test
-	public void lastSegmentSeparatorEndAtVolumeColonForRoot()
-	{
-		// Root-level file: the volume colon stands in as the segment separator. Returns the index just after
-		// the colon so docId.substring(0, end) + child == sibling.
-		assertEquals(8, SafPaths.lastSegmentSeparatorEnd("primary:foo.jpg"));
-		// Empty filename after the colon — still parsable.
-		assertEquals(8, SafPaths.lastSegmentSeparatorEnd("primary:"));
-	}
-
-	@Test
-	public void lastSegmentSeparatorEndPrefersSlashOverColon()
-	{
-		// Nested path: slash takes precedence even though a colon is also present. "primary:Pictures/foo.jpg" →
-		// after the slash that ends "primary:Pictures".
-		String docId = "primary:Pictures/foo.jpg";
-		assertEquals("primary:Pictures/".length(), SafPaths.lastSegmentSeparatorEnd(docId));
-		String deep = "primary:DCIM/Camera/IMG_0001.jpg";
-		assertEquals("primary:DCIM/Camera/".length(), SafPaths.lastSegmentSeparatorEnd(deep));
-	}
-
-	@Test
-	public void lastSegmentSeparatorEndReturnsMinusOneForOpaqueId()
-	{
-		// Opaque IDs (some cloud providers) have neither separator. Caller treats this as "can't derive
-		// sibling" and falls back to the in-place overwrite path.
-		assertEquals(-1, SafPaths.lastSegmentSeparatorEnd("opaqueDriveDocId123"));
-		assertEquals(-1, SafPaths.lastSegmentSeparatorEnd(""));
-	}
-
-	@Test
-	public void parentDocIdOfNestedFileStripsLastSegment()
-	{
-		assertEquals("primary:Pictures", SafPaths.parentDocIdOf("primary:Pictures/foo.jpg"));
-		assertEquals("primary:DCIM/Camera", SafPaths.parentDocIdOf("primary:DCIM/Camera/IMG_0001.jpg"));
-	}
-
-	@Test
-	public void parentDocIdOfRootFileFallsBackToVolumePrefix()
-	{
-		// The bug we just fixed: a file at the provider root must resolve to "primary:" as parent (the volume
-		// root document), NOT null. ExternalStorage- Provider accepts "primary:" as a valid root document for
-		// createDocument.
-		assertEquals("primary:", SafPaths.parentDocIdOf("primary:foo.jpg"));
-		assertEquals("home:", SafPaths.parentDocIdOf("home:bar.png"));
-	}
-
-	@Test
-	public void parentDocIdOfReturnsNullForOpaqueId()
-	{
-		// No slash AND no colon → caller's signal to skip the sibling-replace path entirely and use the
-		// narrower in-place fallback.
-		assertNull(SafPaths.parentDocIdOf("opaqueDriveDocId123"));
-		assertNull(SafPaths.parentDocIdOf(""));
-	}
-
-	@Test
-	public void parentDocIdOfHandlesColonPrefixWithNoFilename()
-	{
-		// "primary:" itself — the volume root with no filename. Treat like "no parent available" since the
-		// volume root has no parent to look up. The current impl returns the volume prefix (= same as input)
-		// because indexOf(':') = 7 > 0. Worth pinning down so any change is intentional.
-		assertEquals("primary:", SafPaths.parentDocIdOf("primary:"));
-	}
-
 	// ── hasImageSignature ── The cheap upfront filter that gates tryReadDirectlyFromPath. A stale MediaStore
 	// _data row pointing at a non-image file would otherwise poison the load with garbage bytes; without these
 	// tests pinning the JPEG/PNG-only contract a future relaxation that accepts HEIC / GIF / WebP signatures
@@ -127,6 +62,82 @@ public final class SafFileHelperTest
 		assertEquals(false, SafPaths.hasImageSignature(new byte[0]));
 	}
 
+	@Test
+	public void lastSegmentSeparatorEndAtVolumeColonForRoot()
+	{
+		// Root-level file: the volume colon stands in as the segment separator. Returns the index just after
+		// the colon so docId.substring(0, end) + child == sibling.
+		assertEquals(8, SafPaths.lastSegmentSeparatorEnd("primary:foo.jpg"));
+		// Empty filename after the colon — still parsable.
+		assertEquals(8, SafPaths.lastSegmentSeparatorEnd("primary:"));
+	}
+
+	@Test
+	public void lastSegmentSeparatorEndPrefersSlashOverColon()
+	{
+		// Nested path: slash takes precedence even though a colon is also present. "primary:Pictures/foo.jpg" →
+		// after the slash that ends "primary:Pictures".
+		String docId = "primary:Pictures/foo.jpg";
+		assertEquals("primary:Pictures/".length(), SafPaths.lastSegmentSeparatorEnd(docId));
+		String deep = "primary:DCIM/Camera/IMG_0001.jpg";
+		assertEquals("primary:DCIM/Camera/".length(), SafPaths.lastSegmentSeparatorEnd(deep));
+	}
+
+	@Test
+	public void lastSegmentSeparatorEndReturnsMinusOneForOpaqueId()
+	{
+		// Opaque IDs (some cloud providers) have neither separator. Caller treats this as "can't derive
+		// sibling" and falls back to the in-place overwrite path.
+		assertEquals(-1, SafPaths.lastSegmentSeparatorEnd("opaqueDriveDocId123"));
+		assertEquals(-1, SafPaths.lastSegmentSeparatorEnd(""));
+	}
+
+	@Test
+	public void parentDocIdOfHandlesColonPrefixWithNoFilename()
+	{
+		// "primary:" itself — the volume root with no filename. Treat like "no parent available" since the
+		// volume root has no parent to look up. The current impl returns the volume prefix (= same as input)
+		// because indexOf(':') = 7 > 0. Worth pinning down so any change is intentional.
+		assertEquals("primary:", SafPaths.parentDocIdOf("primary:"));
+	}
+
+	@Test
+	public void parentDocIdOfNestedFileStripsLastSegment()
+	{
+		assertEquals("primary:Pictures", SafPaths.parentDocIdOf("primary:Pictures/foo.jpg"));
+		assertEquals("primary:DCIM/Camera", SafPaths.parentDocIdOf("primary:DCIM/Camera/IMG_0001.jpg"));
+	}
+
+	@Test
+	public void parentDocIdOfReturnsNullForOpaqueId()
+	{
+		// No slash AND no colon → caller's signal to skip the sibling-replace path entirely and use the
+		// narrower in-place fallback.
+		assertNull(SafPaths.parentDocIdOf("opaqueDriveDocId123"));
+		assertNull(SafPaths.parentDocIdOf(""));
+	}
+
+	@Test
+	public void parentDocIdOfRootFileFallsBackToVolumePrefix()
+	{
+		// The bug we just fixed: a file at the provider root must resolve to "primary:" as parent (the volume
+		// root document), NOT null. ExternalStorage- Provider accepts "primary:" as a valid root document for
+		// createDocument.
+		assertEquals("primary:", SafPaths.parentDocIdOf("primary:foo.jpg"));
+		assertEquals("home:", SafPaths.parentDocIdOf("home:bar.png"));
+	}
+
+	@Test
+	public void readbackFromStreamEofCheckThrowReturnsMinusOne() throws IOException
+	{
+		// Stream serves a clean expected match in one read, then throws on the post-success EOF-check read.
+		// Helper's inner EOF-check try/catch returns -1 — the inner-try contract.
+		byte[] expected = { 0x10, 0x20, 0x30, 0x40 };
+		// Custom stream: first read fills with expected bytes; second read throws.
+		InputStream is = new EofThrowingStream(expected.clone());
+		assertEquals(-1L, SafFileHelper.readbackByteCountFromStream(is, expected));
+	}
+
 	// ── readbackByteCountFromStream ── Verify the contract documented on readbackByteCount: full match returns
 	// expected.length only after EOF is confirmed clean; mismatch / short / trailing each map to a distinct
 	// return-value class so callers using strict equality see the mismatch unambiguously. The helper sits
@@ -139,6 +150,18 @@ public final class SafFileHelperTest
 		byte[] expected = { 0x10, 0x20, 0x30, 0x40 };
 		InputStream is = new ByteArrayInputStream(expected.clone());
 		assertEquals(expected.length, SafFileHelper.readbackByteCountFromStream(is, expected));
+	}
+
+	@Test
+	public void readbackFromStreamMidReadOverflowReturnsTotalPlusN() throws IOException
+	{
+		// Stream serves a single read returning more bytes than expected.length — the helper's `total + n >
+		// expected.length` branch fires before the EOF-check branch ever triggers. Returns total + n.
+		byte[] expected = { 0x10, 0x20 };
+		byte[] actual   = { 0x10, 0x20, 0x30, 0x40 };  // 4 bytes in one read
+		InputStream is = new ByteArrayInputStream(actual);
+		// total starts at 0, n returns 4, total + n (4) > expected.length (2) → returns 0 + 4 = 4.
+		assertEquals(4L, SafFileHelper.readbackByteCountFromStream(is, expected));
 	}
 
 	@Test
@@ -176,29 +199,6 @@ public final class SafFileHelperTest
 		// First read returns the 4 matching bytes; total reaches expected.length and the EOF-check
 		// `is.read(buf)` returns 3 trailing bytes. Helper returns expected.length + trailing = 4 + 3 = 7.
 		assertEquals(7L, SafFileHelper.readbackByteCountFromStream(chunked, expected));
-	}
-
-	@Test
-	public void readbackFromStreamMidReadOverflowReturnsTotalPlusN() throws IOException
-	{
-		// Stream serves a single read returning more bytes than expected.length — the helper's `total + n >
-		// expected.length` branch fires before the EOF-check branch ever triggers. Returns total + n.
-		byte[] expected = { 0x10, 0x20 };
-		byte[] actual   = { 0x10, 0x20, 0x30, 0x40 };  // 4 bytes in one read
-		InputStream is = new ByteArrayInputStream(actual);
-		// total starts at 0, n returns 4, total + n (4) > expected.length (2) → returns 0 + 4 = 4.
-		assertEquals(4L, SafFileHelper.readbackByteCountFromStream(is, expected));
-	}
-
-	@Test
-	public void readbackFromStreamEofCheckThrowReturnsMinusOne() throws IOException
-	{
-		// Stream serves a clean expected match in one read, then throws on the post-success EOF-check read.
-		// Helper's inner EOF-check try/catch returns -1 — the round-5 inner-try contract.
-		byte[] expected = { 0x10, 0x20, 0x30, 0x40 };
-		// Custom stream: first read fills with expected bytes; second read throws.
-		InputStream is = new EofThrowingStream(expected.clone());
-		assertEquals(-1L, SafFileHelper.readbackByteCountFromStream(is, expected));
 	}
 
 	/**

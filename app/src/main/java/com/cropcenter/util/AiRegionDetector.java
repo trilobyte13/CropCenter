@@ -93,8 +93,7 @@ public final class AiRegionDetector
 	 *
 	 * @param sourceBytes original JPEG bytes (pre-AI-edit)
 	 * @param editBytes   alignment-corrected edit JPEG bytes
-	 * @return mask in IN_SAMPLE_SIZE-downsampled coordinates, or null on decode failure
-	 *         or shape mismatch
+	 * @return mask in IN_SAMPLE_SIZE-downsampled coordinates, or null on decode failure or shape mismatch
 	 */
 	public static AiMask detect(byte[] sourceBytes, byte[] editBytes)
 	{

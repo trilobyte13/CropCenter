@@ -5,7 +5,7 @@ import static org.junit.Assert.assertEquals;
 import org.junit.Test;
 
 /**
- * Pin the literal values of DialogStrings constants. DialogStrings is the round-13 chokepoint that consolidated
+ * Pin the literal values of DialogStrings constants. DialogStrings is the chokepoint that consolidated
  * the Cancel / OK / Apply button labels duplicated across 9 call sites — without these pins, a typo or
  * mojibake (smart-quoted "Apply", curly apostrophe, full-width spaces) slipping into one of the constants would
  * silently change every dialog button text across the app without compile error or test failure. Mirrors the

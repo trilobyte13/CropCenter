@@ -68,6 +68,16 @@ public final class MpfPatcher
 				break;
 			}
 			int segLen = ByteBufferUtils.readU16BE(jpeg, afterMarker);
+			if (segLen < 2)
+			{
+				// Segment length MUST include the 2 length bytes themselves (JPEG spec). Zero or one
+				// would advance off by 0 or 1 instead of the real segment size, getting stuck
+				// mid-segment. Matches the defensive guard in every sister walker
+				// (JpegMarkerWalker.findPrimaryEoi, JpegMetadataExtractor.extract,
+				// JpegMetadataInjector.inject, GraftWriter.findFirstNonAppNonCom,
+				// XmpItemLengthPatcher.walkApp1Ranges) — the cross-walker invariant kept consistent.
+				break;
+			}
 
 			// Check for MPF APP2: FF E2 + "MPF\0"
 			if (marker == 0xE2 && segLen > 8 && afterMarker + 6 <= jpeg.length
@@ -117,7 +127,7 @@ public final class MpfPatcher
 				for (int i = 0; i < entryCount; i++)
 				{
 					// Long-arithmetic stride matches sister walkers in ExifPatcher / BitmapUtils /
-					// PngMetadataExtractor (round-35/37/38 hardening sweep). Bounded by the 128 MB
+					// PngMetadataExtractor. Bounded by the 128 MB
 					// SafFileHelper cap today but kept consistent for symmetry.
 					long entryOffsetLong = (long) ifdOff + 2 + (long) i * 12;
 					if (entryOffsetLong + 12 > mpfSegmentEnd)

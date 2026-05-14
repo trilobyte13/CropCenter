@@ -13,13 +13,12 @@ import java.util.Collections;
 import java.util.List;
 
 /**
- * Direct unit tests for HdrSignature, the round-18 / round-19 / round-20 HDR-source gate that drives gain-map
- * extraction at load and graft and the HDR-drop strip on the export path. Three predicates are exposed, all pinned
- * here:
+ * Direct unit tests for HdrSignature, the HDR-source gate that drives gain-map extraction at load and graft and
+ * the HDR-drop strip on the export path. Three predicates are exposed, all pinned here:
  *
  *   - hasHdrgmInXmp(List of JpegSegment) — XMP-segment-only walk used by ImageLoadController.extractMetadata and
- *     GraftWriter.graft. The round-19 F1 fix narrowed this from a full-file scan because a stray "hdrgm" 5-byte
- *     sequence in MakerNote / COM / vendor blob / SEFT edit history / entropy could falsely flag SDR files as HDR.
+ *     GraftWriter.graft. Narrowed from a full-file scan because a stray "hdrgm" 5-byte sequence in
+ *     MakerNote / COM / vendor blob / SEFT edit history / entropy could falsely flag SDR files as HDR.
  *   - isHdrSource(byte[]) — full-file scan used by UltraHdrCompat post-Bitmap.compress diagnostic only. Exercised
  *     here so a regression that broke the byte-pattern walk would be caught at the public API layer rather than
  *     transitively through UltraHdrCompatTest.
@@ -53,7 +52,7 @@ public final class HdrSignatureTest
 	@Test
 	public void hasHdrgmInXmpFindsMarkerInExtensionXmp() throws IOException
 	{
-		// Codex round-20 F3: spec-compliant Extended XMP splits a large XMP packet across multiple APP1
+		// Spec-compliant Extended XMP splits a large XMP packet across multiple APP1
 		// segments. The first carries the standard 28-byte XMP header; subsequent extension segments use
 		// the "http://ns.adobe.com/xmp/extension/\0" header. Pin that hasHdrgmInXmp finds the marker in
 		// an extension segment — without this, a vendor whose hdrgm declaration spilled into the
@@ -75,8 +74,8 @@ public final class HdrSignatureTest
 	@Test
 	public void hasHdrgmInXmpIgnoresHdrgmInNonXmpSegments() throws IOException
 	{
-		// COM segment carrying the literal bytes — must NOT count. This is the round-19 F1 contract
-		// (the false-positive class the XMP-only scan exists to close).
+		// COM segment carrying the literal bytes — must NOT count. The XMP-only scan exists to close
+		// this false-positive class.
 		JpegSegment com = nonXmpSeg(0xFE, prefixedWith("comment with marker ", HDRGM_BYTES));
 		// EXIF segment with the marker in MakerNote — also must NOT count.
 		JpegSegment exif = nonXmpSeg(0xE1, exifPayloadWithMarker());
@@ -143,7 +142,7 @@ public final class HdrSignatureTest
 	@Test
 	public void isHdrgmXmpSegmentFalseOnNonXmpSegmentCarryingHdrgmBytes() throws IOException
 	{
-		// Codex round-19 F1 contract re-asserted at the per-segment layer: a COM segment whose body
+		// Contract re-asserted at the per-segment layer: a COM segment whose body
 		// literally contains "hdrgm" must NOT count. CropExporter.stripHdrSegments calls this directly,
 		// so a regression that weakened the predicate to "any segment containing hdrgm" would silently
 		// drop COM/MakerNote segments on the HDR-drop path.
@@ -207,8 +206,8 @@ public final class HdrSignatureTest
 	}
 
 	/**
-	 * Build a JpegSegment with the Extended XMP namespace header — used by the round-20 F3 test pinning that
-	 * hdrgm in extension segments is also detected.
+	 * Build a JpegSegment with the Extended XMP namespace header — used by the extension-XMP test pinning
+	 * that hdrgm in extension segments is also detected.
 	 */
 	private static JpegSegment newExtendedXmpSeg(byte[] body)
 	{

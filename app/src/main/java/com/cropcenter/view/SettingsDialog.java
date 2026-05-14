@@ -35,7 +35,7 @@ public final class SettingsDialog
 	// arrived) cancels the open picker too, and a user picking a new swatch dismisses the prior picker
 	// before opening a new one. UI-thread-only — SettingsDialog runs on the UI thread, all colorRow /
 	// picker interactions happen there, no synchronisation needed. Cleared by the new picker's
-	// OnDismissListener so a normal user-OK / Cancel doesn't strand the reference. Codex round-17 F2.
+	// OnDismissListener so a normal user-OK / Cancel doesn't strand the reference.
 	private static AlertDialog activePicker;
 
 	/**
@@ -50,25 +50,25 @@ public final class SettingsDialog
 	 * state.gridConfig on the UI thread, and a Share/View intent that arrives mid-dialog runs state.reset()
 	 * on bg, racing the user's in-dialog commits. MainActivity.showSettingsDialog stores the returned
 	 * dialog and dismisses it from ImageLoadController.load's UI-thread entry before any bg work begins
-	 * (Codex round-16 F2).
+	 * before applying its bg mutations.
 	 *
 	 * Both the OnCancelListener AND the OnDismissListener cancel any open ColorPickerDialog: the picker
 	 * is a separate AlertDialog that mutates state.gridConfig through its own OK button, so without
 	 * forced cancellation a stale picker outliving SettingsDialog could keep applying colors to the new
-	 * image's state. Codex round-17 F2 introduced the cancel-hook for user-initiated cancels; the
-	 * round-35 logic audit extended the cleanup to the dismiss path too — the Done button, the
-	 * Activity-destroyed-at-config-change path, and any future dialog-API dismissal all reach
-	 * dismiss-but-not-cancel, and leaving the picker alone on those paths leaks the destroyed window
-	 * through the static `activePicker` reference until the next show() defensively clears it.
+	 * image's state. The cancel-hook covers user-initiated cancels; the dismiss-listener extension
+	 * covers the Done button, the Activity-destroyed-at-config-change path, and any future dialog-API
+	 * dismissal — all of which reach dismiss-but-not-cancel. Leaving the picker alone on those paths
+	 * would leak the destroyed window through the static `activePicker` reference until the next
+	 * show() defensively cleared it.
 	 *
 	 * `hostDismissListener` is the host's own cleanup (typically the activity-tracking clear that
 	 * `MainActivity.registerTransientDialog` would otherwise install). SettingsDialog installs ONE
 	 * `setOnDismissListener` that calls `cancelActivePicker` AND then the host's callback —
 	 * `AlertDialog.setOnDismissListener` replaces rather than chains, so the host cannot install its
-	 * own listener separately without clobbering the embedded-picker cleanup (Codex round-38 F1: the
-	 * prior `registerTransientDialog(SettingsDialog.show(...))` shape silently discarded the picker
-	 * cleanup on Done / config-change dismissals). Pass `null` when the caller doesn't need a host
-	 * dismiss hook.
+	 * own listener separately without clobbering the embedded-picker cleanup — wrapping with
+	 * `registerTransientDialog(SettingsDialog.show(...))` would silently discard the picker cleanup
+	 * on Done / config-change dismissals. Pass `null` when the caller doesn't need a host dismiss
+	 * hook.
 	 *
 	 * @param ctx                 Activity context for inflation
 	 * @param state               CropState whose gridConfig is mutated as the user interacts
@@ -79,9 +79,24 @@ public final class SettingsDialog
 	public static AlertDialog show(Context ctx, CropState state,
 		DialogInterface.OnDismissListener hostDismissListener)
 	{
-		// Reset the cross-dialog tracker so a previous SettingsDialog instance's stale picker reference
-		// can't survive into this new one. The previous instance's OnCancelListener / picker dismiss
-		// listener should already have cleared it on dismissal, but reset here defensively.
+		// Dismiss any prior picker before resetting the tracker. A stale activePicker reference can
+		// outlive its parent Activity when the previous SettingsDialog was closed without its dismiss
+		// listener firing (Activity destroyed by config change mid-picker, or some other torn-down
+		// path) — the static field then holds a strong reference to the destroyed Activity's window
+		// through the AlertDialog → Context chain. Cancelling first severs that chain even when the
+		// dialog's own dismiss listener never ran.
+		AlertDialog stalePicker = activePicker;
+		if (stalePicker != null && stalePicker.isShowing())
+		{
+			try
+			{
+				stalePicker.cancel();
+			}
+			catch (RuntimeException ignored)
+			{
+				// Stale dialog whose window was already destroyed throws on cancel; nothing to clean.
+			}
+		}
 		activePicker = null;
 		float density = ctx.getResources().getDisplayMetrics().density;
 		int dp4 = DpToPx.toPx(4, density);
@@ -117,9 +132,8 @@ public final class SettingsDialog
 		// window goes away before any user event reaches the cancel hook), and any future dialog-API
 		// dismissal. Without this, a SettingsDialog + ColorPicker stack open at config-change time
 		// leaked the destroyed Activity's window through the static `activePicker` reference until the
-		// next `show()` call defensively cleared it (round-35 logic-audit P1). Compose with the host's
-		// optional cleanup so a caller's host-tracking listener doesn't clobber cancelActivePicker
-		// (Codex round-38 F1).
+		// next `show()` call defensively cleared it. Compose with the host's optional cleanup so a
+		// caller's host-tracking listener doesn't clobber cancelActivePicker.
 		settingsDialog.setOnDismissListener(dialog ->
 		{
 			cancelActivePicker();
@@ -411,10 +425,10 @@ public final class SettingsDialog
 	/**
 	 * Dismiss any open ColorPickerDialog and clear the tracker. Called by the parent SettingsDialog's
 	 * OnCancelListener (forced cancel from a load arrival, back-press, or outside-touch) so the
-	 * picker's OK button can't mutate gridConfig after the parent is gone (Codex round-17 F2).
-	 * Hoisted out of the inline cancel-listener lambda to keep the body under the CLAUDE.md 3-line
-	 * cap (Codex round-35 F1). Snapshot the field before clearing so a re-entrant cancel from
-	 * picker.cancel()'s own OnCancelListener doesn't see a half-cleared state.
+	 * picker's OK button can't mutate gridConfig after the parent is gone. Hoisted out of the inline
+	 * cancel-listener lambda to keep the body under the CLAUDE.md 3-line cap. Snapshot the field
+	 * before clearing so a re-entrant cancel from picker.cancel()'s own OnCancelListener doesn't see
+	 * a half-cleared state.
 	 */
 	private static void cancelActivePicker()
 	{
@@ -516,7 +530,7 @@ public final class SettingsDialog
 
 	/**
 	 * Open a ColorPickerDialog for one of the swatch rows. Extracted from colorRow's openPicker click
-	 * listener to keep the lambda body within CLAUDE.md's 3-line cap (Codex round-18 R18-2). Tracks the
+	 * listener to keep the lambda body within CLAUDE.md's 3-line cap. Tracks the
 	 * fresh picker as the active one so SettingsDialog's OnCancelListener can cancel it on forced
 	 * parent dismissal, and dismisses any prior picker first so rapid swatch taps don't stack two
 	 * pickers (the deeper one would still fire its OK listener and mutate gridConfig).

@@ -26,12 +26,30 @@ import java.util.List;
 public final class PngMetadataExtractor
 {
 	private static final String TAG = "PngMetadataExtractor";
-	private static final byte[] PNG_SIGNATURE = {
+
+	/**
+	 * 4-byte ASCII "eXIf" chunk-type bytes. Lowercase 'e' marks ancillary, uppercase 'X' marks public,
+	 * uppercase 'I' is the reserved bit, lowercase 'f' marks safe-to-copy across edits. Shared by
+	 * `findExifChunk` (the byte-by-byte walk) and `CropExporter.injectPngExifFromTiff` (the chunk writer)
+	 * so the chunk-type literal lives in one place rather than as parallel inline byte sequences in both
+	 * files.
+	 */
+	public static final byte[] EXIF_CHUNK_TYPE = { 'e', 'X', 'I', 'f' };
+
+	/**
+	 * Canonical 8-byte PNG file signature (per ISO/IEC 15948 / W3C PNG spec). Centralised here so callers that
+	 * need to detect PNG bytes — `ImageLoadController.isPngSignature` for format dispatch, the chunk walkers
+	 * below for header validation — share one constant rather than re-declaring the same 8 hex/ASCII literals.
+	 */
+	public static final byte[] PNG_SIGNATURE = {
 		(byte) 0x89, 'P', 'N', 'G', (byte) 0x0D, (byte) 0x0A, (byte) 0x1A, (byte) 0x0A
 	};
-	// JPEG APP1 segment length field is u16; subtract the 2 length bytes themselves and the 6-byte "Exif\0\0"
-	// identifier to get the maximum TIFF payload that fits: 65535 - 8 = 65527.
-	private static final int APP1_MAX_TIFF_PAYLOAD = 65535 - 2 - 6;
+
+	// Maximum TIFF payload that fits in a JPEG APP1 segment: subtract the 2 length bytes themselves and the
+	// 6-byte "Exif\0\0" identifier from the spec-max segment length (JpegSegment.MAX_SEGMENT_BYTES = 65535).
+	// Routing through the shared constant rather than inlining 65535 keeps the cap in lockstep with the JPEG
+	// writers (ExifPatcher / XmpItemLengthPatcher) that share it.
+	private static final int APP1_MAX_TIFF_PAYLOAD = JpegSegment.MAX_SEGMENT_BYTES - 2 - 6;
 
 	private PngMetadataExtractor() {}
 
@@ -190,7 +208,7 @@ public final class PngMetadataExtractor
 		long tiffEndLong = (long) tiffStart + tiffLen;
 		for (int i = 0; i < entryCount; i++)
 		{
-			// Long-arithmetic stride matches the round-35/37 ExifPatcher hardening; reachable on the
+			// Long-arithmetic stride matches the ExifPatcher hardening; reachable on the
 			// uncapped PNG eXIf path where tiffLen can be u31 (~2 GB) and ifd0 can be near MAX_INT.
 			// Without this, the int stride would wrap and the bound check evaluate wrap-negative ≯
 			// positive, silently falling back to orientation = 1 instead of reading the real entry.
@@ -256,8 +274,8 @@ public final class PngMetadataExtractor
 				return null;
 			}
 			int typeOff = off + 4;
-			if (png[typeOff] == 'e' && png[typeOff + 1] == 'X'
-				&& png[typeOff + 2] == 'I' && png[typeOff + 3] == 'f')
+			if (png[typeOff] == EXIF_CHUNK_TYPE[0] && png[typeOff + 1] == EXIF_CHUNK_TYPE[1]
+				&& png[typeOff + 2] == EXIF_CHUNK_TYPE[2] && png[typeOff + 3] == EXIF_CHUNK_TYPE[3])
 			{
 				return new int[] { off + 8, length };
 			}

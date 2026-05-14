@@ -112,9 +112,9 @@ public final class HorizonDetector
 			}
 		}
 
-		// Adobe Extended XMP: a > 64 KB XMP packet split across multiple APP1 segments by GUID + offset
-		// (Codex round-21 F1). Reassemble per-GUID before scanning so a Roll/Tilt attribute past the first
-		// chunk OR straddling a chunk boundary isn't lost. Per-segment scan in the next pass would otherwise
+		// Adobe Extended XMP: a > 64 KB XMP packet split across multiple APP1 segments by GUID + offset.
+		// Reassemble per-GUID before scanning so a Roll/Tilt attribute past the first chunk OR
+		// straddling a chunk boundary isn't lost. Per-segment scan in the next pass would otherwise
 		// miss "Ro|ll" split across chunks. Reassembly logic lives in metadata/ExtendedXmpReassembler so
 		// HdrSignature can share it for the symmetric hdrgm-detection case.
 		byte[] extendedBytes = ExtendedXmpReassembler.reassemble(meta);
@@ -148,11 +148,11 @@ public final class HorizonDetector
 			// UTF-8 explicit (see note on the primary loop). No length cap — APP1 segments are bounded by
 			// the JPEG u16 length field at ~64 KB so a String allocation here is bounded; the previous
 			// 65000-byte clamp could miss a Roll attribute landing in the trailing ~535 bytes of a maxed
-			// segment (Codex round-21 F1).
+			// segment.
 			String raw = new String(segData, 4, segData.length - 4, StandardCharsets.UTF_8);
 			// Lowercase pre-filter so a vendor segment with only `tilt="..."` (lowercase) isn't skipped —
 			// findXmpFloat itself uses Pattern.CASE_INSENSITIVE so catching it here keeps the pre-filter
-			// in step (Codex round-22 logic F1). Single toLowerCase pass over the raw body is bounded by
+			// in step. Single toLowerCase pass over the raw body is bounded by
 			// the JPEG APP1 ~64 KB cap so the cost is negligible per segment.
 			String lower = raw.toLowerCase(Locale.ROOT);
 			if (!lower.contains("roll") && !lower.contains("tilt"))
@@ -207,6 +207,107 @@ public final class HorizonDetector
 			Log.w(TAG, "OOM in painted detection");
 			return Float.NaN;
 		}
+	}
+
+	/**
+	 * Refine the Hough winner with a least-squares fit over the edge pixels that sit on the winning line.
+	 *
+	 * The Hough pass votes into integer-distance bins, so a real-world horizon can sit between bins and still land
+	 * one or two ruler ticks off. Once Hough has chosen the correct line, fitting the actual inlier coordinates
+	 * recovers the sub-bin slope while retaining Hough's outlier rejection. Returns NaN when the fit is too weak or
+	 * disagrees too much with the Hough seed, in which case the caller keeps the original Hough angle.
+	 *
+	 * @param edgeX         edge pixel X coordinates
+	 * @param edgeY         edge pixel Y coordinates
+	 * @param edgeCount     number of valid coordinates in edgeX / edgeY
+	 * @param width         source bitmap width, used for the minimum inlier threshold
+	 * @param height        source bitmap height, used to reproduce the Hough distance-bin geometry
+	 * @param houghAngleDeg Hough normal angle in degrees
+	 * @return refined Hough normal angle in degrees, or NaN when the fit should be ignored
+	 */
+	static float refineLineFitAngle(int[] edgeX, int[] edgeY, int edgeCount,
+		int width, int height, float houghAngleDeg)
+	{
+		double rad = Math.toRadians(houghAngleDeg);
+		double cos = Math.cos(rad);
+		double sin = Math.sin(rad);
+		float diagonal = (float) Math.hypot(width, height);
+		int numBins = (int) (2 * diagonal) + 1;
+		int distanceOffset = (int) diagonal;
+		int[] histogram = new int[numBins];
+
+		for (int i = 0; i < edgeCount; i++)
+		{
+			int bin = (int) Math.floor(edgeX[i] * cos + edgeY[i] * sin) + distanceOffset;
+			if (bin >= 0 && bin < numBins)
+			{
+				histogram[bin]++;
+			}
+		}
+
+		int bestBin = 0;
+		int bestCount = 0;
+		for (int bin = 0; bin < numBins; bin++)
+		{
+			if (histogram[bin] > bestCount)
+			{
+				bestCount = histogram[bin];
+				bestBin = bin;
+			}
+		}
+
+		int minInliers = Math.max(MIN_LINE_FIT_INLIERS, width * 3 / 100);
+		if (bestCount < minInliers)
+		{
+			return Float.NaN;
+		}
+
+		double rhoCenter = bestBin - distanceOffset + 0.5;
+		double sumX = 0;
+		double sumY = 0;
+		double sumXX = 0;
+		double sumXY = 0;
+		int inliers = 0;
+		for (int i = 0; i < edgeCount; i++)
+		{
+			double rho = edgeX[i] * cos + edgeY[i] * sin;
+			if (Math.abs(rho - rhoCenter) > LINE_FIT_INLIER_DISTANCE_PX)
+			{
+				continue;
+			}
+			double x = edgeX[i];
+			double y = edgeY[i];
+			sumX += x;
+			sumY += y;
+			sumXX += x * x;
+			sumXY += x * y;
+			inliers++;
+		}
+		if (inliers < minInliers)
+		{
+			return Float.NaN;
+		}
+
+		double denom = sumXX - sumX * sumX / inliers;
+		if (denom <= 1e-6)
+		{
+			return Float.NaN;
+		}
+		double slope = (sumXY - sumX * sumY / inliers) / denom;
+		// NaN slope (sumXX == sumX^2/inliers via floating-point underflow not caught by denom > 1e-6) would
+		// flow into atan → NaN → 90+NaN=NaN. The Math.clamp below would return NaN; the caller treats the
+		// result as a real rotation. Guard explicitly so a degenerate inlier set returns the spec'd "no
+		// reading" sentinel.
+		if (Double.isNaN(slope) || Double.isInfinite(slope))
+		{
+			return Float.NaN;
+		}
+		float refinedAngle = 90f + (float) Math.toDegrees(Math.atan(slope));
+		if (Math.abs(refinedAngle - houghAngleDeg) > MAX_LINE_FIT_DELTA_DEGREES)
+		{
+			return Float.NaN;
+		}
+		return Math.clamp(refinedAngle, 80f, 100f);
 	}
 
 	// ── Image processing primitives ──
@@ -527,107 +628,6 @@ public final class HorizonDetector
 			}
 		}
 		return Float.NaN;
-	}
-
-	/**
-	 * Refine the Hough winner with a least-squares fit over the edge pixels that sit on the winning line.
-	 *
-	 * The Hough pass votes into integer-distance bins, so a real-world horizon can sit between bins and still land
-	 * one or two ruler ticks off. Once Hough has chosen the correct line, fitting the actual inlier coordinates
-	 * recovers the sub-bin slope while retaining Hough's outlier rejection. Returns NaN when the fit is too weak or
-	 * disagrees too much with the Hough seed, in which case the caller keeps the original Hough angle.
-	 *
-	 * @param edgeX         edge pixel X coordinates
-	 * @param edgeY         edge pixel Y coordinates
-	 * @param edgeCount     number of valid coordinates in edgeX / edgeY
-	 * @param width         source bitmap width, used for the minimum inlier threshold
-	 * @param height        source bitmap height, used to reproduce the Hough distance-bin geometry
-	 * @param houghAngleDeg Hough normal angle in degrees
-	 * @return refined Hough normal angle in degrees, or NaN when the fit should be ignored
-	 */
-	static float refineLineFitAngle(int[] edgeX, int[] edgeY, int edgeCount,
-		int width, int height, float houghAngleDeg)
-	{
-		double rad = Math.toRadians(houghAngleDeg);
-		double cos = Math.cos(rad);
-		double sin = Math.sin(rad);
-		float diagonal = (float) Math.hypot(width, height);
-		int numBins = (int) (2 * diagonal) + 1;
-		int distanceOffset = (int) diagonal;
-		int[] histogram = new int[numBins];
-
-		for (int i = 0; i < edgeCount; i++)
-		{
-			int bin = (int) Math.floor(edgeX[i] * cos + edgeY[i] * sin) + distanceOffset;
-			if (bin >= 0 && bin < numBins)
-			{
-				histogram[bin]++;
-			}
-		}
-
-		int bestBin = 0;
-		int bestCount = 0;
-		for (int bin = 0; bin < numBins; bin++)
-		{
-			if (histogram[bin] > bestCount)
-			{
-				bestCount = histogram[bin];
-				bestBin = bin;
-			}
-		}
-
-		int minInliers = Math.max(MIN_LINE_FIT_INLIERS, width * 3 / 100);
-		if (bestCount < minInliers)
-		{
-			return Float.NaN;
-		}
-
-		double rhoCenter = bestBin - distanceOffset + 0.5;
-		double sumX = 0;
-		double sumY = 0;
-		double sumXX = 0;
-		double sumXY = 0;
-		int inliers = 0;
-		for (int i = 0; i < edgeCount; i++)
-		{
-			double rho = edgeX[i] * cos + edgeY[i] * sin;
-			if (Math.abs(rho - rhoCenter) > LINE_FIT_INLIER_DISTANCE_PX)
-			{
-				continue;
-			}
-			double x = edgeX[i];
-			double y = edgeY[i];
-			sumX += x;
-			sumY += y;
-			sumXX += x * x;
-			sumXY += x * y;
-			inliers++;
-		}
-		if (inliers < minInliers)
-		{
-			return Float.NaN;
-		}
-
-		double denom = sumXX - sumX * sumX / inliers;
-		if (denom <= 1e-6)
-		{
-			return Float.NaN;
-		}
-		double slope = (sumXY - sumX * sumY / inliers) / denom;
-		// NaN slope (sumXX == sumX^2/inliers via floating-point underflow not caught by denom > 1e-6) would
-		// flow into atan → NaN → 90+NaN=NaN. The Math.clamp below would return NaN; the caller treats the
-		// result as a real rotation. Guard explicitly so a degenerate inlier set returns the spec'd "no
-		// reading" sentinel.
-		if (Double.isNaN(slope) || Double.isInfinite(slope))
-		{
-			return Float.NaN;
-		}
-		float refinedAngle = 90f + (float) Math.toDegrees(Math.atan(slope));
-		if (Math.abs(refinedAngle - houghAngleDeg) > MAX_LINE_FIT_DELTA_DEGREES)
-		{
-			return Float.NaN;
-		}
-		return Math.clamp(refinedAngle, 80f, 100f);
 	}
 
 	private static float[] gaussianBlur5x5(float[] src, int width, int height)

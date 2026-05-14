@@ -13,10 +13,9 @@ import java.util.List;
  * prefix `http://ns.adobe.com/xmp/extension/\0`.
  *
  * Single source of truth for the GUID + offset reassembly logic, used by both `HorizonDetector` (Roll /
- * Tilt scanning across chunk boundaries — Codex round-21 F1) and `HdrSignature` (hdrgm marker scanning —
- * Codex round-22 logic F2). Without reassembly each scanner would substring-search per chunk; an attribute
- * that straddles a chunk boundary OR lands past the chunk holding the namespace declaration would be
- * silently missed.
+ * Tilt scanning across chunk boundaries) and `HdrSignature` (hdrgm marker scanning). Without reassembly
+ * each scanner would substring-search per chunk; an attribute that straddles a chunk boundary OR lands
+ * past the chunk holding the namespace declaration would be silently missed.
  *
  * Pure Java — no Android dependencies — so callers in any package can use it without dragging UI surface.
  *
@@ -28,7 +27,7 @@ import java.util.List;
  * sorted by offset and concatenated; different GUIDs land contiguously after each other in GUID-string
  * order. The offset is decoded as unsigned (offsets are file positions and always >= 0; spec disallows
  * negative values, but a corrupted top-bit-set offset would otherwise sort BEFORE the legitimate offset
- * 0 under signed int comparison — Codex round-22 logic F3).
+ * 0 under signed int comparison).
  */
 public final class ExtendedXmpReassembler
 {
@@ -58,27 +57,20 @@ public final class ExtendedXmpReassembler
 			return new byte[0];
 		}
 		int extPrefixLen = JpegSegment.EXTENDED_XMP_HEADER.length();
-		// FF E1 LL LL (4) + namespace prefix + 32-byte GUID + 4-byte total len + 4-byte offset
+		// FF E1 LL LL (4) + namespace prefix + 32-byte GUID + 4-byte total len + 4-byte offset.
+		// JpegSegment.isExtendedXmp validates the FF E1 + namespace prefix; this is the stricter
+		// post-prefix length needed to safely read the GUID + total-length + offset header fields.
 		int minHeaderLen = 4 + extPrefixLen + 32 + 4 + 4;
 
 		List<ExtendedXmpChunk> chunks = new ArrayList<>();
 		for (JpegSegment seg : meta)
 		{
-			byte[] data = seg.data();
-			if (seg.marker() != 0xE1 || data.length < minHeaderLen)
+			if (!seg.isExtendedXmp())
 			{
 				continue;
 			}
-			boolean prefixMatches = true;
-			for (int i = 0; i < extPrefixLen; i++)
-			{
-				if ((data[4 + i] & 0xFF) != JpegSegment.EXTENDED_XMP_HEADER.charAt(i))
-				{
-					prefixMatches = false;
-					break;
-				}
-			}
-			if (!prefixMatches)
+			byte[] data = seg.data();
+			if (data.length < minHeaderLen)
 			{
 				continue;
 			}
@@ -87,7 +79,7 @@ public final class ExtendedXmpReassembler
 			// Skip the 4-byte total-length field (we don't pre-allocate; we just concatenate).
 			int offsetStart = guidStart + 32 + 4;
 			// Decode as unsigned 32-bit so a top-bit-set offset (corrupt / adversarial input — spec
-			// disallows them) sorts AFTER zero rather than before it (Codex round-22 logic F3). Stored
+			// disallows them) sorts AFTER zero rather than before it. Stored
 			// as long since Java has no unsigned int; the 0xFFFFFFFFL mask widens the sign-extended
 			// int to its unsigned interpretation.
 			long offset = (((long) data[offsetStart] & 0xFF) << 24)

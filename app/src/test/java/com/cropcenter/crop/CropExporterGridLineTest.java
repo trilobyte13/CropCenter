@@ -17,6 +17,15 @@ import org.junit.Test;
 public final class CropExporterGridLineTest
 {
 	@Test
+	public void firstHalfLinesUseDirectRounding()
+	{
+		// Sanity check that the first-half branch (i * 2 <= count) computes the natural rounded position.
+		// count=10 dim=100: line 3 sits at 30 (raw 30.0, no rounding needed); line 5 at 50 (the midpoint).
+		assertEquals(30, CropExporter.gridLinePixel(3, 10, 100));
+		assertEquals(50, CropExporter.gridLinePixel(5, 10, 100));
+	}
+
+	@Test
 	public void mirrorPairsAreSymmetricAcrossDimWhenHalfIntegerSensitive()
 	{
 		// count=4, dim=10: raw positions are 2.5, 5.0, 7.5. A naive Math.round half-up would give (3, 5, 8) —
@@ -63,15 +72,6 @@ public final class CropExporterGridLineTest
 					+ " must sum to dim", dim, linePos + mirrorPos);
 			}
 		}
-	}
-
-	@Test
-	public void firstHalfLinesUseDirectRounding()
-	{
-		// Sanity check that the first-half branch (i * 2 <= count) computes the natural rounded position.
-		// count=10 dim=100: line 3 sits at 30 (raw 30.0, no rounding needed); line 5 at 50 (the midpoint).
-		assertEquals(30, CropExporter.gridLinePixel(3, 10, 100));
-		assertEquals(50, CropExporter.gridLinePixel(5, 10, 100));
 	}
 
 	@Test

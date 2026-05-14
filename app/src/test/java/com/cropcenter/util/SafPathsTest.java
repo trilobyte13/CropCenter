@@ -38,6 +38,53 @@ public final class SafPathsTest
 	}
 
 	@Test
+	public void hasParentTraversalSegmentAllowsCleanNestedPath()
+	{
+		assertFalse(SafPaths.hasParentTraversalSegment("DCIM/Camera/IMG_20250819.jpg"));
+	}
+
+	@Test
+	public void hasParentTraversalSegmentAllowsDotDotSubstring()
+	{
+		// "IMG..edited.jpg" — Samsung's edited-photo filename pattern. The segment is the whole string, not
+		// "..". The pre-fix String.contains("..") rejected this as suspicious, sending Samsung loads through
+		// the provider stream path which mangles HDR metadata. Round-40 F2 fix: segment-aware check passes.
+		assertFalse(SafPaths.hasParentTraversalSegment("IMG..edited.jpg"));
+	}
+
+	@Test
+	public void hasParentTraversalSegmentAllowsEmptyString()
+	{
+		assertFalse(SafPaths.hasParentTraversalSegment(""));
+	}
+
+	@Test
+	public void hasParentTraversalSegmentAllowsNestedDotDotSubstring()
+	{
+		assertFalse(SafPaths.hasParentTraversalSegment("DCIM/Camera/IMG..edited.jpg"));
+	}
+
+	@Test
+	public void hasParentTraversalSegmentAllowsSingleDotSegment()
+	{
+		// "." is the current-directory token, harmless from a traversal perspective. Only ".." escapes.
+		assertFalse(SafPaths.hasParentTraversalSegment("Pictures/./foo"));
+	}
+
+	@Test
+	public void hasParentTraversalSegmentAllowsThreeDotSegment()
+	{
+		// "..." is not a path-traversal token (it's a regular filename in Unix). Only exact ".." matches.
+		assertFalse(SafPaths.hasParentTraversalSegment("Pictures/.../foo"));
+	}
+
+	@Test
+	public void hasParentTraversalSegmentDetectsBareDotDot()
+	{
+		assertTrue(SafPaths.hasParentTraversalSegment(".."));
+	}
+
+	@Test
 	public void hasParentTraversalSegmentDetectsLeadingDotDot()
 	{
 		// "../etc/passwd" — first segment is "..", classic traversal.
@@ -59,50 +106,10 @@ public final class SafPathsTest
 	}
 
 	@Test
-	public void hasParentTraversalSegmentDetectsBareDotDot()
+	public void lastSegmentSeparatorEndFallsBackToColon()
 	{
-		assertTrue(SafPaths.hasParentTraversalSegment(".."));
-	}
-
-	@Test
-	public void hasParentTraversalSegmentAllowsDotDotSubstring()
-	{
-		// "IMG..edited.jpg" — Samsung's edited-photo filename pattern. The segment is the whole string, not
-		// "..". The pre-fix String.contains("..") rejected this as suspicious, sending Samsung loads through
-		// the provider stream path which mangles HDR metadata. Round-40 F2 fix: segment-aware check passes.
-		assertFalse(SafPaths.hasParentTraversalSegment("IMG..edited.jpg"));
-	}
-
-	@Test
-	public void hasParentTraversalSegmentAllowsNestedDotDotSubstring()
-	{
-		assertFalse(SafPaths.hasParentTraversalSegment("DCIM/Camera/IMG..edited.jpg"));
-	}
-
-	@Test
-	public void hasParentTraversalSegmentAllowsThreeDotSegment()
-	{
-		// "..." is not a path-traversal token (it's a regular filename in Unix). Only exact ".." matches.
-		assertFalse(SafPaths.hasParentTraversalSegment("Pictures/.../foo"));
-	}
-
-	@Test
-	public void hasParentTraversalSegmentAllowsSingleDotSegment()
-	{
-		// "." is the current-directory token, harmless from a traversal perspective. Only ".." escapes.
-		assertFalse(SafPaths.hasParentTraversalSegment("Pictures/./foo"));
-	}
-
-	@Test
-	public void hasParentTraversalSegmentAllowsEmptyString()
-	{
-		assertFalse(SafPaths.hasParentTraversalSegment(""));
-	}
-
-	@Test
-	public void hasParentTraversalSegmentAllowsCleanNestedPath()
-	{
-		assertFalse(SafPaths.hasParentTraversalSegment("DCIM/Camera/IMG_20250819.jpg"));
+		// "primary:foo.jpg" — file at the provider root, no slash. Colon is the segment separator.
+		assertEquals(8, SafPaths.lastSegmentSeparatorEnd("primary:foo.jpg"));
 	}
 
 	@Test
@@ -114,13 +121,6 @@ public final class SafPathsTest
 	}
 
 	@Test
-	public void lastSegmentSeparatorEndFallsBackToColon()
-	{
-		// "primary:foo.jpg" — file at the provider root, no slash. Colon is the segment separator.
-		assertEquals(8, SafPaths.lastSegmentSeparatorEnd("primary:foo.jpg"));
-	}
-
-	@Test
 	public void lastSegmentSeparatorEndReturnsMinusOneForOpaqueId()
 	{
 		// Cloud-provider opaque IDs have neither separator — sibling derivation can't proceed.
@@ -128,9 +128,10 @@ public final class SafPathsTest
 	}
 
 	@Test
-	public void parentDocIdOfStripsLastSlashSegment()
+	public void parentDocIdOfReturnsNullForOpaqueId()
 	{
-		assertEquals("primary:DCIM/Camera", SafPaths.parentDocIdOf("primary:DCIM/Camera/foo.jpg"));
+		// Cloud-provider opaque IDs without either separator have no derivable parent.
+		assertEquals(null, SafPaths.parentDocIdOf("abc123def456"));
 	}
 
 	@Test
@@ -142,9 +143,8 @@ public final class SafPathsTest
 	}
 
 	@Test
-	public void parentDocIdOfReturnsNullForOpaqueId()
+	public void parentDocIdOfStripsLastSlashSegment()
 	{
-		// Cloud-provider opaque IDs without either separator have no derivable parent.
-		assertEquals(null, SafPaths.parentDocIdOf("abc123def456"));
+		assertEquals("primary:DCIM/Camera", SafPaths.parentDocIdOf("primary:DCIM/Camera/foo.jpg"));
 	}
 }

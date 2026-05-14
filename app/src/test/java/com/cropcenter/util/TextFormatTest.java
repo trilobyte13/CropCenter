@@ -24,18 +24,6 @@ public final class TextFormatTest
 
 	private Locale savedDefault;
 
-	@Before
-	public void saveLocale()
-	{
-		savedDefault = Locale.getDefault();
-	}
-
-	@After
-	public void restoreLocale()
-	{
-		Locale.setDefault(savedDefault);
-	}
-
 	@Test
 	public void degreesRendersIntegerWithoutDecimals()
 	{
@@ -76,5 +64,17 @@ public final class TextFormatTest
 			"5.1" + DEG, TextFormat.degrees(5.1f));
 		assertEquals("two-decimal branch must also survive",
 			"0.05" + DEG, TextFormat.degrees(0.05f));
+	}
+
+	@After
+	public void restoreLocale()
+	{
+		Locale.setDefault(savedDefault);
+	}
+
+	@Before
+	public void saveLocale()
+	{
+		savedDefault = Locale.getDefault();
 	}
 }

@@ -435,7 +435,7 @@ final class EditorRenderer
 		int viewHeight = view.getHeight();
 		// Reuse coordScratch across the four corner reads. The min/max are accumulated as floats so we never
 		// need to keep two corners alive simultaneously — the alternative (4 fresh float[2]s) was the
-		// dominant per-frame allocation source flagged by the round-10 audit.
+		// dominant per-frame allocation source under profiling.
 		viewport.screenToImagePixelInto(0f, 0f, state, coordScratch);
 		float minX = coordScratch[0];
 		float maxX = coordScratch[0];

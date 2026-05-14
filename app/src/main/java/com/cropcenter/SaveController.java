@@ -142,13 +142,12 @@ final class SaveController
 	 *
 	 * (A) chosen == requested — SAF kept the name. Either the file didn't exist (new file) or
 	 *     SAF prompted "Replace?" and the user accepted. Since we can't distinguish the two
-	 *     from the URI alone, always try to create a sibling placeholder and route through
-	 *     ReplaceStrategy: this gives provider-confirmed overwrites the crash-safe write-
-	 *     first-then-swap pattern. When createDocument isn't supported (opaque-ID
-	 *     providers), fall back to exportToPreserving (writes to newUri directly but
-	 *     doesn't delete on verification failure — minimises data loss on the narrow
-	 *     fallback path) for ambiguous cases, or exportToOverwrite for confirmed
-	 *     overwrites where the success toast should announce as "Replaced <name>".
+	 *     from the URI alone, route through routeCrashSafeSave: create a sibling placeholder
+	 *     and write-then-swap via ReplaceStrategy when possible, falling back to direct
+	 *     overwrite (with preserveOnFailure) or preserving write on opaque-ID providers
+	 *     that can't placeholder. The wasOverwrite flag — derived from a SIZE probe plus
+	 *     a content-stream fallback for no-SIZE providers — drives the "Replaced" vs
+	 *     "Saved" toast wording.
 	 *
 	 * (B) chosen ends in an "(N)" auto-rename suffix AND the inferred base name still exists
 	 *     in the picked directory — SAF silently renamed to dodge a collision. The detection
@@ -160,7 +159,12 @@ final class SaveController
 	 *
 	 * (C) chosen differs from requested but NOT an auto-rename pattern (or "(N)" stripped
 	 *     doesn't actually collide in that directory) — the user deliberately typed a
-	 *     different name in the picker. Save as-is.
+	 *     different name in the picker. Route through the same routeCrashSafeSave path as
+	 *     Case A: the provider may still have shown its own Replace prompt for the user-typed
+	 *     name and returned a URI pointing at pre-existing content, so a non-preserving
+	 *     direct write would risk truncating a real user file on encoder failure. `chosen`
+	 *     drives the toast wording so a provider-confirmed overwrite announces as
+	 *     "Replaced <chosen>" rather than the misleading "Saved <chosen>".
 	 *
 	 * @param newUri SAF document URI returned by the ACTION_CREATE_DOCUMENT picker
 	 */
@@ -242,7 +246,7 @@ final class SaveController
 	 * (user Cancel, back-press, outside-touch, or forced dismissTransientDialogs from a parallel load).
 	 * The snapshot's sourceImage field holds a strong reference to the source Bitmap; without this clear,
 	 * an abandoned dialog would pin the bitmap until the next openSaveOptionsDialog overwrites the field
-	 * or the Activity tears down (Codex round-17 F4). The Continue path deliberately does NOT call this —
+	 * or the Activity tears down. The Continue path deliberately does NOT call this —
 	 * handleSaveAsResultBody / onSaveCancelled / the launcher-exception path still own the snapshot
 	 * rollback contract for a save that's reached SAF and then abandoned.
 	 */
@@ -306,50 +310,12 @@ final class SaveController
 		// Case (A): SAF accepted the requested name exactly. Always route through the
 		// crash-safe Replace flow — we can't rule out provider-confirmed overwrite from
 		// the URI alone (SIZE == 0 may be an empty existing file, SIZE == -1 is unknown).
-		// The priorSize query discriminates messaging:
-		//   priorSize  > 0  → confirmed overwrite → wasOverwrite=true: toast "Replaced"
-		//   priorSize  ≤ 0  → ambiguous (fresh doc OR zero-byte existing OR no-SIZE
-		//                     provider) → wasOverwrite=false: toast "Saved"
-		// Sibling placeholder creation is required for the full write-then-swap safety;
-		// when that's unavailable (opaque-ID providers), fall back to a direct write with
-		// preserveOnFailure.
+		// savePending cleared by the wrapper's finally — the placeholder/overwrite/preserve dispatches
+		// inside routeCrashSafeSave are async and the user must be able to start a new Save after they
+		// return.
 		if (requested != null && chosen != null && requested.equalsIgnoreCase(chosen))
 		{
-			// savePending cleared by the wrapper's finally — the placeholder/overwrite/preserve dispatches
-			// below are async and the user must be able to start a new Save after they return.
-			// wasOverwrite classification:
-			//   priorSize >  0                → confirmed overwrite
-			//   priorSize == 0                → ambiguous (treat as not-overwrite; empty
-			//                                   placeholder nearly always, no meaningful
-			//                                   content there either way)
-			//   priorSize == -1 (no-SIZE)     → fall back to a content-stream probe; if the
-			//                                   URI serves at least one byte it's a real
-			//                                   existing file regardless of missing SIZE
-			//                                   metadata. Probe returns false on empty /
-			//                                   provider-refused / security-exception, which
-			//                                   all coincide with "don't claim overwrite".
-			long priorSize = safFiles.querySafFileSize(newUri);
-			boolean wasOverwrite = priorSize > 0 || (priorSize < 0 && safFiles.hasExistingContent(newUri));
-			String mime = host.getState().getExportConfig().format().mimeType();
-			String placeholderName = ".cropcenter-tmp-" + System.currentTimeMillis() + "-" + requested;
-			Uri placeholder = safFiles.createSiblingPlaceholder(newUri, mime, placeholderName);
-			if (placeholder != null)
-			{
-				replaceStrategy.replaceColliding(placeholder, requested, wasOverwrite);
-			}
-			else if (wasOverwrite)
-			{
-				// Opaque-ID + confirmed overwrite: can't placeholder. Direct overwrite with
-				// preserve-on-failure. Pass `requested` so the success toast says "Replaced <name>" — a
-				// generic "Saved N KB" would misrepresent a confirmed overwrite.
-				exportPipeline.exportToOverwrite(newUri, requested);
-			}
-			else
-			{
-				// Opaque-ID + ambiguous: can't confirm existing content, can't placeholder. Preserve on
-				// failure so we don't destroy a file the user might own.
-				exportPipeline.exportToPreserving(newUri);
-			}
+			routeCrashSafeSave(newUri, requested);
 			return false;
 		}
 
@@ -375,9 +341,17 @@ final class SaveController
 		}
 
 		// Case (C): user changed the name intentionally (no "(N)" suffix, or "(N)" stripped doesn't collide
-		// with anything in the picked directory). The wrapper's finally clears savePending after exportTo
-		// dispatches its async write.
-		exportPipeline.exportTo(newUri);
+		// with anything in the picked directory). The user-typed name might still match a pre-existing file —
+		// many providers handle a user-typed collision with their own Replace prompt and return a URI pointing
+		// at existing content with `chosen` equal to the user-typed (colliding) name. Route through the same
+		// crash-safe save path as Case A so a write failure can't truncate that existing content on path-backed
+		// providers, and a successful overwrite toasts as "Replaced <chosen>" rather than the misleading
+		// "Saved <chosen>". The wrapper's finally clears savePending after routeCrashSafeSave's async dispatch.
+		// `requested` is the fallback name when chosen is null (rare opaque-name provider — chosen is null in
+		// practice only on providers that also refuse SIZE, so wasOverwrite resolves to false and the fallback
+		// preserving write is the safe choice).
+		String saveName = chosen != null ? chosen : requested;
+		routeCrashSafeSave(newUri, saveName);
 		return false;
 	}
 
@@ -386,7 +360,7 @@ final class SaveController
 	 * "Replaced" toast). Busy-rejection cleanup: when a parallel bg op (e.g. a Share/View intent's load
 	 * that arrived while the user deliberated) holds busy, replaceColliding's downstream busy gate would
 	 * silently reject and leave the SAF auto-rename target on disk. Run cleanupPlaceholder here so the
-	 * orphan doesn't linger (R17-3).
+	 * orphan doesn't linger.
 	 *
 	 * @param newUri             SAF auto-rename target URI ("foo (1).jpg")
 	 * @param requested          user-typed name that collided (drives downstream toast wording)
@@ -409,8 +383,7 @@ final class SaveController
 	/**
 	 * Handle the Replace dialog's neutral "Keep" button: commit the SAF auto-rename URI as the actual save
 	 * (no overwrite of the colliding original). Same busy-rejection cleanup contract as onReplaceConfirmed
-	 * — without it, exportTo's busy gate silently rejects and leaves the auto-rename SAF document
-	 * stranded (R17-3).
+	 * — without it, exportTo's busy gate silently rejects and leaves the auto-rename SAF document stranded.
 	 *
 	 * @param newUri             SAF auto-rename target URI (already has the SAF-assigned name)
 	 * @param cleanupPlaceholder runs safFiles.tryDeleteSafDocument(newUri) on busy-rejection
@@ -489,7 +462,7 @@ final class SaveController
 	 *     transient-dialog tracker)
 	 *   - a parallel load forces dismissTransientDialogs (same callback as user cancel)
 	 *   - the dialog itself fails to show (BadTokenException from a config-change race) — the catch
-	 *     below clears priorSnapshot directly because the OnCancelListener never registers (R17 F4)
+	 *     below clears priorSnapshot directly because the OnCancelListener never registers
 	 *
 	 * isDestroyed pre-check is the first line of defense against the config-change race; the
 	 * try/catch around .show is the second (the race window between the check and the actual show is
@@ -518,10 +491,10 @@ final class SaveController
 		{
 			// Register the dialog with the host's transient-dialog tracker so a Share/View intent or graft
 			// apply that arrives mid-dialog dismisses it before bg state.reset() — without this, the user's
-			// Continue tap would commit image A's format/grid choices onto image B's state (R17-1).
+			// Continue tap would commit image A's format/grid choices onto image B's state.
 			// onClearPriorSnapshotOnCancel runs on every cancel path (user Cancel, back-press,
 			// outside-touch, forced dismissTransientDialogs) so the snapshot — which holds the source
-			// Bitmap reference — doesn't pin memory after an abandoned dialog (Codex round-17 F4).
+			// Bitmap reference — doesn't pin memory after an abandoned dialog.
 			host.registerTransientDialog(SaveDialog.show(host.getActivity(), host.getState(),
 				this::onSaveDialogConfirmed, this::clearPriorSnapshotOnCancel));
 		}
@@ -529,8 +502,7 @@ final class SaveController
 		{
 			// On show / register failure the OnCancelListener is never installed, so
 			// clearPriorSnapshotOnCancel won't fire — clear the snapshot here so the source bitmap
-			// reference doesn't stay pinned until the next openSaveOptionsDialog or activity teardown
-			// (Codex round-18 F2).
+			// reference doesn't stay pinned until the next openSaveOptionsDialog or activity teardown.
 			Log.w(TAG, "save options dialog failed to show", e);
 			priorSnapshot = null;
 		}
@@ -568,6 +540,59 @@ final class SaveController
 	}
 
 	/**
+	 * Probe the SAF-returned URI for pre-existing content and dispatch to the appropriate save path. The URI
+	 * may point to a fresh placeholder document just created by SAF (no prior content; brand-new save) OR to
+	 * an existing document the provider returned after its own Replace prompt (Case A exact-name match, or
+	 * Case C where the user typed an existing name in the picker). The URI's prior-content status is
+	 * ambiguous from the URI alone — querySafFileSize returns 0 for both empty placeholders and zero-byte
+	 * existing files, and -1 from providers that don't expose OpenableColumns.SIZE — so the crash-safe
+	 * write-then-swap pattern via a sibling placeholder is the conservative default. The wasOverwrite
+	 * classification:
+	 *   priorSize  >  0                 → confirmed overwrite (real content)
+	 *   priorSize == 0                  → ambiguous (treat as not-overwrite; empty placeholder nearly
+	 *                                     always, no meaningful content there either way)
+	 *   priorSize == -1 (no-SIZE)       → fall back to a content-stream probe; if the URI serves at least
+	 *                                     one byte it's a real existing file regardless of missing SIZE
+	 *                                     metadata. Probe returns false on empty / provider-refused /
+	 *                                     security-exception, all of which coincide with "don't claim
+	 *                                     overwrite".
+	 *
+	 * Shared by Case A (exact-name match) and Case C (user-renamed without "(N)" pattern): the previous
+	 * Case-C straight-to-exportTo path used preserveOnFailure=false and could truncate pre-existing content
+	 * on path-backed providers when the user typed an existing name and accepted the provider's own Replace
+	 * prompt; it also reported "Saved" for confirmed overwrites that should have toasted "Replaced".
+	 *
+	 * @param newUri SAF document URI returned by the picker
+	 * @param name   user's intended filename — Case A: original `requested`; Case C: `chosen` (the
+	 *               user-edited name and what should appear in a "Replaced X" toast)
+	 */
+	private void routeCrashSafeSave(Uri newUri, String name)
+	{
+		long priorSize = safFiles.querySafFileSize(newUri);
+		boolean wasOverwrite = priorSize > 0 || (priorSize < 0 && safFiles.hasExistingContent(newUri));
+		String mime = host.getState().getExportConfig().format().mimeType();
+		String placeholderName = ".cropcenter-tmp-" + System.currentTimeMillis() + "-" + name;
+		Uri placeholder = safFiles.createSiblingPlaceholder(newUri, mime, placeholderName);
+		if (placeholder != null)
+		{
+			replaceStrategy.replaceColliding(placeholder, name, wasOverwrite);
+		}
+		else if (wasOverwrite)
+		{
+			// Opaque-ID + confirmed overwrite: can't placeholder. Direct overwrite with
+			// preserve-on-failure. Pass `name` so the success toast says "Replaced <name>" — a
+			// generic "Saved N KB" would misrepresent a confirmed overwrite.
+			exportPipeline.exportToOverwrite(newUri, name);
+		}
+		else
+		{
+			// Opaque-ID + ambiguous: can't confirm existing content, can't placeholder. Preserve on failure
+			// so we don't destroy a file the user might own.
+			exportPipeline.exportToPreserving(newUri);
+		}
+	}
+
+	/**
 	 * Warn the user that renaming the extension in the SAF picker would produce a MIME/content mismatch and tell
 	 * them to change format in the Save dialog instead. The caller does NOT delete the placeholder —
 	 * ACTION_CREATE_DOCUMENT can return an existing zero-byte file after the provider's own Replace prompt, and
@@ -595,7 +620,7 @@ final class SaveController
 			// GraftController.confirmOversizedThenApply — config-change races can land between the
 			// isDestroyed pre-check and the actual show() call (the Activity finishes after the
 			// pre-check but before WindowManager accepts the dialog). The catch keeps the warning
-			// best-effort instead of crashing the UI thread (Codex round-19 F2).
+			// best-effort instead of crashing the UI thread.
 			new AlertDialog.Builder(host.getActivity())
 				.setTitle("Change format in Save, not the picker")
 				.setMessage(message)
@@ -632,7 +657,7 @@ final class SaveController
 			// Register with the host's transient-dialog tracker so a Share/View intent or graft apply
 			// dismisses this dialog before the bg state.reset(). Without this, a stale Replace prompt
 			// could outlive the source image it was opened for — pressing Replace/Keep then would write
-			// image B's state to image A's SAF target (Codex round-17 F1). dismissTransientDialogs uses
+			// image B's state to image A's SAF target. dismissTransientDialogs uses
 			// cancel(), which fires the OnCancelListener below — so the cleanupPlaceholder + savePending
 			// reset still run even on forced dismissal.
 			host.registerTransientDialog(new AlertDialog.Builder(host.getActivity())

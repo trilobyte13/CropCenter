@@ -42,9 +42,9 @@ public final class RotationRulerView extends View
 	private record TickConfig(float minor, float major) {}
 
 	// Pre-built tick configurations for each zoom level. Indexed parallel to TICK_THRESHOLDS:
-	// the first config whose threshold is strictly below degreesVisible wins. Cached as
-	// static finals because chooseTickConfig is called on every onDraw and every snapToTick
-	// during a fling — otherwise we'd allocate 60+ TickConfig records per second.
+	// the first config whose threshold is strictly below degreesVisible wins. Cached as static finals because
+	// chooseTickConfig is called on every onDraw and every snapToTick during a fling — otherwise we'd allocate
+	// 60+ TickConfig records per second.
 	private static final TickConfig[] TICK_CONFIGS = {
 		new TickConfig(10f,   45f), new TickConfig(5f,    45f),
 		new TickConfig(1f,    10f), new TickConfig(1f,    5f),
@@ -105,7 +105,7 @@ public final class RotationRulerView extends View
 	private float gestureStartDegrees; // currentDegrees at ACTION_DOWN — used by drag-release to skip the
 	                                   // detent the user is dragging AWAY from (so 0° → 0.4° release doesn't
 	                                   // re-snap to 0° at coarse zoom where the 0.5° detent window swallows
-	                                   // small intentional drags). Codex round-35 bug-1 fix.
+	                                   // small intentional drags).
 	private float lastTouchX;
 	private float pixelsPerDegree;
 	private float totalDragDx; // cumulative drag distance since touchdown
@@ -536,7 +536,7 @@ public final class RotationRulerView extends View
 	 * ACTION_CANCEL takes the cleanup-only path — Android dispatches CANCEL when the OS / a parent view
 	 * claims the gesture (system back, multi-touch disambiguation, scroll-container intercept), which is
 	 * NOT a user-completed release. Treating CANCEL as if it were ACTION_UP would commit a fling or
-	 * snap-and-notify rotation the user never intended (Codex round-16).
+	 * snap-and-notify rotation the user never intended.
 	 */
 	private void handleTouchRelease(MotionEvent event)
 	{
@@ -591,7 +591,7 @@ public final class RotationRulerView extends View
 				// away from 0° (e.g. setting 0.4° at coarse zoom where the 0.5° detent threshold would
 				// otherwise swallow the move) actually lands at the new value rather than re-snapping
 				// back. Fast flings land wherever the trajectory dictates and tap snaps normally, so
-				// only this slow-drag-release path passes a skipDetent (Codex round-35 bug-1 fix).
+				// only this slow-drag-release path passes a skipDetent.
 				float snapped = Math.clamp(snapToDetentOrTick(currentDegrees, gestureStartDegrees),
 					MIN_DEG, MAX_DEG);
 				if (snapped != currentDegrees)
@@ -638,7 +638,7 @@ public final class RotationRulerView extends View
 	/**
 	 * Drag-release variant of `snapToDetentOrTick` that ignores the detent the gesture STARTED at, so a
 	 * drag-from-0° to a small angle (e.g., 0.4°) doesn't re-snap to 0° when the user clearly intended
-	 * to leave it (Codex round-35 bug-1 fix). The skipped value is compared with a tight tolerance
+	 * to leave it. The skipped value is compared with a tight tolerance
 	 * because gestureStartDegrees is a previously-snapped value — exact equality to the detent it
 	 * landed on is the common case. Passing `Float.NaN` for `skipDetent` falls back to the original
 	 * snap-to-any-detent behaviour (used by tap, which has no "previous state" to escape from).

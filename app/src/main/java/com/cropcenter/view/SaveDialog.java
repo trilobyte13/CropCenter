@@ -49,12 +49,12 @@ public final class SaveDialog
 	 * Returns the AlertDialog so the caller can register it with SaveHost.registerTransientDialog — a
 	 * Share/View intent or graft apply that arrives mid-dialog must dismiss this dialog before bg
 	 * state.reset() runs, otherwise applySettings's CropState mutations on Continue would commit the
-	 * user's choices for image A onto image B (R17-1).
+	 * user's choices for image A onto image B.
 	 *
 	 * The onCancel callback fires on every cancel path — Cancel button (which now calls dialog.cancel()
 	 * to route through OnCancelListener), back-press, outside-touch, and forced dismissTransientDialogs.
 	 * SaveController uses it to clear priorSnapshot so an abandoned dialog doesn't pin the source bitmap
-	 * via a snapshot that no rollback path will consume (Codex round-17 F4). It does NOT fire on the
+	 * via a snapshot that no rollback path will consume. It does NOT fire on the
 	 * Continue path — applySettings + onSave have committed user choices, and the SAF flow's own abort
 	 * paths (onSaveCancelled, launcher RuntimeException, post-dialog busy-toast) still own the snapshot
 	 * rollback contract.

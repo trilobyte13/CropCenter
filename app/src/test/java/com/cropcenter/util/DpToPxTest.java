@@ -12,6 +12,16 @@ import org.junit.Test;
 public final class DpToPxTest
 {
 	@Test
+	public void toPxAtIntegerDensityIsExact()
+	{
+		// At density 1.0 / 2.0 / 3.0, the rounded result equals dp * density exactly — no boundary surprises.
+		assertEquals(8, DpToPx.toPx(8, 1f));
+		assertEquals(16, DpToPx.toPx(8, 2f));
+		assertEquals(24, DpToPx.toPx(8, 3f));
+		assertEquals(0, DpToPx.toPx(0, 2.5f));
+	}
+
+	@Test
 	public void toPxAtLowDensityRoundsOneDpUpToOnePx()
 	{
 		// Documented regression target: density 0.75 with truncation produces (int)(1 * 0.75) = 0, hiding 1dp
@@ -29,15 +39,5 @@ public final class DpToPxTest
 		assertEquals(5, DpToPx.toPx(3f, 1.5f));
 		// 1 * 1.5 = 1.5 — round-half-up to 2.
 		assertEquals(2, DpToPx.toPx(1, 1.5f));
-	}
-
-	@Test
-	public void toPxAtIntegerDensityIsExact()
-	{
-		// At density 1.0 / 2.0 / 3.0, the rounded result equals dp * density exactly — no boundary surprises.
-		assertEquals(8, DpToPx.toPx(8, 1f));
-		assertEquals(16, DpToPx.toPx(8, 2f));
-		assertEquals(24, DpToPx.toPx(8, 3f));
-		assertEquals(0, DpToPx.toPx(0, 2.5f));
 	}
 }

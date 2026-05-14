@@ -31,6 +31,19 @@ final class HorizonPaintOverlay
 	}
 
 	/**
+	 * Record the first touch of a stroke. screenX/screenY go into the displayed path; imagePoint is the
+	 * already-un-rotated image-pixel coordinate for the detector.
+	 */
+	void begin(float screenX, float screenY, float[] imagePoint)
+	{
+		imagePoints.clear();
+		screenPath.reset();
+		screenPath.moveTo(screenX, screenY);
+		imagePoints.add(imagePoint);
+		drawing = true;
+	}
+
+	/**
 	 * Discard the in-progress stroke without exiting paint mode and without invoking the detection callback.
 	 * Used for `MotionEvent.ACTION_CANCEL` — Android dispatches that when the OS or a parent view claims
 	 * the gesture (e.g. system back, multi-touch disambiguation, scroll container intercept), which is
@@ -44,19 +57,6 @@ final class HorizonPaintOverlay
 		drawing = false;
 		imagePoints.clear();
 		screenPath.reset();
-	}
-
-	/**
-	 * Record the first touch of a stroke. screenX/screenY go into the displayed path; imagePoint is the
-	 * already-un-rotated image-pixel coordinate for the detector.
-	 */
-	void begin(float screenX, float screenY, float[] imagePoint)
-	{
-		imagePoints.clear();
-		screenPath.reset();
-		screenPath.moveTo(screenX, screenY);
-		imagePoints.add(imagePoint);
-		drawing = true;
 	}
 
 	/**

@@ -10,14 +10,14 @@ import org.junit.Test;
  * Tests for HorizonPaintOverlay's stroke / cancel state machine. The render path uses android.graphics.Canvas /
  * Paint and isn't reachable from pure JUnit, but the active / drawing flags + the imagePoints bookkeeping are
  * pure Java and drive the auto-rotate UX directly: a regression here would either trigger false-positive
- * detections on aborted strokes (Codex round-15 finding) or strand paint mode after a cancel.
+ * detections on aborted strokes or strand paint mode after a cancel.
  */
 public final class HorizonPaintOverlayTest
 {
 	@Test
 	public void cancelStrokeKeepsActiveAndDoesNotInvokeOnDrawn()
 	{
-		// Codex round-15 contract: ACTION_CANCEL must NOT fire the detection callback. Active stays true so
+		// Contract: ACTION_CANCEL must NOT fire the detection callback. Active stays true so
 		// the user can re-paint without re-tapping Auto. Pin both invariants so a regression that swaps
 		// cancelStroke for setActive(false, ...) or for end(...) gets caught here.
 		HorizonPaintOverlay overlay = new HorizonPaintOverlay();

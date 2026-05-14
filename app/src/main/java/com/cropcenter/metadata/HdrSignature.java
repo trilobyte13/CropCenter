@@ -5,8 +5,7 @@ import java.util.List;
 /**
  * Detect the XMP "hdrgm" namespace marker — the canonical signature of an Ultra HDR gain map. Used to gate
  * gain-map extraction so a non-HDR Samsung file whose SEFT data block starts with FF D8 (typically an embedded
- * JPEG thumbnail) isn't mis-extracted as a gain map (Codex round-18 F1, refined for false-positive elimination
- * in round-19 F1).
+ * JPEG thumbnail) isn't mis-extracted as a gain map.
  *
  * Pure Java — no Android dependencies — so the metadata extractors and GraftWriter can call it without dragging
  * in the Android Bitmap / Gainmap surface that lives in util/UltraHdrCompat (which delegates to this helper for
@@ -22,7 +21,7 @@ import java.util.List;
  *
  *   - isHdrgmXmpSegment(JpegSegment) — per-segment predicate. Used by CropExporter.stripHdrSegments on
  *     the HDR-drop path so the saved JPEG's metadata doesn't claim HDR the file no longer carries
- *     (Codex round-20 F1). Same XMP-restricted scan as hasHdrgmInXmp, exposed as a single-segment
+ *     to downstream consumers. Same XMP-restricted scan as hasHdrgmInXmp, exposed as a single-segment
  *     callable for filter-loop call sites.
  *
  *   - isHdrSource(byte[]) — full-file scan. Used by UltraHdrCompat post Bitmap.compress to verify the
@@ -39,12 +38,12 @@ public final class HdrSignature
 	 * sequence — anywhere else in the file (MakerNote, COM, vendor blob, SEFT edit history) is either
 	 * coincidence or non-HDR vendor data. ImageLoadController.extractMetadata and GraftWriter.graft both
 	 * gate gain-map extraction on this precise check so an SDR file with `hdrgm` outside XMP isn't
-	 * mis-classified as Ultra HDR (Codex round-19 F1).
+	 * mis-classified as Ultra HDR.
 	 *
 	 * Walks both standard XMP (via JpegSegment.isXmp) and Extended XMP (the secondary-segment shape that
 	 * carries any XMP overflow past the JPEG APP1 ~64 KB cap; mirrors the pattern in
 	 * HorizonDetector.detectFromMetadata). A vendor whose hdrgm declaration ended up in the extension
-	 * segment would otherwise be silently mis-classified as SDR (Codex round-20 F3).
+	 * segment would otherwise be silently mis-classified as SDR.
 	 *
 	 * @param segments parsed JPEG segments from JpegMetadataExtractor.extract; may be null or empty
 	 * @return true when at least one XMP APP1 segment (standard or extended) contains "hdrgm" in its body
@@ -68,26 +67,10 @@ public final class HdrSignature
 		}
 		// Reassembled Extended XMP fallback: covers the case where the marker straddles a chunk boundary
 		// or the file's only "hdrgm" occurrence happens to land in a chunk that the per-segment scan
-		// missed. Same shape of fix as HorizonDetector's Codex round-21 F1; lifted to a shared helper
-		// so both paths stay in lockstep (Codex round-22 logic F2).
+		// missed. Same shape of reassembly fallback used by HorizonDetector; lifted to a shared helper
+		// so both paths stay in lockstep.
 		byte[] reassembled = ExtendedXmpReassembler.reassemble(segments);
 		return reassembled.length > 0 && containsHdrgm(reassembled);
-	}
-
-	/**
-	 * Per-segment predicate: true when seg is an XMP APP1 segment (standard or extended) whose body
-	 * contains the "hdrgm" namespace marker. Exposed so CropExporter.stripHdrSegments can drop both kinds
-	 * of HDR-claiming XMP — without this, an HDR-drop save (HDR source where the gain-map composition
-	 * skipped or failed) could leave Extended-XMP `hdrgm` declarations in the output and lie about HDR
-	 * presence to downstream apps and the app's own ExportPipeline.reportSuccess HDR-OK toast (Codex
-	 * round-20 F1).
-	 *
-	 * @param seg JPEG segment to test
-	 * @return true when seg is an XMP segment (standard or extended) carrying "hdrgm" in its body
-	 */
-	public static boolean isHdrgmXmpSegment(JpegSegment seg)
-	{
-		return (seg.isXmp() || isExtendedXmp(seg)) && containsHdrgm(seg.data());
 	}
 
 	/**
@@ -95,7 +78,7 @@ public final class HdrSignature
 	 * Used by UltraHdrCompat as a post-compress sanity flag on the export pipeline's output bytes — at
 	 * that point the bytes are a freshly-emitted JPEG with well-formed XMP, so a coarse full-file scan is
 	 * cheaper than re-parsing segments. NOT for load-time HDR gating — use hasHdrgmInXmp(...) instead so
-	 * a stray "hdrgm" outside XMP doesn't false-positive (Codex round-19 F1).
+	 * a stray "hdrgm" outside XMP doesn't false-positive.
 	 *
 	 * @param data full file bytes to scan
 	 * @return true when the XMP "hdrgm" namespace marker is present anywhere in data
@@ -103,6 +86,21 @@ public final class HdrSignature
 	public static boolean isHdrSource(byte[] data)
 	{
 		return containsHdrgm(data);
+	}
+
+	/**
+	 * Per-segment predicate: true when seg is an XMP APP1 segment (standard or extended) whose body
+	 * contains the "hdrgm" namespace marker. Exposed so CropExporter.stripHdrSegments can drop both kinds
+	 * of HDR-claiming XMP — without this, an HDR-drop save (HDR source where the gain-map composition
+	 * skipped or failed) could leave Extended-XMP `hdrgm` declarations in the output and lie about HDR
+	 * presence to downstream apps and the app's own ExportPipeline.reportSuccess HDR-OK toast.
+	 *
+	 * @param seg JPEG segment to test
+	 * @return true when seg is an XMP segment (standard or extended) carrying "hdrgm" in its body
+	 */
+	public static boolean isHdrgmXmpSegment(JpegSegment seg)
+	{
+		return (seg.isXmp() || seg.isExtendedXmp()) && containsHdrgm(seg.data());
 	}
 
 	/**
@@ -132,29 +130,4 @@ public final class HdrSignature
 		return false;
 	}
 
-	/**
-	 * Detect an Extended XMP APP1 segment (marker 0xE1 with the Adobe extension namespace prefix at the
-	 * usual data[4] body offset). Used by hasHdrgmInXmp to also scan multi-segment XMP packets when the
-	 * hdrgm declaration spilled past the standard XMP segment's ~64 KB cap.
-	 *
-	 * @param seg JPEG segment to test
-	 * @return true when seg has marker 0xE1 and its body starts with the Adobe Extended XMP namespace
-	 *         prefix at the data[4] offset
-	 */
-	private static boolean isExtendedXmp(JpegSegment seg)
-	{
-		byte[] data = seg.data();
-		if (seg.marker() != 0xE1 || data.length < 4 + JpegSegment.EXTENDED_XMP_HEADER.length())
-		{
-			return false;
-		}
-		for (int i = 0; i < JpegSegment.EXTENDED_XMP_HEADER.length(); i++)
-		{
-			if ((data[4 + i] & 0xFF) != JpegSegment.EXTENDED_XMP_HEADER.charAt(i))
-			{
-				return false;
-			}
-		}
-		return true;
-	}
 }

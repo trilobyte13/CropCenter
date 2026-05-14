@@ -115,8 +115,9 @@ public final class GainMapInpainter
 	 * In-place 8-connected mask dilation by `radius` pixels. Each iteration marks any unmasked pixel whose
 	 * 8-neighborhood contains a masked pixel. Uses a snapshot per iteration so dilation grows by exactly one ring
 	 * per pass (vs reading the same array we're writing, which would race growth across the mask within a pass).
+	 *
+	 * Package-visible for unit tests — see inpaintIterative for the broader rationale.
 	 */
-	// Package-visible for unit tests — see inpaintIterative.
 	static void dilateMask(boolean[] mask, int width, int height, int radius)
 	{
 		for (int ring = 0; ring < radius; ring++)
@@ -170,10 +171,11 @@ public final class GainMapInpainter
 	 *
 	 * The mask is mutated. Isolated masked pixels (no path to any unmasked pixel) keep their original value when
 	 * the loop exits with empty frontier.
+	 *
+	 * Package-visible for unit tests — the algorithm is pure (int[] values, boolean[] mask) and the only way to
+	 * pin the rounding-bias regression (round-half-up vs floor-toward-zero) without an Android Bitmap. The
+	 * Bitmap-dispatch entry point inpaintBitmap remains the production API.
 	 */
-	// Package-visible for unit tests — the algorithm is pure (int[] values, boolean[] mask) and the only way to
-	// pin the rounding-bias regression (round-half-up vs floor-toward-zero) without an Android Bitmap. The Bitmap-
-	// dispatch entry point inpaintBitmap remains the production API.
 	static int inpaintIterative(int[] values, boolean[] mask, int width, int height)
 	{
 		int[] frontier = new int[mask.length];

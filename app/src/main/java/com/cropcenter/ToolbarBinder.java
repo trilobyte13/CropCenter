@@ -3,6 +3,7 @@ package com.cropcenter;
 import android.app.AlertDialog;
 import android.graphics.Paint;
 import android.text.InputType;
+import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -33,6 +34,8 @@ import java.util.Locale;
  */
 final class ToolbarBinder
 {
+	private static final String TAG = "ToolbarBinder";
+
 	private static final AspectRatio[] AR_VALUES = {
 		AspectRatio.R4_5, AspectRatio.FREE, AspectRatio.R16_9, AspectRatio.R3_2,
 		AspectRatio.R4_3, AspectRatio.R5_4, AspectRatio.R1_1, AspectRatio.R3_4,
@@ -52,8 +55,8 @@ final class ToolbarBinder
 	// Dynamic Custom row label. Defaults to "Custom" until the user applies a custom AR; then reads
 	// "Custom W:H" so the spinner head + dropdown reflect the active model state. The closed spinner
 	// shows this string whenever customArActive is true (instead of the AR_LABELS preset text); the
-	// Custom dropdown row at AR_LABELS.length - 1 always shows it. Codex round-16: without this dynamic
-	// reflection, the spinner could show e.g. "16:9" while the crop was actually using a custom 5:7.
+	// Custom dropdown row at AR_LABELS.length - 1 always shows it. Without this dynamic reflection,
+	// the spinner could show e.g. "16:9" while the crop was actually using a custom 5:7.
 	private String customArLabel = "Custom";
 	// True when state holds a Custom (non-preset) AR. Set in applyAndResetSpinner; cleared whenever the
 	// user picks a preset row from the AR spinner. Drives the getView override that overrides the closed
@@ -126,8 +129,8 @@ final class ToolbarBinder
 	 * suppresses same-position re-selections, so leaving it on Custom blocks reopen). suppressArListener
 	 * gates the synthetic setSelection's listener fire so it doesn't overwrite the just-applied custom AR
 	 * with the previous preset. Extracted from the showCustomArDialog Apply runnable to keep the
-	 * positive-button lambda within CLAUDE.md's 3-line cap (the inline body grew to 6 statements after
-	 * round-16 added the customArLabel / customArActive / notifyDataSetChanged reflection).
+	 * positive-button lambda within CLAUDE.md's 3-line cap (the inline body grew to 6 statements once
+	 * the customArLabel / customArActive / notifyDataSetChanged reflection landed).
 	 *
 	 * @param widthInput        custom-W EditText
 	 * @param heightInput       custom-H EditText
@@ -538,8 +541,7 @@ final class ToolbarBinder
 		// cancels — restore would commit a preset over the preserved Custom AR, silently replacing the
 		// user's saved Custom W:H. (2) cross-load case — forced cancel from inbound load posts the
 		// setSelection async, by which time state.reset has run and image B is loaded; the post-async
-		// onItemSelected would commit a stale preset onto image B's preserved AR. Suppress closes both
-		// (Codex round-18 F18-4).
+		// onItemSelected would commit a stale preset onto image B's preserved AR. Suppress closes both.
 		Runnable restore = () ->
 		{
 			suppressArListener = true;
@@ -548,15 +550,34 @@ final class ToolbarBinder
 		// Register the dialog with the host's transient-dialog tracker so a Share/View intent or graft
 		// apply that arrives mid-dialog dismisses it before bg state.reset(). Without this, applying the
 		// dialog's Custom values after a load would set state.aspectRatio + customArLabel for image A's
-		// typed values onto image B's spinner (R17-4).
-		host.registerTransientDialog(new AlertDialog.Builder(host.getActivity())
-			.setTitle("Custom Aspect Ratio")
-			.setView(layout)
-			.setPositiveButton(DialogStrings.APPLY, (dialog, which) ->
-				applyCustomArAndResetSpinner(editW, editH, spinner, previousArPosition))
-			.setNegativeButton(DialogStrings.CANCEL, (dialog, which) -> restore.run())
-			.setOnCancelListener(dialog -> restore.run())
-			.show());
+		// typed values onto image B's spinner.
+		//
+		// BadTokenException guard mirrors SaveController.openSaveOptionsDialog / showReplaceDialog /
+		// showExtensionMismatchDialog, MainActivity.showSettingsDialog, and
+		// GraftController.confirmOversizedThenApply: the spinner's onItemSelected fires from a posted
+		// layout pass, so a config-change race between the user tapping "Custom" and the dialog .show()
+		// is reachable. isDestroyed is the first line of defense; the try/catch is the second.
+		if (host.isDestroyed())
+		{
+			restore.run();
+			return;
+		}
+		try
+		{
+			host.registerTransientDialog(new AlertDialog.Builder(host.getActivity())
+				.setTitle("Custom Aspect Ratio")
+				.setView(layout)
+				.setPositiveButton(DialogStrings.APPLY, (dialog, which) ->
+					applyCustomArAndResetSpinner(editW, editH, spinner, previousArPosition))
+				.setNegativeButton(DialogStrings.CANCEL, (dialog, which) -> restore.run())
+				.setOnCancelListener(dialog -> restore.run())
+				.show());
+		}
+		catch (RuntimeException e)
+		{
+			Log.w(TAG, "custom AR dialog failed to show", e);
+			restore.run();
+		}
 	}
 
 	/**
@@ -585,12 +606,28 @@ final class ToolbarBinder
 
 		// Register with the host's transient-dialog tracker so a Share/View intent or graft apply
 		// dismisses this dialog before bg state.reset() \u2014 applyPreciseRotation otherwise commits image
-		// A's typed degrees onto image B's just-reset 0\u00B0 (R17-2).
-		host.registerTransientDialog(new AlertDialog.Builder(host.getActivity())
-			.setTitle("Enter Rotation (\u00B0)")
-			.setView(input)
-			.setPositiveButton(DialogStrings.APPLY, (dialog, which) -> applyPreciseRotation(input))
-			.setNegativeButton(DialogStrings.CANCEL, null)
-			.show());
+		// A's typed degrees onto image B's just-reset 0\u00B0.
+		//
+		// BadTokenException guard mirrors showCustomArDialog and the other tracked-dialog show sites: the
+		// rot-degrees text click is forwarded through a posted layout, so a config-change race between
+		// tap and .show() is reachable. isDestroyed is the first line of defense; the try/catch is the
+		// second.
+		if (host.isDestroyed())
+		{
+			return;
+		}
+		try
+		{
+			host.registerTransientDialog(new AlertDialog.Builder(host.getActivity())
+				.setTitle("Enter Rotation (\u00B0)")
+				.setView(input)
+				.setPositiveButton(DialogStrings.APPLY, (dialog, which) -> applyPreciseRotation(input))
+				.setNegativeButton(DialogStrings.CANCEL, null)
+				.show());
+		}
+		catch (RuntimeException e)
+		{
+			Log.w(TAG, "precise-rotation dialog failed to show", e);
+		}
 	}
 }

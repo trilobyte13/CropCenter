@@ -21,11 +21,6 @@ import java.io.IOException;
  */
 public final class GraftWriterTest
 {
-	private static final byte[] DQT_STUB =
-	{
-		(byte) 0xFF, (byte) 0xDB, 0x00, 0x04, 0x00, 0x00,
-	};
-
 	@Test
 	public void graftAcceptsValidEditWithLegalSosAndEoi() throws IOException
 	{
@@ -40,6 +35,44 @@ public final class GraftWriterTest
 		assertEquals((byte) 0xD8, result[1]);
 		assertEquals((byte) 0xFF, result[result.length - 2]);
 		assertEquals((byte) 0xD9, result[result.length - 1]);
+	}
+
+	@Test
+	public void graftPreservesOriginalExifSegmentVerbatim() throws IOException
+	{
+		// Source carries an EXIF APP1 segment whose payload contains a sentinel byte pattern; edit carries a
+		// DIFFERENT EXIF (different sentinel). Per the SWAP_EXIF=false design, the output must contain source's
+		// EXIF bytes verbatim and must NOT contain the edit's sentinel.
+		byte[] origExifPayload = exifPayloadWithSentinel((byte) 0xAA);
+		byte[] editExifPayload = exifPayloadWithSentinel((byte) 0xBB);
+
+		byte[] orig = JpegFixtures.concat(JpegFixtures.soi(), JpegFixtures.appSegment(0xE1, origExifPayload),
+			DQT_STUB, JpegFixtures.minimalScanAndEoi());
+		byte[] edit = JpegFixtures.concat(JpegFixtures.soi(), JpegFixtures.appSegment(0xE1, editExifPayload),
+			DQT_STUB, JpegFixtures.minimalScanAndEoi());
+
+		byte[] result = GraftWriter.graft(orig, edit);
+		assertTrue("result should contain source's EXIF sentinel (0xAA)",
+			containsSentinel(result, (byte) 0xAA));
+		assertFalse("result must not contain edit's EXIF sentinel (0xBB)",
+			containsSentinel(result, (byte) 0xBB));
+	}
+
+	@Test
+	public void graftReAppendsSourceSeftTrailerVerbatim() throws IOException
+	{
+		// Source has a SEFT trailer; edit doesn't. Output must end with source's SEFT trailer (Samsung Revert
+		// chain preservation depends on this — the SEFT is byte-for-byte re-appended).
+		byte[] orig = JpegFixtures.concat(
+			JpegFixtures.soi(), DQT_STUB, JpegFixtures.minimalScanAndEoi(), seftTrailer());
+		byte[] edit = JpegFixtures.concat(JpegFixtures.soi(), DQT_STUB, JpegFixtures.minimalScanAndEoi());
+
+		byte[] result = GraftWriter.graft(orig, edit);
+		// Last 4 bytes of the result must be the SEFT magic (assuming SEFT trailer got appended).
+		assertEquals('S', result[result.length - 4]);
+		assertEquals('E', result[result.length - 3]);
+		assertEquals('F', result[result.length - 2]);
+		assertEquals('T', result[result.length - 1]);
 	}
 
 	@Test
@@ -99,55 +132,15 @@ public final class GraftWriterTest
 	}
 
 	@Test
-	public void graftPreservesOriginalExifSegmentVerbatim() throws IOException
-	{
-		// Source carries an EXIF APP1 segment whose payload contains a sentinel byte pattern; edit carries a
-		// DIFFERENT EXIF (different sentinel). Per the SWAP_EXIF=false design, the output must contain source's
-		// EXIF bytes verbatim and must NOT contain the edit's sentinel.
-		byte[] origExifPayload = exifPayloadWithSentinel((byte) 0xAA);
-		byte[] editExifPayload = exifPayloadWithSentinel((byte) 0xBB);
-
-		byte[] orig = JpegFixtures.concat(JpegFixtures.soi(), JpegFixtures.appSegment(0xE1, origExifPayload),
-			DQT_STUB, JpegFixtures.minimalScanAndEoi());
-		byte[] edit = JpegFixtures.concat(JpegFixtures.soi(), JpegFixtures.appSegment(0xE1, editExifPayload),
-			DQT_STUB, JpegFixtures.minimalScanAndEoi());
-
-		byte[] result = GraftWriter.graft(orig, edit);
-		assertTrue("result should contain source's EXIF sentinel (0xAA)",
-			containsSentinel(result, (byte) 0xAA));
-		assertFalse("result must not contain edit's EXIF sentinel (0xBB)",
-			containsSentinel(result, (byte) 0xBB));
-	}
-
-	@Test
-	public void graftUsesEditPrimaryScanNotOriginals() throws IOException
-	{
-		// Source carries a primary scan whose entropy-coded body has byte value 0xAA; edit carries 0xBB. Per
-		// the design, the output's primary scan must come from edit (the AI-edited pixels) — verifying this is
-		// the whole point of the graft.
-		byte[] origScan = scanWithPayload((byte) 0xAA);
-		byte[] editScan = scanWithPayload((byte) 0xBB);
-
-		byte[] orig = JpegFixtures.concat(JpegFixtures.soi(), DQT_STUB, origScan);
-		byte[] edit = JpegFixtures.concat(JpegFixtures.soi(), DQT_STUB, editScan);
-
-		byte[] result = GraftWriter.graft(orig, edit);
-		assertTrue("result should contain edit's scan sentinel (0xBB)", containsSentinel(result, (byte) 0xBB));
-		assertFalse("result must not contain source's scan sentinel (0xAA)",
-			containsSentinel(result, (byte) 0xAA));
-	}
-
-	@Test
 	public void graftSkipsGainMapForSdrSourceWithEmbeddedFfd8PostEoi() throws IOException
 	{
-		// Codex round-26 T2 — pin GraftWriter's HDR per-side AND-gate (`origHasMpf && hasHdrgmInXmp`).
-		// Build an SDR original with NO MPF segment and NO hdrgm in XMP, but post-primary-EOI bytes
-		// that structurally look like a JPEG (`FF D8 ... FF D9` mimicking a SEFT-block embedded
-		// thumbnail). Without the AND-gate, a regression that gated only on hasMpf — or only on
-		// hasHdrgmInXmp — would mis-walk those bytes as a synthesised gain map and append them as
-		// HDR-claiming output. With the gate intact, GainMapExtractor refuses to inspect post-EOI
-		// bytes and the graft output carries no gain map. (Round-19 F19-1 follow-up; mirrors the
-		// HdrSignature load-time gate but on the graft path.)
+		// Pin GraftWriter's HDR per-side AND-gate (`origHasMpf && hasHdrgmInXmp`). Build an SDR original
+		// with NO MPF segment and NO hdrgm in XMP, but post-primary-EOI bytes that structurally look
+		// like a JPEG (`FF D8 ... FF D9` mimicking a SEFT-block embedded thumbnail). Without the
+		// AND-gate, a regression that gated only on hasMpf — or only on hasHdrgmInXmp — would mis-walk
+		// those bytes as a synthesised gain map and append them as HDR-claiming output. With the gate
+		// intact, GainMapExtractor refuses to inspect post-EOI bytes and the graft output carries no
+		// gain map. Mirrors the HdrSignature load-time gate but on the graft path.
 		ByteArrayOutputStream origOut = new ByteArrayOutputStream();
 		origOut.write(JpegFixtures.soi());
 		origOut.write(DQT_STUB);
@@ -194,20 +187,21 @@ public final class GraftWriterTest
 	}
 
 	@Test
-	public void graftReAppendsSourceSeftTrailerVerbatim() throws IOException
+	public void graftUsesEditPrimaryScanNotOriginals() throws IOException
 	{
-		// Source has a SEFT trailer; edit doesn't. Output must end with source's SEFT trailer (Samsung Revert
-		// chain preservation depends on this — the SEFT is byte-for-byte re-appended).
-		byte[] orig = JpegFixtures.concat(
-			JpegFixtures.soi(), DQT_STUB, JpegFixtures.minimalScanAndEoi(), seftTrailer());
-		byte[] edit = JpegFixtures.concat(JpegFixtures.soi(), DQT_STUB, JpegFixtures.minimalScanAndEoi());
+		// Source carries a primary scan whose entropy-coded body has byte value 0xAA; edit carries 0xBB. Per
+		// the design, the output's primary scan must come from edit (the AI-edited pixels) — verifying this is
+		// the whole point of the graft.
+		byte[] origScan = scanWithPayload((byte) 0xAA);
+		byte[] editScan = scanWithPayload((byte) 0xBB);
+
+		byte[] orig = JpegFixtures.concat(JpegFixtures.soi(), DQT_STUB, origScan);
+		byte[] edit = JpegFixtures.concat(JpegFixtures.soi(), DQT_STUB, editScan);
 
 		byte[] result = GraftWriter.graft(orig, edit);
-		// Last 4 bytes of the result must be the SEFT magic (assuming SEFT trailer got appended).
-		assertEquals('S', result[result.length - 4]);
-		assertEquals('E', result[result.length - 3]);
-		assertEquals('F', result[result.length - 2]);
-		assertEquals('T', result[result.length - 1]);
+		assertTrue("result should contain edit's scan sentinel (0xBB)", containsSentinel(result, (byte) 0xBB));
+		assertFalse("result must not contain source's scan sentinel (0xAA)",
+			containsSentinel(result, (byte) 0xAA));
 	}
 
 	/**
@@ -329,4 +323,9 @@ public final class GraftWriterTest
 	{
 		return new byte[]{ 0x10, 0x00, 0x00, 0x00, 'S', 'E', 'F', 'T' };
 	}
+
+	private static final byte[] DQT_STUB =
+	{
+		(byte) 0xFF, (byte) 0xDB, 0x00, 0x04, 0x00, 0x00,
+	};
 }

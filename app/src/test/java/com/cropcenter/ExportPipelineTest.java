@@ -31,24 +31,33 @@ import java.util.List;
 public final class ExportPipelineTest
 {
 	@Test
-	public void rejectsBypassWhenOutputIsPng()
+	public void permitsBypassWhenAllGatesClearAndNoCrop()
 	{
-		// PNG has its own encode path (eXIf chunk metadata, transparent canvas); can't bypass via the
-		// JPEG-verbatim shortcut.
+		// Happy path: JPEG source + JPEG output, no graft, no rotation, no grid bake, bytes available, no
+		// crop center seeded yet, AND the source carries an IFD1 thumbnail to round-trip verbatim. Bypass
+		// returns true.
 		CropState state = new CropState();
 		state.setSourceFormat(Format.JPEG);
 		state.setOriginalFileBytes(new byte[]{ (byte) 0xFF, (byte) 0xD8 });
-		assertFalse(ExportPipeline.canBypassEncode(state, true));
+		state.setJpegMeta(metaWithThumbnail());
+		assertTrue(ExportPipeline.canBypassEncode(state, false));
 	}
 
 	@Test
-	public void rejectsBypassWhenSourceFormatIsPng()
+	public void permitsBypassWhenRotationIsSubEpsilon()
 	{
-		// Source PNG with output JPEG can't bypass — would ship PNG bytes labeled JPEG.
+		// Sub-epsilon rotation snaps to exactly 0 in setRotationDegrees, so the renderer treats it as no
+		// rotation. Bypass should be allowed (assuming all other gates pass) — anything else would force a
+		// needless re-encode. hasCenter is false (default), so we don't need a Bitmap to reach the happy-path
+		// return. State must carry an EXIF segment with an IFD1 thumbnail; the thumbnail-presence gate
+		// disqualifies bypass when the source has no pre-computed thumbnail so the re-encode path can
+		// synthesise one.
 		CropState state = new CropState();
-		state.setSourceFormat(Format.PNG);
-		state.setOriginalFileBytes(new byte[]{ (byte) 0x89, 'P', 'N', 'G' });
-		assertFalse(ExportPipeline.canBypassEncode(state, false));
+		state.setSourceFormat(Format.JPEG);
+		state.setOriginalFileBytes(new byte[]{ (byte) 0xFF, (byte) 0xD8 });
+		state.setJpegMeta(metaWithThumbnail());
+		state.setRotationDegrees(BitmapUtils.ROTATION_EPSILON / 2f);
+		assertTrue(ExportPipeline.canBypassEncode(state, false));
 	}
 
 	@Test
@@ -63,34 +72,6 @@ public final class ExportPipelineTest
 		AiMask mask = AiMask.of(new boolean[]{ true }, 1, 1, 4);
 		state.installGraft(new Graft(new byte[]{ 0x01 }, "test.jpg", mask));
 		assertFalse(ExportPipeline.canBypassEncode(state, false));
-	}
-
-	@Test
-	public void rejectsBypassWhenRotationAtOrAboveEpsilon()
-	{
-		// Any rotation magnitude at or above the renderer epsilon means a real transform; bypass would skip the
-		// canvas pass and ship source pixels at their original orientation under metadata that says "rotated".
-		CropState state = new CropState();
-		state.setSourceFormat(Format.JPEG);
-		state.setOriginalFileBytes(new byte[]{ (byte) 0xFF, (byte) 0xD8 });
-		state.setRotationDegrees(BitmapUtils.ROTATION_EPSILON);
-		assertFalse(ExportPipeline.canBypassEncode(state, false));
-	}
-
-	@Test
-	public void permitsBypassWhenRotationIsSubEpsilon()
-	{
-		// Sub-epsilon rotation snaps to exactly 0 in setRotationDegrees, so the renderer treats it as no
-		// rotation. Bypass should be allowed (assuming all other gates pass) — anything else would force a
-		// needless re-encode. hasCenter is false (default), so we don't need a Bitmap to reach the happy-path
-		// return. State must carry an EXIF segment with an IFD1 thumbnail; the round-36 gate disqualifies
-		// bypass when the source has no pre-computed thumbnail so the re-encode path can synthesise one.
-		CropState state = new CropState();
-		state.setSourceFormat(Format.JPEG);
-		state.setOriginalFileBytes(new byte[]{ (byte) 0xFF, (byte) 0xD8 });
-		state.setJpegMeta(metaWithThumbnail());
-		state.setRotationDegrees(BitmapUtils.ROTATION_EPSILON / 2f);
-		assertTrue(ExportPipeline.canBypassEncode(state, false));
 	}
 
 	@Test
@@ -114,16 +95,36 @@ public final class ExportPipelineTest
 	}
 
 	@Test
-	public void permitsBypassWhenAllGatesClearAndNoCrop()
+	public void rejectsBypassWhenOutputIsPng()
 	{
-		// Happy path: JPEG source + JPEG output, no graft, no rotation, no grid bake, bytes available, no
-		// crop center seeded yet, AND the source carries an IFD1 thumbnail to round-trip verbatim. Bypass
-		// returns true.
+		// PNG has its own encode path (eXIf chunk metadata, transparent canvas); can't bypass via the
+		// JPEG-verbatim shortcut.
 		CropState state = new CropState();
 		state.setSourceFormat(Format.JPEG);
 		state.setOriginalFileBytes(new byte[]{ (byte) 0xFF, (byte) 0xD8 });
-		state.setJpegMeta(metaWithThumbnail());
-		assertTrue(ExportPipeline.canBypassEncode(state, false));
+		assertFalse(ExportPipeline.canBypassEncode(state, true));
+	}
+
+	@Test
+	public void rejectsBypassWhenRotationAtOrAboveEpsilon()
+	{
+		// Any rotation magnitude at or above the renderer epsilon means a real transform; bypass would skip the
+		// canvas pass and ship source pixels at their original orientation under metadata that says "rotated".
+		CropState state = new CropState();
+		state.setSourceFormat(Format.JPEG);
+		state.setOriginalFileBytes(new byte[]{ (byte) 0xFF, (byte) 0xD8 });
+		state.setRotationDegrees(BitmapUtils.ROTATION_EPSILON);
+		assertFalse(ExportPipeline.canBypassEncode(state, false));
+	}
+
+	@Test
+	public void rejectsBypassWhenSourceFormatIsPng()
+	{
+		// Source PNG with output JPEG can't bypass — would ship PNG bytes labeled JPEG.
+		CropState state = new CropState();
+		state.setSourceFormat(Format.PNG);
+		state.setOriginalFileBytes(new byte[]{ (byte) 0x89, 'P', 'N', 'G' });
+		assertFalse(ExportPipeline.canBypassEncode(state, false));
 	}
 
 	@Test

@@ -31,9 +31,10 @@ public final class JpegMarkerWalker
 	private JpegMarkerWalker() {}
 
 	/**
-	 * Walk JPEG markers to find the byte offset just past the primary's EOI (FF D9). Returns -1 when the primary
-	 * doesn't end cleanly within `endBound` — caller treats this as "no recoverable scan" and surfaces a real
-	 * failure toast rather than relying on an undefined post-EOF read.
+	 * Walk JPEG markers from `startOff` (which must point at an SOI marker — FF D8) to find the byte offset
+	 * just past the matching EOI (FF D9). Returns -1 when the JPEG starting at startOff doesn't end cleanly
+	 * within `endBound` — caller treats this as "no recoverable scan" and surfaces a real failure toast
+	 * rather than relying on an undefined post-EOF read.
 	 *
 	 * Hardened against four classes of malformed / adversarial input:
 	 *   - segLen < 2 (per spec the length must include the 2 length bytes themselves; smaller is invalid and
@@ -44,14 +45,19 @@ public final class JpegMarkerWalker
 	 *   - leading fill bytes 0xFF before a marker (legal per ITU-T T.81 §B.1.1.2) — mis-reading the second 0xFF
 	 *     as a marker code would parse a bogus segment length from the next two bytes
 	 *
-	 * @param file     full JPEG file bytes (must start with SOI; this method skips the first 2 bytes)
-	 * @param endBound exclusive upper offset to stop scanning at (typically file.length, or the start of a
-	 *                 known trailing region like a SEFT trailer)
-	 * @return offset just past the primary's EOI, or -1 when no clean EOI is found within endBound
+	 * The explicit startOff lets callers scan an embedded JPEG (gain-map slice in an Ultra HDR file's
+	 * post-primary bytes, for example) without allocating a fresh Arrays.copyOfRange — the walker reads
+	 * directly out of the source array between [startOff, endBound).
+	 *
+	 * @param file     bytes containing a JPEG whose SOI sits at startOff
+	 * @param startOff inclusive offset of the SOI marker (this method advances past it)
+	 * @param endBound exclusive upper offset to stop scanning at
+	 * @return offset just past the matching EOI (relative to file's byte 0, NOT to startOff), or -1 when no
+	 *         clean EOI is found within endBound
 	 */
-	public static int findPrimaryEoi(byte[] file, int endBound)
+	public static int findEoi(byte[] file, int startOff, int endBound)
 	{
-		int off = 2; // skip SOI
+		int off = startOff + 2; // skip SOI
 		while (off < endBound - 1)
 		{
 			if ((file[off] & 0xFF) != 0xFF)
@@ -114,6 +120,22 @@ public final class JpegMarkerWalker
 			}
 		}
 		return -1;
+	}
+
+	/**
+	 * Walk JPEG markers from byte 0 to find the byte offset just past the primary's EOI (FF D9). Convenience
+	 * wrapper for the most common case — when the JPEG starts at the file's first byte. Delegates to
+	 * findEoi(file, 0, endBound) which is the same walk with an explicit start offset for the embedded-JPEG
+	 * case (gain-map scan in GainMapExtractor, etc.).
+	 *
+	 * @param file     full JPEG file bytes (must start with SOI at byte 0)
+	 * @param endBound exclusive upper offset to stop scanning at (typically file.length, or the start of a
+	 *                 known trailing region like a SEFT trailer)
+	 * @return offset just past the primary's EOI, or -1 when no clean EOI is found within endBound
+	 */
+	public static int findPrimaryEoi(byte[] file, int endBound)
+	{
+		return findEoi(file, 0, endBound);
 	}
 
 	/**

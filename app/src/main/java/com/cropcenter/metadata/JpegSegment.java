@@ -29,15 +29,15 @@ public record JpegSegment(int marker, byte[] data)
 	 * segment of a multi-chunk Extended XMP packet (used when the standard XMP body exceeds 64 KiB and has to be
 	 * split across several APP1 segments). Centralised here so ExtendedXmpReassembler, HdrSignature, and
 	 * XmpItemLengthPatcher all reference the same string rather than redeclaring it three different ways with
-	 * three different constant names (Codex round-46 style-agent F1).
+	 * three different constant names.
 	 */
 	public static final String EXTENDED_XMP_HEADER = "http://ns.adobe.com/xmp/extension/\0";
 
 	/**
 	 * Cap on a JPEG APP segment's total byte length, INCLUDING the 2-byte length field itself. The segLen field
 	 * is u16, so 65535 is the absolute spec ceiling. Centralised here so ExifPatcher and XmpItemLengthPatcher
-	 * both reference the same constant rather than declaring near-duplicate copies with different names (Codex
-	 * round-46 style-agent F2). Note: this is the spec cap; some encoders cap practical segments lower (e.g.
+	 * both reference the same constant rather than declaring near-duplicate copies with different names. Note:
+	 * this is the spec cap; some encoders cap practical segments lower (e.g.
 	 * Samsung writes EXIF at 65535 but XMP at 65533 to leave room for stuffing bytes).
 	 */
 	public static final int MAX_SEGMENT_BYTES = 65535;
@@ -49,6 +49,31 @@ public record JpegSegment(int marker, byte[] data)
 	{
 		return marker == 0xE1 && data.length >= 10 && data[4] == 'E' && data[5] == 'x' && data[6] == 'i'
 			&& data[7] == 'f' && data[8] == 0 && data[9] == 0;
+	}
+
+	/**
+	 * Check if this is an Adobe Extended XMP APP1 segment — marker 0xE1 with the extension namespace prefix
+	 * (`http://ns.adobe.com/xmp/extension/\0`) at the data[4] body offset. Vendors split a > 64 KB XMP packet
+	 * across multiple APP1 segments: the first carries the standard `XMP_HEADER` + xmpNote:HasExtendedXMP, and
+	 * subsequent segments use this extension prefix followed by a 32-byte MD5 GUID + 32-bit total length +
+	 * 32-bit offset. Centralised here so `HdrSignature.isHdrgmXmpSegment` and `ExtendedXmpReassembler` share
+	 * one prefix-walk implementation rather than two near-identical loops; `ExtendedXmpReassembler` layers a
+	 * stricter post-prefix length guard on top of this predicate before decoding the GUID / offset header.
+	 */
+	public boolean isExtendedXmp()
+	{
+		if (marker != 0xE1 || data.length < 4 + EXTENDED_XMP_HEADER.length())
+		{
+			return false;
+		}
+		for (int i = 0; i < EXTENDED_XMP_HEADER.length(); i++)
+		{
+			if ((data[4 + i] & 0xFF) != EXTENDED_XMP_HEADER.charAt(i))
+			{
+				return false;
+			}
+		}
+		return true;
 	}
 
 	/**
@@ -85,7 +110,7 @@ public record JpegSegment(int marker, byte[] data)
 	 */
 	public boolean isXmp()
 	{
-		if (marker != 0xE1 || data.length < 33)
+		if (marker != 0xE1 || data.length < 4 + XMP_HEADER.length())
 		{
 			return false;
 		}

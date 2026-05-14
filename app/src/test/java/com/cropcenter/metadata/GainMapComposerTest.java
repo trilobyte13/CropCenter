@@ -1,7 +1,9 @@
 package com.cropcenter.metadata;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
 
@@ -10,49 +12,47 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 
 /**
- * Tests for GainMapComposer.compose covering the three documented return classes:
- * primary-unchanged on null/empty gain map, primary-unchanged on MPF-patch failure
- * (the round-7 P2 fix that prevents shipping orphaned HDR bytes), and combined
- * bytes when patch succeeds. The MPF-patch-failure case is the key safety
- * invariant — without it, decoders that scan for the hdrgm signature would
- * render HDR with the wrong offset on a file whose metadata still claimed an
- * attached gain map. The save-toast wiring through ExportResult.hdrAttached
- * separately ensures the [HDR OK] / [HDR dropped] suffix reflects what the
- * encoder actually appended (Codex round-20 F2 replaced an earlier full-file
- * substring scan).
+ * Tests for GainMapComposer.compose covering the four documented outcomes — three HDR-drop paths plus the
+ * full-success path — and the ComposeResult.hdrAttached flag that disambiguates them for downstream callers.
+ *
+ * The previous reference-equality contract (drop returns input array, success returns a fresh array) broke
+ * once compose started returning the XMP-patched primary on the MPF-fail path: a freshly-allocated array
+ * distinct from the input made `result != input` true on a drop, fooling CropExporter into reporting
+ * "[HDR OK]" on a file with no gain map. Each test below now asserts both `bytes` content/identity AND
+ * the explicit `hdrAttached` flag so the tagged contract can't drift back to reference-inequality.
  */
 public final class GainMapComposerTest
 {
 	@Test
-	public void composeReturnsPrimaryUnchangedForNullGainMap()
+	public void composeHdrAttachedFalseWhenXmpPatchedButMpfFails() throws IOException
 	{
-		byte[] primary = { 1, 2, 3, 4 };
-		byte[] result = GainMapComposer.compose(primary, null);
-		assertSame("null gain map should pass primary through verbatim", primary, result);
-	}
+		// Regression for a detection-shape bug: when standard XMP carries a patchable Item:Length AND
+		// MpfPatcher subsequently fails (no MPF segment), GainMapComposer returns the XMP-patched primary
+		// (a freshly-allocated byte array because Item:Length was rewritten) — DIFFERENT reference from the
+		// input. The previous reference-inequality detection in CropExporter (`withGainMap != withFullMeta`)
+		// wrongly fired hdrAttached=true on this path, skipped stripHdrSegments, and toasted "[HDR OK]" on
+		// a file that ships with no gain map but XMP that still claims one. The ComposeResult.hdrAttached
+		// flag must be false here regardless of byte-array identity.
+		byte[] standardXmp = (JpegSegment.XMP_HEADER
+			+ "<rdf:Description Item:Length=\"100\" Item:Mime=\"image/jpeg\"/>")
+				.getBytes(StandardCharsets.US_ASCII);
+		// Build a primary with a patchable XMP segment but NO MPF segment. XmpItemLengthPatcher will rewrite
+		// "100" to the gain-map size (40), producing a new byte array; MpfPatcher will then fail because no
+		// MPF segment exists.
+		ByteArrayOutputStream out = new ByteArrayOutputStream();
+		out.write(JpegFixtures.soi());
+		out.write(JpegFixtures.appSegment(0xE1, standardXmp));
+		out.write(JpegFixtures.minimalScanAndEoi());
+		byte[] primary = out.toByteArray();
+		byte[] gainMap = new byte[40];
+		for (int i = 0; i < gainMap.length; i++)
+		{
+			gainMap[i] = 0x42;
+		}
 
-	@Test
-	public void composeReturnsPrimaryUnchangedForEmptyGainMap()
-	{
-		byte[] primary = { 1, 2, 3, 4 };
-		byte[] empty = new byte[0];
-		byte[] result = GainMapComposer.compose(primary, empty);
-		assertSame("empty gain map should pass primary through verbatim", primary, result);
-	}
-
-	@Test
-	public void composeReturnsPrimaryUnchangedWhenMpfPatchFails()
-	{
-		// Without a valid MPF segment in primary, MpfPatcher.patch returns false. compose must DROP the gain
-		// map and ship primary verbatim — appending orphaned gain-map bytes that no MPF entry points at would
-		// either crash strict decoders' Revert pre-flight (Samsung Gallery) or render with the wrong offset in
-		// lenient decoders (which scan for the hdrgm signature). Reference equality on the compose result is
-		// what CropExporter uses to set ExportResult.hdrAttached=false on this drop path so the save toast
-		// reads "[HDR dropped]" instead of "[HDR OK]" (Codex round-20 F2 replaced an earlier full-file scan).
-		byte[] primary = { 0x10, 0x20, 0x30 };
-		byte[] gainMap = { 0x40, 0x50 };
-		byte[] result = GainMapComposer.compose(primary, gainMap);
-		assertSame("MPF patch failure should drop the gain map and return primary", primary, result);
+		GainMapComposer.ComposeResult result = GainMapComposer.compose(primary, gainMap);
+		assertFalse("MPF-fail-after-XMP-patch must mark hdrAttached=false even when bytes != primary",
+			result.hdrAttached());
 	}
 
 	@Test
@@ -68,25 +68,64 @@ public final class GainMapComposerTest
 			gainMap[i] = 0x42;
 		}
 
-		byte[] result = GainMapComposer.compose(primary, gainMap);
+		GainMapComposer.ComposeResult result = GainMapComposer.compose(primary, gainMap);
+		assertTrue("full-success path must mark hdrAttached=true", result.hdrAttached());
+		byte[] bytes = result.bytes();
 		assertEquals("compose should return primary + gainMap concatenated",
-			primary.length + gainMap.length, result.length);
+			primary.length + gainMap.length, bytes.length);
 		// First primary.length bytes should be the primary verbatim (MPF segment inside has been mutated by
 		// patch, but the first bytes of the segment header / SOI / etc are unchanged).
-		assertEquals((byte) 0xFF, result[0]);
-		assertEquals((byte) 0xD8, result[1]);
+		assertEquals((byte) 0xFF, bytes[0]);
+		assertEquals((byte) 0xD8, bytes[1]);
 		// Last gainMap.length bytes should be our 0x42 padding.
 		for (int i = 0; i < gainMap.length; i++)
 		{
 			assertEquals("gain map byte " + i + " should be appended verbatim",
-				(byte) 0x42, result[primary.length + i]);
+				(byte) 0x42, bytes[primary.length + i]);
 		}
+	}
+
+	@Test
+	public void composeReturnsPrimaryUnchangedForEmptyGainMap()
+	{
+		byte[] primary = { 1, 2, 3, 4 };
+		byte[] empty = new byte[0];
+		GainMapComposer.ComposeResult result = GainMapComposer.compose(primary, empty);
+		assertFalse("empty gain map must mark hdrAttached=false", result.hdrAttached());
+		assertSame("empty gain map should pass primary through verbatim", primary, result.bytes());
+	}
+
+	@Test
+	public void composeReturnsPrimaryUnchangedForNullGainMap()
+	{
+		byte[] primary = { 1, 2, 3, 4 };
+		GainMapComposer.ComposeResult result = GainMapComposer.compose(primary, null);
+		assertFalse("null gain map must mark hdrAttached=false", result.hdrAttached());
+		assertSame("null gain map should pass primary through verbatim", primary, result.bytes());
+	}
+
+	@Test
+	public void composeReturnsPrimaryUnchangedWhenMpfPatchFails()
+	{
+		// Without a valid MPF segment in primary, MpfPatcher.patch returns false. compose must DROP the gain
+		// map — appending orphaned gain-map bytes that no MPF entry points at would either crash strict
+		// decoders' Revert pre-flight (Samsung Gallery) or render with the wrong offset in lenient decoders.
+		// hdrAttached=false in the ComposeResult is what CropExporter uses to set ExportResult.hdrAttached
+		// and toast "[HDR dropped]" instead of "[HDR OK]". On this primary (no XMP, no MPF), the
+		// XmpItemLengthPatcher passes through with the input array unchanged, so the returned bytes are also
+		// the input reference — pinning that with assertSame protects against an inadvertent re-allocation
+		// that would also still be wrong-but-undetectable.
+		byte[] primary = { 0x10, 0x20, 0x30 };
+		byte[] gainMap = { 0x40, 0x50 };
+		GainMapComposer.ComposeResult result = GainMapComposer.compose(primary, gainMap);
+		assertFalse("MPF patch failure must mark hdrAttached=false", result.hdrAttached());
+		assertSame("MPF patch failure should drop the gain map and return primary", primary, result.bytes());
 	}
 
 	@Test
 	public void composeReturnsPrimaryWhenItemLengthInExtendedXmp() throws IOException
 	{
-		// Codex round-26 T1 — when XmpItemLengthPatcher.patch returns null (Item:Length lives in Extended
+		// When XmpItemLengthPatcher.patch returns null (Item:Length lives in Extended
 		// XMP, which can't be safely patched in-place across the per-chunk reassembly headers), compose
 		// must drop the gain map and ship primary verbatim. Without this null-handling integration, the
 		// composer would either NPE on the null `patched` array or ship a file with stale Item:Length —
@@ -107,15 +146,31 @@ public final class GainMapComposerTest
 			gainMap[i] = 0x42;
 		}
 
-		byte[] result = GainMapComposer.compose(primary, gainMap);
+		GainMapComposer.ComposeResult result = GainMapComposer.compose(primary, gainMap);
+		assertFalse("Item:Length-in-Extended-XMP must mark hdrAttached=false", result.hdrAttached());
 		assertSame("Item:Length-in-Extended-XMP must drop the gain map (patcher null return)",
-			primary, result);
+			primary, result.bytes());
+	}
+
+	@Test
+	public void composeReturnsPrimaryWhenMpfMissingEvenWithGainMap() throws IOException
+	{
+		// Variant of the patch-failure test using a real-looking JPEG (SOI + DQT + minimal scan + EOI) that has
+		// NO MPF segment. patch returns false; compose must drop the gain map. This pin closes the hardest
+		// case: a valid SDR JPEG (not Ultra HDR) being passed to compose — the gain map shouldn't hitch a ride.
+		byte[] primary = JpegFixtures.concat(
+			JpegFixtures.soi(), new byte[] { (byte) 0xFF, (byte) 0xDB, 0x00, 0x04, 0x00, 0x00 },
+			JpegFixtures.minimalScanAndEoi());
+		byte[] gainMap = { 0x42, 0x42, 0x42 };
+		GainMapComposer.ComposeResult result = GainMapComposer.compose(primary, gainMap);
+		assertFalse("SDR primary with no MPF must mark hdrAttached=false", result.hdrAttached());
+		assertSame("SDR primary with no MPF should ignore gain map", primary, result.bytes());
 	}
 
 	@Test
 	public void composeReturnsPrimaryWhenStandardItemLengthIsUnpatchable() throws IOException
 	{
-		// Codex round-29 A4.2 — pin GainMapComposer's null-return handling for the OTHER trigger:
+		// Pin GainMapComposer's null-return handling for the OTHER trigger:
 		// XmpItemLengthPatcher returns null because standard XMP carries Item:Length but the segment
 		// is unpatchable (here: malformed empty digit run). Existing
 		// composeReturnsPrimaryWhenItemLengthInExtendedXmp covers the Extended XMP trigger; this
@@ -130,23 +185,11 @@ public final class GainMapComposerTest
 			gainMap[i] = 0x42;
 		}
 
-		byte[] result = GainMapComposer.compose(primary, gainMap);
+		GainMapComposer.ComposeResult result = GainMapComposer.compose(primary, gainMap);
+		assertFalse("standard-XMP unpatchable Item:Length must mark hdrAttached=false",
+			result.hdrAttached());
 		assertSame("standard-XMP unpatchable Item:Length must drop the gain map (patcher null return)",
-			primary, result);
-	}
-
-	@Test
-	public void composeReturnsPrimaryWhenMpfMissingEvenWithGainMap() throws IOException
-	{
-		// Variant of the patch-failure test using a real-looking JPEG (SOI + DQT + minimal scan + EOI) that has
-		// NO MPF segment. patch returns false; compose must drop the gain map. This pin closes the hardest
-		// case: a valid SDR JPEG (not Ultra HDR) being passed to compose — the gain map shouldn't hitch a ride.
-		byte[] primary = JpegFixtures.concat(
-			JpegFixtures.soi(), new byte[] { (byte) 0xFF, (byte) 0xDB, 0x00, 0x04, 0x00, 0x00 },
-			JpegFixtures.minimalScanAndEoi());
-		byte[] gainMap = { 0x42, 0x42, 0x42 };
-		byte[] result = GainMapComposer.compose(primary, gainMap);
-		assertSame("SDR primary with no MPF should ignore gain map", primary, result);
+			primary, result.bytes());
 	}
 
 	private static byte[] buildExtendedXmpChunk(String inner) throws IOException

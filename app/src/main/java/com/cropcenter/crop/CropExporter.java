@@ -13,6 +13,7 @@ import com.cropcenter.metadata.HdrSignature;
 import com.cropcenter.metadata.JpegMarkerWalker;
 import com.cropcenter.metadata.JpegMetadataInjector;
 import com.cropcenter.metadata.JpegSegment;
+import com.cropcenter.metadata.PngMetadataExtractor;
 import com.cropcenter.model.CropState;
 import com.cropcenter.model.Format;
 import com.cropcenter.model.GridConfig;
@@ -63,8 +64,8 @@ public final class CropExporter
 	 * @param cacheDir Activity cache dir for UltraHdrCompat's intermediate file work; may be null
 	 *                 when the platform decode path doesn't need a temp file
 	 * @return ExportResult carrying the encoded bytes and the structural hdrAttached flag
-	 * @throws IOException when no image is loaded, encoding fails, or metadata splicing rejects
-	 *                     the input as malformed
+	 * @throws IOException when no image is loaded, encoding fails, or metadata splicing rejects the input
+	 *                     as malformed
 	 */
 	public static ExportResult export(CropState state, File cacheDir)
 		throws IOException
@@ -176,6 +177,39 @@ public final class CropExporter
 	}
 
 	/**
+	 * Pixel index for grid line i of a count-N grid along one axis of the exported crop. Matches the
+	 * continuous-float positions GridRenderer.linePos emits for the preview, rounded to the nearest output pixel.
+	 * Second-half lines mirror the first half around dim / 2 so (i, count − i) pairs stay symmetric — Java's
+	 * Math.round rounds half-up, which would break symmetry at half-integer positions (e.g. count=4, dim=10
+	 * produces raw values 2.5 and 7.5; rounding both half-up gives 3 and 8 instead of the symmetric 3 and 7).
+	 *
+	 * Known half-pixel divergence from the preview: for odd `dim` with `i * 2 == count` (the middle line), the
+	 * preview draws at the fractional coord `dim / 2f` and anti-aliases across the two adjacent pixels. This
+	 * exporter must pick one integer pixel index, so the middle line in the baked export sits on `ceil(dim / 2f)`
+	 * while the preview's visual centre of mass is 0.5 px to its left. Acceptable because the preview is
+	 * anti-aliased and the eye reads its centre, not its origin.
+	 *
+	 * Package-private so CropExporterGridLineTest can pin the mirror-symmetry invariant — a regression that
+	 * collapses the mirror trick to a plain Math.round((double) dim * i / count) would silently produce
+	 * asymmetric exported grids on count=4 / dim=10-class fixtures.
+	 *
+	 * @param i     grid line index in [1, count − 1] — the integer line count from the left/top edge
+	 * @param count total number of grid intervals (so the grid draws count − 1 internal lines)
+	 * @param dim   total dimension in output pixels along this axis (cropW or cropH)
+	 * @return pixel index where line i sits in the baked export; for any i, the (i, count − i) pair
+	 *         satisfies result(i) + result(count − i) == dim
+	 */
+	static int gridLinePixel(int i, int count, int dim)
+	{
+		if (i * 2 > count)
+		{
+			int mirror = (int) Math.round((double) dim * (count - i) / count);
+			return dim - mirror;
+		}
+		return (int) Math.round((double) dim * i / count);
+	}
+
+	/**
 	 * Run a raw TIFF through ExifPatcher.patch to normalise orientation (forced to 1 because pixels
 	 * were rotated at load time), rewrite cropped dimensions, and replace OR strip the embedded IFD1
 	 * thumbnail. Wraps the TIFF as a synthetic APP1 segment for ExifPatcher's segment-oriented API;
@@ -183,13 +217,13 @@ public final class CropExporter
 	 * reads only data().length, never the wrapped length, so the truncation is harmless. Returns the
 	 * patched TIFF bytes, or null when ExifPatcher rejected the input (malformed byte order, etc.).
 	 *
-	 * Stale-thumbnail safety on huge PNG eXIf (Codex round-33 F1 + round-34 F1): ExifPatcher's
-	 * spliceExistingThumbnail still enforces the JPEG APP1 u16 cap (65535) on the rebuilt synthetic
-	 * segment, so a too-large rebuild rejects silently and leaves the source's IFD1 thumbnail in
-	 * place — leaking pre-edit content via the embedded preview. Predict the rejection here using
-	 * `ExifPatcher.maxThumbnailBytes`, which subtracts the OLD thumbnail's bytes from the segment
-	 * size before measuring remaining APP1 room (round-33 F1's naive `tiff.length + thumbnail.length`
-	 * sum stripped many splices that would actually have shrunk the segment — Codex round-34 F1).
+	 * Stale-thumbnail safety on huge PNG eXIf: ExifPatcher's spliceExistingThumbnail still enforces the
+	 * JPEG APP1 u16 cap (65535) on the rebuilt synthetic segment, so a too-large rebuild rejects
+	 * silently and leaves the source's IFD1 thumbnail in place — leaking pre-edit content via the
+	 * embedded preview. Predict the rejection here using `ExifPatcher.maxThumbnailBytes`, which
+	 * subtracts the OLD thumbnail's bytes from the segment size before measuring remaining APP1 room
+	 * (a naive `tiff.length + thumbnail.length` sum would force-strip many splices that actually
+	 * shrink the segment).
 	 * When the new thumbnail won't fit even after old-thumbnail removal, force-route to
 	 * `ExifPatcher.STRIP_IFD1_THUMBNAIL` so the saved PNG carries no IFD1 rather than the source's
 	 * pre-edit preview.
@@ -201,10 +235,10 @@ public final class CropExporter
 	 * @param newW      cropped image width
 	 * @param newH      cropped image height
 	 * @param thumbnail fresh JPEG thumbnail of the cropped pixels — non-null is required so the IFD1
-	 *                  thumbnail doesn't carry the source's pre-crop preview (Codex round-30 F1);
-	 *                  passing null here would PRESERVE the original thumbnail, leaking pre-edit
-	 *                  content. Force-overridden to STRIP_IFD1_THUMBNAIL when the rebuilt segment
-	 *                  cannot fit under APP1's cap even after old-thumbnail removal (round-34 F1)
+	 *                  thumbnail doesn't carry the source's pre-crop preview; passing null here would
+	 *                  PRESERVE the original thumbnail, leaking pre-edit content. Force-overridden to
+	 *                  STRIP_IFD1_THUMBNAIL when the rebuilt segment cannot fit under APP1's cap even
+	 *                  after old-thumbnail removal
 	 * @return patched TIFF bytes ready for the eXIf chunk, or null on parse failure
 	 */
 	static byte[] patchPngExifTiff(byte[] tiff, int newW, int newH, byte[] thumbnail)
@@ -230,12 +264,11 @@ public final class CropExporter
 		wrappedList.add(new JpegSegment(0xE1, wrapped));
 
 		// Predict whether spliceExistingThumbnail's APP1-cap check will reject the rebuild. Using
-		// ExifPatcher.maxThumbnailBytes (rather than a naive tiff.length + thumbnail.length sum) is
-		// the round-34 F1 fix — maxThumbnailBytes walks IFD0 → IFD1 → JPEGInterchangeFormatLength to
-		// find the OLD thumbnail size and returns `JpegSegment.MAX_SEGMENT_BYTES - (data.length -
-		// oldThumbLen)`, the exact post-splice budget. The previous round-33 guard force-stripped a
-		// 50KB-old + 30KB-fresh fixture even though the rebuilt segment (~30KB after old-thumb
-		// removal) would have fit comfortably.
+		// ExifPatcher.maxThumbnailBytes (rather than a naive tiff.length + thumbnail.length sum) walks
+		// IFD0 → IFD1 → JPEGInterchangeFormatLength to find the OLD thumbnail size and returns
+		// `JpegSegment.MAX_SEGMENT_BYTES - (data.length - oldThumbLen)`, the exact post-splice budget.
+		// A naive sum would force-strip a 50KB-old + 30KB-fresh case even though the rebuilt segment
+		// (~30KB after old-thumb removal) would fit comfortably.
 		if (thumbnail.length > 0 && thumbnail.length > ExifPatcher.maxThumbnailBytes(wrappedList))
 		{
 			Log.d(TAG, "PNG eXIf rebuild after splice would exceed APP1 cap (TIFF " + tiff.length
@@ -261,6 +294,45 @@ public final class CropExporter
 	}
 
 	/**
+	 * Drop HDR-specific segments — XMP segments containing the `hdrgm` namespace marker (standard OR
+	 * Extended XMP), and APP2/MPF segments pointing at the gain map. Used on the HDR-drop path so the
+	 * saved JPEG's metadata doesn't claim HDR that the output file doesn't actually carry.
+	 *
+	 * Drops the WHOLE XMP segment when it contains hdrgm rather than surgically rewriting the XML — most camera
+	 * vendors split XMP into multiple APP1 segments anyway, so any non-hdrgm XMP typically lives in a separate
+	 * segment. The corner case (a single XMP segment carrying hdrgm + non-hdrgm metadata) loses the non-hdrgm
+	 * tags too, but that beats lying to ExportPipeline.reportSuccess about HDR presence.
+	 *
+	 * Delegates to HdrSignature.isHdrgmXmpSegment so the standard-plus-extended-XMP detection stays in
+	 * lockstep with the load-time hasHdrgmInXmp gate — without that, an HDR-drop output of a source whose
+	 * hdrgm declaration was in Extended XMP would leak the HDR signature past the gain-map removal.
+	 *
+	 * Package-private so CropExporterStripHdrTest can pin the strip behavior — particularly the
+	 * Extended-XMP `hdrgm` strip, where a regression that drops the Extended-XMP branch of
+	 * HdrSignature.isHdrgmXmpSegment would silently let HDR-claiming XMP survive on the HDR-drop output.
+	 *
+	 * @param meta source JPEG segment list
+	 * @return new list with HDR-specific segments removed; non-HDR segments preserved verbatim
+	 */
+	static List<JpegSegment> stripHdrSegments(List<JpegSegment> meta)
+	{
+		List<JpegSegment> filtered = new ArrayList<>(meta.size());
+		for (JpegSegment seg : meta)
+		{
+			if (seg.isMpf())
+			{
+				continue;
+			}
+			if (HdrSignature.isHdrgmXmpSegment(seg))
+			{
+				continue;
+			}
+			filtered.add(seg);
+		}
+		return filtered;
+	}
+
+	/**
 	 * Re-append an existing SEFT trailer verbatim, or return the JPEG unchanged when none was captured at load.
 	 * CropCenter does not generate fresh SEFTs — Samsung Gallery's Revert validates a backup path the SEFT claims,
 	 * and only honors paths under Samsung-blessed locations like `/data/sec/photoeditor/` that third-party apps
@@ -275,8 +347,20 @@ public final class CropExporter
 		{
 			return jpeg;
 		}
+		// Defensive long-arithmetic guard mirrors injectPngExifFromTiff's eXIf-chunk overflow check. The
+		// SafFileHelper.MAX_READ_BYTES = 128 MiB cap makes the int sum unreachable today, but the
+		// symmetric defensive style is what keeps sister concatenators from drifting apart — a future cap
+		// relaxation that lets a multi-GB JPEG plus a multi-MB SEFT through silently wraps the int sum
+		// negative and throws NegativeArraySizeException from the bg encode worker.
+		long combinedLong = (long) jpeg.length + (long) existingSeft.length;
+		if (combinedLong > Integer.MAX_VALUE)
+		{
+			Log.w(TAG, "JPEG " + jpeg.length + " + SEFT " + existingSeft.length
+				+ " would overflow int; dropping SEFT trailer to keep the primary intact");
+			return jpeg;
+		}
 		Log.d(TAG, "Preserving existing SEFT trailer: " + existingSeft.length + " bytes");
-		byte[] result = new byte[jpeg.length + existingSeft.length];
+		byte[] result = new byte[(int) combinedLong];
 		System.arraycopy(jpeg, 0, result, 0, jpeg.length);
 		System.arraycopy(existingSeft, 0, result, jpeg.length, existingSeft.length);
 		return result;
@@ -331,9 +415,8 @@ public final class CropExporter
 	 * artificially shrunk. Returns ExifPatcher.STRIP_IFD1_THUMBNAIL (a byte[0] sentinel) — never null — when the
 	 * budget is too small for a meaningful thumbnail, the retry-at-half-size still doesn't fit, or generation
 	 * throws OOM. That sentinel routes ExifPatcher through the strip-IFD1 path so the saved file carries no
-	 * embedded preview, rather than preserving the SOURCE's pre-edit thumbnail (Codex round-31 F1: passing null
-	 * here previously left the source thumbnail in place, leaking pre-edit content via any EXIF-thumbnail-aware
-	 * viewer).
+	 * embedded preview, rather than preserving the SOURCE's pre-edit thumbnail (passing null here would
+	 * leave the source thumbnail in place, leaking pre-edit content via any EXIF-thumbnail-aware viewer).
 	 */
 	private static byte[] buildEmbeddedThumbnail(CropState state, Bitmap bmp)
 	{
@@ -366,8 +449,17 @@ public final class CropExporter
 	 * state.getGainMap() is aligned to the UNCROPPED / UNROTATED source, so we refuse to ship it onto a cropped /
 	 * rotated primary — that would put gain-map blobs off the features they were meant to highlight. Better to drop
 	 * HDR than ship a broken file; doExport's toast reports "[HDR dropped]" in that case.
+	 *
+	 * @param jpegBytes      primary JPEG bytes with metadata already injected
+	 * @param state          source state (used for diagnostic logging on the gain-map-extraction-failed path)
+	 * @param croppedGainMap cropped gain-map JPEG bytes from UltraHdrCompat, or null/empty when extraction
+	 *                       failed
+	 * @return tagged result — bytes set to either the input jpegBytes (no gain map to attempt) or
+	 *         GainMapComposer.compose's output; hdrAttached true only when the gain map was successfully
+	 *         appended AND MPF offsets point at it
 	 */
-	private static byte[] composeGainMap(byte[] jpegBytes, CropState state, byte[] croppedGainMap)
+	private static GainMapComposer.ComposeResult composeGainMap(byte[] jpegBytes, CropState state,
+		byte[] croppedGainMap)
 	{
 		if (croppedGainMap != null && croppedGainMap.length > 0)
 		{
@@ -378,7 +470,7 @@ public final class CropExporter
 		{
 			Log.d(TAG, "compressWithGainmap failed — dropping HDR to avoid misalignment");
 		}
-		return jpegBytes;
+		return new GainMapComposer.ComposeResult(jpegBytes, false);
 	}
 
 	/**
@@ -446,7 +538,7 @@ public final class CropExporter
 		// Recycle the primary bitmap on every exit, covering the entire pre-compress + compress block.
 		// buildEmbeddedThumbnail and buildCroppedGainMap both render into intermediate bitmaps and can
 		// throw OutOfMemoryError on multi-MP HDR sources; before the wrap was extended to cover them, an
-		// OOM there would orphan bmp's native pixel buffer for the GC finalizer (Codex round-16). The
+		// OOM there would orphan bmp's native pixel buffer for the GC finalizer. The
 		// post-compress metadata work below doesn't touch bmp, so it stays outside.
 		byte[] thumbnail;
 		byte[] croppedGainMap;
@@ -458,7 +550,7 @@ public final class CropExporter
 			ByteArrayOutputStream bos = new ByteArrayOutputStream();
 			// Bitmap.compress returns false on Skia encoder rejection — but the partial output already
 			// in `bos` (headers, segments, mid-entropy bytes that landed before the failure) looks like a
-			// valid JPEG to a casual byte walker. Round-40 user report: the export produced an 8 MB file
+			// valid JPEG to a casual byte walker. Observed user report: the export produced an 8 MB file
 			// that ended mid-entropy with no EOI / gainmap / SEFT trailer; the cause was an unchecked
 			// compress return paired with `bos.toByteArray()` shipping the partial buffer onward to the
 			// inject / append pipeline. The Samsung-HDR case is the most likely trigger — Skia's
@@ -485,11 +577,12 @@ public final class CropExporter
 		// would still claim one — strict decoders' Revert pre-flight would reject the orphaned-metadata
 		// shape, and lenient decoders that scan for the hdrgm signature would render with the wrong offset.
 		// Strip the HDR-specific segments from the injected metadata when we know the gain map didn't make
-		// it. Codex round-20 F2 separately replaced ExportPipeline.reportSuccess's full-file substring scan
-		// with the structural hdrAttached flag returned in ExportResult below, so the toast no longer
-		// false-positive's on stale metadata; the strip remains the right behaviour for honest output bytes.
+		// it. ExportPipeline.reportSuccess relies on the structural hdrAttached flag returned in
+		// ExportResult below rather than a full-file substring scan for "hdrgm" (which would
+		// false-positive on preserved trailers, stale metadata, and Extended-XMP segments). The strip
+		// remains the right behaviour for honest output bytes.
 		//
-		// Codex round-45 F2: when the source carries an MPF segment but no Ultra HDR gain map (e.g. Samsung
+		// When the source carries an MPF segment but no Ultra HDR gain map (e.g. Samsung
 		// "Best Photo" burst groups, focus-stacked panoramas, or any multi-picture JPEG without hdrgm),
 		// ImageLoadController leaves state.getGainMap() null and hdrAttempted is false. The injected
 		// metadata would otherwise carry source's MPF verbatim, anchored at non-existent secondary-image
@@ -506,12 +599,17 @@ public final class CropExporter
 		List<JpegSegment> initialMeta = hdrAttempted ? meta : metaWithHdrStripped;
 
 		// Optimistically inject the (HDR-path) full metadata or (non-HDR-path) pre-stripped metadata, then
-		// attempt the gain-map compose. If compose drops the gain map (returns the input unchanged),
-		// re-inject from scratch with HDR-specific segments stripped so the output's metadata stays honest
-		// about what's actually attached.
+		// attempt the gain-map compose. If compose drops the gain map (hdrAttached=false in the tagged
+		// result), re-inject from scratch with HDR-specific segments stripped so the output's metadata
+		// stays honest about what's actually attached. The previous reference-inequality detection
+		// (`withGainMap != withFullMeta`) broke once GainMapComposer started returning the XMP-patched
+		// primary on the MPF-fail path — that's a freshly-allocated array distinct from withFullMeta, so
+		// the inequality wrongly fired hdrAttached=true and skipped stripping. The explicit boolean from
+		// ComposeResult.hdrAttached() is the canonical signal.
 		byte[] withFullMeta = injectExifMetadata(jpegBytes, initialMeta, cropW, cropH, thumbnail);
-		byte[] withGainMap = composeGainMap(withFullMeta, state, croppedGainMap);
-		boolean hdrAttached = withGainMap != withFullMeta;
+		GainMapComposer.ComposeResult composed = composeGainMap(withFullMeta, state, croppedGainMap);
+		byte[] withGainMap = composed.bytes();
+		boolean hdrAttached = composed.hdrAttached();
 		if (hdrAttempted && !hdrAttached)
 		{
 			Log.d(TAG, "HDR drop detected — re-injecting metadata with hdrgm XMP + MPF stripped");
@@ -523,12 +621,12 @@ public final class CropExporter
 		}
 		jpegBytes = appendSeft(jpegBytes, state.getSeftTrailer());
 
-		// Codex round-20 F2: thread `hdrAttached` back to the caller structurally, so
-		// ExportPipeline.reportSuccess doesn't have to substring-scan the output for "hdrgm" — that scan
-		// false-positive'd on preserved trailers, stale metadata, and Extended-XMP segments. The flag
-		// reflects what composeGainMap actually did: a different byte array means the gain map was
-		// appended; the same array means HDR was dropped (and stripHdrSegments has already removed the
-		// HDR-claiming segments above).
+		// Thread `hdrAttached` back to the caller structurally, so ExportPipeline.reportSuccess doesn't
+		// have to substring-scan the output for "hdrgm" — that scan would false-positive on preserved
+		// trailers, stale metadata, and Extended-XMP segments. The flag is sourced from the
+		// ComposeResult tagged record: true ONLY when the gain map was appended AND MPF offsets were
+		// patched to point at it; false on every drop path (including stripHdrSegments-cleaned re-inject
+		// above).
 		return new ExportResult(jpegBytes, hdrAttached);
 	}
 
@@ -538,7 +636,7 @@ public final class CropExporter
 		// pixel-width rectangles. Generate the EXIF thumbnail BEFORE recycle so it represents the
 		// cropped + rotated pixels — passing null thumbnail to ExifPatcher would preserve the source's
 		// pre-crop IFD1 thumbnail, which leaks the original (uncropped, un-rotated, pre-edit) image
-		// content via any EXIF-thumbnail-aware viewer (Codex round-30 F1). Thumbnail format is JPEG
+		// content via any EXIF-thumbnail-aware viewer. Thumbnail format is JPEG
 		// per the EXIF spec regardless of the outer container, so buildEmbeddedThumbnail's JPEG
 		// compress is correct for PNG export too.
 		byte[] thumbnail;
@@ -585,9 +683,9 @@ public final class CropExporter
 		// raw-TIFF patch returned null because ExifPatcher rejected the input as malformed. Without this
 		// fallback, a malformed PNG eXIf chunk would silently drop EXIF on the saved PNG even though
 		// state.jpegMeta still has a valid synthetic APP1 (capped, but valid for in-bounds payloads).
-		// Calling ExifPatcher.patch with null/empty meta also fires the round-36 synthesise-fresh-EXIF
-		// path so a PNG source with no EXIF at all (and a fresh thumbnail generated above) still gets
-		// its IFD1 written into the eXIf chunk.
+		// Calling ExifPatcher.patch with null/empty meta also fires its synthesise-fresh-EXIF path so a
+		// PNG source with no EXIF at all (and a fresh thumbnail generated above) still gets its IFD1
+		// written into the eXIf chunk.
 		if (!wrotePngExif)
 		{
 			List<JpegSegment> meta = state.getJpegMeta();
@@ -684,8 +782,8 @@ public final class CropExporter
 			}
 			// Quarter-dim emergency fallback: even halved+q70 didn't fit. A 256-max-dim thumb at q50
 			// produces ~3-8KB and fits in any non-pathological budget — better to embed a small
-			// preview than to drop the IFD1 entirely (round-36 user-reported: minimal-EXIF Samsung
-			// HDR JPEGs ended up with no thumbnail when this last-resort path didn't exist).
+			// preview than to drop the IFD1 entirely (minimal-EXIF Samsung HDR JPEGs were observed
+			// landing with no thumbnail when this last-resort path didn't exist).
 			thumb.recycle();
 			int quarterDim = 256;
 			double quarterScale = Math.min((double) quarterDim / width, (double) quarterDim / height);
@@ -713,8 +811,7 @@ public final class CropExporter
 			// Widened to OOM as well as Exception so a thumbnail-side allocation failure (Bitmap.compress
 			// on a multi-MP intermediate, or renderSrgbThumb's Canvas.drawBitmap rasterisation) degrades
 			// to "save without embedded thumbnail" rather than aborting the whole save with no toast —
-			// encodePhase's catch is also Exception-only and OOM would otherwise propagate past it
-			// silently (R17-5).
+			// encodePhase's catch is also Exception-only and OOM would otherwise propagate silently.
 			Log.w(TAG, "Thumbnail generation failed", e);
 			return null;
 		}
@@ -725,39 +822,6 @@ public final class CropExporter
 				thumb.recycle();
 			}
 		}
-	}
-
-	/**
-	 * Pixel index for grid line i of a count-N grid along one axis of the exported crop. Matches the
-	 * continuous-float positions GridRenderer.linePos emits for the preview, rounded to the nearest output pixel.
-	 * Second-half lines mirror the first half around dim / 2 so (i, count − i) pairs stay symmetric — Java's
-	 * Math.round rounds half-up, which would break symmetry at half-integer positions (e.g. count=4, dim=10
-	 * produces raw values 2.5 and 7.5; rounding both half-up gives 3 and 8 instead of the symmetric 3 and 7).
-	 *
-	 * Known half-pixel divergence from the preview: for odd `dim` with `i * 2 == count` (the middle line), the
-	 * preview draws at the fractional coord `dim / 2f` and anti-aliases across the two adjacent pixels. This
-	 * exporter must pick one integer pixel index, so the middle line in the baked export sits on `ceil(dim / 2f)`
-	 * while the preview's visual centre of mass is 0.5 px to its left. Acceptable because the preview is
-	 * anti-aliased and the eye reads its centre, not its origin.
-	 *
-	 * Package-private so CropExporterGridLineTest can pin the mirror-symmetry invariant — a regression that
-	 * collapses the mirror trick to a plain Math.round((double) dim * i / count) would silently produce
-	 * asymmetric exported grids on count=4 / dim=10-class fixtures (Codex round-46 test-agent F8).
-	 *
-	 * @param i     grid line index in [1, count − 1] — the integer line count from the left/top edge
-	 * @param count total number of grid intervals (so the grid draws count − 1 internal lines)
-	 * @param dim   total dimension in output pixels along this axis (cropW or cropH)
-	 * @return pixel index where line i sits in the baked export; for any i, the (i, count − i) pair
-	 *         satisfies result(i) + result(count − i) == dim
-	 */
-	static int gridLinePixel(int i, int count, int dim)
-	{
-		if (i * 2 > count)
-		{
-			int mirror = (int) Math.round((double) dim * (count - i) / count);
-			return dim - mirror;
-		}
-		return (int) Math.round((double) dim * i / count);
 	}
 
 	/**
@@ -773,7 +837,7 @@ public final class CropExporter
 	 * @param thumbnail freshly-generated thumbnail JPEG bytes; pass `ExifPatcher.STRIP_IFD1_THUMBNAIL` (a byte[0]
 	 *                  sentinel) to strip the source's IFD1 thumbnail when fresh generation failed —
 	 *                  null preserves the source's IFD1 thumbnail and is unsafe for cropped / rotated /
-	 *                  grafted exports (Codex round-31 F1)
+	 *                  grafted exports
 	 * @return JPEG bytes with metadata replaced
 	 */
 	private static byte[] injectExifMetadata(byte[] jpegBytes, List<JpegSegment> meta,
@@ -781,10 +845,10 @@ public final class CropExporter
 	{
 		// Skip injection only when there's nothing to inject AND no thumbnail to add. When a fresh
 		// thumbnail exists but `meta` carries no EXIF segment (screenshots, generated images, files
-		// re-encoded by minimal tools), routing through ExifPatcher.patch lets its round-36
-		// synthesise-fresh-EXIF path fire so the saved file gains an IFD1 thumbnail instead of
-		// silently dropping the freshly-generated bytes. Previously the early-return collapsed both
-		// cases and screenshots came out without thumbnails (user-reported).
+		// re-encoded by minimal tools), routing through ExifPatcher.patch lets its synthesise-fresh-EXIF
+		// path fire so the saved file gains an IFD1 thumbnail instead of silently dropping the
+		// freshly-generated bytes. A collapsing early-return would let screenshots come out without
+		// thumbnails (user-reported regression).
 		boolean hasRealThumbnail = thumbnail != null && thumbnail.length > 0;
 		if ((meta == null || meta.isEmpty()) && !hasRealThumbnail)
 		{
@@ -851,7 +915,7 @@ public final class CropExporter
 		int insertPos = (int) insertPosLong;
 
 		// Build eXIf chunk: length(4) + "eXIf"(4) + tiffData + CRC(4)
-		byte[] chunkType = { 'e', 'X', 'I', 'f' };
+		byte[] chunkType = PngMetadataExtractor.EXIF_CHUNK_TYPE;
 		byte[] chunkLenBytes = {
 				(byte) (tiffLen >> 24), (byte) (tiffLen >> 16), (byte) (tiffLen >> 8), (byte) (tiffLen)
 		};
@@ -868,8 +932,8 @@ public final class CropExporter
 		// Defensive long-arithmetic: PNG eXIf is u31-uncapped, so on a pathological 2GB-class TIFF the
 		// int sum `4 + 4 + tiffLen + 4` would overflow to negative and `new byte[png.length + chunkTotal]`
 		// would throw NegativeArraySizeException uncaught. SafFileHelper's 128MB read cap makes this
-		// unreachable today but the sister walkers' defensive style (round-35/37/38 sweep) keeps it
-		// consistent — bail with the original png unchanged when the result would exceed int range.
+		// unreachable today but the sister walkers' defensive style keeps it consistent — bail with the
+		// original png unchanged when the result would exceed int range.
 		long chunkTotalLong = 4L + 4L + (long) tiffLen + 4L;
 		if (chunkTotalLong + png.length > Integer.MAX_VALUE)
 		{
@@ -898,7 +962,7 @@ public final class CropExporter
 	 * Recycles `out` and rethrows on any Canvas / Paint / drawBitmap failure (RuntimeException) or
 	 * OutOfMemoryError. Without the wrap, `out`'s native pixel buffer would orphan to the GC finalizer
 	 * under the same allocation pressure that triggered the OOM. Mirrors UltraHdrCompat.renderPrimary's
-	 * recycle-and-rethrow shape (R17-5).
+	 * recycle-and-rethrow shape.
 	 */
 	private static Bitmap renderSrgbThumb(Bitmap src, int width, int height)
 	{
@@ -920,39 +984,4 @@ public final class CropExporter
 		}
 	}
 
-	/**
-	 * Drop HDR-specific segments — XMP segments containing the `hdrgm` namespace marker (standard OR
-	 * Extended XMP), and APP2/MPF segments pointing at the gain map. Used on the HDR-drop path so the
-	 * saved JPEG's metadata doesn't claim HDR that the output file doesn't actually carry.
-	 *
-	 * Drops the WHOLE XMP segment when it contains hdrgm rather than surgically rewriting the XML — most camera
-	 * vendors split XMP into multiple APP1 segments anyway, so any non-hdrgm XMP typically lives in a separate
-	 * segment. The corner case (a single XMP segment carrying hdrgm + non-hdrgm metadata) loses the non-hdrgm
-	 * tags too, but that beats lying to ExportPipeline.reportSuccess about HDR presence.
-	 *
-	 * Delegates to HdrSignature.isHdrgmXmpSegment so the standard-plus-extended-XMP detection stays in
-	 * lockstep with the load-time hasHdrgmInXmp gate — without that, an HDR-drop output of a source whose
-	 * hdrgm declaration was in Extended XMP would leak the HDR signature past the gain-map removal
-	 * (Codex round-20 F1).
-	 *
-	 * @param meta source JPEG segment list
-	 * @return new list with HDR-specific segments removed; non-HDR segments preserved verbatim
-	 */
-	private static List<JpegSegment> stripHdrSegments(List<JpegSegment> meta)
-	{
-		List<JpegSegment> filtered = new ArrayList<>(meta.size());
-		for (JpegSegment seg : meta)
-		{
-			if (seg.isMpf())
-			{
-				continue;
-			}
-			if (HdrSignature.isHdrgmXmpSegment(seg))
-			{
-				continue;
-			}
-			filtered.add(seg);
-		}
-		return filtered;
-	}
 }

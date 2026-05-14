@@ -69,6 +69,23 @@ public final class GainMapExtractorTest
 	}
 
 	@Test
+	public void retainedGainMapByteCountIncludesItsOwnEoi() throws IOException
+	{
+		// The returned gain-map bytes start at the byte AFTER primary's EOI and run through (and including) the
+		// gain map's own EOI. Pin down the exact length for a known fixture so a regression in the end-boundary
+		// calculation surfaces here (2-byte SOI + 4-byte SOS header + 4-byte body + 3-byte payload + 2-byte EOI
+		// = 15 bytes from minimalScanAndEoi + soi).
+		byte[] gainMap = JpegFixtures.concat(JpegFixtures.soi(), JpegFixtures.minimalScanAndEoi());
+		assertEquals(15, gainMap.length);
+
+		byte[] file = JpegFixtures.concat(JpegFixtures.soi(), JpegFixtures.minimalScanAndEoi(), gainMap);
+
+		byte[] extracted = GainMapExtractor.extract(file, true);
+		assertNotNull(extracted);
+		assertEquals(15, extracted.length);
+	}
+
+	@Test
 	public void returnsGainMapStartingWithSoi() throws IOException
 	{
 		// The extracted gain map MUST start with FF D8 (JPEG SOI). The post-EOI byte of the primary must
@@ -102,20 +119,9 @@ public final class GainMapExtractorTest
 	}
 
 	@Test
-	public void returnsNullWhenPrimaryHasNoTrailingData() throws IOException
-	{
-		// Plain JPEG with no gain map — primary EOI is also file end. Extractor must return null (not an empty
-		// array) so callers can null-check the "is this HDR" decision uniformly.
-		byte[] file = JpegFixtures.concat(JpegFixtures.soi(), JpegFixtures.minimalScanAndEoi());
-
-		byte[] extracted = GainMapExtractor.extract(file, true);
-		assertNull(extracted);
-	}
-
-	@Test
 	public void returnsNullWhenGainMapSliceHasNoEoi() throws IOException
 	{
-		// Round 8 replaced the backwards-FF-D9 scan with a structural forward walk: extract the gain-map
+		// The backwards-FF-D9 scan was replaced with a structural forward walk: extract the gain-map
 		// bytes between primary's EOI and either file end (no SEFT) or len-8 (SEFT footer present), and
 		// walk the slice for ITS EOI via JpegMarkerWalker.findPrimaryEoi. If the slice has FF D8 at the
 		// post-primary boundary but no clean EOI within the slice, the walker returns -1 and the extractor
@@ -134,7 +140,7 @@ public final class GainMapExtractorTest
 	@Test
 	public void returnsNullWhenIsHdrSourceFalseEvenWithFfd8AfterPrimary() throws IOException
 	{
-		// Codex round-18 F1 contract: even when FF D8 follows primary's EOI (which would structurally
+		// Even when FF D8 follows primary's EOI (which would structurally
 		// look like a gain-map SOI), the extractor must return null when the caller indicates the file
 		// is not an HDR source. This pins the gate that prevents a SEFT-thumbnail from being mis-walked
 		// as a gain map — the structural FF D8 alone is ambiguous (gain map vs SEFT data), so the
@@ -146,19 +152,13 @@ public final class GainMapExtractorTest
 	}
 
 	@Test
-	public void retainedGainMapByteCountIncludesItsOwnEoi() throws IOException
+	public void returnsNullWhenPrimaryHasNoTrailingData() throws IOException
 	{
-		// The returned gain-map bytes start at the byte AFTER primary's EOI and run through (and including) the
-		// gain map's own EOI. Pin down the exact length for a known fixture so a regression in the end-boundary
-		// calculation surfaces here (2-byte SOI + 4-byte SOS header + 4-byte body + 3-byte payload + 2-byte EOI
-		// = 15 bytes from minimalScanAndEoi + soi).
-		byte[] gainMap = JpegFixtures.concat(JpegFixtures.soi(), JpegFixtures.minimalScanAndEoi());
-		assertEquals(15, gainMap.length);
-
-		byte[] file = JpegFixtures.concat(JpegFixtures.soi(), JpegFixtures.minimalScanAndEoi(), gainMap);
+		// Plain JPEG with no gain map — primary EOI is also file end. Extractor must return null (not an empty
+		// array) so callers can null-check the "is this HDR" decision uniformly.
+		byte[] file = JpegFixtures.concat(JpegFixtures.soi(), JpegFixtures.minimalScanAndEoi());
 
 		byte[] extracted = GainMapExtractor.extract(file, true);
-		assertNotNull(extracted);
-		assertEquals(15, extracted.length);
+		assertNull(extracted);
 	}
 }

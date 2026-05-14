@@ -14,13 +14,15 @@ import org.junit.Test;
 public final class CropFitContextTest
 {
 	@Test
-	public void ofAtZeroRotationProducesCosOneSinZero()
+	public void ofAt45DegreesProducesIdenticalAbsValuesForSinAndCos()
 	{
-		// Identity rotation — cos(0) = 1, sin(0) = 0. Pin so a regression that drops the negation never
-		// shows up here because zero is its own negation.
-		CropFitContext ctx = CropFitContext.of(100, 80, 0f, 1000, 800);
-		assertEquals(1.0, ctx.cosR(), 1e-9);
-		assertEquals(0.0, ctx.sinR(), 1e-9);
+		// At 45° (or -45°), |sin| = |cos| = √2/2 ≈ 0.7071. Pin the magnitude with a wider tolerance so a
+		// trig-table regression is caught.
+		CropFitContext ctx45 = CropFitContext.of(100, 80, 45f, 1000, 800);
+		assertEquals(Math.cos(Math.toRadians(-45)), ctx45.cosR(), 1e-9);
+		assertEquals(Math.sin(Math.toRadians(-45)), ctx45.sinR(), 1e-9);
+		// Magnitudes equal at ±45°.
+		assertTrue(Math.abs(Math.abs(ctx45.cosR()) - Math.abs(ctx45.sinR())) < 1e-9);
 	}
 
 	@Test
@@ -41,6 +43,16 @@ public final class CropFitContextTest
 		CropFitContext ctx = CropFitContext.of(100, 80, -90f, 1000, 800);
 		assertEquals(0.0, ctx.cosR(), 1e-9);
 		assertEquals(1.0, ctx.sinR(), 1e-9);
+	}
+
+	@Test
+	public void ofAtZeroRotationProducesCosOneSinZero()
+	{
+		// Identity rotation — cos(0) = 1, sin(0) = 0. Pin so a regression that drops the negation never
+		// shows up here because zero is its own negation.
+		CropFitContext ctx = CropFitContext.of(100, 80, 0f, 1000, 800);
+		assertEquals(1.0, ctx.cosR(), 1e-9);
+		assertEquals(0.0, ctx.sinR(), 1e-9);
 	}
 
 	@Test
@@ -69,17 +81,5 @@ public final class CropFitContextTest
 		CropFitContext ctx = CropFitContext.of(100, 80, 0f, 1234, 567);
 		assertEquals(1234, ctx.imgW());
 		assertEquals(567, ctx.imgH());
-	}
-
-	@Test
-	public void ofAt45DegreesProducesIdenticalAbsValuesForSinAndCos()
-	{
-		// At 45° (or -45°), |sin| = |cos| = √2/2 ≈ 0.7071. Pin the magnitude with a wider tolerance so a
-		// trig-table regression is caught.
-		CropFitContext ctx45 = CropFitContext.of(100, 80, 45f, 1000, 800);
-		assertEquals(Math.cos(Math.toRadians(-45)), ctx45.cosR(), 1e-9);
-		assertEquals(Math.sin(Math.toRadians(-45)), ctx45.sinR(), 1e-9);
-		// Magnitudes equal at ±45°.
-		assertTrue(Math.abs(Math.abs(ctx45.cosR()) - Math.abs(ctx45.sinR())) < 1e-9);
 	}
 }

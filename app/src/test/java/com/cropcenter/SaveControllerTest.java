@@ -45,16 +45,33 @@ public final class SaveControllerTest
 	}
 
 	@Test
-	public void autoRenameBaseNameReturnsNullForNullInput()
+	public void autoRenameBaseNameHandlesStemWithDotsAndSpaces()
 	{
-		assertNull(SaveController.autoRenameBaseName(null));
+		// Multi-dot stem like "image.v2.final.jpg" → "image.v2.final (1).jpg" suffixed → infer the same with
+		// "(1)" stripped. lastIndexOf('.') is the canonical extension splitter — pin behaviour against a stem
+		// that itself contains dots.
+		assertEquals("image.v2.final.jpg", SaveController.autoRenameBaseName("image.v2.final (1).jpg"));
 	}
 
 	@Test
-	public void autoRenameBaseNameReturnsNullForNoExtension()
+	public void autoRenameBaseNamePreservesBaseExtension()
 	{
-		// No dot at all — can't be the SAF auto-rename pattern.
-		assertNull(SaveController.autoRenameBaseName("crop (1)"));
+		// Base extension is whatever the suffixed name carries, regardless of case.
+		assertEquals("snapshot.PNG", SaveController.autoRenameBaseName("snapshot (5).PNG"));
+	}
+
+	@Test
+	public void autoRenameBaseNameReturnsNullForCloseWithoutOpen()
+	{
+		// Reversed bracket — must not crash, must not match.
+		assertNull(SaveController.autoRenameBaseName("crop 1).jpg"));
+	}
+
+	@Test
+	public void autoRenameBaseNameReturnsNullForEmptyParens()
+	{
+		// "()" has no digits — bare parens, not an auto-rename suffix.
+		assertNull(SaveController.autoRenameBaseName("crop ().jpg"));
 	}
 
 	@Test
@@ -62,6 +79,13 @@ public final class SaveControllerTest
 	{
 		// Leading-dot file (no stem) — SAF wouldn't generate this from a typed filename.
 		assertNull(SaveController.autoRenameBaseName(".jpg"));
+	}
+
+	@Test
+	public void autoRenameBaseNameReturnsNullForNoExtension()
+	{
+		// No dot at all — can't be the SAF auto-rename pattern.
+		assertNull(SaveController.autoRenameBaseName("crop (1)"));
 	}
 
 	@Test
@@ -79,17 +103,9 @@ public final class SaveControllerTest
 	}
 
 	@Test
-	public void autoRenameBaseNameReturnsNullForEmptyParens()
+	public void autoRenameBaseNameReturnsNullForNullInput()
 	{
-		// "()" has no digits — bare parens, not an auto-rename suffix.
-		assertNull(SaveController.autoRenameBaseName("crop ().jpg"));
-	}
-
-	@Test
-	public void autoRenameBaseNameReturnsNullForSuffixAlone()
-	{
-		// "(1)" with no leading stem — empty base after stripping the suffix.
-		assertNull(SaveController.autoRenameBaseName("(1).jpg"));
+		assertNull(SaveController.autoRenameBaseName(null));
 	}
 
 	@Test
@@ -100,10 +116,10 @@ public final class SaveControllerTest
 	}
 
 	@Test
-	public void autoRenameBaseNameReturnsNullForCloseWithoutOpen()
+	public void autoRenameBaseNameReturnsNullForSuffixAlone()
 	{
-		// Reversed bracket — must not crash, must not match.
-		assertNull(SaveController.autoRenameBaseName("crop 1).jpg"));
+		// "(1)" with no leading stem — empty base after stripping the suffix.
+		assertNull(SaveController.autoRenameBaseName("(1).jpg"));
 	}
 
 	@Test
@@ -113,21 +129,5 @@ public final class SaveControllerTest
 		// single-space test (autoRenameBaseNameDetectsClassicalCollision). A regression that switched
 		// stripTrailing for a single-char trim would still pass the canonical test but fail this one.
 		assertEquals("crop.jpg", SaveController.autoRenameBaseName("crop   (1).jpg"));
-	}
-
-	@Test
-	public void autoRenameBaseNamePreservesBaseExtension()
-	{
-		// Base extension is whatever the suffixed name carries, regardless of case.
-		assertEquals("snapshot.PNG", SaveController.autoRenameBaseName("snapshot (5).PNG"));
-	}
-
-	@Test
-	public void autoRenameBaseNameHandlesStemWithDotsAndSpaces()
-	{
-		// Multi-dot stem like "image.v2.final.jpg" → "image.v2.final (1).jpg" suffixed → infer the same with
-		// "(1)" stripped. lastIndexOf('.') is the canonical extension splitter — pin behaviour against a stem
-		// that itself contains dots.
-		assertEquals("image.v2.final.jpg", SaveController.autoRenameBaseName("image.v2.final (1).jpg"));
 	}
 }

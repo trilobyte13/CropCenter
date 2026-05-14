@@ -36,14 +36,14 @@ interface UiHost extends EditorHost
 	CenterMode getMoveLockPref();
 
 	/**
-	 * Cached reference to the rotation ruler resolved at onCreate.
-	 */
-	RotationRulerView getRotationRuler();
-
-	/**
 	 * Cached reference to the rotation-degrees readout TextView.
 	 */
 	TextView getRotDegreesTextView();
+
+	/**
+	 * Cached reference to the rotation ruler resolved at onCreate.
+	 */
+	RotationRulerView getRotationRuler();
 
 	/**
 	 * Sidebar TextView showing "WIDTH × HEIGHT" of the current crop rectangle.

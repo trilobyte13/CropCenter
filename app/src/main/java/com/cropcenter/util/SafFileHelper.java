@@ -379,43 +379,6 @@ public final class SafFileHelper
 	}
 
 	/**
-	 * Byte-for-byte verify the file at `uri` matches `expected`. Ground-truth content verification — used when a
-	 * write path threw a harmless EPIPE/IOException on close yet persisted the full payload, or when a cheap
-	 * size-only check isn't enough to prove the bytes on disk are really the ones we intended to write.
-	 *
-	 * Returns:
-	 *   full bytes verified equal  → expected.length (save ok)
-	 *   any mismatch or short file → number of bytes read before divergence/EOF (save failed)
-	 *   trailing bytes (provider didn't truncate) → expected.length + trailing (save failed)
-	 *   provider can't serve file, or EOF check threw before confirming no trailing bytes → -1
-	 * Callers MUST use strict equality against expected.length — any other result means
-	 * the save is unverified, regardless of whether the numeric value is higher or lower.
-	 */
-	public long readbackByteCount(Uri uri, byte[] expected)
-	{
-		try (InputStream is = ctx.getContentResolver().openInputStream(uri))
-		{
-			if (is == null)
-			{
-				return -1;
-			}
-			return readbackByteCountFromStream(is, expected);
-		}
-		catch (Exception e)
-		{
-			Log.w(TAG, "readbackByteCount: " + e.getMessage());
-			// Any exception (open failure, mid-stream read failure, close throwing AFTER the helper's
-			// success-return value was queued) lands here. The helper either returns a valid byte-count
-			// contract value or throws — the only path to expected.length is via a successful return that,
-			// if preceded by a close throw, must NOT be reported as verified. Always return -1 from this
-			// catch; the contract for callers is "strict equality vs expected.length", which -1 always
-			// fails. This is also the round-5 H1 contract: never return expected.length from the outer
-			// catch.
-			return -1;
-		}
-	}
-
-	/**
 	 * Copy the URI to a cache file, then slurp raw bytes. The two-step routing (stream → cache file
 	 * → in-memory byte[]) is deliberate: some ContentProviders (notably Samsung MediaStore) strip
 	 * post-EOI bytes from JPEGs when streaming, which would lose the HDR gain map. Materialising
@@ -497,6 +460,43 @@ public final class SafFileHelper
 	}
 
 	/**
+	 * Byte-for-byte verify the file at `uri` matches `expected`. Ground-truth content verification — used when a
+	 * write path threw a harmless EPIPE/IOException on close yet persisted the full payload, or when a cheap
+	 * size-only check isn't enough to prove the bytes on disk are really the ones we intended to write.
+	 *
+	 * Returns:
+	 *   full bytes verified equal  → expected.length (save ok)
+	 *   any mismatch or short file → number of bytes read before divergence/EOF (save failed)
+	 *   trailing bytes (provider didn't truncate) → expected.length + trailing (save failed)
+	 *   provider can't serve file, or EOF check threw before confirming no trailing bytes → -1
+	 * Callers MUST use strict equality against expected.length — any other result means
+	 * the save is unverified, regardless of whether the numeric value is higher or lower.
+	 */
+	public long readbackByteCount(Uri uri, byte[] expected)
+	{
+		try (InputStream is = ctx.getContentResolver().openInputStream(uri))
+		{
+			if (is == null)
+			{
+				return -1;
+			}
+			return readbackByteCountFromStream(is, expected);
+		}
+		catch (Exception e)
+		{
+			Log.w(TAG, "readbackByteCount: " + e.getMessage());
+			// Any exception (open failure, mid-stream read failure, close throwing AFTER the helper's
+			// success-return value was queued) lands here. The helper either returns a valid byte-count
+			// contract value or throws — the only path to expected.length is via a successful return that,
+			// if preceded by a close throw, must NOT be reported as verified. Always return -1 from this
+			// catch; the contract for callers is "strict equality vs expected.length", which -1 always
+			// fails. The contract is "never return expected.length from the outer catch" — anything that
+			// reached this catch is unverified.
+			return -1;
+		}
+	}
+
+	/**
 	 * Best-effort delete of a SAF document URI. Returns true when a provider explicitly confirmed the deletion
 	 * (DocumentsContract.deleteDocument returned true, or the ContentResolver delete reported > 0 rows affected);
 	 * false when both paths failed OR silently reported ambiguous results. Callers that NEED the document gone
@@ -546,8 +546,8 @@ public final class SafFileHelper
 	 * @param expected expected bytes to compare against
 	 * @return verified byte count, or a sentinel value indicating mismatch / trailing / short — see
 	 *         readbackByteCount Javadoc for the full classification
-	 * @throws IOException when the main read loop (NOT the EOF check) errors; the outer caller
-	 *                     catches and returns -1
+	 * @throws IOException when the main read loop (NOT the EOF check) errors; the outer caller catches
+	 *                     and returns -1
 	 */
 	static long readbackByteCountFromStream(InputStream is, byte[] expected) throws IOException
 	{

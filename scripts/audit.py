@@ -11,11 +11,13 @@ Usage:
     python scripts/audit.py <name> [roots...] # run one audit
 
 Audit names:
-    over-cols          lines exceeding 120 rendered columns (tab=8)
-    ignored-catches    catches that swallow exceptions without explaining why
-    static-first       static methods that follow instance methods in the same tier
-    final-classes      classes that should be `final` per Effective Java item 19
-    lsloc              logical SLOC count (UCC-style — excludes bare-brace lines)
+    over-cols                 lines exceeding 120 rendered columns (tab=8)
+    ignored-catches           catches that swallow exceptions without explaining why
+    static-first              static methods that follow instance methods in the same tier
+    method-order              private-before-package + case-sensitive alphabetical within tier
+    adjacent-comment-styles   `*/` immediately followed by `//` (consolidate into Javadoc)
+    final-classes             classes that should be `final` per Effective Java item 19
+    lsloc                     logical SLOC count (UCC-style — excludes bare-brace lines)
 
 Default roots: app/src/main/java app/src/test/java (or app/src for over-cols).
 Exit code: 0 when all selected audits pass; 1 when any fails (lsloc never fails).
@@ -306,6 +308,204 @@ def audit_static_first(roots):
 	return 1
 
 
+# ─── audit: method-order ─────────────────────────────────────────────────────
+
+_ACCESS_RANK = {'public': 1, 'protected': 2, 'package': 3, 'private': 4}
+_SECTION_DIVIDER_RE = re.compile(r'^\s*//\s*[─=]{2,}|^\s*//.*[─=]{2,}\s*$')
+
+
+def _audit_method_order_in_file(path, raw):
+	"""Walk each class scope and report:
+	  - access-tier inversions (private method appearing before package-private, etc.)
+	  - case-sensitive alphabetical violations within each (access, static/instance) sub-block
+	Section-divider comments (`// ── X ──`, `// ── X` etc.) reset the alphabetical-order
+	baseline so deliberate thematic groupings inside one tier don't false-positive."""
+	src = strip_comments_strings(raw)
+	raw_lines = raw.split('\n')
+	lines = src.split('\n')
+	stack = []
+	depth = 0
+	pending_class = None
+	violations = []
+	for ln_idx, line in enumerate(lines):
+		line_no = ln_idx + 1
+		opens = line.count('{')
+		closes = line.count('}')
+		if stack and depth == stack[-1]['body_depth'] and not _TYPE_DECL_RE.search(line):
+			m = _METHOD_RE.match(line)
+			access = is_static = name = None
+			if m and m.group('name') not in _KW:
+				mods = m.group('mods').split()
+				access = access_of(mods)
+				is_static = 'static' in mods
+				name = m.group('name')
+			else:
+				m2 = _DEFAULT_METHOD_RE.match(line)
+				if m2 and m2.group('name') not in _KW:
+					rt = m2.group('rt')
+					if rt not in _KW and not rt.startswith('@'):
+						access = 'package'
+						is_static = False
+						name = m2.group('name')
+			if name is not None and name != stack[-1]['name']:
+				cls = stack[-1]
+				cls['methods'].append({
+					'line': line_no, 'name': name, 'access': access, 'is_static': is_static,
+					'divider_before': cls['saw_divider_since_last_method'],
+				})
+				cls['saw_divider_since_last_method'] = False
+		# Check raw line for section dividers (block comments were stripped from `src`).
+		if stack and _SECTION_DIVIDER_RE.match(raw_lines[ln_idx]):
+			stack[-1]['saw_divider_since_last_method'] = True
+		cls_m = _CLASS_RE.search(line)
+		if cls_m:
+			if opens > 0:
+				stack.append({
+					'name': cls_m.group(1), 'body_depth': depth + 1,
+					'methods': [], 'saw_divider_since_last_method': False, 'file': path,
+				})
+			else:
+				pending_class = cls_m.group(1)
+		elif pending_class is not None and opens > 0:
+			stack.append({
+				'name': pending_class, 'body_depth': depth + 1,
+				'methods': [], 'saw_divider_since_last_method': False, 'file': path,
+			})
+			pending_class = None
+		depth += opens - closes
+		while stack and depth < stack[-1]['body_depth']:
+			cls = stack.pop()
+			methods = cls['methods']
+			# Access-tier inversion: each method's rank must be >= the previous method's rank.
+			# A drop from rank K to rank L < K is an inversion (e.g., private at rank 4 followed
+			# by package at rank 3).
+			for i in range(1, len(methods)):
+				prev = methods[i - 1]
+				cur = methods[i]
+				prev_rank = _ACCESS_RANK.get(prev['access'], 99)
+				cur_rank = _ACCESS_RANK.get(cur['access'], 99)
+				if cur_rank < prev_rank:
+					violations.append({
+						'kind': 'tier-inversion', 'file': cls['file'], 'class': cls['name'],
+						'prev_name': prev['name'], 'prev_line': prev['line'],
+						'prev_access': prev['access'],
+						'cur_name': cur['name'], 'cur_line': cur['line'],
+						'cur_access': cur['access'],
+					})
+			# Alphabetical-within-sub-block: within each (access, static/instance) bucket, names
+			# must be case-sensitive non-decreasing in ASCII order. Section dividers reset the
+			# baseline so HorizonDetector / ByteBufferUtils-style thematic groupings are exempt.
+			buckets = {}
+			for m in methods:
+				key = (m['access'], m['is_static'])
+				buckets.setdefault(key, []).append(m)
+			for key, bucket in buckets.items():
+				prev_name = None
+				exempt_remaining = False
+				for entry in bucket:
+					if entry['divider_before']:
+						# A section divider (// ── X ──) inside a bucket signals manual
+						# organization (thematic grouping over alphabetical). HorizonDetector's
+						# pipeline order and ByteBufferUtils's endian split rely on this. Once a
+						# divider intervenes, exempt the rest of the bucket from alphabetical
+						# checks rather than just resetting the baseline — partial alphabetical
+						# inside a divider-grouped section is more confusing than useful.
+						exempt_remaining = True
+					if not exempt_remaining:
+						if prev_name is not None and entry['name'] < prev_name:
+							violations.append({
+								'kind': 'alphabetical', 'file': cls['file'],
+								'class': cls['name'], 'access': key[0],
+								'is_static': key[1], 'prev_name': prev_name,
+								'cur_name': entry['name'], 'cur_line': entry['line'],
+							})
+					prev_name = entry['name']
+	return violations
+
+
+def audit_method_order(roots):
+	"""Enforce CLAUDE.md's method-ordering rules beyond static-first: access-tier order
+	(public → protected → package-private → private) and case-sensitive alphabetical
+	ordering within each (access, static/instance) sub-block. Section dividers
+	(// ── ... ──) reset the alphabetical baseline within a tier so thematic
+	groupings stay exempt."""
+	if not roots:
+		roots = ['app/src/main/java', 'app/src/test/java']
+	all_violations = []
+	file_count = 0
+	for path, text in walk_java_files(roots):
+		file_count += 1
+		all_violations.extend(_audit_method_order_in_file(path, text))
+	if not all_violations:
+		print(f'OK: {file_count} files scanned, no method-order violations.')
+		return 0
+	by_file = {}
+	for v in all_violations:
+		by_file.setdefault(v['file'], []).append(v)
+	for path, vs in sorted(by_file.items()):
+		print(path)
+		for v in vs:
+			if v['kind'] == 'tier-inversion':
+				print(f"  class {v['class']}:  {v['cur_access']} '{v['cur_name']}' "
+					f"(line {v['cur_line']}) appears after {v['prev_access']} "
+					f"'{v['prev_name']}' (line {v['prev_line']}) — "
+					f"expected order public -> protected -> package -> private")
+			else:
+				static_str = 'static' if v['is_static'] else 'instance'
+				print(f"  class {v['class']}:  {v['access']} {static_str} '{v['cur_name']}' "
+					f"(line {v['cur_line']}) follows '{v['prev_name']}' -- "
+					f"case-sensitive ASCII alphabetical expected")
+		print()
+	print(f'TOTAL: {len(all_violations)} violation(s) in {len(by_file)} file(s) '
+		f'(of {file_count} scanned)')
+	return 1
+
+
+# ─── audit: adjacent-comment-styles ──────────────────────────────────────────
+
+def _audit_adjacent_comments_in_file(text):
+	"""Yield (line_no, snippet) for each `*/` line followed by a `//` line. The
+	anti-pattern is a Javadoc block sitting immediately above a `//` rationale —
+	these should be consolidated by folding the `//` content into the Javadoc."""
+	lines = text.split('\n')
+	hits = []
+	for i in range(len(lines) - 1):
+		cur = lines[i].rstrip()
+		nxt = lines[i + 1].lstrip()
+		if cur.endswith('*/') and nxt.startswith('//'):
+			hits.append((i + 1, cur.lstrip('\t ')))
+	return hits
+
+
+def audit_adjacent_comment_styles(roots):
+	"""Flag `*/` (closing block / Javadoc comment) immediately followed by `//` line
+	comment. The pattern means a rationale comment got tacked on AFTER the Javadoc
+	rather than folded INTO it — per CLAUDE.md the Javadoc should absorb the `//`
+	content as a new paragraph (separated by `*` on its own line)."""
+	if not roots:
+		roots = ['app/src/main/java', 'app/src/test/java']
+	all_violations = []
+	file_count = 0
+	for path, text in walk_java_files(roots):
+		file_count += 1
+		for line_no, snippet in _audit_adjacent_comments_in_file(text):
+			all_violations.append((path, line_no, snippet))
+	if not all_violations:
+		print(f'OK: {file_count} files scanned, no adjacent-comment-style violations.')
+		return 0
+	by_file = {}
+	for path, line_no, snippet in all_violations:
+		by_file.setdefault(path, []).append((line_no, snippet))
+	for path, vs in sorted(by_file.items()):
+		print(path)
+		for line_no, snippet in vs:
+			print(f"  line {line_no}: {snippet}  followed by '//' line — fold into Javadoc")
+		print()
+	print(f'TOTAL: {len(all_violations)} adjacent-comment-style violation(s) in '
+		f'{len(by_file)} file(s) (of {file_count} scanned)')
+	return 1
+
+
 # ─── audit: final-classes ────────────────────────────────────────────────────
 
 _CLASS_DECL_RE = re.compile(
@@ -460,6 +660,8 @@ AUDITS = {
 	'over-cols': audit_over_cols,
 	'ignored-catches': audit_ignored_catches,
 	'static-first': audit_static_first,
+	'method-order': audit_method_order,
+	'adjacent-comment-styles': audit_adjacent_comment_styles,
 	'final-classes': audit_final_classes,
 	'lsloc': audit_lsloc,
 }

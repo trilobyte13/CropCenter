@@ -36,6 +36,7 @@ import java.util.List;
  */
 final class ImageLoadController
 {
+
 	/**
 	 * Snapshot of the metadata extracted from a freshly-loaded image, ready to commit onto CropState as one
 	 * atomic block. Read-only-on-construction so a partial extraction failure can be discarded without
@@ -113,14 +114,14 @@ final class ImageLoadController
 
 		// HDR gate: only consider FF D8 after primary EOI as a gain map when the file carries the XMP
 		// hdrgm namespace marker (scanned ONLY inside parsed XMP APP1 segments — a stray "hdrgm" 5-byte
-		// sequence in MakerNote / COM / vendor blob / SEFT history / entropy doesn't false-positive,
-		// per Codex round-19 F1) AND has MPF segments (which describe Multi-Picture layouts including
-		// HDR). hasMpf is the cheap pre-filter — segment iteration above already computed it; the
-		// XMP-segment-only hdrgm scan runs only when MPF is present (Samsung non-HDR files typically
-		// don't have MPF, so the scan is skipped on the SDR happy path). Without this combined gate,
-		// an SDR Samsung file whose SEFT data block starts with an embedded JPEG thumbnail's FF D8
-		// would be mis-extracted as having a gain map AND have its SEFT trailer truncated past the
-		// thumbnail (Codex round-18 F1). Both extractors use the resulting hint.
+		// sequence in MakerNote / COM / vendor blob / SEFT history / entropy doesn't false-positive)
+		// AND has MPF segments (which describe Multi-Picture layouts including HDR). hasMpf is the
+		// cheap pre-filter — segment iteration above already computed it; the XMP-segment-only hdrgm
+		// scan runs only when MPF is present (Samsung non-HDR files typically don't have MPF, so the
+		// scan is skipped on the SDR happy path). Without this combined gate, an SDR Samsung file
+		// whose SEFT data block starts with an embedded JPEG thumbnail's FF D8 would be mis-extracted
+		// as having a gain map AND have its SEFT trailer truncated past the thumbnail. Both extractors
+		// use the resulting hint.
 		boolean isHdrSource = hasMpf && HdrSignature.hasHdrgmInXmp(meta);
 		byte[] gainMap = GainMapExtractor.extract(fileBytes, isHdrSource);
 		byte[] seftTrailer = SeftExtractor.extract(fileBytes, gainMap != null);
@@ -157,17 +158,29 @@ final class ImageLoadController
 	}
 
 	/**
-	 * True when fileBytes starts with the 8-byte PNG signature (89 50 4E 47 0D 0A 1A 0A).
+	 * True when fileBytes starts with the 8-byte PNG signature (89 50 4E 47 0D 0A 1A 0A). Routes through
+	 * PngMetadataExtractor.PNG_SIGNATURE rather than re-declaring the 8 hex/ASCII bytes here so the
+	 * canonical constant lives in one place — paired with the chunk walkers in PngMetadataExtractor that
+	 * also reference it.
 	 *
 	 * @param fileBytes raw bytes
 	 * @return true when the first eight bytes match the PNG file signature
 	 */
 	static boolean isPngSignature(byte[] fileBytes)
 	{
-		return fileBytes.length >= 8 && (fileBytes[0] & 0xFF) == 0x89
-			&& fileBytes[1] == 'P' && fileBytes[2] == 'N' && fileBytes[3] == 'G'
-			&& (fileBytes[4] & 0xFF) == 0x0D && (fileBytes[5] & 0xFF) == 0x0A
-			&& (fileBytes[6] & 0xFF) == 0x1A && (fileBytes[7] & 0xFF) == 0x0A;
+		byte[] sig = PngMetadataExtractor.PNG_SIGNATURE;
+		if (fileBytes.length < sig.length)
+		{
+			return false;
+		}
+		for (int i = 0; i < sig.length; i++)
+		{
+			if (fileBytes[i] != sig[i])
+			{
+				return false;
+			}
+		}
+		return true;
 	}
 
 	/**
@@ -182,8 +195,7 @@ final class ImageLoadController
 	 *
 	 * @param fileBytes raw image bytes (JPEG or PNG)
 	 * @param origName  display name used as the source filename in CropState
-	 * @return true on successful decode + state population, false when BitmapFactory
-	 *         rejected the bytes
+	 * @return true on successful decode + state population, false when BitmapFactory rejected the bytes
 	 */
 	boolean applyBytes(byte[] fileBytes, String origName)
 	{
@@ -199,7 +211,28 @@ final class ImageLoadController
 				"Unsupported image format — only JPEG and PNG are supported", Toast.LENGTH_LONG));
 			return false;
 		}
-		Bitmap raw = BitmapFactory.decodeByteArray(fileBytes, 0, fileBytes.length);
+		// Two-pass decode for memory bounds. Pass 1 reads only the SOF dimensions (no pixel allocation) so
+		// we can pick an inSampleSize that fits the decoded bitmap within BitmapUtils.getMaxDecodePixels()
+		// — the device-adaptive cap set at MainActivity.onCreate via BitmapUtils.initialize. On a 12 GB-RAM
+		// flagship the cap reaches ~187 MP so 200 MP sources decode at inSampleSize=1 (no quality loss).
+		// On a 4 GB device the cap floors at 32 MP and subsampling protects against OOM. Pass 2 does the
+		// real decode at that subsampling. BitmapFactory's bounds pre-pass is essentially free — header
+		// walk only, no entropy decode — so the overhead is negligible for sources that don't need to
+		// subsample.
+		int maxPixels = BitmapUtils.getMaxDecodePixels();
+		BitmapFactory.Options boundsOpts = new BitmapFactory.Options();
+		boundsOpts.inJustDecodeBounds = true;
+		BitmapFactory.decodeByteArray(fileBytes, 0, fileBytes.length, boundsOpts);
+		BitmapFactory.Options decodeOpts = new BitmapFactory.Options();
+		decodeOpts.inSampleSize = BitmapUtils.computeInSampleSize(
+			boundsOpts.outWidth, boundsOpts.outHeight, maxPixels);
+		if (decodeOpts.inSampleSize > 1)
+		{
+			Log.d(TAG, "Large source " + boundsOpts.outWidth + "x" + boundsOpts.outHeight
+				+ " — subsampling at inSampleSize=" + decodeOpts.inSampleSize
+				+ " to fit device-adaptive cap=" + maxPixels);
+		}
+		Bitmap raw = BitmapFactory.decodeByteArray(fileBytes, 0, fileBytes.length, decodeOpts);
 		if (raw == null || raw.getWidth() <= 0 || raw.getHeight() <= 0)
 		{
 			// BitmapFactory.decodeByteArray on a corrupt JPEG can return a non-null Bitmap with width=0 or
@@ -338,7 +371,7 @@ final class ImageLoadController
 		// Dismiss any open state-mutating dialog (SettingsDialog) BEFORE busy.compareAndSet — once we
 		// dispatch to bg, state.reset() runs and would race the dialog's still-active UI commits to
 		// state.gridConfig. Done synchronously on the UI thread so by the time runInBackground is called,
-		// no widget inside the dialog can fire another updateGridConfig. Codex round-16 F2.
+		// no widget inside the dialog can fire another updateGridConfig.
 		host.dismissTransientDialogs();
 		if (!host.getBusy().compareAndSet(false, true))
 		{
@@ -451,8 +484,8 @@ final class ImageLoadController
 			// applyOrientation rotated copy blows the heap budget surfaces a "Load failed: …" toast
 			// instead of dying silently — finally still releases busy and hides the overlay, but the
 			// catch is the only place the user-facing toast posts. Mirrors ExportPipeline.encodePhase
-			// (Codex round-17 F5) and the round-18 sweep that found this gap and the matching graft-side
-			// gaps in MainActivity.applyGraftedBytesOnBg + GraftController.assembleGraftOnBg.
+			// and the graft-side catches in MainActivity.applyGraftedBytesOnBg +
+			// GraftController.assembleGraftOnBg.
 			Log.e(TAG, "Load failed", e);
 			host.runOnUiThread(() -> host.toastIfAlive(
 				"Load failed: " + e.getMessage(), Toast.LENGTH_SHORT));

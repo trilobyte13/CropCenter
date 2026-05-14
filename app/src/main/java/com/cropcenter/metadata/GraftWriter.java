@@ -71,8 +71,8 @@ public final class GraftWriter
 	 * @param edit     external-edit JPEG providing the primary scan; must already share
 	 *                 original's stored layout (caller's responsibility — see EditAligner.align)
 	 * @return assembled JPEG bytes
-	 * @throws IOException when either input fails structural validation (not a JPEG,
-	 *                     missing primary EOI, malformed segments)
+	 * @throws IOException when either input fails structural validation (not a JPEG, missing primary EOI,
+	 *                     malformed segments)
 	 */
 	public static byte[] graft(byte[] original, byte[] edit) throws IOException
 	{
@@ -101,9 +101,9 @@ public final class GraftWriter
 		// gate closes: (1) MPF can describe non-HDR multi-picture (focus-stacked / panorama / ZSL),
 		// so MPF alone isn't sufficient; (2) a stray "hdrgm" 5-byte sequence in MakerNote / COM /
 		// vendor blob / SEFT history / entropy would false-positive a full-file scan, so the hdrgm
-		// check restricts to XMP segment bodies (Codex round-19 F1); (3) without this combined gate,
-		// GraftWriter's bare full-file scan re-opened the Codex-round-18 F1 false-positive on the
-		// graft-pipeline path (Codex round-19 F19-1). Mirrors ImageLoadController.extractMetadata's
+		// check restricts to XMP segment bodies; (3) without this combined gate, a bare full-file scan
+		// would re-open the SEFT-thumbnail false-positive on the graft-pipeline path. Mirrors
+		// ImageLoadController.extractMetadata's
 		// gate. hasMpf is the cheap pre-filter — segment-list scan, near-free — so the XMP-only hdrgm
 		// scan runs only when MPF is present.
 		boolean origHasMpf = hasMpf(origSegments);
@@ -136,15 +136,15 @@ public final class GraftWriter
 		// then append SEFT.
 		ByteArrayOutputStream out = new ByteArrayOutputStream(
 			Math.max(original.length, edit.length) + (origSeft == null ? 0 : origSeft.length));
-		out.write(0xFF);
-		out.write(0xD8);
+		out.write(JpegMarker.PREFIX);
+		out.write(JpegMarker.SOI);
 
 		// When the assembled output won't carry a gain map (origGainMap == null AND editGainMap == null —
 		// i.e., a non-HDR original whose MPF describes a non-HDR multi-picture layout like Samsung "Best
 		// Photo" burst / focus-stacked panorama), passing source's MPF verbatim into the output leaves it
 		// pointing at secondary images that no longer exist in the grafted file. Strict decoders' MPF
 		// pre-flight rejects the orphan, lenient decoders walk past malformed entries. Drop MPF in that
-		// case so the output's metadata stays honest about what it actually carries (Codex round-45 F2).
+		// case so the output's metadata stays honest about what it actually carries.
 		// HDR grafts (gainMapToWrite != null) preserve MPF — MpfPatcher.patch below rewrites the entries
 		// for the post-graft primary size and gain-map offset.
 		boolean dropOrphanMpf = gainMapToWrite == null;

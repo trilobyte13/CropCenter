@@ -18,8 +18,7 @@ public final class JpegMarker
 	 * Marker prefix — the 0xFF byte that introduces every JPEG marker pair. Every marker in this file is the
 	 * SECOND byte of a (PREFIX, X) pair; centralised here so test fixtures (and any byte-walking caller that
 	 * synthesises markers rather than scanning existing bytes) can write `(byte) JpegMarker.PREFIX, (byte)
-	 * JpegMarker.SOI` instead of repeating the 0xFF hex literal with an explanatory comment (Codex round-46
-	 * style-agent F7).
+	 * JpegMarker.SOI` instead of repeating the 0xFF hex literal with an explanatory comment.
 	 */
 	public static final int PREFIX = 0xFF;
 

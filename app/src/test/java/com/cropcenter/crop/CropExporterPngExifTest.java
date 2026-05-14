@@ -19,12 +19,10 @@ import java.io.IOException;
  * so a too-large rebuild would silently reject the splice and leave the SOURCE's IFD1 thumbnail in place —
  * leaking pre-edit content via the embedded preview.
  *
- * The round-33 F1 fix predicted this case via a naive `tiff.length + thumbnail.length` sum; round-34 F1 then
- * caught the naive sum's false positive — splices that would actually have shrunk the segment (because the
- * old thumbnail is removed before the new one is inserted) were getting force-stripped. The round-34 fix
- * routes through `ExifPatcher.maxThumbnailBytes`, which subtracts the old thumbnail's bytes from the segment
- * size before measuring remaining APP1 room. These tests pin both branches: splice when the rebuilt segment
- * fits, strip when it genuinely does not.
+ * A naive `tiff.length + thumbnail.length` sum would force-strip splices that actually shrink the segment
+ * (because the old thumbnail is removed before the new one is inserted). `ExifPatcher.maxThumbnailBytes`
+ * subtracts the old thumbnail's bytes from the segment size before measuring remaining APP1 room. These
+ * tests pin both branches: splice when the rebuilt segment fits, strip when it genuinely does not.
  */
 public final class CropExporterPngExifTest
 {
@@ -34,8 +32,8 @@ public final class CropExporterPngExifTest
 		// 50 KB old thumbnail + 30 KB fresh thumbnail. Naive sum (50,068 + 30,000 + 8 = 80,076) exceeds
 		// the APP1 cap, but the splice removes the 50 KB old thumbnail before inserting the 30 KB fresh
 		// one, so the rebuilt segment is roughly 30 KB + IFD overhead — comfortably under 65,535. The
-		// previous round-33 guard force-stripped this case; the round-34 fix routes through
-		// ExifPatcher.maxThumbnailBytes which correctly accounts for old-thumbnail removal. Pin
+		// A naive-sum guard would force-strip this case; routing through ExifPatcher.maxThumbnailBytes
+		// correctly accounts for old-thumbnail removal. Pin
 		// splice-not-strip behaviour: IFD0's next-IFD pointer must remain non-zero (still pointing at
 		// the rebuilt IFD1 carrying the new thumbnail).
 		byte[] tiff = buildTiffWithThumbnail(50_000);

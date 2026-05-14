@@ -21,6 +21,18 @@ import com.cropcenter.util.AiRegionDetector.AiMask;
 public final class AiRegionDetectorTest
 {
 	@Test
+	public void canonicalConstructorAcceptsExplicitMaskedCount()
+	{
+		// AiRegionDetector.detect uses the canonical record constructor directly to avoid re-walking the
+		// mask post-detect. Pin the contract: the explicit count is preserved verbatim, even if it doesn't
+		// match a recount of the boolean array. This is intentional — the count is the source of truth at
+		// construction; the boolean array is just storage.
+		boolean[] mask = { true, false, true, false };
+		AiMask aiMask = new AiMask(mask, 2, 2, 4, 99);
+		assertEquals("explicit count is not recomputed", 99, aiMask.maskedCount());
+	}
+
+	@Test
 	public void componentAccessorsExposeAllFields()
 	{
 		// Records auto-generate accessors. Pin them down so a renamed component surfaces here as a compile
@@ -33,18 +45,6 @@ public final class AiRegionDetectorTest
 		assertEquals(2, aiMask.height());
 		assertEquals(4, aiMask.sampleSize());
 		assertEquals(2, aiMask.maskedCount());
-	}
-
-	@Test
-	public void canonicalConstructorAcceptsExplicitMaskedCount()
-	{
-		// AiRegionDetector.detect uses the canonical record constructor directly to avoid re-walking the
-		// mask post-detect. Pin the contract: the explicit count is preserved verbatim, even if it doesn't
-		// match a recount of the boolean array. This is intentional — the count is the source of truth at
-		// construction; the boolean array is just storage.
-		boolean[] mask = { true, false, true, false };
-		AiMask aiMask = new AiMask(mask, 2, 2, 4, 99);
-		assertEquals("explicit count is not recomputed", 99, aiMask.maskedCount());
 	}
 
 	@Test

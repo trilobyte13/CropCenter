@@ -12,8 +12,7 @@ package com.cropcenter.crop;
  * EditorRenderer) would write `new CropRender(cx, cy, cropW, cropH, imgW, imgH, rot)` and silently transpose each pair
  * — all int, no compile error, but the gain-map output would carry visible HDR halos around every cropped export.
  * Converting from `public record` to `public final class` + `private` ctor closes that hole at compile time: the only
- * way to construct a CropRender is through `of(...)`, whose parameter order matches the rest of the codebase (Codex
- * round-43 F4).
+ * way to construct a CropRender is through `of(...)`, whose parameter order matches the rest of the codebase.
  *
  * Components are stored in alphabetical-by-name order per CLAUDE.md's field-ordering rule (cropH before cropW, imgH
  * before imgW); the `of(...)` factory accepts them in (W, H) order and threads the swap internally so the public API

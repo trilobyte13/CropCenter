@@ -9,10 +9,10 @@ import java.util.zip.CRC32;
  * JpegFixtures' role on the PNG side — minimal-valid layouts that exercise the parsers' chunk walks without
  * needing real-photo fixtures (which are user-supplied and not committed).
  *
- * Two consumers as of round-23: PngMetadataExtractorTest (parser-direct) and ImageLoadControllerExtractMetadataTest
+ * Two consumers: PngMetadataExtractorTest (parser-direct) and ImageLoadControllerExtractMetadataTest
  * (format-routing). Before extraction each carried its own copy of the same chunk + CRC builder; centralising here
  * means a future fix to the chunk format (a new CRC seed, a different length encoding) can't drift between the two
- * test files (Codex round-23 F4).
+ * test files.
  *
  * Not a runtime helper — lives only in the test source set. Public so callers outside the metadata package can
  * use it without copy-paste.

@@ -32,18 +32,37 @@ import java.io.IOException;
 public final class MpfPatcherTest
 {
 	@Test
-	public void patchSucceedsOnTwoImageMpf() throws IOException
+	public void patchAcceptsExactlyMaxMpfEntriesAndRejectsOneOver() throws IOException
 	{
-		// Standard Ultra HDR layout: primary + gain map, MPF carries 2 entries.
-		int newPrimarySize = 200;
+		// Pin the cap boundary at MAX_MPF_ENTRIES = 64. 64 entries with the gain
+		// map at index 1 must succeed; 65 entries must be refused as overflow protection for the int cast
+		// at `numImages = (int)(byteCount / MPF_ENTRY_BYTES)`. A regression that swapped `>` to `>=` would
+		// silently drop the cap by one and slip 65-entry MPFs through — caught here.
+		long[] attrsAtCap = new long[64];
+		attrsAtCap[1] = 0x00010005L;
+		MpfFixture okFx = buildMpfFile(2_000, 60, attrsAtCap);
+		assertTrue("64 entries (cap) must patch successfully",
+			MpfPatcher.patch(okFx.bytes, 2_000));
+
+		long[] attrsOverCap = new long[65];
+		attrsOverCap[1] = 0x00010005L;
+		MpfFixture badFx = buildMpfFile(3_000, 60, attrsOverCap);
+		assertFalse("65 entries (one over MAX_MPF_ENTRIES) must be rejected",
+			MpfPatcher.patch(badFx.bytes, 3_000));
+	}
+
+	@Test
+	public void patchFallsBackToEntry1ForTwoImageMpfWithMissingMpType() throws IOException
+	{
+		// numImages == 2 with no MPType match: the empirical Samsung Ultra HDR pattern ships gain map at index
+		// 1 even when MPType is malformed. Patcher should fall back to entry[1] in this specific case so
+		// existing Samsung captures keep round-tripping correctly.
+		int newPrimarySize = 220;
 		int gainMapSize = 60;
-		MpfFixture fx = buildMpfFile(newPrimarySize, gainMapSize, 2);
+		long[] attrs = { 0x20000000L, 0x12345678L };   // bogus attr on entry[1]
+		MpfFixture fx = buildMpfFile(newPrimarySize, gainMapSize, attrs);
 		assertTrue(MpfPatcher.patch(fx.bytes, newPrimarySize));
-		// entry[0] size patched to newPrimarySize.
-		assertEquals(newPrimarySize, readU32Le(fx.bytes, fx.entry0Off + 4));
-		// entry[1] size = gainMapSize, offset = newPrimarySize - mpfStart.
 		assertEquals(gainMapSize, readU32Le(fx.bytes, fx.entry0Off + 16 + 4));
-		assertEquals(newPrimarySize - fx.mpfStart, readU32Le(fx.bytes, fx.entry0Off + 16 + 8));
 	}
 
 	@Test
@@ -80,81 +99,6 @@ public final class MpfPatcherTest
 	}
 
 	@Test
-	public void patchRejectsThreeImageMpfWhenNoMpTypeMatch() throws IOException
-	{
-		// 3-image MPF whose attr fields are all bogus / non-gain-map MPTypes — patcher must refuse rather than
-		// blindly patch entry[1] (which could land the gain-map size into a depth map or thumbnail slot).
-		// Falling back to entry[1] is only safe when numImages == 2, where the Samsung Ultra HDR pattern
-		// guarantees the gain map lives at index 1 even when its MPType field is malformed.
-		//
-		// Pin BOTH the false return AND the no-byte-mutation invariant. The patch function reorders the
-		// gain-map walk before the entry[0] / gain-map writes specifically so a refused patch leaves the
-		// JPEG byte buffer in its pre-call state — a regression that wrote entry[0].size before the refusal
-		// check would silently corrupt the file while still returning false. Sister test
-		// patchRejectsMultipleGainMapMpTypeMatches pins the same invariant on the multi-match branch; this
-		// test pins it on the no-match-with-numImages-not-2 branch.
-		int newPrimarySize = 320;
-		int gainMapSize = 80;
-		long[] attrs = {
-			0x20000000L,                // primary
-			0x00010003L,                // Large Thumbnail (NOT gain map)
-			0x00010003L,                // Large Thumbnail (NOT gain map)
-		};
-		MpfFixture fx = buildMpfFile(newPrimarySize, gainMapSize, attrs);
-		byte[] snapshot = fx.bytes.clone();
-		assertFalse(MpfPatcher.patch(fx.bytes, newPrimarySize));
-		for (int i = 0; i < fx.bytes.length; i++)
-		{
-			assertEquals("byte " + i + " mutated on rejected patch (no-MPType-match branch)",
-				snapshot[i], fx.bytes[i]);
-		}
-	}
-
-	@Test
-	public void patchFallsBackToEntry1ForTwoImageMpfWithMissingMpType() throws IOException
-	{
-		// numImages == 2 with no MPType match: the empirical Samsung Ultra HDR pattern ships gain map at index
-		// 1 even when MPType is malformed. Patcher should fall back to entry[1] in this specific case so
-		// existing Samsung captures keep round-tripping correctly.
-		int newPrimarySize = 220;
-		int gainMapSize = 60;
-		long[] attrs = { 0x20000000L, 0x12345678L };   // bogus attr on entry[1]
-		MpfFixture fx = buildMpfFile(newPrimarySize, gainMapSize, attrs);
-		assertTrue(MpfPatcher.patch(fx.bytes, newPrimarySize));
-		assertEquals(gainMapSize, readU32Le(fx.bytes, fx.entry0Off + 16 + 4));
-	}
-
-	@Test
-	public void patchRejectsSingleImageMpf() throws IOException
-	{
-		// numImages < 2: no gain-map slot to patch. Patcher must return false rather than silently writing
-		// entry[1]-shaped data into adjacent memory.
-		MpfFixture fx = buildMpfFile(100, 30, 1);
-		assertFalse(MpfPatcher.patch(fx.bytes, 100));
-	}
-
-	@Test
-	public void patchAcceptsExactlyMaxMpfEntriesAndRejectsOneOver() throws IOException
-	{
-		// Pin the cap boundary at MAX_MPF_ENTRIES = 64 (round-10 named constant). 64 entries with the gain
-		// map at index 1 must succeed; 65 entries must be refused as overflow protection for the int cast
-		// at `numImages = (int)(byteCount / MPF_ENTRY_BYTES)`. A regression that swapped `>` to `>=` would
-		// silently drop the cap by one and slip 65-entry MPFs through — caught here.
-		long[] attrsAtCap = new long[64];
-		attrsAtCap[1] = 0x00010005L;
-		MpfFixture okFx = buildMpfFile(2_000, 60, attrsAtCap);
-		assertTrue("64 entries (cap) must patch successfully",
-			MpfPatcher.patch(okFx.bytes, 2_000));
-
-		long[] attrsOverCap = new long[65];
-		attrsOverCap[1] = 0x00010005L;
-		MpfFixture badFx = buildMpfFile(3_000, 60, attrsOverCap);
-		assertFalse("65 entries (one over MAX_MPF_ENTRIES) must be rejected",
-			MpfPatcher.patch(badFx.bytes, 3_000));
-	}
-
-
-	@Test
 	public void patchLocatesGainMapByMpTypeWhenAtIndexTwo() throws IOException
 	{
 		// 3-image MPF where the gain-map MPType (0x010005) is at index 2 — Samsung Ultra HDR conventionally
@@ -185,20 +129,6 @@ public final class MpfPatcherTest
 	}
 
 	@Test
-	public void patchRejectsMismatchedByteOrderField() throws IOException
-	{
-		// MPF MP Endian field must be "II" (0x49 0x49) or "MM" (0x4D 0x4D). A malformed half-pair like "IM" /
-		// "MI" would slip through a single-byte check and parse subsequent IFD offsets with wrong byte order,
-		// producing nonsense bounds-check passes that land writes on arbitrary positions.
-		int newPrimarySize = 200;
-		int gainMapSize = 60;
-		MpfFixture fx = buildMpfFile(newPrimarySize, gainMapSize, 2);
-		// Corrupt the byte-order field from "II" to "IM".
-		fx.bytes[fx.mpfStart + 1] = 'M';
-		assertFalse(MpfPatcher.patch(fx.bytes, newPrimarySize));
-	}
-
-	@Test
 	public void patchPassesByteOrderCheckOnBigEndianHeaderButFailsLaterOnMisencodedIfd() throws IOException
 	{
 		// "MM" (big-endian) MPF is legal per spec. Confirm the byte-order validation accepts it (i.e. doesn't
@@ -220,62 +150,6 @@ public final class MpfPatcherTest
 		for (int i = fx.mpfStart + 2; i < fx.bytes.length; i++)
 		{
 			assertEquals("byte " + i + " must be unchanged when patch rejected mid-flow",
-				snapshot[i], fx.bytes[i]);
-		}
-	}
-
-	@Test
-	public void patchRejectsPrimarySizeSmallerThanMpfStart() throws IOException
-	{
-		// primarySize < mpfStart produces a negative relativeOffset = primarySize
-		// - mpfStart, which writeU32 reinterprets as a huge u32 — emitting a
-		// corrupt MP entry that decoders treat as an offset past EOF. Refuse to
-		// patch rather than write the poison value.
-		int gainMapSize = 60;
-		MpfFixture fx = buildMpfFile(200, gainMapSize, 2);
-		// mpfStart in the fixture sits around offset 10; passing primarySize = 5 drives relativeOffset
-		// negative.
-		assertFalse(MpfPatcher.patch(fx.bytes, 5));
-	}
-
-	@Test
-	public void patchReturnsFalseWhenNoMpfPresent() throws IOException
-	{
-		// File has only a non-MPF APP2 (e.g. ICC). Walker should reach SOS and return false without claiming a
-		// successful patch.
-		ByteArrayOutputStream out = new ByteArrayOutputStream();
-		out.write(JpegFixtures.soi());
-		byte[] iccPayload = "ICC_PROFILE\0body".getBytes();
-		out.write(JpegFixtures.appSegment(0xE2, iccPayload));
-		out.write(JpegFixtures.minimalScanAndEoi());
-		assertFalse(MpfPatcher.patch(out.toByteArray(), out.size()));
-	}
-
-	@Test
-	public void patchRejectsMultipleGainMapMpTypeMatches() throws IOException
-	{
-		// A spec-legal multi-gain-map MPF (composite depth + Original Preservation, some Apple Portrait
-		// variants) carries multiple 0x010005 entries. We have one post-edit gain-map size + offset, but no
-		// way to assign it across multiple entries without guessing — a single-entry write would leave the
-		// others pointing at pre-edit positions in the source file, which strict decoders reject. Refusing
-		// here lets GainMapComposer drop HDR cleanly per its design.
-		int newPrimarySize = 280;
-		int gainMapSize = 70;
-		long[] attrs = {
-			0x20000000L,                // entry[0] primary (representative-image bit)
-			0x00010005L,                // entry[1] Original Preservation #1 (gain map)
-			0x00010005L,                // entry[2] Original Preservation #2 (second gain map)
-		};
-		MpfFixture fx = buildMpfFile(newPrimarySize, gainMapSize, attrs);
-		byte[] snapshot = fx.bytes.clone();
-		assertFalse("multi-gain-map MPF must be refused, not silently single-patched",
-			MpfPatcher.patch(fx.bytes, newPrimarySize));
-
-		// No bytes mutated — a regression that wrote into entry[1] or entry[2] before checking the count
-		// would trip this assertion.
-		for (int i = 0; i < fx.bytes.length; i++)
-		{
-			assertEquals("byte " + i + " must be unchanged when patch refused on multi-match",
 				snapshot[i], fx.bytes[i]);
 		}
 	}
@@ -314,16 +188,131 @@ public final class MpfPatcherTest
 		}
 	}
 
-	/**
-	 * Build a JPEG byte array with a plausible MPF segment carrying `numImages` entries. Returns the bytes plus the
-	 * offsets the test needs (mpfStart and entry[0] base).
-	 *
-	 * MPF layout (little-endian for portability with the MPF "II" form):
-	 *   FF E2 [segLen:2] "MPF\0"
-	 *   "II*\0" + IFD offset (= 8, points right after the header)
-	 *   IFD: numEntries=2, entries: { tag=0xB000 version, tag=0xB002 entries }
-	 *   MP Entries: numImages * 16 bytes (attr, size, dataOff, two reserved)
-	 */
+	@Test
+	public void patchRejectsMismatchedByteOrderField() throws IOException
+	{
+		// MPF MP Endian field must be "II" (0x49 0x49) or "MM" (0x4D 0x4D). A malformed half-pair like "IM" /
+		// "MI" would slip through a single-byte check and parse subsequent IFD offsets with wrong byte order,
+		// producing nonsense bounds-check passes that land writes on arbitrary positions.
+		int newPrimarySize = 200;
+		int gainMapSize = 60;
+		MpfFixture fx = buildMpfFile(newPrimarySize, gainMapSize, 2);
+		// Corrupt the byte-order field from "II" to "IM".
+		fx.bytes[fx.mpfStart + 1] = 'M';
+		assertFalse(MpfPatcher.patch(fx.bytes, newPrimarySize));
+	}
+
+	@Test
+	public void patchRejectsMultipleGainMapMpTypeMatches() throws IOException
+	{
+		// A spec-legal multi-gain-map MPF (composite depth + Original Preservation, some Apple Portrait
+		// variants) carries multiple 0x010005 entries. We have one post-edit gain-map size + offset, but no
+		// way to assign it across multiple entries without guessing — a single-entry write would leave the
+		// others pointing at pre-edit positions in the source file, which strict decoders reject. Refusing
+		// here lets GainMapComposer drop HDR cleanly per its design.
+		int newPrimarySize = 280;
+		int gainMapSize = 70;
+		long[] attrs = {
+			0x20000000L,                // entry[0] primary (representative-image bit)
+			0x00010005L,                // entry[1] Original Preservation #1 (gain map)
+			0x00010005L,                // entry[2] Original Preservation #2 (second gain map)
+		};
+		MpfFixture fx = buildMpfFile(newPrimarySize, gainMapSize, attrs);
+		byte[] snapshot = fx.bytes.clone();
+		assertFalse("multi-gain-map MPF must be refused, not silently single-patched",
+			MpfPatcher.patch(fx.bytes, newPrimarySize));
+
+		// No bytes mutated — a regression that wrote into entry[1] or entry[2] before checking the count
+		// would trip this assertion.
+		for (int i = 0; i < fx.bytes.length; i++)
+		{
+			assertEquals("byte " + i + " must be unchanged when patch refused on multi-match",
+				snapshot[i], fx.bytes[i]);
+		}
+	}
+
+	@Test
+	public void patchRejectsPrimarySizeSmallerThanMpfStart() throws IOException
+	{
+		// primarySize < mpfStart produces a negative relativeOffset = primarySize
+		// - mpfStart, which writeU32 reinterprets as a huge u32 — emitting a
+		// corrupt MP entry that decoders treat as an offset past EOF. Refuse to
+		// patch rather than write the poison value.
+		int gainMapSize = 60;
+		MpfFixture fx = buildMpfFile(200, gainMapSize, 2);
+		// mpfStart in the fixture sits around offset 10; passing primarySize = 5 drives relativeOffset
+		// negative.
+		assertFalse(MpfPatcher.patch(fx.bytes, 5));
+	}
+
+	@Test
+	public void patchRejectsSingleImageMpf() throws IOException
+	{
+		// numImages < 2: no gain-map slot to patch. Patcher must return false rather than silently writing
+		// entry[1]-shaped data into adjacent memory.
+		MpfFixture fx = buildMpfFile(100, 30, 1);
+		assertFalse(MpfPatcher.patch(fx.bytes, 100));
+	}
+
+	@Test
+	public void patchRejectsThreeImageMpfWhenNoMpTypeMatch() throws IOException
+	{
+		// 3-image MPF whose attr fields are all bogus / non-gain-map MPTypes — patcher must refuse rather than
+		// blindly patch entry[1] (which could land the gain-map size into a depth map or thumbnail slot).
+		// Falling back to entry[1] is only safe when numImages == 2, where the Samsung Ultra HDR pattern
+		// guarantees the gain map lives at index 1 even when its MPType field is malformed.
+		//
+		// Pin BOTH the false return AND the no-byte-mutation invariant. The patch function reorders the
+		// gain-map walk before the entry[0] / gain-map writes specifically so a refused patch leaves the
+		// JPEG byte buffer in its pre-call state — a regression that wrote entry[0].size before the refusal
+		// check would silently corrupt the file while still returning false. Sister test
+		// patchRejectsMultipleGainMapMpTypeMatches pins the same invariant on the multi-match branch; this
+		// test pins it on the no-match-with-numImages-not-2 branch.
+		int newPrimarySize = 320;
+		int gainMapSize = 80;
+		long[] attrs = {
+			0x20000000L,                // primary
+			0x00010003L,                // Large Thumbnail (NOT gain map)
+			0x00010003L,                // Large Thumbnail (NOT gain map)
+		};
+		MpfFixture fx = buildMpfFile(newPrimarySize, gainMapSize, attrs);
+		byte[] snapshot = fx.bytes.clone();
+		assertFalse(MpfPatcher.patch(fx.bytes, newPrimarySize));
+		for (int i = 0; i < fx.bytes.length; i++)
+		{
+			assertEquals("byte " + i + " mutated on rejected patch (no-MPType-match branch)",
+				snapshot[i], fx.bytes[i]);
+		}
+	}
+
+	@Test
+	public void patchReturnsFalseWhenNoMpfPresent() throws IOException
+	{
+		// File has only a non-MPF APP2 (e.g. ICC). Walker should reach SOS and return false without claiming a
+		// successful patch.
+		ByteArrayOutputStream out = new ByteArrayOutputStream();
+		out.write(JpegFixtures.soi());
+		byte[] iccPayload = "ICC_PROFILE\0body".getBytes();
+		out.write(JpegFixtures.appSegment(0xE2, iccPayload));
+		out.write(JpegFixtures.minimalScanAndEoi());
+		assertFalse(MpfPatcher.patch(out.toByteArray(), out.size()));
+	}
+
+	@Test
+	public void patchSucceedsOnTwoImageMpf() throws IOException
+	{
+		// Standard Ultra HDR layout: primary + gain map, MPF carries 2 entries.
+		int newPrimarySize = 200;
+		int gainMapSize = 60;
+		MpfFixture fx = buildMpfFile(newPrimarySize, gainMapSize, 2);
+		assertTrue(MpfPatcher.patch(fx.bytes, newPrimarySize));
+		// entry[0] size patched to newPrimarySize.
+		assertEquals(newPrimarySize, readU32Le(fx.bytes, fx.entry0Off + 4));
+		// entry[1] size = gainMapSize, offset = newPrimarySize - mpfStart.
+		assertEquals(gainMapSize, readU32Le(fx.bytes, fx.entry0Off + 16 + 4));
+		assertEquals(newPrimarySize - fx.mpfStart, readU32Le(fx.bytes, fx.entry0Off + 16 + 8));
+	}
+
 	/**
 	 * Convenience overload that gives every entry the same placeholder `attr` value. Used by tests that don't care
 	 * which entry carries the gain-map MPType (the patcher's fall-through to entry[1] handles that case).
@@ -339,6 +328,16 @@ public final class MpfPatcherTest
 		return buildMpfFile(primarySize, gainMapSize, attrs);
 	}
 
+	/**
+	 * Build a JPEG byte array with a plausible MPF segment carrying `attrs.length` entries. Returns the bytes plus
+	 * the offsets the test needs (mpfStart and entry[0] base).
+	 *
+	 * MPF layout (little-endian for portability with the MPF "II" form):
+	 *   FF E2 [segLen:2] "MPF\0"
+	 *   "II*\0" + IFD offset (= 8, points right after the header)
+	 *   IFD: numEntries=2, entries: { tag=0xB000 version, tag=0xB002 entries }
+	 *   MP Entries: numImages * 16 bytes (attr, size, dataOff, two reserved)
+	 */
 	private static MpfFixture buildMpfFile(int primarySize, int gainMapSize, long[] attrs)
 		throws IOException
 	{

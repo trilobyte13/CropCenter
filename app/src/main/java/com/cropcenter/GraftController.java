@@ -56,8 +56,8 @@ final class GraftController
 	 *
 	 * @param originalBytes raw bytes of the source the user long-pressed on
 	 * @param gainMap       source's gain map at long-press time, or null for SDR sources
-	 * @param filename      source's display name at long-press time (used for the
-	 *                      "{stem}-graft.jpg" default save name)
+	 * @param filename      source's display name at long-press time (used for the "{stem}-graft.jpg"
+	 *                      default save name)
 	 */
 	private record SourceSnapshot(byte[] originalBytes, byte[] gainMap, String filename) {}
 
@@ -97,6 +97,51 @@ final class GraftController
 		this.host = host;
 		this.safFiles = safFiles;
 		this.onGraftReady = onGraftReady;
+	}
+
+	/**
+	 * True when the AI mask covers a fraction of the image larger than the small-touch-up profile this feature
+	 * targets. Triggers the user-visible confirm path. SDR sources (no mask) and empty masks (no detected change)
+	 * pass through with maskedPixelCount<0 or maskTotal==0 and skip the dialog.
+	 *
+	 * Pre-counted args (rather than the AiMask record) so callers don't pay the O(N) mask walk twice — once here,
+	 * once again to format the dialog message.
+	 *
+	 * @param maskedPixelCount number of pixels flagged in the AI mask, or <0 when no mask
+	 * @param maskTotal        total pixel count in the mask (mask.length)
+	 * @return true when count / total exceeds LARGE_EDIT_FRACTION
+	 */
+	static boolean isOversizedEdit(int maskedPixelCount, int maskTotal)
+	{
+		if (maskedPixelCount < 0 || maskTotal <= 0)
+		{
+			return false;
+		}
+		return maskedPixelCount > maskTotal * LARGE_EDIT_FRACTION;
+	}
+
+	/**
+	 * Build the suggested filename used when the user later saves the grafted image. Suffix the original's stem
+	 * with "-graft" so the user can tell at a glance that the file is post-graft. Falls back to "graft.jpg" when
+	 * the original has no display name (rare — usually only for content URIs without OpenableColumns).
+	 *
+	 * Takes the filename as a parameter rather than reading state.getOriginalFilename directly so this stays
+	 * consistent with the rest of onEditPicked's "use the snapshot, not live state" rule. The user might have
+	 * loaded a different image while the picker was open; reading state here would produce image B's stem on a
+	 * graft assembled from image A's bytes.
+	 *
+	 * @param originalFilename source's display name at long-press time (may be null)
+	 * @return "{stem}-graft.jpg" when originalFilename is non-empty, else "graft.jpg"
+	 */
+	static String suggestedFilename(String originalFilename)
+	{
+		if (originalFilename == null || originalFilename.isEmpty())
+		{
+			return "graft.jpg";
+		}
+		int dot = originalFilename.lastIndexOf('.');
+		String stem = dot > 0 ? originalFilename.substring(0, dot) : originalFilename;
+		return stem + "-graft.jpg";
 	}
 
 	/**
@@ -230,51 +275,6 @@ final class GraftController
 	}
 
 	/**
-	 * True when the AI mask covers a fraction of the image larger than the small-touch-up profile this feature
-	 * targets. Triggers the user-visible confirm path. SDR sources (no mask) and empty masks (no detected change)
-	 * pass through with maskedPixelCount<0 or maskTotal==0 and skip the dialog.
-	 *
-	 * Pre-counted args (rather than the AiMask record) so callers don't pay the O(N) mask walk twice — once here,
-	 * once again to format the dialog message.
-	 *
-	 * @param maskedPixelCount number of pixels flagged in the AI mask, or <0 when no mask
-	 * @param maskTotal        total pixel count in the mask (mask.length)
-	 * @return true when count / total exceeds LARGE_EDIT_FRACTION
-	 */
-	private static boolean isOversizedEdit(int maskedPixelCount, int maskTotal)
-	{
-		if (maskedPixelCount < 0 || maskTotal <= 0)
-		{
-			return false;
-		}
-		return maskedPixelCount > maskTotal * LARGE_EDIT_FRACTION;
-	}
-
-	/**
-	 * Build the suggested filename used when the user later saves the grafted image. Suffix the original's stem
-	 * with "-graft" so the user can tell at a glance that the file is post-graft. Falls back to "graft.jpg" when
-	 * the original has no display name (rare — usually only for content URIs without OpenableColumns).
-	 *
-	 * Takes the filename as a parameter rather than reading state.getOriginalFilename directly so this stays
-	 * consistent with the rest of onEditPicked's "use the snapshot, not live state" rule. The user might have
-	 * loaded a different image while the picker was open; reading state here would produce image B's stem on a
-	 * graft assembled from image A's bytes.
-	 *
-	 * @param originalFilename source's display name at long-press time (may be null)
-	 * @return "{stem}-graft.jpg" when originalFilename is non-empty, else "graft.jpg"
-	 */
-	private static String suggestedFilename(String originalFilename)
-	{
-		if (originalFilename == null || originalFilename.isEmpty())
-		{
-			return "graft.jpg";
-		}
-		int dot = originalFilename.lastIndexOf('.');
-		String stem = dot > 0 ? originalFilename.substring(0, dot) : originalFilename;
-		return stem + "-graft.jpg";
-	}
-
-	/**
 	 * Shared apply-pipeline entry for both the normal graft path (dispatchGraftToUi → here) and the
 	 * oversized-edit Apply button (confirmOversizedThenApply → here). Guards against the case where the user
 	 * taps through after the Activity started finishing — a config change that races the dialog (or the
@@ -374,8 +374,13 @@ final class GraftController
 			int maskedPixelCount = (aiMask != null) ? aiMask.maskedCount() : -1;
 			int maskTotal = (aiMask != null) ? aiMask.mask().length : 0;
 			graftPending = false;
-			handedOff = true;
+			// `handedOff = true` is set AFTER runOnUiThread succeeds so a runOnUiThread throw — rare but
+			// reachable on a torn-down view tree — lands in the catch below with handedOff still false.
+			// The finally's `if (!handedOff)` block then releases the busy AtomicBoolean. Setting the flag
+			// before the call would strand busy=true forever on this narrow path, leaving every subsequent
+			// Save/Open tap rejected with "Busy — try again" until Activity destroy.
 			host.runOnUiThread(() -> dispatchGraftToUi(graft, maskedPixelCount, maskTotal));
+			handedOff = true;
 		}
 		catch (IOException e)
 		{
@@ -390,8 +395,8 @@ final class GraftController
 			// pixel-array / byte-buffer pressure. A multi-MP HDR source's graft assembly is comparable
 			// in allocation to the export path — without OOM here, finally would clear pendingSource +
 			// release busy + hide progress, but no "Graft failed" toast would post and the user would
-			// have no signal. Mirrors round-17 F5 and the round-18 widenings in
-			// ImageLoadController.runLoadBg + MainActivity.applyGraftedBytesOnBg.
+			// have no signal. Mirrors the widenings in ImageLoadController.runLoadBg and
+			// MainActivity.applyGraftedBytesOnBg.
 			Log.e(TAG, "Unexpected graft error", e);
 			toast("Graft failed: " + e.getMessage());
 			graftPending = false;
@@ -512,8 +517,8 @@ final class GraftController
 	 * cleanup tail by the graft pipeline whenever an Activity-destroyed guard fires, the user cancels the
 	 * oversized-edit confirm dialog, or the dialog plumbing throws — anywhere the busy ownership the graft
 	 * pipeline holds must be relinquished without proceeding to applyBytes. Hoisted out of two parallel
-	 * lambda bodies in confirmOversizedThenApply / dispatchGraftToUi (round-34 style audit P2) so the
-	 * three-step cleanup contract (busy flag, busy UI, progress overlay) lives at one chokepoint.
+	 * lambda bodies in confirmOversizedThenApply / dispatchGraftToUi so the three-step cleanup
+	 * contract (busy flag, busy UI, progress overlay) lives at one chokepoint.
 	 */
 	private void releaseBusyAndHideProgress()
 	{

@@ -174,7 +174,7 @@ final class UiSync
 		// decimal separator (e.g. "2,5x" on de-DE) per CLAUDE.md's "system locale only for user-facing
 		// display" rule — Locale.ROOT here would force a "." even where the user's OS expects ",", which
 		// is the exact mismatch the rule exists to prevent for visible UI text. Explicit
-		// Locale.getDefault() so the locale choice is auditable rather than implicit (Codex round-24 F3).
+		// Locale.getDefault() so the locale choice is auditable rather than implicit.
 		host.getZoomBadgeTextView().setText(zoom < 10f
 			? String.format(Locale.getDefault(), "%.1fx", zoom)
 			: Math.round(zoom) + "x");
