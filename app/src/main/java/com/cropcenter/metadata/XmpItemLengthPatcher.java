@@ -199,7 +199,7 @@ public final class XmpItemLengthPatcher
 			int segTotal = bodyEnd - segStart;
 			byte[] segData = new byte[segTotal];
 			System.arraycopy(primary, segStart, segData, 0, segTotal);
-			out.add(new JpegSegment(0xE1, segData));
+			out.add(new JpegSegment(JpegMarker.APP1, segData));
 		}
 		return out;
 	}
@@ -450,7 +450,7 @@ public final class XmpItemLengthPatcher
 			{
 				break;
 			}
-			if (marker == 0xE1)
+			if (marker == JpegMarker.APP1)
 			{
 				ranges.add(new int[] { markerByteOff - 1, afterMarker + 2, next });
 			}

@@ -244,6 +244,27 @@ public final class CropStateTest
 	}
 
 	@Test
+	public void setCenterWithNullSourceImageSkipsClampAndDoesNotNpe()
+	{
+		// CropState.setCenter snapshots the volatile sourceImage at method entry. The snapshot exists
+		// because a bg-thread reset() can null the field between this read and the getWidth()/Height()
+		// reads inside the clamp branch — without the snapshot the UI thread NPEs on
+		// snapshot.getWidth(). Pin the contract: setCenter with sourceImage == null must (a) NOT
+		// throw, (b) NOT apply the clamp (the (x, y) pass through), (c) still set hasCenter and fire
+		// the listener.
+		CropState state = new CropState();
+		// sourceImage stays null (default).
+		// cropW/cropH stay 0 (default), so the clamp branch would be skipped even with a non-null
+		// snapshot — but the test still exercises the snapshot path. Pre-fix the NPE was inside the
+		// snapshot != null && cropW > 0 && cropH > 0 branch's sourceImage.getWidth() call; the
+		// snapshot prevents it.
+		state.setCenter(500f, 700f);
+		assertEquals("centerX accepted without clamp (no source)", 500f, state.getCenterX(), 0f);
+		assertEquals("centerY accepted without clamp (no source)", 700f, state.getCenterY(), 0f);
+		assertTrue("hasCenter flips true regardless of source presence", state.hasCenter());
+	}
+
+	@Test
 	public void setSourceFormatSeedsExportConfig()
 	{
 		// `setSourceFormat(PNG)` must seed `exportConfig.format()` to PNG so the

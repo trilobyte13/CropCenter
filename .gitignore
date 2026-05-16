@@ -18,5 +18,6 @@
 __pycache__/
 # Graft-diagnostic fixtures (user-supplied, multi-MB) and regenerable heatmap outputs:
 /scripts/graft-fixtures/
+/scripts/input/
 /scripts/*.png
 gradle/gradle-daemon-jvm.properties

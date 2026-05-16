@@ -8,12 +8,10 @@ import android.util.Log;
  */
 public final class SeftExtractor
 {
-	/**
-	 * Byte size of the SEFT footer at the end of the file: 4-byte little-endian size value + 4-byte "SEFT"
-	 * ASCII magic. Centralised so the gain-map walker's `file.length - FOOTER_SIZE` slice cap (in
-	 * GainMapExtractor) and the SEFT extractor's own `file.length - FOOTER_SIZE` aren't two unconnected
-	 * `8` magic literals.
-	 */
+	// Byte size of the SEFT footer at the end of the file: 4-byte little-endian size value + 4-byte "SEFT"
+	// ASCII magic. Centralised so the gain-map walker's `file.length - FOOTER_SIZE` slice cap (in
+	// GainMapExtractor) and the SEFT extractor's own `file.length - FOOTER_SIZE` aren't two unconnected
+	// `8` magic literals.
 	public static final int FOOTER_SIZE = 8;
 
 	private static final String TAG = "SeftExtractor";

@@ -30,17 +30,18 @@ public final class JpegSegmentTest
 	}
 
 	@Test
-	public void xmpHeaderConstantValueAndLength()
+	public void extendedXmpHeaderConstantValueAndLength()
 	{
-		// HorizonDetector.detectFromMetadata reads `xmlStart = 4 + JpegSegment.XMP_HEADER.length()` to locate
-		// the XML body inside an XMP APP1 segment. If a future refactor drops the trailing `\0` from the
-		// literal (e.g. "this NUL looks redundant"), XMP_HEADER.length() shifts from 29 to 28 and
-		// HorizonDetector starts parsing 1 byte of "http://ns.adobe.com/xap/1.0/" payload as XML — producing
-		// silent garbage XPath misses without any test failure. Pin the exact value AND the trailing NUL
-		// so a length-changing edit gets caught here.
-		assertEquals(29, JpegSegment.XMP_HEADER.length());
-		assertEquals('\0', JpegSegment.XMP_HEADER.charAt(28));
-		assertEquals("http://ns.adobe.com/xap/1.0/\0", JpegSegment.XMP_HEADER);
+		// `ExtendedXmpReassembler.reassemble` reads `4 + extPrefix.length() + 32 (GUID) + 4 (totalLen)
+		// + 4 (offset) = 4 + 35 + 40 = 79` as the minimum byte count for any Extended XMP chunk header,
+		// and downstream GUID + offset reads use those exact byte positions. A future refactor that
+		// drops the trailing `\0` from the literal (e.g. "this NUL looks redundant") shifts the
+		// constant from 35 to 34 and silently slides every GUID / offset read by 1 byte — every
+		// reassembly of a real-world >64 KB XMP packet would produce corrupted output. Pin the
+		// exact value AND the trailing NUL so a length-changing edit gets caught here.
+		assertEquals(35, JpegSegment.EXTENDED_XMP_HEADER.length());
+		assertEquals('\0', JpegSegment.EXTENDED_XMP_HEADER.charAt(34));
+		assertEquals("http://ns.adobe.com/xmp/extension/\0", JpegSegment.EXTENDED_XMP_HEADER);
 	}
 
 	@Test
@@ -75,6 +76,27 @@ public final class JpegSegmentTest
 		// "FF E1 [len] Exif\0\0 [tiff data...]" — the canonical EXIF APP1 signature.
 		byte[] data = exifLike();
 		assertTrue(new JpegSegment(0xE1, data).isExif());
+	}
+
+	@Test
+	public void isExtendedXmpTrueOnValidExtendedXmpAndFalseOnSiblingShapes()
+	{
+		// Pin Extended XMP detection. The predicate gates the reassembly path in
+		// `HdrSignature.hasHdrgmInXmp` and `ExtendedXmpReassembler.reassemble` — a regression
+		// in the 35-byte prefix-walk or the 4 + prefix.length() bound would silently mis-route
+		// every >64 KB XMP packet (the chunked Extended XMP case Samsung Galaxy emits). Pin the
+		// happy path AND three near-misses so the predicate's individual rejections each
+		// surface here rather than via downstream parser failures: APP2 marker (must be APP1),
+		// truncated body (< 4 + 35 = 39 bytes), and standard XMP (`xap/1.0/` not extension).
+		byte[] extXmp = extendedXmpLike();
+		assertTrue(new JpegSegment(0xE1, extXmp).isExtendedXmp());
+		assertFalse("APP2 marker disqualifies even with extension prefix",
+			new JpegSegment(0xE2, extXmp).isExtendedXmp());
+		byte[] truncated = { (byte) 0xFF, (byte) 0xE1, 0x00, 0x10, 'h', 't', 't', 'p', ':', '/' };
+		assertFalse("body shorter than 4 + EXTENDED_XMP_HEADER.length() rejects",
+			new JpegSegment(0xE1, truncated).isExtendedXmp());
+		assertFalse("standard XMP prefix (xap/1.0/) is not Extended XMP",
+			new JpegSegment(0xE1, xmpLike()).isExtendedXmp());
 	}
 
 	@Test
@@ -161,6 +183,18 @@ public final class JpegSegmentTest
 	}
 
 	@Test
+	public void maxSegmentBytesIsU16Cap()
+	{
+		// The JPEG APP segment length field is a u16 — the maximum value it can hold (and
+		// therefore the maximum legal segment payload+len) is 65535. Every metadata patcher
+		// (`ExifPatcher`, `XmpItemLengthPatcher`, `MpfPatcher`, `PngMetadataExtractor`'s
+		// synthetic-APP1 cap) routes through this constant for its cap math. A regression to
+		// e.g. 65533 (Samsung's practical XMP cap) would silently shift every overhead
+		// calculation downstream without a single direct test fixture catching it.
+		assertEquals(0xFFFF, JpegSegment.MAX_SEGMENT_BYTES);
+	}
+
+	@Test
 	public void predicatesAreMutuallyExclusiveOnRealSegments()
 	{
 		// A JPEG segment is exactly one type — sanity-check that exact-type matchers don't false-positive on a
@@ -190,6 +224,37 @@ public final class JpegSegmentTest
 		assertTrue(mpf.isMpf());
 	}
 
+	@Test
+	public void xmpHeaderConstantValueAndLength()
+	{
+		// HorizonDetector.detectFromMetadata reads `xmlStart = 4 + JpegSegment.XMP_HEADER.length()` to locate
+		// the XML body inside an XMP APP1 segment. If a future refactor drops the trailing `\0` from the
+		// literal (e.g. "this NUL looks redundant"), XMP_HEADER.length() shifts from 29 to 28 and
+		// HorizonDetector starts parsing 1 byte of "http://ns.adobe.com/xap/1.0/" payload as XML — producing
+		// silent garbage XPath misses without any test failure. Pin the exact value AND the trailing NUL
+		// so a length-changing edit gets caught here.
+		assertEquals(29, JpegSegment.XMP_HEADER.length());
+		assertEquals('\0', JpegSegment.XMP_HEADER.charAt(28));
+		assertEquals("http://ns.adobe.com/xap/1.0/\0", JpegSegment.XMP_HEADER);
+	}
+
+	private static byte[] concat(byte[]... arrays)
+	{
+		int total = 0;
+		for (byte[] array : arrays)
+		{
+			total += array.length;
+		}
+		byte[] out = new byte[total];
+		int off = 0;
+		for (byte[] array : arrays)
+		{
+			System.arraycopy(array, 0, out, off, array.length);
+			off += array.length;
+		}
+		return out;
+	}
+
 	private static byte[] exifLike()
 	{
 		// FF E1 [len:2] Exif\0\0 [TIFF "II*\0" + minimal IFD]
@@ -197,6 +262,17 @@ public final class JpegSegmentTest
 		byte[] sig = "Exif\0\0".getBytes(StandardCharsets.US_ASCII);
 		byte[] tiff = { 'I', 'I', '*', 0x00, 0x08, 0x00, 0x00, 0x00 };
 		return concat(header, sig, tiff);
+	}
+
+	private static byte[] extendedXmpLike()
+	{
+		// FF E1 [len:2] http://ns.adobe.com/xmp/extension/\0 [stub GUID+totalLen+offset]
+		byte[] header = { (byte) 0xFF, (byte) 0xE1, 0x00, 0x4F };
+		byte[] sig = "http://ns.adobe.com/xmp/extension/\0".getBytes(StandardCharsets.US_ASCII);
+		// 32-byte ASCII GUID + 4-byte totalLen + 4-byte offset (stub bytes are fine — isExtendedXmp
+		// only walks the prefix, not the trailing chunk header).
+		byte[] body = new byte[40];
+		return concat(header, sig, body);
 	}
 
 	private static byte[] iccLike()
@@ -224,22 +300,5 @@ public final class JpegSegmentTest
 		byte[] sig = "http://ns.adobe.com/xap/1.0/\0".getBytes(StandardCharsets.US_ASCII);
 		byte[] body = { '<', '?', 'x' };
 		return concat(header, sig, body);
-	}
-
-	private static byte[] concat(byte[]... arrays)
-	{
-		int total = 0;
-		for (byte[] array : arrays)
-		{
-			total += array.length;
-		}
-		byte[] out = new byte[total];
-		int off = 0;
-		for (byte[] array : arrays)
-		{
-			System.arraycopy(array, 0, out, off, array.length);
-			off += array.length;
-		}
-		return out;
 	}
 }

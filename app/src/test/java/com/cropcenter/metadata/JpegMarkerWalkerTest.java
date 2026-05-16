@@ -17,6 +17,51 @@ import java.io.IOException;
 public final class JpegMarkerWalkerTest
 {
 	@Test
+	public void findEoiHonoursTighterEndBound() throws IOException
+	{
+		// When the gain-map walker passes a SEFT-aware endBound (file.length - SEFT_FOOTER_SIZE), the
+		// walker must NOT scan into the SEFT bytes looking for EOI. Pass an endBound that cuts off
+		// AFTER the gain-map EOI but before the trailing SEFT bytes — walker must find the EOI in the
+		// allowed range. Then pass an endBound that cuts off BEFORE the gain-map EOI — walker must
+		// return -1 because there's no clean EOI within bounds.
+		byte[] embedded = JpegFixtures.concat(
+			JpegFixtures.soi(),
+			new byte[] { (byte) 0xFF, (byte) 0xE0, 0x00, 0x04, 0x01, 0x02 },
+			JpegFixtures.minimalScanAndEoi());
+		byte[] junkPrefix = new byte[] { 0x00, 0x11 };
+		byte[] trailing = new byte[] { 0x44, 0x53, 0x45, 0x46, 0x54 };  // arbitrary post-EOI bytes
+		byte[] file = JpegFixtures.concat(junkPrefix, embedded, trailing);
+
+		int embeddedEoi = junkPrefix.length + embedded.length;
+		assertEquals("endBound at embedded EOI: walker returns absolute EOI offset",
+			embeddedEoi, JpegMarkerWalker.findEoi(file, junkPrefix.length, embeddedEoi));
+		assertEquals("endBound cutting off before EOI: walker returns -1",
+			-1, JpegMarkerWalker.findEoi(file, junkPrefix.length, embeddedEoi - 4));
+	}
+
+	@Test
+	public void findEoiWalksFromNonZeroStartOff() throws IOException
+	{
+		// The 3-parameter findEoi(file, startOff, endBound) overload is what GainMapExtractor +
+		// SeftExtractor use to walk an embedded gain-map sub-JPEG that starts at a non-zero file offset.
+		// Construct [junk-prefix][SOI][APP0-stub][minimal-SOS-EOI] and verify findEoi returns an
+		// offset measured from file byte 0 (absolute) — NOT relative to startOff — and that the
+		// returned offset points one byte past the embedded EOI. A regression in the `off = startOff +
+		// 2` initialisation (forgetting the +2 to skip SOI, or making startOff 1-indexed) would
+		// shift every gain-map walk by one byte and corrupt every HDR re-save.
+		byte[] junkPrefix = new byte[] { 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 };
+		byte[] embedded = JpegFixtures.concat(
+			JpegFixtures.soi(),
+			new byte[] { (byte) 0xFF, (byte) 0xE0, 0x00, 0x04, 0x01, 0x02 },
+			JpegFixtures.minimalScanAndEoi());
+		byte[] file = JpegFixtures.concat(junkPrefix, embedded);
+
+		int eoi = JpegMarkerWalker.findEoi(file, junkPrefix.length, file.length);
+		assertEquals("findEoi returns absolute offset (relative to file byte 0), pointing one byte past EOI",
+			file.length, eoi);
+	}
+
+	@Test
 	public void findPrimaryEoiAcceptsFillBytesBeforeApp1() throws IOException
 	{
 		// FF FF E1 ... — APP1 with one leading fill byte. Without fill-byte handling the walker treats

@@ -313,11 +313,14 @@ final class ImageLoadController
 			state.setSeftTrailer(extracted.seftTrailer());
 			String metaInfo = extracted.displayString();
 
-			// handedOff flips only after width/height are read so a (theoretical) recycle race during those
-			// reads still leaves the finally responsible for the cleanup. In practice nothing else holds
-			// bmp at this point.
-			handedOff = true;
+			// `handedOff = true` flips ONLY AFTER runOnUiThread successfully posts the runnable. If
+			// the post itself throws (RejectedExecutionException on a handler whose looper is quitting
+			// during a config change, or any other UI-post failure), the catch path with handedOff
+			// still false triggers the finally's bmp.recycle() so the native pixel buffer is reclaimed
+			// promptly rather than orphaning to the GC finalizer. Mirrors the ordering already used by
+			// GraftController.assembleGraftOnBg.
 			host.runOnUiThread(() -> host.installImageOnUi(bmp, sizeInfo, metaInfo));
+			handedOff = true;
 			return true;
 		}
 		finally

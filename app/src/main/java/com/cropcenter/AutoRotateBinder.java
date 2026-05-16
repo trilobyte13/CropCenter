@@ -251,13 +251,13 @@ final class AutoRotateBinder
 		{
 			angle = HorizonDetector.detectFromPaintedRegion(src, points, brushRadius);
 		}
-		catch (Exception | StackOverflowError t)
+		catch (Exception | StackOverflowError e)
 		{
 			// Narrow catch: Exception + StackOverflowError specifically. A degenerate Hough search can blow
 			// the stack; that's the one Error subclass worth recovering from here. Catching Throwable
 			// (OutOfMemoryError, LinkageError, ThreadDeath) would let the recovery handler itself fail or
 			// worsen the situation. HorizonDetector already catches OutOfMemoryError internally.
-			Log.w(TAG, "horizon detection failed", t);
+			Log.w(TAG, "horizon detection failed", e);
 			host.getBusy().set(false);
 			host.runOnUiThread(() ->
 			{

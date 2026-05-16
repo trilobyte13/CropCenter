@@ -450,14 +450,22 @@ final class GraftController
 			+ " typical for AI spot removal. Apply anyway?";
 		try
 		{
-			new AlertDialog.Builder(host.getActivity())
+			// Register with the host's transient-dialog tracker so a Share/View intent or a follow-up
+			// graft apply that arrives mid-prompt dismisses this dialog before bg state.reset() — without
+			// this registration the dialog can outlive its source state, leaving the user staring at a
+			// stale "x% of pixels" prompt that targets a vanished graft. Mirrors the pattern in
+			// SaveController.showReplaceDialog / openSaveOptionsDialog / showExtensionMismatchDialog and
+			// ToolbarBinder.showCustomArDialog / showPreciseRotationDialog. dismissTransientDialogs uses
+			// cancel(), which fires the OnCancelListener below — so releaseBusy still runs on forced
+			// dismissal.
+			host.registerTransientDialog(new AlertDialog.Builder(host.getActivity())
 				.setTitle("Large edit detected")
 				.setMessage(message)
 				.setPositiveButton(DialogStrings.APPLY,
 					(dialog, which) -> applyConfirmedGraft(graft, releaseBusy))
 				.setNegativeButton(DialogStrings.CANCEL, (dialog, which) -> releaseBusy.run())
 				.setOnCancelListener(dialog -> releaseBusy.run())
-				.show();
+				.show());
 		}
 		catch (RuntimeException e)
 		{

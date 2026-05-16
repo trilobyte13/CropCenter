@@ -336,13 +336,13 @@ public final class SettingsDialog
 				editRows.setText(String.valueOf(rows));
 			});
 			// layout_weight=1 with width=0 → each chip gets equal share of row width
-			LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+			LinearLayout.LayoutParams chipLayoutParams = new LinearLayout.LayoutParams(
 				0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
 			if (i > 0)
 			{
-				lp.leftMargin = dp4;
+				chipLayoutParams.leftMargin = dp4;
 			}
-			presetRow.addView(btn, lp);
+			presetRow.addView(btn, chipLayoutParams);
 		}
 		return presetRow;
 	}

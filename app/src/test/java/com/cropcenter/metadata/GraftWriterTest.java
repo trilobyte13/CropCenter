@@ -132,6 +132,61 @@ public final class GraftWriterTest
 	}
 
 	@Test
+	public void graftRejectsNullAndNonJpegInputs() throws IOException
+	{
+		// Pin the three up-front guards (null original, null edit, non-JPEG signature). These are
+		// the first line of defense before any byte-walking; removing any guard would NPE on the
+		// bg save thread (null) or scan random bytes as JPEG markers (non-JPEG). The existing
+		// tests cover happy-path and malformed-SOS rejections but never the input-shape gates.
+		byte[] validJpeg = JpegFixtures.concat(JpegFixtures.soi(), JpegFixtures.minimalScanAndEoi());
+		byte[] notJpeg = { 0x12, 0x34, 0x56, 0x78 };
+
+		try
+		{
+			GraftWriter.graft(null, validJpeg);
+			fail("expected IOException for null original");
+		}
+		catch (IOException e)
+		{
+			assertTrue("message should mention null: " + e.getMessage(),
+				e.getMessage().contains("null"));
+		}
+
+		try
+		{
+			GraftWriter.graft(validJpeg, null);
+			fail("expected IOException for null edit");
+		}
+		catch (IOException e)
+		{
+			assertTrue("message should mention null: " + e.getMessage(),
+				e.getMessage().contains("null"));
+		}
+
+		try
+		{
+			GraftWriter.graft(notJpeg, validJpeg);
+			fail("expected IOException for non-JPEG original");
+		}
+		catch (IOException e)
+		{
+			assertTrue("message should mention Original / JPEG: " + e.getMessage(),
+				e.getMessage().contains("Original") || e.getMessage().contains("JPEG"));
+		}
+
+		try
+		{
+			GraftWriter.graft(validJpeg, notJpeg);
+			fail("expected IOException for non-JPEG edit");
+		}
+		catch (IOException e)
+		{
+			assertTrue("message should mention Edit / JPEG: " + e.getMessage(),
+				e.getMessage().contains("Edit") || e.getMessage().contains("JPEG"));
+		}
+	}
+
+	@Test
 	public void graftSkipsGainMapForSdrSourceWithEmbeddedFfd8PostEoi() throws IOException
 	{
 		// Pin GraftWriter's HDR per-side AND-gate (`origHasMpf && hasHdrgmInXmp`). Build an SDR original

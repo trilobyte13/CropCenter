@@ -15,6 +15,15 @@ import org.junit.Test;
 public final class TiffTagTest
 {
 	@Test
+	public void compressionTag()
+	{
+		// TIFF 6.0 §22 Compression — used by `ExifPatcher`'s IFD0 sanitisation (zeros the entry
+		// when it leaks into IFD0, since it belongs in IFD1) and by `buildFreshIfd1Header` (writes
+		// the value 6 = JPEG into the fresh IFD1).
+		assertEquals(0x0103, TiffTag.COMPRESSION);
+	}
+
+	@Test
 	public void exifSubIfdPointer()
 	{
 		// EXIF 2.32 §4.6.5 Tag Type 1: Pointer from IFD0 to ExifSubIFD.
@@ -57,6 +66,17 @@ public final class TiffTagTest
 		// EXIF 2.32 §4.6.5 PixelXDimension / PixelYDimension (in ExifSubIFD).
 		assertEquals(0xA002, TiffTag.PIXEL_X_DIMENSION);
 		assertEquals(0xA003, TiffTag.PIXEL_Y_DIMENSION);
+	}
+
+	@Test
+	public void tiffMagic()
+	{
+		// TIFF 6.0 §2 — the 16-bit magic that follows the byte-order marker (II*\0 or MM\0*).
+		// Required by every TIFF-body validity check across `ExifPatcher`, `PngMetadataExtractor`,
+		// `BitmapUtils.readExifOrientationInternal`, `MpfPatcher`, `JpegSegment.isExtendedXmp`'s
+		// downstream walkers. A regression here would silently reject every big-endian Samsung
+		// MM TIFF that survives the byte-order check but fails the swapped-magic-bytes test.
+		assertEquals(42, TiffTag.MAGIC);
 	}
 
 	@Test

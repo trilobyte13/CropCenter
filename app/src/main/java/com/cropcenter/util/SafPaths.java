@@ -24,7 +24,10 @@ public final class SafPaths
 	 */
 	public static boolean hasImageSignature(byte[] bytes)
 	{
-		if (bytes.length < 4)
+		// Null-safe entry: callers may pass null when a MediaStore / SAF read returned no bytes
+		// (deleted file, permission denied mid-stream). Returning false routes the caller through
+		// the SAF-stream fallback rather than NPE-crashing the bg save / load thread.
+		if (bytes == null || bytes.length < 4)
 		{
 			return false;
 		}

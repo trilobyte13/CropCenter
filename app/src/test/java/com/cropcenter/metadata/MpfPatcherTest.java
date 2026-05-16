@@ -155,6 +155,40 @@ public final class MpfPatcherTest
 	}
 
 	@Test
+	public void patchRejectsByteCountNotDivisibleBySixteenViaFloorToOne() throws IOException
+	{
+		// The MPEntries IFD entry's byteCount is a u32 — a malformed encoder could write any value,
+		// not just exact multiples of 16. patchMpEntry floors via integer division:
+		//   `numImages = (int)(byteCount / MPF_ENTRY_BYTES)`.
+		// At byteCount=17, numImages floors to 1 (< 2), which the next guard rejects. Pin this so
+		// a regression that "fixes" the floor (e.g. round-up, or admits trailing-slop entries) is
+		// caught here — admitting a half-entry would write past the MPF segment boundary.
+		int newPrimarySize = 200;
+		int gainMapSize = 60;
+		MpfFixture fx = buildMpfFile(newPrimarySize, gainMapSize, 2);
+
+		// MPEntries IFD entry: tag(2) + type(2) + byteCount(4) + dataOffset(4) = 12 bytes total.
+		// Sibling test `patchRejectsEntryArrayPointingPastMpfSegmentIntoSosData` documents
+		// `dataOffset at mpfStart + 30`, so `byteCount` sits at mpfStart + 26 (4 bytes earlier).
+		// Write byteCount = 17 in little-endian.
+		fx.bytes[fx.mpfStart + 26] = 17;
+		fx.bytes[fx.mpfStart + 27] = 0;
+		fx.bytes[fx.mpfStart + 28] = 0;
+		fx.bytes[fx.mpfStart + 29] = 0;
+
+		byte[] snapshot = fx.bytes.clone();
+		assertFalse("byteCount=17 floors to numImages=1 (<2) and must reject",
+			MpfPatcher.patch(fx.bytes, newPrimarySize));
+		// Confirm no bytes were mutated before the reject — same no-mutation contract as the
+		// sister out-of-bounds-offset test.
+		for (int i = 0; i < fx.bytes.length; i++)
+		{
+			assertEquals("byte " + i + " must be unchanged when patch rejected on numImages<2",
+				snapshot[i], fx.bytes[i]);
+		}
+	}
+
+	@Test
 	public void patchRejectsEntryArrayPointingPastMpfSegmentIntoSosData() throws IOException
 	{
 		// Adversarial MPF: dataOffset of the MPEntries IFD entry points past the MPF segment into SOS data.

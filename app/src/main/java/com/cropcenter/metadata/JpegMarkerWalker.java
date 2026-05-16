@@ -21,11 +21,9 @@ import com.cropcenter.util.ByteBufferUtils;
  */
 public final class JpegMarkerWalker
 {
-	/**
-	 * Sentinel returned by scanSosEntropy when the SOS header itself is malformed (truncated header or
-	 * wrap-overflow on sosLen). Distinct from "found EOI" (≥ 0) and from "next-marker offset" (negative encoding).
-	 * Caller propagates a -1 to the outer findPrimaryEoi return.
-	 */
+	// Sentinel returned by scanSosEntropy when the SOS header itself is malformed (truncated header or
+	// wrap-overflow on sosLen). Distinct from "found EOI" (≥ 0) and from "next-marker offset" (negative encoding).
+	// Caller propagates a -1 to the outer findPrimaryEoi return.
 	private static final int SOS_BAIL = Integer.MIN_VALUE;
 
 	private JpegMarkerWalker() {}

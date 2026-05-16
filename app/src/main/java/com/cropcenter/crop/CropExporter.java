@@ -10,6 +10,7 @@ import android.util.Log;
 import com.cropcenter.metadata.ExifPatcher;
 import com.cropcenter.metadata.GainMapComposer;
 import com.cropcenter.metadata.HdrSignature;
+import com.cropcenter.metadata.JpegMarker;
 import com.cropcenter.metadata.JpegMarkerWalker;
 import com.cropcenter.metadata.JpegMetadataInjector;
 import com.cropcenter.metadata.JpegSegment;
@@ -261,7 +262,7 @@ public final class CropExporter
 		System.arraycopy(tiff, 0, wrapped, 10, tiff.length);
 
 		List<JpegSegment> wrappedList = new ArrayList<>(1);
-		wrappedList.add(new JpegSegment(0xE1, wrapped));
+		wrappedList.add(new JpegSegment(JpegMarker.APP1, wrapped));
 
 		// Predict whether spliceExistingThumbnail's APP1-cap check will reject the rebuild. Using
 		// ExifPatcher.maxThumbnailBytes (rather than a naive tiff.length + thumbnail.length sum) walks
@@ -420,21 +421,19 @@ public final class CropExporter
 	 */
 	private static byte[] buildEmbeddedThumbnail(CropState state, Bitmap bmp)
 	{
-		// JPEG thumbnail cap. APP1 segment limit is 65535 bytes total; this leaves room for the IFD0/IFD1
-		// metadata before the thumbnail bytes. Used both as the no-source-meta fallback budget AND as the
-		// upper clamp on the measured budget below — a corrupted source EXIF could report an arbitrarily
-		// large "remaining APP1 space", and clamping here keeps the encoded thumbnail under the segment cap.
-		int maxThumbnailBudget = 60_000;
-		// Margin against the measured EXIF-segment budget to absorb IFD bookkeeping changes that the patcher
-		// adds when it injects the new thumbnail entries.
-		int thumbnailMarginBytes = 200;
-		int thumbnailMaxDim = 1024;
+		// Exact-budget formulation: ask ExifPatcher to predict the post-patch segment's non-thumbnail
+		// byte count (mirrors patch's decision tree — splice / append / synthesise), then subtract from
+		// the APP1 segment cap to know precisely how many bytes the new thumbnail can occupy. No
+		// estimation margin, no upper clamp; the prediction is byte-exact for the splice path that
+		// camera sources hit and conservative-by-42-bytes for the append fallback. Floor at 0 because
+		// `data.length + 42` from the append-path predictor can exceed the cap on pathological
+		// already-near-full source EXIF (corrupt or near-MAX_INT lengths) — a negative budget would
+		// propagate to generateThumbnail's `maxBytes <= 0` short-circuit and we'd fall through to
+		// STRIP_IFD1_THUMBNAIL, same outcome as if every cascade rung failed.
 		List<JpegSegment> metaForThumb = state.getJpegMeta();
-		int thumbBudget = (metaForThumb != null && !metaForThumb.isEmpty())
-			? ExifPatcher.maxThumbnailBytes(metaForThumb) - thumbnailMarginBytes
-			: maxThumbnailBudget;
-		thumbBudget = Math.clamp(thumbBudget, 0, maxThumbnailBudget);
-		byte[] thumb = generateThumbnail(bmp, thumbnailMaxDim, thumbBudget);
+		int outputNonThumb = ExifPatcher.patchedNonThumbBytes(metaForThumb);
+		int thumbBudget = Math.max(0, JpegSegment.MAX_SEGMENT_BYTES - outputNonThumb);
+		byte[] thumb = generateThumbnail(bmp, thumbBudget);
 		if (thumb == null)
 		{
 			Log.w(TAG, "Thumbnail generation returned null at budget " + thumbBudget
@@ -704,106 +703,94 @@ public final class CropExporter
 	}
 
 	/**
-	 * Produce an EXIF thumbnail JPEG that fits within maxBytes. Scales bmp down to maxDim on its longest side
-	 * (never up), then tries decreasing quality levels until the compressed size fits. Falls back to halving the
-	 * dimensions if even q50 is too large.
+	 * Produce an EXIF thumbnail JPEG that fits within maxBytes. Two-rung cascade on the longest side:
+	 * 512 maxDim first, then 256 maxDim. Each rung tries qualities 95 → 90 → 80 → 75 → 70 → 65 → 60 →
+	 * 55 → 50 in order; the first encoding that fits maxBytes wins. Returns null when 256-maxDim q50
+	 * still doesn't fit — caller routes that through STRIP_IFD1_THUMBNAIL.
 	 *
-	 * The thumbnail is rendered into an sRGB bitmap regardless of `bmp`'s color space: when `bmp` is DISPLAY_P3
-	 * (used for HDR JPEG exports), Bitmap.compress would embed an APP2 ICC profile (~500-600 bytes) inside the
-	 * thumbnail JPEG, and that overhead combined with a tight `maxBytes` budget can cause
-	 * `ExifPatcher.replaceThumbnail` to silently reject the thumbnail for APP1 overflow. sRGB compression produces
-	 * a plain baseline JPEG with no ICC segment, matching camera-native thumbnails and keeping the byte budget
-	 * predictable.
+	 * Why no 1024-maxDim "full" rung: on typical full-resolution crops (3-4 MP), a 819×1024 thumbnail
+	 * at any quality 50..90 produces 130-400 KB — well above the 65 535-byte APP1 segment cap, so the
+	 * rung was unreachable in practice. Starting at 512 maxDim matches Samsung's native embedded-
+	 * thumbnail dimensions and lets the quality cascade actually do work.
+	 *
+	 * Why a dim-preserving cascade (drop quality before dim): bigger wins at typical thumbnail viewing
+	 * scale. Viewers downscale the EXIF preview for grid / hover display (96-256 px), and downscaling
+	 * masks JPEG artifacts substantially — a heavily-compressed 410×512 viewed at 128×160 looks
+	 * substantially better than its 1:1 view suggests, while a small high-quality 205×256 viewed at
+	 * 256×320 has to be upscaled which can't hide its sins the way downscale can. So the cascade
+	 * tries quality 95 → 50 at 512 maxDim before falling to 256, sacrificing per-pixel quality to
+	 * keep more pixels. Matches Samsung's "preserve dim, scale quality" design.
+	 *
+	 * Why q95 is in the cascade even though it's currently unreachable: on CropCenter's re-encoded
+	 * source bitmap, the JPEG cascade tax (first encoder's quantization noise becoming "real content"
+	 * for the second encoder) inflates bytes-per-pixel 2-4× over fresh-sensor input, putting q95
+	 * over the 65 KB APP1 segment cap even on smooth content. Kept as future-proofing — if the
+	 * input pipeline ever lands cleaner pixels (raw decode, lossless intermediate), q95 becomes
+	 * reachable without a cascade re-edit.
+	 *
+	 * The thumbnail is rendered into an sRGB bitmap regardless of `bmp`'s color space: when `bmp` is
+	 * DISPLAY_P3 (used for HDR JPEG exports), Bitmap.compress would embed an APP2 ICC profile
+	 * (~500-600 bytes) inside the thumbnail JPEG, and that overhead combined with a tight `maxBytes`
+	 * budget can cause `ExifPatcher.replaceThumbnail` to silently reject the thumbnail for APP1
+	 * overflow. sRGB compression produces a plain baseline JPEG with no ICC segment, matching
+	 * camera-native thumbnails and keeping the byte budget predictable.
 	 */
-	private static byte[] generateThumbnail(Bitmap bmp, int maxDim, int maxBytes)
+	private static byte[] generateThumbnail(Bitmap bmp, int maxBytes)
 	{
 		if (maxBytes <= 0)
 		{
 			Log.w(TAG, "Thumbnail budget ≤ 0 — skipping generation");
 			return null;
 		}
+		int width = bmp.getWidth();
+		int height = bmp.getHeight();
+		// Cascade: dimensions × qualities. First combo whose encoded size fits maxBytes wins. The
+		// 512 → 256 maxDim split aligns with Samsung's native thumbnail (~512×640 portrait); the
+		// 9-step quality bracket exhausts dim-preserving fallback (q95..q50) before stepping down
+		// to 256 maxDim.
+		int[] maxDims = { 512, 256 };
+		int[] qualities = { 95, 90, 80, 75, 70, 65, 60, 55, 50 };
 		Bitmap thumb = null;
 		try
 		{
-			int width = bmp.getWidth();
-			int height = bmp.getHeight();
-
-			// Compute scale in double precision: 512/5000 in float is 0.102399997f (not 0.1024), which can
-			// drop 4096*0.1024=409.6 into 409.599988 and — once Math.round(float) delegates to (int)floor(x
-			// + 0.5f) — occasionally land on 409 instead of 410. Using double eliminates the drift
-			// entirely.
-			double scale = Math.min((double) maxDim / width, (double) maxDim / height);
-			scale = Math.min(scale, 1.0); // don't upscale
-			int thumbWidth = Math.max(1, (int) Math.round(width * scale));
-			int thumbHeight = Math.max(1, (int) Math.round(height * scale));
-
-			thumb = renderSrgbThumb(bmp, thumbWidth, thumbHeight);
-
-			// Match camera fidelity when the EXIF budget allows; fall through to scale-down only at q50.
-			int[] qualities = { 90, 85, 80, 75, 70, 60, 50 };
-			for (int quality : qualities)
+			for (int maxDim : maxDims)
 			{
-				ByteArrayOutputStream bos = new ByteArrayOutputStream();
-				// Skip on Skia rejection — partial bytes would either fit the budget (corrupt thumbnail
-				// in IFD1) or fail it (skip anyway). Explicit skip keeps the fallback chain honest.
-				if (!thumb.compress(Bitmap.CompressFormat.JPEG, quality, bos))
+				// Compute scale in double precision: 512/5000 in float is 0.102399997f (not 0.1024),
+				// which can drop 4096*0.1024=409.6 into 409.599988 and — once Math.round(float)
+				// delegates to (int)floor(x + 0.5f) — occasionally land on 409 instead of 410. Using
+				// double eliminates the drift entirely.
+				double scale = Math.min((double) maxDim / width, (double) maxDim / height);
+				scale = Math.min(scale, 1.0); // don't upscale
+				int rw = Math.max(1, (int) Math.round(width * scale));
+				int rh = Math.max(1, (int) Math.round(height * scale));
+				if (thumb != null && !thumb.isRecycled())
 				{
-					Log.w(TAG, "thumb.compress q" + quality + " returned false; trying next");
-					continue;
+					thumb.recycle();
 				}
-				byte[] result = bos.toByteArray();
-				if (result.length <= maxBytes)
+				thumb = renderSrgbThumb(bmp, rw, rh);
+				for (int quality : qualities)
 				{
-					Log.d(TAG, "Thumbnail: " + thumbWidth + "x" + thumbHeight
-						+ " q" + quality + " = " + result.length + "B");
-					return result;
+					ByteArrayOutputStream bos = new ByteArrayOutputStream();
+					// Skip on Skia rejection — partial bytes would either fit the budget (corrupt
+					// thumbnail in IFD1) or fail it (skip anyway). Explicit skip keeps the fallback
+					// chain honest.
+					if (!thumb.compress(Bitmap.CompressFormat.JPEG, quality, bos))
+					{
+						Log.w(TAG, "thumb.compress " + rw + "x" + rh + " q" + quality
+							+ " returned false; trying next");
+						continue;
+					}
+					byte[] result = bos.toByteArray();
+					if (result.length <= maxBytes)
+					{
+						Log.d(TAG, "Thumbnail: " + rw + "x" + rh + " q" + quality
+							+ " = " + result.length + "B");
+						return result;
+					}
 				}
 			}
-
-			// Still too large — halve dimensions and retry at mid quality. IMPORTANT: recompute from (width
-			// * scale * 0.5) rather than (thumbWidth / 2). Integer division on the already-rounded
-			// thumbWidth truncates: for a 4:5 source like 4000×5000 at scale 0.2048 this produced 819/2 =
-			// 409 instead of the correct round(409.6) = 410. Going through the original scale preserves
-			// full precision end-to-end.
-			thumb.recycle();
-			int halvedWidth = Math.max(1, (int) Math.round(width * scale * 0.5));
-			int halvedHeight = Math.max(1, (int) Math.round(height * scale * 0.5));
-			thumb = renderSrgbThumb(bmp, halvedWidth, halvedHeight);
-			ByteArrayOutputStream bos = new ByteArrayOutputStream();
-			// Match the loop above: false return → fall through to quarter-dim fallback instead of
-			// embedding partial bytes as the IFD1 thumbnail.
-			boolean halvedCompressed = thumb.compress(Bitmap.CompressFormat.JPEG, 70, bos);
-			byte[] result = halvedCompressed ? bos.toByteArray() : new byte[0];
-			if (halvedCompressed && result.length <= maxBytes)
-			{
-				Log.d(TAG, "Thumbnail (halved): " + halvedWidth + "x" + halvedHeight
-					+ " q70 = " + result.length + "B");
-				return result;
-			}
-			// Quarter-dim emergency fallback: even halved+q70 didn't fit. A 256-max-dim thumb at q50
-			// produces ~3-8KB and fits in any non-pathological budget — better to embed a small
-			// preview than to drop the IFD1 entirely (minimal-EXIF Samsung HDR JPEGs were observed
-			// landing with no thumbnail when this last-resort path didn't exist).
-			thumb.recycle();
-			int quarterDim = 256;
-			double quarterScale = Math.min((double) quarterDim / width, (double) quarterDim / height);
-			quarterScale = Math.min(quarterScale, 1.0);
-			int quarterWidth = Math.max(1, (int) Math.round(width * quarterScale));
-			int quarterHeight = Math.max(1, (int) Math.round(height * quarterScale));
-			thumb = renderSrgbThumb(bmp, quarterWidth, quarterHeight);
-			ByteArrayOutputStream quarterBos = new ByteArrayOutputStream();
-			// Last-resort thumbnail attempt — if even this rejects we return null and the caller
-			// routes through STRIP_IFD1_THUMBNAIL (no preview embedded, better than a partial one).
-			boolean quarterCompressed = thumb.compress(Bitmap.CompressFormat.JPEG, 50, quarterBos);
-			byte[] quarterResult = quarterCompressed ? quarterBos.toByteArray() : new byte[0];
-			if (quarterCompressed && quarterResult.length <= maxBytes)
-			{
-				Log.d(TAG, "Thumbnail (quarter): " + quarterWidth + "x" + quarterHeight
-					+ " q50 = " + quarterResult.length + "B");
-				return quarterResult;
-			}
-			Log.w(TAG, "Thumbnail too large even at quarter size: " + quarterResult.length
-				+ " > " + maxBytes);
+			Log.w(TAG, "Thumbnail too large at every cascade rung; returning null (maxBytes="
+				+ maxBytes + ")");
 			return null;
 		}
 		catch (Exception | OutOfMemoryError e)
@@ -908,7 +895,12 @@ public final class CropExporter
 		long ihdrLen = ((long) (png[8] & 0xFF) << 24) | ((long) (png[9] & 0xFF) << 16)
 				| ((long) (png[10] & 0xFF) << 8) | (png[11] & 0xFF);
 		long insertPosLong = 8L + 4L + 4L + ihdrLen + 4L; // after IHDR chunk
-		if (insertPosLong > png.length || insertPosLong < 0)
+		// `>=` rejects an IHDR-only PNG (insertPos == png.length means IHDR's CRC is the last byte and
+		// there's no IEND chunk following). Strict PNG decoders reject IEND-less PNGs as truncated;
+		// inserting eXIf at the very tail would produce a PNG that ends with eXIf and still no IEND,
+		// which is no better than the source. The negative check guards the long-arithmetic wrap on
+		// adversarial ihdrLen values near MAX_INT.
+		if (insertPosLong >= png.length || insertPosLong < 0)
 		{
 			return png;
 		}

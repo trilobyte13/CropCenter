@@ -27,20 +27,16 @@ public final class PngMetadataExtractor
 {
 	private static final String TAG = "PngMetadataExtractor";
 
-	/**
-	 * 4-byte ASCII "eXIf" chunk-type bytes. Lowercase 'e' marks ancillary, uppercase 'X' marks public,
-	 * uppercase 'I' is the reserved bit, lowercase 'f' marks safe-to-copy across edits. Shared by
-	 * `findExifChunk` (the byte-by-byte walk) and `CropExporter.injectPngExifFromTiff` (the chunk writer)
-	 * so the chunk-type literal lives in one place rather than as parallel inline byte sequences in both
-	 * files.
-	 */
+	// 4-byte ASCII "eXIf" chunk-type bytes. Lowercase 'e' marks ancillary, uppercase 'X' marks public,
+	// uppercase 'I' is the reserved bit, lowercase 'f' marks safe-to-copy across edits. Shared by
+	// `findExifChunk` (the byte-by-byte walk) and `CropExporter.injectPngExifFromTiff` (the chunk writer)
+	// so the chunk-type literal lives in one place rather than as parallel inline byte sequences in both
+	// files.
 	public static final byte[] EXIF_CHUNK_TYPE = { 'e', 'X', 'I', 'f' };
 
-	/**
-	 * Canonical 8-byte PNG file signature (per ISO/IEC 15948 / W3C PNG spec). Centralised here so callers that
-	 * need to detect PNG bytes — `ImageLoadController.isPngSignature` for format dispatch, the chunk walkers
-	 * below for header validation — share one constant rather than re-declaring the same 8 hex/ASCII literals.
-	 */
+	// Canonical 8-byte PNG file signature (per ISO/IEC 15948 / W3C PNG spec). Centralised here so callers that
+	// need to detect PNG bytes — `ImageLoadController.isPngSignature` for format dispatch, the chunk walkers
+	// below for header validation — share one constant rather than re-declaring the same 8 hex/ASCII literals.
 	public static final byte[] PNG_SIGNATURE = {
 		(byte) 0x89, 'P', 'N', 'G', (byte) 0x0D, (byte) 0x0A, (byte) 0x1A, (byte) 0x0A
 	};
@@ -105,7 +101,7 @@ public final class PngMetadataExtractor
 		exifSegBytes[8] = 0;
 		exifSegBytes[9] = 0;
 		System.arraycopy(png, dataOff, exifSegBytes, 10, length);
-		segments.add(new JpegSegment(0xE1, exifSegBytes));
+		segments.add(new JpegSegment(JpegMarker.APP1, exifSegBytes));
 		Log.d(TAG, "Extracted eXIf chunk: " + length + " bytes TIFF data");
 		return segments;
 	}
@@ -192,7 +188,7 @@ public final class PngMetadataExtractor
 		// chunk isn't actually TIFF — refuse to read further so a malformed eXIf payload can't make us return
 		// a non-1 orientation from random bytes.
 		int tiffMagic = ByteBufferUtils.readU16(png, tiffStart + 2, isLittleEndian);
-		if (tiffMagic != 42)
+		if (tiffMagic != TiffTag.MAGIC)
 		{
 			return 1;
 		}

@@ -32,6 +32,17 @@ public final class SafPathsTest
 	}
 
 	@Test
+	public void hasImageSignatureRejectsNull()
+	{
+		// Pre-fix, the method read `bytes.length` before any null check — NPE on the bg thread
+		// of any caller that received `null` from a MediaStore / SAF stream read (file deleted
+		// mid-stream, permission denied, cloud provider returned no payload). The null guard
+		// routes the caller through the SAF-stream fallback instead. SafFileHelper's direct-read
+		// path is the documented caller.
+		assertFalse("null input must return false (no NPE)", SafPaths.hasImageSignature(null));
+	}
+
+	@Test
 	public void hasImageSignatureRejectsShortBuffer()
 	{
 		assertFalse(SafPaths.hasImageSignature(new byte[] { (byte) 0xFF, (byte) 0xD8, 0x00 }));
@@ -125,6 +136,17 @@ public final class SafPathsTest
 	{
 		// Cloud-provider opaque IDs have neither separator — sibling derivation can't proceed.
 		assertEquals(-1, SafPaths.lastSegmentSeparatorEnd("abc123def456"));
+	}
+
+	@Test
+	public void parentDocIdOfLeadingSlashFallsBackToColon()
+	{
+		// docId starting with `/` has slash at index 0; the check `slash > 0` (NOT `>= 0`) means
+		// the slash branch is skipped — root-slash paths are treated like the "no slash" case.
+		// Pin the existing behavior: no colon → null return. A regression that loosened the
+		// check to `>= 0` would silently start returning "" for `/foo.jpg`, breaking SAF
+		// createDocument-against-parent flow on root-anchored docIds.
+		assertEquals(null, SafPaths.parentDocIdOf("/foo.jpg"));
 	}
 
 	@Test

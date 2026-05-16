@@ -5,6 +5,7 @@ import android.graphics.Color;
 import android.util.Log;
 
 import com.cropcenter.metadata.ExtendedXmpReassembler;
+import com.cropcenter.metadata.JpegMarker;
 import com.cropcenter.metadata.JpegSegment;
 
 import java.nio.charset.StandardCharsets;
@@ -141,7 +142,7 @@ public final class HorizonDetector
 		for (JpegSegment seg : meta)
 		{
 			byte[] segData = seg.data();
-			if (seg.marker() != 0xE1 || segData.length < 50)
+			if (seg.marker() != JpegMarker.APP1 || segData.length < 50)
 			{
 				continue;
 			}

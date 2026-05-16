@@ -2,7 +2,9 @@ package com.cropcenter.metadata;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
 
@@ -53,6 +55,38 @@ public final class SeftExtractorTest
 
 		byte[] result = SeftExtractor.extract(file, true);
 		assertArrayEquals(expectedTrailer, result);
+	}
+
+	@Test
+	public void hasSeftFooterAcceptsExactMinAndRejectsShorterOrWrongMagic()
+	{
+		// `hasSeftFooter` is the gate consumed by both `extract` and `GainMapExtractor`'s
+		// `file.length - FOOTER_SIZE` slice cap. A regression in its boundary check would silently
+		// mis-cap the gain-map walk on Samsung files (dropping HDR) or skip SEFT preservation
+		// (breaking Gallery's Revert chain). Pin all four boundary conditions: too-short, exact
+		// 12-byte minimum with valid magic, exact 12-byte with wrong magic, and 12-byte with
+		// partial magic at the wrong offset.
+		assertFalse("11-byte file can't carry SEFT trailer (min is 4 magic + 4 size + 4 EOI = 12)",
+			SeftExtractor.hasSeftFooter(new byte[11]));
+		byte[] exactMin = new byte[12];
+		exactMin[8] = 'S';
+		exactMin[9] = 'E';
+		exactMin[10] = 'F';
+		exactMin[11] = 'T';
+		assertTrue("12-byte file with magic at last 4 bytes is exactly the minimum",
+			SeftExtractor.hasSeftFooter(exactMin));
+		byte[] wrongMagic = exactMin.clone();
+		wrongMagic[10] = 'F';
+		wrongMagic[11] = 't';   // lowercase t — case-sensitive magic
+		assertFalse("magic check is case-sensitive — 'SEFt' must reject",
+			SeftExtractor.hasSeftFooter(wrongMagic));
+		byte[] offsetMagic = new byte[12];
+		offsetMagic[6] = 'S';
+		offsetMagic[7] = 'E';
+		offsetMagic[8] = 'F';
+		offsetMagic[9] = 'T';   // magic at bytes 6..9 (not last 4) — should reject
+		assertFalse("magic must be at the LAST 4 bytes, not anywhere in the trailing region",
+			SeftExtractor.hasSeftFooter(offsetMagic));
 	}
 
 	@Test

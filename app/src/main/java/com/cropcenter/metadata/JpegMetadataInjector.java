@@ -54,7 +54,7 @@ public final class JpegMetadataInjector
 			int marker = reencoded[markerByteOff] & 0xFF;
 			int afterMarker = markerByteOff + 1;
 			// Stop at non-APP/COM markers: DQT(DB), SOF(C0-CF), DHT(C4), SOS(DA), etc.
-			if (!((marker >= 0xE0 && marker <= 0xEF) || marker == 0xFE))
+			if (!((marker >= JpegMarker.APP0 && marker <= JpegMarker.APP_LAST) || marker == JpegMarker.COM))
 			{
 				break;
 			}

@@ -649,6 +649,56 @@ public final class ExifPatcherTest
 	}
 
 	@Test
+	public void patchNeutralisesIfd0ThumbnailPointerTags() throws IOException
+	{
+		// Tags 0x0103 (Compression), 0x0201 (JPEGInterchangeFormat), and 0x0202
+		// (JPEGInterchangeFormatLength) are IFD1-only per the EXIF spec. Some EXIF round-trips
+		// (Samsung Gallery, earlier CropCenter) leak them into IFD0 carrying stale offsets that
+		// point at the source's pre-edit thumbnail (or worse, at byte ranges outside the export's
+		// EXIF segment entirely). Strict EXIF parsers walk IFD0 first and follow the stale pointer,
+		// extracting garbage. Regression for that case: scanIfd at depth=0 must zero the entire
+		// 12-byte entry for each of these tags in IFD0 so parsers see unknown tag 0x0000 and skip.
+		// IFD1's real fresh thumbnail pointers (written by buildFreshIfd1Header /
+		// spliceExistingThumbnail) are unaffected.
+		ByteArrayOutputStream tiff = new ByteArrayOutputStream();
+		tiff.write('I');
+		tiff.write('I');
+		tiff.write('*');
+		tiff.write(0);
+		writeU32Le(tiff, 8);
+		byte[] ifd0 = buildIfd(new int[][] {
+			{ 0x0112, 3, 1, 0x0006 },                                 // Orientation (legitimate)
+			{ TiffTag.COMPRESSION, 3, 1, 0x0006 },                    // hoisted Compression
+			{ TiffTag.JPEG_INTERCHANGE_FORMAT, 4, 1, 9999 },          // stale pointer
+			{ TiffTag.JPEG_INTERCHANGE_FORMAT_LENGTH, 4, 1, 12345 },  // stale length
+		});
+		tiff.write(ifd0);
+		JpegSegment seg = wrapTiffAsExifSegment(tiff.toByteArray());
+
+		List<JpegSegment> patched = ExifPatcher.patch(Collections.singletonList(seg), 100, 200, null);
+
+		// Segment layout: FF E1 (2) + segLen (2) + "Exif\0\0" (6) + TIFF body. TIFF starts at offset
+		// TIFF_HEADER_OFFSET (10). Inside TIFF: II*\0 (4) + IFD0 offset = 8 (4). IFD0 starts at TIFF+8,
+		// so IFD0 in segment-relative bytes starts at TIFF_HEADER_OFFSET + 8 = 18.
+		byte[] resultData = patched.get(0).data();
+		int ifd0Off = TIFF_HEADER_OFFSET + 8;
+		// Entry 0 = Orientation (legitimate IFD0 tag; preserved as value=1, scanIfd sets
+		// orientation=1 on patch).
+		assertEquals("Orientation entry preserved at tag 0x0112",
+			0x0112, ByteBufferUtils.readU16(resultData, ifd0Off + 2, true));
+		// Entries 1-3 = the hoisted IFD1 tags. Each entry's full 12 bytes must be zeroed.
+		for (int entryIdx = 1; entryIdx <= 3; entryIdx++)
+		{
+			int entryStart = ifd0Off + 2 + entryIdx * 12;
+			for (int b = 0; b < 12; b++)
+			{
+				assertEquals("entry " + entryIdx + " byte " + b + " must be zeroed in IFD0",
+					0, resultData[entryStart + b] & 0xFF);
+			}
+		}
+	}
+
+	@Test
 	public void patchPassesThroughEmptyList()
 	{
 		// Empty input → empty output, no NPE on the for-each. The audit flagged this as untested.
@@ -1026,6 +1076,201 @@ public final class ExifPatcherTest
 		assertEquals(1, data[orientationValueOff] & 0xFF);
 		// High byte of u16 should be zero.
 		assertEquals(0, data[orientationValueOff + 1] & 0xFF);
+	}
+
+	@Test
+	public void patchedNonThumbBytesPredictionMatchesActualAppendOutput() throws IOException
+	{
+		// Prediction-vs-reality contract for the append path. Source has IFD0 + no IFD1 →
+		// patch() routes through appendFreshIfd1WithThumbnail which adds a 42-byte fresh IFD1
+		// header + new thumbnail bytes. The exact-budget caller in CropExporter relies on the
+		// prediction staying in sync with patch's actual write — a 42-byte drift here would
+		// overflow the APP1 segment on at-cap thumbnails.
+		byte[] ifd0Only = buildIfd(new int[][] { { 0x0112, 3, 1, 0x0001 } });
+		JpegSegment seg = wrapAsExifSegment(ifd0Only);
+		int predicted = ExifPatcher.patchedNonThumbBytes(Collections.singletonList(seg));
+		assertEquals("append-path prediction must equal source.length + 42 (fresh IFD1 header)",
+			seg.data().length + 42, predicted);
+
+		byte[] newThumb = uniqueThumbnailBytes((byte) 0xCC, 200);
+		List<JpegSegment> patched = ExifPatcher.patch(
+			Collections.singletonList(seg), 100, 200, newThumb);
+		assertEquals("actual patched segment size must equal prediction + newThumb.length "
+			+ "(no estimation drift)",
+			predicted + newThumb.length, patched.get(0).data().length);
+	}
+
+	@Test
+	public void patchedNonThumbBytesPredictionMatchesActualSpliceOutput() throws IOException
+	{
+		// Prediction-vs-reality contract for the splice path. Source has a valid IFD1 thumbnail;
+		// patch swaps the old bytes for new ones in-place. Output size = source.length minus the
+		// old thumbnail bytes plus the new thumbnail bytes. Pin the prediction-vs-actual delta
+		// here so a future refactor of spliceExistingThumbnail can't silently drift the
+		// non-thumb byte count.
+		byte[] oldThumb = uniqueThumbnailBytes((byte) 0xAA, 80);
+		JpegSegment seg = buildSegmentWithExistingThumbnail(oldThumb);
+		int predicted = ExifPatcher.patchedNonThumbBytes(Collections.singletonList(seg));
+		assertEquals("splice-path prediction must equal source.length - oldThumbLen",
+			seg.data().length - oldThumb.length, predicted);
+
+		byte[] newThumb = uniqueThumbnailBytes((byte) 0xCC, 200);
+		List<JpegSegment> patched = ExifPatcher.patch(
+			Collections.singletonList(seg), 100, 200, newThumb);
+		assertEquals("actual patched segment size must equal prediction + newThumb.length "
+			+ "(no estimation drift)",
+			predicted + newThumb.length, patched.get(0).data().length);
+	}
+
+	@Test
+	public void patchedNonThumbBytesPredictsAppendForBigEndianSourceWithoutIfd1() throws IOException
+	{
+		// Big-endian (MM) byte-order coverage — the bulk of Samsung Galaxy sources are MM, so a
+		// byte-order-conditional bug in the predictor would silently miss the common case. Build
+		// a minimal MM TIFF with IFD0 + no IFD1 and verify the append-path prediction parses
+		// correctly across endianness.
+		ByteArrayOutputStream tiff = new ByteArrayOutputStream();
+		tiff.write('M');
+		tiff.write('M');
+		tiff.write(0);
+		tiff.write(42);
+		writeU32Be(tiff, 8);
+		writeU16Be(tiff, 1);        // 1 entry
+		writeU16Be(tiff, 0x0112);   // Orientation
+		writeU16Be(tiff, 3);        // SHORT
+		writeU32Be(tiff, 1);        // count
+		writeU16Be(tiff, 1);        // value = 1
+		writeU16Be(tiff, 0);        // padding
+		writeU32Be(tiff, 0);        // next-IFD = 0 (no IFD1)
+		JpegSegment seg = wrapTiffAsExifSegment(tiff.toByteArray());
+		int predicted = ExifPatcher.patchedNonThumbBytes(Collections.singletonList(seg));
+		assertEquals("big-endian source with no IFD1 → append estimate",
+			seg.data().length + 42, predicted);
+	}
+
+	@Test
+	public void patchedNonThumbBytesPredictsAppendForSourceWithIfd1ButNoThumbnailTags() throws IOException
+	{
+		// Minimal-EXIF encoder shape: IFD1 exists but carries only resolution metadata
+		// (Compression tag here), no JPEGInterchangeFormat / JPEGInterchangeFormatLength. patch()
+		// rejects splice (findThumbnailTags returns null) and falls through to
+		// appendFreshIfd1WithThumbnail. Predictor must match that fallback's overhead.
+		ByteArrayOutputStream tiff = new ByteArrayOutputStream();
+		tiff.write('I');
+		tiff.write('I');
+		tiff.write('*');
+		tiff.write(0);
+		writeU32Le(tiff, 8);
+		byte[] ifd0 = buildIfd(new int[][] { { 0x0112, 3, 1, 0x0001 } });
+		// Strip the default next-IFD = 0 from buildIfd's output and rewrite to point at IFD1.
+		tiff.write(ifd0, 0, ifd0.length - 4);
+		writeU32Le(tiff, 26);
+		tiff.write(buildIfd(new int[][] { { 0x0103, 3, 1, 6 } }));
+		JpegSegment seg = wrapTiffAsExifSegment(tiff.toByteArray());
+		int predicted = ExifPatcher.patchedNonThumbBytes(Collections.singletonList(seg));
+		assertEquals("IFD1 missing JPEGInterchangeFormat/Length tags → append estimate",
+			seg.data().length + 42, predicted);
+	}
+
+	@Test
+	public void patchedNonThumbBytesPredictsAppendForSourceWithIfd1ThumbOffsetZero() throws IOException
+	{
+		// IFD1 has both thumbnail tags present but JPEGInterchangeFormat offset = 0, i.e.
+		// "thumbnail tag declared but no thumbnail bytes recorded." findThumbnailTags rejects
+		// (offset==0 triggers null return), so patch falls through to append. Pin that the
+		// predictor also returns the append estimate rather than the splice estimate (which
+		// would incorrectly subtract 0 bytes and report data.length).
+		ByteArrayOutputStream tiff = new ByteArrayOutputStream();
+		tiff.write('I');
+		tiff.write('I');
+		tiff.write('*');
+		tiff.write(0);
+		writeU32Le(tiff, 8);
+		// IFD0: 1 entry + next-IFD pointer at TIFF offset 26.
+		writeU16Le(tiff, 1);
+		writeU16Le(tiff, 0x0112);
+		writeU16Le(tiff, 3);
+		writeU32Le(tiff, 1);
+		writeU16Le(tiff, 6);
+		writeU16Le(tiff, 0);
+		writeU32Le(tiff, 26);
+		// IFD1: JPEGInterchangeFormat with offset=0, JPEGInterchangeFormatLength.
+		writeU16Le(tiff, 2);
+		writeU16Le(tiff, 0x0201);
+		writeU16Le(tiff, 4);
+		writeU32Le(tiff, 1);
+		writeU32Le(tiff, 0);            // offset = 0 → no thumbnail
+		writeU16Le(tiff, 0x0202);
+		writeU16Le(tiff, 4);
+		writeU32Le(tiff, 1);
+		writeU32Le(tiff, 0);
+		writeU32Le(tiff, 0);            // next-IFD = 0
+		JpegSegment seg = wrapTiffAsExifSegment(tiff.toByteArray());
+		int predicted = ExifPatcher.patchedNonThumbBytes(Collections.singletonList(seg));
+		assertEquals("IFD1 thumb-offset zero → append estimate (splice rejects)",
+			seg.data().length + 42, predicted);
+	}
+
+	@Test
+	public void patchedNonThumbBytesReturnsAppendEstimateOnOutOfBoundsIfd0Offset() throws IOException
+	{
+		// Adversarial IFD0 offset that the long-arithmetic guard catches (mirrors the
+		// maxThumbnailBytes regression test above). When the IFD0 walk fails this way,
+		// replaceThumbnail's own bounds check also fires and falls through to
+		// stripIfd1Thumbnail (no thumb embedded). Predictor returns the append estimate as a
+		// conservative non-overestimate: the actual patch either lands on append (if IFD0 walk
+		// succeeds) or strip (if not), and the append estimate never reports MORE budget than
+		// the actual patch can hold.
+		ByteArrayOutputStream tiff = new ByteArrayOutputStream();
+		tiff.write('I');
+		tiff.write('I');
+		tiff.write('*');
+		tiff.write(0);
+		writeU32Le(tiff, 0x80000010L);  // u32 that wraps to small-positive int post-cast
+		for (int i = 0; i < 100; i++)
+		{
+			tiff.write(0);
+		}
+		JpegSegment seg = wrapTiffAsExifSegment(tiff.toByteArray());
+		int predicted = ExifPatcher.patchedNonThumbBytes(Collections.singletonList(seg));
+		assertEquals("out-of-bounds IFD0 offset → append estimate (data.length + 42)",
+			seg.data().length + 42, predicted);
+	}
+
+	@Test
+	public void patchedNonThumbBytesReturnsSynthesizeEstimateForEmptySegments()
+	{
+		// Empty segment list → patch's synthesise fallback fires (foundExif stays false,
+		// buildMinimalExifSegment runs). The synthesise layout is FF E1 marker (2) + segLen
+		// field (2) + "Exif\0\0" (6) + TIFF II*\0 + IFD0 offset (8) + IFD0 (42) + IFD1 (42)
+		// = 102 bytes of non-thumb overhead.
+		assertEquals("empty segment list → synthesise estimate",
+			102, ExifPatcher.patchedNonThumbBytes(Collections.emptyList()));
+	}
+
+	@Test
+	public void patchedNonThumbBytesReturnsSynthesizeEstimateForMalformedByteOrder() throws IOException
+	{
+		// "IM" byte-order rejection: both bytes must match ("II" or "MM"). Falls through
+		// (continue) to the end of the loop and returns the synthesise estimate when no
+		// parseable EXIF was found. In reality patch preserves the malformed segment without
+		// adding a thumbnail; the predicted budget is only relevant to whether
+		// CropExporter bothers running the thumbnail encode at all (bounded compute, not a
+		// correctness issue).
+		byte[] ifd = buildIfd(new int[][] { { 0x0112, 3, 1, 0x0001 } });
+		JpegSegment seg = wrapAsExifSegmentWithByteOrder(ifd, (byte) 'I', (byte) 'M');
+		assertEquals("IM byte-order → synthesise estimate (no parseable EXIF found)",
+			102, ExifPatcher.patchedNonThumbBytes(Collections.singletonList(seg)));
+	}
+
+	@Test
+	public void patchedNonThumbBytesReturnsSynthesizeEstimateForNullSegments()
+	{
+		// Defensive contract: caller may pass null (CropState.getJpegMeta returns an
+		// unmodifiableList which is never null today, but the public method should still
+		// tolerate it). Matches hasIfd1Thumbnail's null-handling shape.
+		assertEquals("null segments → synthesise estimate",
+			102, ExifPatcher.patchedNonThumbBytes(null));
 	}
 
 	@Test

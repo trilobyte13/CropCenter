@@ -381,7 +381,7 @@ public final class BitmapUtils
 			}
 
 			// APP1 with Exif header
-			if (marker == 0xE1 && segLen > 14 && afterMarker + 8 <= jpeg.length
+			if (marker == JpegMarker.APP1 && segLen > 14 && afterMarker + 8 <= jpeg.length
 				&& jpeg[afterMarker + 2] == 'E' && jpeg[afterMarker + 3] == 'x'
 				&& jpeg[afterMarker + 4] == 'i' && jpeg[afterMarker + 5] == 'f'
 				&& jpeg[afterMarker + 6] == 0 && jpeg[afterMarker + 7] == 0)
@@ -407,7 +407,7 @@ public final class BitmapUtils
 				// isn't really TIFF — without this check a malformed payload with plausible offsets and
 				// a coincidental TiffTag.ORIENTATION byte sequence would rotate pixels.
 				int tiffMagic = ByteBufferUtils.readU16(jpeg, tiffStart + 2, isLittleEndian);
-				if (tiffMagic != 42)
+				if (tiffMagic != TiffTag.MAGIC)
 				{
 					return 1;
 				}

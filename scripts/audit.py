@@ -17,10 +17,12 @@ Audit names:
     method-order              private-before-package + case-sensitive alphabetical within tier
     adjacent-comment-styles   `*/` immediately followed by `//` (consolidate into Javadoc)
     final-classes             classes that should be `final` per Effective Java item 19
+    reflow                    multi-line comment blocks whose last line could fold into the prior
     lsloc                     logical SLOC count (UCC-style — excludes bare-brace lines)
 
 Default roots: app/src/main/java app/src/test/java (or app/src for over-cols).
-Exit code: 0 when all selected audits pass; 1 when any fails (lsloc never fails).
+Exit code: 0 when all selected audits pass; 1 when any fails (reflow and lsloc never fail —
+both are advisory metrics, not pass/fail style violations).
 """
 import os
 import re
@@ -607,6 +609,132 @@ def audit_final_classes(roots):
 	return 0 if len(candidates) == 0 else 1
 
 
+# ─── audit: reflow ───────────────────────────────────────────────────────────
+
+def _text_after_marker(line, marker):
+	"""Return the body text of a comment line after `marker` (`*` for Javadoc body lines,
+	`//` for inline). One leading space after the marker is consumed if present."""
+	idx = line.find(marker)
+	if idx < 0:
+		return None
+	after = line[idx + len(marker):]
+	if after.startswith(' '):
+		after = after[1:]
+	return after
+
+
+def _scan_javadoc_blocks(lines):
+	"""Find Javadoc blocks whose LAST body line is short enough that combining with the prior body
+	line stays under 120 cols. Excludes empty `*` lines (paragraph separators) and `@param`/`@return`
+	tag lines."""
+	hits = []
+	i = 0
+	while i < len(lines):
+		stripped = lines[i].lstrip('\t ')
+		if stripped.startswith('/**'):
+			body_lines = []
+			j = i + 1
+			while j < len(lines):
+				bs = lines[j].lstrip('\t ')
+				if bs.startswith('*/'):
+					break
+				if bs.startswith('*'):
+					rest = bs[1:].lstrip()
+					body_lines.append((j, lines[j], rest))
+				j += 1
+			# Find the last non-empty, non-tag line
+			last_text_idx = None
+			for k in range(len(body_lines) - 1, -1, -1):
+				_, _, txt = body_lines[k]
+				if not txt or txt.startswith('@'):
+					continue
+				last_text_idx = k
+				break
+			if last_text_idx is not None and last_text_idx > 0:
+				prev_idx = last_text_idx - 1
+				_, _, prev_txt = body_lines[prev_idx]
+				if prev_txt and not prev_txt.startswith('@'):
+					ln_no, last_line_full, last_txt = body_lines[last_text_idx]
+					last_rendered = rendered_width(last_line_full.rstrip('\n'))
+					if last_rendered < 80:
+						_, prev_line_full, _ = body_lines[prev_idx]
+						prev_rendered = rendered_width(prev_line_full.rstrip('\n'))
+						combined = prev_rendered + 1 + len(last_txt)
+						if combined <= 120 and last_rendered < prev_rendered:
+							hits.append((ln_no + 1, prev_line_full.rstrip(),
+								last_line_full.rstrip(), combined))
+			i = j + 1
+			continue
+		i += 1
+	return hits
+
+
+def _scan_inline_blocks(lines):
+	"""Find consecutive `//` comment blocks whose last line could fold into the prior. Section
+	dividers (`//──`, `// ──`) are excluded at BOTH the outer guard and the inner loop — a previous
+	version that excluded only `//─` looped forever on `// ── section ──` lines (re-entered the
+	same line because the outer guard accepted it but the inner guard broke immediately, producing
+	a `continue` without advancing `i`)."""
+	hits = []
+	i = 0
+	while i < len(lines):
+		stripped = lines[i].lstrip('\t ')
+		if (stripped.startswith('//')
+				and not stripped.startswith('///')
+				and not stripped.startswith('//─')
+				and not stripped.startswith('// ──')):
+			block = []
+			while i < len(lines):
+				bs = lines[i].lstrip('\t ')
+				if not bs.startswith('//'):
+					break
+				if bs.startswith('//─') or bs.startswith('// ──'):
+					break
+				block.append((i, lines[i]))
+				i += 1
+			if len(block) >= 2:
+				_, prev_full = block[-2]
+				last_ln, last_full = block[-1]
+				last_rendered = rendered_width(last_full.rstrip('\n'))
+				prev_rendered = rendered_width(prev_full.rstrip('\n'))
+				last_text = _text_after_marker(last_full, '//')
+				if last_text and last_rendered < 80 and last_rendered < prev_rendered:
+					combined = prev_rendered + 1 + len(last_text.rstrip())
+					if combined <= 120:
+						hits.append((last_ln + 1, prev_full.rstrip(),
+							last_full.rstrip(), combined))
+			continue
+		i += 1
+	return hits
+
+
+def audit_reflow(roots):
+	"""Report multi-line comment blocks (Javadoc and `//`) whose last body line ends short and
+	could fold into the prior line under 120 cols. Catches the typical aftermath of a bulk strip —
+	a sentence that originally wrapped tightly now has its tail orphaned on a short last line.
+	Always returns 0; this is an advisory metric, not a pass/fail audit (reflow opportunities are
+	style suggestions, not violations)."""
+	if not roots:
+		roots = ['app/src/main/java', 'app/src/test/java']
+	count = 0
+	for path, text in walk_java_files(roots):
+		lines = text.split('\n')
+		for ln, prev, last, combined in _scan_javadoc_blocks(lines):
+			print(f'{path}:{ln} (javadoc, combined {combined} cols)')
+			print(f'  prev: {prev}')
+			print(f'  last: {last}')
+			print()
+			count += 1
+		for ln, prev, last, combined in _scan_inline_blocks(lines):
+			print(f'{path}:{ln} (inline, combined {combined} cols)')
+			print(f'  prev: {prev}')
+			print(f'  last: {last}')
+			print()
+			count += 1
+	print(f'Total reflow candidates: {count}')
+	return 0
+
+
 # ─── audit: lsloc ────────────────────────────────────────────────────────────
 
 _STRUCTURAL_ONLY = re.compile(r'^[\{\}\(\),;\s]+$')
@@ -663,11 +791,26 @@ AUDITS = {
 	'method-order': audit_method_order,
 	'adjacent-comment-styles': audit_adjacent_comment_styles,
 	'final-classes': audit_final_classes,
+	'reflow': audit_reflow,
 	'lsloc': audit_lsloc,
 }
 
 
 def main():
+	# Reconfigure stdout/stderr to UTF-8 with replacement on Windows where the default console
+	# encoding is cp1252 / cp437. The `reflow` audit prints raw source-line snippets that contain
+	# Unicode characters (em-dashes, arrows, the `─` section-divider character). Without this,
+	# `python scripts/audit.py` on Windows raises UnicodeEncodeError mid-reflow and never reaches
+	# the `lsloc` step — defeating CLAUDE.md's documented "cross-shell self-audit runner" promise.
+	# `reconfigure` is Python 3.7+; CropCenter pins ≥ 3.9, so the call is always safe. The
+	# try/except handles the edge case where stdout has been rewrapped to a non-text stream
+	# (unusual but theoretically possible when callers pipe to a subprocess that captures bytes).
+	try:
+		sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+		sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+	except (AttributeError, OSError):
+		pass
+
 	args = sys.argv[1:]
 	if args and args[0] in ('-h', '--help'):
 		print(__doc__)

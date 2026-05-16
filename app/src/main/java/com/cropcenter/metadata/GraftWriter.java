@@ -312,7 +312,8 @@ public final class GraftWriter
 				off = afterMarker;
 				continue;
 			}
-			boolean isAppOrCom = (marker >= 0xE0 && marker <= 0xEF) || marker == 0xFE;
+			boolean isAppOrCom = (marker >= JpegMarker.APP0 && marker <= JpegMarker.APP_LAST)
+				|| marker == JpegMarker.COM;
 			if (!isAppOrCom)
 			{
 				// Return the leading 0xFF (including any fill bytes) so the caller's splice keeps the

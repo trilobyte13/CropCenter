@@ -93,6 +93,30 @@ public final class ExtendedXmpReassemblerTest
 		assertArrayEquals(concat(CHUNK_A_BODY, CHUNK_B_BODY), reassembled);
 	}
 
+	@Test
+	public void truncatedExtendedXmpChunkSkippedWithoutThrow() throws IOException
+	{
+		// Build a segment whose body passes `isExtendedXmp` (has FF E1 marker + the 35-byte
+		// extension namespace prefix at the right offset) but whose total data length is below
+		// minHeaderLen = 4 + 35 + 32 + 4 + 4 = 79. The reassembler's `data.length < minHeaderLen`
+		// guard must skip the chunk rather than read past end-of-buffer for the GUID / offset
+		// fields. A regression that drops the bounds check would AIOOBE on truncated source
+		// segments — possible from malformed cloud-provider streams that cut mid-chunk.
+		ByteArrayOutputStream payload = new ByteArrayOutputStream();
+		payload.write(JpegSegment.EXTENDED_XMP_HEADER.getBytes(StandardCharsets.US_ASCII));
+		// No GUID / totalLen / offset bytes — the segment ends right after the namespace prefix.
+		// Total data.length = 4 (FF E1 LL LL) + 35 (prefix) = 39, well under minHeaderLen=79.
+		JpegSegment truncated = new JpegSegment(0xE1,
+			JpegFixtures.appSegment(0xE1, payload.toByteArray()));
+
+		byte[] reassembled = ExtendedXmpReassembler.reassemble(
+			Collections.singletonList(truncated));
+
+		assertNotNull(reassembled);
+		assertEquals("truncated chunk skipped, no GUIDs collected → empty reassembly",
+			0, reassembled.length);
+	}
+
 	/**
 	 * Concatenate two byte arrays into a single array. Test-only helper to spell out expected reassembled
 	 * payloads without an intermediate ByteArrayOutputStream at every assertion.

@@ -17,29 +17,23 @@ package com.cropcenter.metadata;
  */
 public record JpegSegment(int marker, byte[] data)
 {
-	/**
-	 * Canonical XMP namespace identifier that prefixes the XML body of an XMP APP1 segment. The 29-byte
-	 * "http://ns.adobe.com/xap/1.0/\0" string is the spec-defined signature; centralised here so both isXmp() and
-	 * HorizonDetector.detectFromMetadata reference one constant rather than two duplicate string literals.
-	 */
+	// Canonical XMP namespace identifier that prefixes the XML body of an XMP APP1 segment. The 29-byte
+	// "http://ns.adobe.com/xap/1.0/\0" string is the spec-defined signature; centralised here so both isXmp() and
+	// HorizonDetector.detectFromMetadata reference one constant rather than two duplicate string literals.
 	public static final String XMP_HEADER = "http://ns.adobe.com/xap/1.0/\0";
 
-	/**
-	 * Canonical Extended XMP namespace identifier — Adobe's continuation-chunk header that lives on each APP1
-	 * segment of a multi-chunk Extended XMP packet (used when the standard XMP body exceeds 64 KiB and has to be
-	 * split across several APP1 segments). Centralised here so ExtendedXmpReassembler, HdrSignature, and
-	 * XmpItemLengthPatcher all reference the same string rather than redeclaring it three different ways with
-	 * three different constant names.
-	 */
+	// Canonical Extended XMP namespace identifier — Adobe's continuation-chunk header that lives on each APP1
+	// segment of a multi-chunk Extended XMP packet (used when the standard XMP body exceeds 64 KiB and has to be
+	// split across several APP1 segments). Centralised here so ExtendedXmpReassembler, HdrSignature, and
+	// XmpItemLengthPatcher all reference the same string rather than redeclaring it three different ways with
+	// three different constant names.
 	public static final String EXTENDED_XMP_HEADER = "http://ns.adobe.com/xmp/extension/\0";
 
-	/**
-	 * Cap on a JPEG APP segment's total byte length, INCLUDING the 2-byte length field itself. The segLen field
-	 * is u16, so 65535 is the absolute spec ceiling. Centralised here so ExifPatcher and XmpItemLengthPatcher
-	 * both reference the same constant rather than declaring near-duplicate copies with different names. Note:
-	 * this is the spec cap; some encoders cap practical segments lower (e.g.
-	 * Samsung writes EXIF at 65535 but XMP at 65533 to leave room for stuffing bytes).
-	 */
+	// Cap on a JPEG APP segment's total byte length, INCLUDING the 2-byte length field itself. The segLen field
+	// is u16, so 65535 is the absolute spec ceiling. Centralised here so ExifPatcher and XmpItemLengthPatcher
+	// both reference the same constant rather than declaring near-duplicate copies with different names. Note:
+	// this is the spec cap; some encoders cap practical segments lower (e.g.
+	// Samsung writes EXIF at 65535 but XMP at 65533 to leave room for stuffing bytes).
 	public static final int MAX_SEGMENT_BYTES = 65535;
 
 	/**
@@ -47,7 +41,8 @@ public record JpegSegment(int marker, byte[] data)
 	 */
 	public boolean isExif()
 	{
-		return marker == 0xE1 && data.length >= 10 && data[4] == 'E' && data[5] == 'x' && data[6] == 'i'
+		return marker == JpegMarker.APP1 && data.length >= 10
+			&& data[4] == 'E' && data[5] == 'x' && data[6] == 'i'
 			&& data[7] == 'f' && data[8] == 0 && data[9] == 0;
 	}
 
@@ -62,7 +57,7 @@ public record JpegSegment(int marker, byte[] data)
 	 */
 	public boolean isExtendedXmp()
 	{
-		if (marker != 0xE1 || data.length < 4 + EXTENDED_XMP_HEADER.length())
+		if (marker != JpegMarker.APP1 || data.length < 4 + EXTENDED_XMP_HEADER.length())
 		{
 			return false;
 		}
@@ -81,7 +76,7 @@ public record JpegSegment(int marker, byte[] data)
 	 */
 	public boolean isIcc()
 	{
-		if (marker != 0xE2 || data.length < 18)
+		if (marker != JpegMarker.APP2 || data.length < 18)
 		{
 			return false;
 		}
@@ -101,7 +96,7 @@ public record JpegSegment(int marker, byte[] data)
 	 */
 	public boolean isMpf()
 	{
-		return marker == 0xE2 && data.length >= 8
+		return marker == JpegMarker.APP2 && data.length >= 8
 			&& data[4] == 'M' && data[5] == 'P' && data[6] == 'F' && data[7] == 0;
 	}
 
@@ -110,7 +105,7 @@ public record JpegSegment(int marker, byte[] data)
 	 */
 	public boolean isXmp()
 	{
-		if (marker != 0xE1 || data.length < 4 + XMP_HEADER.length())
+		if (marker != JpegMarker.APP1 || data.length < 4 + XMP_HEADER.length())
 		{
 			return false;
 		}

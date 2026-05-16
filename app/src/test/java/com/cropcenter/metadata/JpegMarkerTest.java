@@ -14,6 +14,31 @@ import org.junit.Test;
 public final class JpegMarkerTest
 {
 	@Test
+	public void appFamilyMarkerRange()
+	{
+		// APP0..APP15 spans FF E0..FF EF (16 markers). The walkers iterate every APP-marker via
+		// `marker >= APP0 && marker <= APP_LAST`. A regression that flipped APP1 from 0xE1 to
+		// 0xE2 would silently route every EXIF reader through the MPF marker code path; the
+		// existing walker tests pass byte fixtures, so a constant-drift bug wouldn't surface
+		// there. Pin every value the codebase uses plus the 16-marker range invariant.
+		assertEquals(0xE0, JpegMarker.APP0);
+		assertEquals(0xE1, JpegMarker.APP1);
+		assertEquals(0xE2, JpegMarker.APP2);
+		assertEquals(0xEF, JpegMarker.APP_LAST);
+		assertEquals("APP0..APP15 spans 16 markers", 16, JpegMarker.APP_LAST - JpegMarker.APP0 + 1);
+	}
+
+	@Test
+	public void prefixAndCommentMarkers()
+	{
+		// PREFIX = 0xFF introduces every JPEG marker pair (FF MM). COM = 0xFE (FF FE) is the
+		// comment marker. Both are referenced directly by test fixtures and byte-walkers; a
+		// regression in either would mis-route the entire marker walk.
+		assertEquals(0xFF, JpegMarker.PREFIX);
+		assertEquals(0xFE, JpegMarker.COM);
+	}
+
+	@Test
 	public void rstMarkerRange()
 	{
 		// Restart markers FF D0 through FF D7 — RST0..RST7 standalone markers interleaved into SOS data for

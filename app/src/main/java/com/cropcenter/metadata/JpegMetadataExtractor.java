@@ -94,7 +94,7 @@ public final class JpegMetadataExtractor
 			// dropping them keeps JpegSegment.isExif() / isIcc() / isMpf() / isXmp() (which read data[1] as
 			// the marker code and data[4..] as the payload prefix) consistent with the historical contract
 			// — downstream injection re-emits the canonical form, which decoders accept regardless of fill.
-			if ((marker >= 0xE0 && marker <= 0xEF) || marker == 0xFE)
+			if ((marker >= JpegMarker.APP0 && marker <= JpegMarker.APP_LAST) || marker == JpegMarker.COM)
 			{
 				int canonicalStart = markerByteOff - 1;
 				int totalLen = next - canonicalStart;

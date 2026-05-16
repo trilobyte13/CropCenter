@@ -260,8 +260,14 @@ public final class SafFileHelper
 					}
 				}
 			}
-			// For SAF URIs, try to extract document ID and look up path in MediaStore
-			if ("com.android.providers.media.documents".equals(uri.getAuthority()))
+			// For SAF URIs, try to extract document ID and look up path in MediaStore. Gate on
+			// DocumentsContract.isDocumentUri before calling getDocumentId — a non-document URI carrying
+			// the providers.media.documents authority (constructed by a malicious / malformed Share intent)
+			// would make getDocumentId throw IllegalArgumentException. The outer catch absorbs it cleanly,
+			// but the precheck avoids the log noise and matches the asymmetric handling in
+			// fileFromSafUri's sister branch.
+			if ("com.android.providers.media.documents".equals(uri.getAuthority())
+				&& DocumentsContract.isDocumentUri(ctx, uri))
 			{
 				String docId = DocumentsContract.getDocumentId(uri);
 				if (docId != null && docId.startsWith("image:")) // docId format: "image:12345"
@@ -292,7 +298,11 @@ public final class SafFileHelper
 			// (the provider doesn't expose it), so we return path-only with id=null — the id slot is
 			// preserved in the return shape for symmetry with the MediaStore-Documents branch below, even
 			// though no current caller reads it.
-			if ("com.android.externalstorage.documents".equals(uri.getAuthority()))
+			// Same isDocumentUri precheck rationale as the providers.media.documents branch above:
+			// guard getDocumentId against IllegalArgumentException on a non-document URI that happens to
+			// carry the externalstorage.documents authority.
+			if ("com.android.externalstorage.documents".equals(uri.getAuthority())
+				&& DocumentsContract.isDocumentUri(ctx, uri))
 			{
 				String docId = DocumentsContract.getDocumentId(uri);
 				int colon = docId == null ? -1 : docId.indexOf(':');
@@ -585,10 +595,10 @@ public final class SafFileHelper
 				{
 					trailing = is.read(buf);
 				}
-				catch (Exception eofException)
+				catch (Exception e)
 				{
 					Log.w(TAG, "readback: EOF-check threw, treating as unverified: "
-						+ eofException.getMessage());
+						+ e.getMessage());
 					return -1;
 				}
 				if (trailing > 0)

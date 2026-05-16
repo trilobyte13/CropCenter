@@ -13,6 +13,13 @@ package com.cropcenter.metadata;
  */
 public final class TiffTag
 {
+	// Compression scheme (IFD1 for JPEG primary thumbnails — value=6=JPEG). Per EXIF 2.32 the
+	// tag should be OMITTED from IFD0 for JPEG-encoded primaries because the FF D8 JPEG header
+	// already implies the compression scheme; some EXIF round-trips leak it into IFD0 anyway,
+	// where ExifPatcher.scanIfd neutralises the entry at depth=0 to keep parsers from acting on
+	// a redundant value (zeroing alone would write Compression=0 which is invalid TIFF; instead
+	// the entire 12-byte entry is zeroed so parsers see unknown tag 0x0000 and skip).
+	public static final int COMPRESSION = 0x0103;
 	// EXIF SubIFD pointer (IFD0 → ExifSubIFD). u32 offset to the sub-IFD relative to TIFF header.
 	public static final int EXIF_SUB_IFD = 0x8769;
 	// Image width (IFD0). SHORT or LONG. CropExporter rewrites this to the cropped dimension.
@@ -23,6 +30,12 @@ public final class TiffTag
 	public static final int JPEG_INTERCHANGE_FORMAT = 0x0201;
 	// JPEGInterchangeFormatLength — byte length of the IFD1 thumbnail JPEG (LONG).
 	public static final int JPEG_INTERCHANGE_FORMAT_LENGTH = 0x0202;
+	// TIFF magic number (always 42 = 0x002A, u16 in declared byte order). Sits at offset +2 inside the TIFF
+	// header, just after the byte-order marker (II/MM). Every TIFF-walker uses this as the second half of the
+	// "is this a valid TIFF body?" check (alongside the II/MM byte-order pair) — extracted as a constant so
+	// the literal 42 isn't repeated alongside its `// TIFF magic = 42` comment at the six call sites
+	// (BitmapUtils, ExifPatcher's four entry points, PngMetadataExtractor).
+	public static final int MAGIC = 42;
 	// MP Entry list (APP2 / MPF IFD). LONG, count = numImages.
 	public static final int MP_ENTRY = 0xB002;
 	// Orientation (IFD0). SHORT, count = 1, value 1..8 per EXIF 2.32.

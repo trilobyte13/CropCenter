@@ -231,6 +231,10 @@ final class ToolbarBinder
 	private void onLockButtonClick(View view)
 	{
 		int id = view.getId();
+		// if/else-if ladder rather than a switch expression: R.id.* in an app module is generated as
+		// non-`final int` (only library modules generate `static final int`), so `case R.id.btnLockBoth`
+		// fails with "constant expression required". CLAUDE.md §Language level's "3+ discrete-value
+		// dispatch uses switch" yields to this Android-platform constraint here.
 		CenterMode pref;
 		if (id == R.id.btnLockBoth)
 		{

@@ -450,7 +450,7 @@ Before declaring a change done, these checks should come back empty. The fastest
 consolidated runner:
 
 ```bash
-python scripts/audit.py   # runs over-cols, ignored-catches, static-first, method-order, adjacent-comment-styles, final-classes, lsloc
+python scripts/audit.py   # runs over-cols, ignored-catches, static-first, method-order, adjacent-comment-styles, final-classes, reflow, lsloc
 ```
 
 Individual subcommands (`python scripts/audit.py <name>`) are listed below alongside the awk

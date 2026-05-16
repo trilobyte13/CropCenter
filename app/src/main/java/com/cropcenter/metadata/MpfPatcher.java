@@ -80,7 +80,7 @@ public final class MpfPatcher
 			}
 
 			// Check for MPF APP2: FF E2 + "MPF\0"
-			if (marker == 0xE2 && segLen > 8 && afterMarker + 6 <= jpeg.length
+			if (marker == JpegMarker.APP2 && segLen > 8 && afterMarker + 6 <= jpeg.length
 				&& jpeg[afterMarker + 2] == 'M' && jpeg[afterMarker + 3] == 'P'
 				&& jpeg[afterMarker + 4] == 'F' && jpeg[afterMarker + 5] == 0)
 			{
