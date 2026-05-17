@@ -112,7 +112,7 @@ public final class BitmapUtilsTest
 		long eightGb = 8L * 1024 * 1024 * 1024;
 		assertEquals((int) (eightGb / 16L / 4L), BitmapUtils.computeMaxDecodePixels(eightGb));
 		// 4 GB RAM (a mid-range device). 4 * 1024^3 / 16 / 4 = 67_108_864 pixels (~64 MP). 200 MP needs
-		// inSampleSize=4 (decode at 12.6 MP).
+		// inSampleSize=2 (decode at 50 MP, which fits the 64 MP cap).
 		long fourGb = 4L * 1024 * 1024 * 1024;
 		assertEquals((int) (fourGb / 16L / 4L), BitmapUtils.computeMaxDecodePixels(fourGb));
 	}

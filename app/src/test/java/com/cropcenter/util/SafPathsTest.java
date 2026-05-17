@@ -57,9 +57,9 @@ public final class SafPathsTest
 	@Test
 	public void hasParentTraversalSegmentAllowsDotDotSubstring()
 	{
-		// "IMG..edited.jpg" — Samsung's edited-photo filename pattern. The segment is the whole string, not
-		// "..". The pre-fix String.contains("..") rejected this as suspicious, sending Samsung loads through
-		// the provider stream path which mangles HDR metadata. Round-40 F2 fix: segment-aware check passes.
+		// "IMG..edited.jpg" — Samsung's edited-photo filename pattern. The segment is the whole string,
+		// not "..". A naive String.contains("..") rejects this as suspicious and sends Samsung loads
+		// through the provider stream path, which mangles HDR metadata.
 		assertFalse(SafPaths.hasParentTraversalSegment("IMG..edited.jpg"));
 	}
 

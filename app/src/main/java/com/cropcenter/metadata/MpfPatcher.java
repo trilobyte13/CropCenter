@@ -43,7 +43,6 @@ public final class MpfPatcher
 			{
 				break;
 			}
-			// Fill bytes (legal per ITU-T T.81 §B.1.1.2) — skip extra 0xFF bytes before reading the marker.
 			int markerByteOff = JpegMarkerWalker.skipFillBytes(jpeg, off, jpeg.length);
 			if (markerByteOff < 0)
 			{
@@ -54,7 +53,7 @@ public final class MpfPatcher
 
 			if (marker == JpegMarker.SOS || marker == JpegMarker.EOI)
 			{
-				break; // SOS or EOI — stop
+				break;
 			}
 			if (marker == JpegMarker.STUFFING || marker == JpegMarker.TEM
 				|| (marker >= JpegMarker.RST_FIRST && marker <= JpegMarker.RST_LAST))
@@ -70,16 +69,11 @@ public final class MpfPatcher
 			int segLen = ByteBufferUtils.readU16BE(jpeg, afterMarker);
 			if (segLen < 2)
 			{
-				// Segment length MUST include the 2 length bytes themselves (JPEG spec). Zero or one
-				// would advance off by 0 or 1 instead of the real segment size, getting stuck
-				// mid-segment. Matches the defensive guard in every sister walker
-				// (JpegMarkerWalker.findPrimaryEoi, JpegMetadataExtractor.extract,
-				// JpegMetadataInjector.inject, GraftWriter.findFirstNonAppNonCom,
-				// XmpItemLengthPatcher.walkApp1Ranges) — the cross-walker invariant kept consistent.
+				// Segment length must include the 2 length bytes themselves (JPEG spec). Zero or one
+				// would advance off by 0 or 1 instead of the real segment size.
 				break;
 			}
 
-			// Check for MPF APP2: FF E2 + "MPF\0"
 			if (marker == JpegMarker.APP2 && segLen > 8 && afterMarker + 6 <= jpeg.length
 				&& jpeg[afterMarker + 2] == 'M' && jpeg[afterMarker + 3] == 'P'
 				&& jpeg[afterMarker + 4] == 'F' && jpeg[afterMarker + 5] == 0)
@@ -110,10 +104,9 @@ public final class MpfPatcher
 				}
 
 				// IFD offset (relative to mpfStart). Validate the long sum BEFORE the int cast — a u32
-				// ifdOffRel near 2^32-1 plus a small mpfStart wraps to a small positive int that would
-				// pass the bounds check on the truncated value, letting the entry walk read garbage as
-				// entryCount and then call patchMpEntry on attacker-controlled offsets. Same defensive
-				// pattern lives in ExifPatcher.scanIfd.
+				// ifdOffRel near 2^32-1 plus a small mpfStart wraps to a small positive int that passes
+				// the bounds check on the truncated value, letting the entry walk read garbage as
+				// entryCount and call patchMpEntry on attacker-controlled offsets.
 				long ifdOffRel = ByteBufferUtils.readU32(jpeg, mpfStart + 4, isLittleEndian);
 				long ifdOffAbs = (long) mpfStart + ifdOffRel;
 				if (ifdOffAbs < mpfStart || ifdOffAbs + 2 > mpfSegmentEnd
@@ -126,9 +119,6 @@ public final class MpfPatcher
 
 				for (int i = 0; i < entryCount; i++)
 				{
-					// Long-arithmetic stride matches sister walkers in ExifPatcher / BitmapUtils /
-					// PngMetadataExtractor. Bounded by the 128 MB
-					// SafFileHelper cap today but kept consistent for symmetry.
 					long entryOffsetLong = (long) ifdOff + 2 + (long) i * 12;
 					if (entryOffsetLong + 12 > mpfSegmentEnd)
 					{
@@ -143,10 +133,8 @@ public final class MpfPatcher
 							entryOffset, isLittleEndian);
 					}
 				}
-				return false; // MPF found but no MP Entry tag
+				return false;
 			}
-			// Advance past the segment. afterMarker = byte just after the marker code; add segLen (which
-			// includes the 2 length bytes themselves) to land on the next marker's leading 0xFF.
 			int next = afterMarker + segLen;
 			if (next > jpeg.length || next < off)
 			{
@@ -154,7 +142,7 @@ public final class MpfPatcher
 			}
 			off = next;
 		}
-		return false; // no MPF segment
+		return false;
 	}
 
 	private static void logEntries(byte[] jpeg, int entryOff, int numImages, boolean isLittleEndian,
@@ -162,7 +150,6 @@ public final class MpfPatcher
 	{
 		for (int img = 0; img < numImages; img++)
 		{
-			// Long-arithmetic stride for symmetry with the patch() walker above.
 			long baseLong = (long) entryOff + (long) img * MPF_ENTRY_BYTES;
 			if (baseLong + MPF_ENTRY_BYTES > jpeg.length)
 			{
@@ -226,32 +213,21 @@ public final class MpfPatcher
 
 		Log.d(TAG, numImages + " images, mpfStart=" + mpfStart);
 
-		// Locate the gain-map entry BEFORE writing any bytes. Per the MPF spec, the entry's lower 24 bits of
-		// `attr` carry the MPType (0x010005 = "Original Preservation" / gain map). Samsung Ultra HDR files
-		// always place the gain map at index 1, but multi-image MPFs (depth maps, burst frames, Apple Portrait
-		// layers) can shuffle it elsewhere — patching entry[1] unconditionally would write the gain-map size
-		// into the wrong slot and leave the actual gain-map entry stale, which strict-MPF decoders then reject.
-		// Walk all entries counting matches:
-		//   - 0 matches + numImages == 2 → fall back to entry[1] (the empirical Samsung Ultra HDR pattern,
-		//     which sometimes ships a malformed MPType field but reliably keeps the gain map at index 1).
-		//   - 0 matches + numImages != 2 → refuse the patch — writing entry[1] in that case can land the
-		//     gain-map size on a depth map, burst frame, or thumbnail entry and leave the real gain-map
-		//     entry stale.
-		//   - >1 matches → refuse the patch. A spec-legal multi-gain-map MPF (composite depth + Original
-		//     Preservation, some Apple Portrait variants) carries multiple 0x010005 entries. We have one
-		//     post-edit gain-map size + offset, but no way to assign it across multiple entries without
-		//     guessing — a single-entry write would leave the others pointing at pre-edit positions in the
-		//     source file, which strict decoders reject. Refusing here lets GainMapComposer drop HDR cleanly
-		//     per its design instead of shipping inconsistent metadata.
-		//
-		// All refusal branches return BEFORE the entry[0] / gain-map writes below so a rejected patch leaves
-		// the byte buffer in its pre-call state — the test fixture relies on this invariant for the
-		// adversarial multi-match and segment-end-bound cases.
+		// Locate the gain-map entry before writing any bytes. The entry's lower 24 bits of `attr` carry
+		// the MPType (0x010005 = "Original Preservation" / gain map). Multi-image MPFs (depth maps,
+		// burst frames, Apple Portrait layers) can shuffle the gain map off index 1, so walk all
+		// entries counting matches:
+		//   - 0 matches + numImages == 2 → fall back to entry[1] (Samsung Ultra HDR sometimes ships a
+		//     malformed MPType field but reliably keeps the gain map at index 1).
+		//   - 0 matches + numImages != 2 → refuse: writing entry[1] could land on a depth map / burst
+		//     frame / thumbnail and leave the real gain-map entry stale.
+		//   - >1 matches → refuse: spec-legal multi-gain-map MPF (composite depth + Original
+		//     Preservation) carries multiple 0x010005 entries; we have one post-edit size + offset.
+		// Refusal branches return BEFORE the entry writes below.
 		int gainMapEntryBase = -1;
 		int gainMapMatchCount = 0;
 		for (int img = 1; img < numImages; img++)
 		{
-			// Long-arithmetic stride for symmetry with the IFD entry walker above.
 			long baseLong = (long) entryOff + (long) img * MPF_ENTRY_BYTES;
 			if (baseLong + MPF_ENTRY_BYTES > jpeg.length)
 			{

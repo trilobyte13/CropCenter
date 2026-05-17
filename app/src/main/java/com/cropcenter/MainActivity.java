@@ -60,15 +60,14 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 		thread.setDaemon(true);
 		return thread;
 	});
-	// safFiles / permissions declared before saveController and graftController because both constructors take them
-	// — Java initialises fields in declaration order, so dependencies must come first regardless of strict
-	// alphabetical ordering.
+	// safFiles / permissions / ui declared before their consumers (saveController, graftController, toolbar)
+	// because Java initialises fields in declaration order, so dependencies must come first regardless of
+	// strict alphabetical ordering.
 	private final SafFileHelper safFiles = new SafFileHelper(this);
 	private final StoragePermissionHelper permissions = new StoragePermissionHelper(this);
 	private final ImageLoadController imageLoader = new ImageLoadController(this, safFiles);
 	private final SaveController saveController = new SaveController(this, safFiles, permissions);
 	private final GraftController graftController = new GraftController(this, safFiles, this::applyGraftedBytes);
-	// ui declared before toolbar for the same dependency reason.
 	private final UiSync ui = new UiSync(this);
 	private final ToolbarBinder toolbar = new ToolbarBinder(this, ui);
 
@@ -415,9 +414,9 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 		// Bind the device-adaptive decode-pixel cap from ActivityManager.MemoryInfo.totalMem ONCE per
 		// process. Every subsequent ImageLoadController / UltraHdrCompat decode site reads via
 		// BitmapUtils.getMaxDecodePixels(), so 12 GB-RAM phones lift the cap to ~187 MP (handling 200 MP
-		// captures at inSampleSize=1) while 4 GB phones stay floored at 32 MP. Must run before
-		// installImageOnUi / runLoadBg / any save path can fire — placed first in onCreate so even an
-		// onNewIntent-driven SEND/VIEW image load picks up the right cap.
+		// captures at inSampleSize=1) while 4 GB phones land at ~64 MP. Must run before installImageOnUi
+		// / runLoadBg / any save path can fire — placed first in onCreate so even an onNewIntent-driven
+		// SEND/VIEW image load picks up the right cap.
 		BitmapUtils.initialize(this);
 		setContentView(R.layout.activity_main);
 
@@ -548,15 +547,14 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 		//     and rethrows.
 		// Dismiss any open state-mutating dialog (SettingsDialog) BEFORE the bg dispatch — applyBytes runs
 		// state.reset() on bg, and an open Settings dialog would race the reset with its in-dialog
-		// updateGridConfig commits. Mirrors ImageLoadController.load's UI-thread pre-dispatch dismiss.
+		// updateGridConfig commits.
 		dismissTransientDialogs();
 		runInBackground(() -> applyGraftedBytesOnBg(graft));
 	}
 
 	/**
-	 * Bg-thread body of applyGraftedBytes, extracted to satisfy CLAUDE.md's 3-line lambda cap. Runs the spliced
-	 * bytes through applyBytes, installs graft state on success, fires the user-visible toast, and releases the
-	 * busy flag in finally regardless of outcome.
+	 * Bg-thread body of applyGraftedBytes. Runs the spliced bytes through applyBytes, installs graft state on
+	 * success, fires the user-visible toast, and releases the busy flag in finally regardless of outcome.
 	 *
 	 * @param graft assembled graft (bytes + displayName + aiMask) from GraftController
 	 */
@@ -596,8 +594,7 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 			// Widened to include OutOfMemoryError — graft bytes carry the source's HDR + SEFT, so the
 			// applyBytes decode + applyOrientation pass is the second-largest allocation peak in the
 			// app (after primary export). Without OOM in the catch, a low-memory device would see the
-			// progress overlay vanish with no signal that the graft apply died. Mirrors the catch
-			// widening in ExportPipeline.encodePhase and ImageLoadController.runLoadBg.
+			// progress overlay vanish with no signal that the graft apply died.
 			Log.e(TAG, "Apply graft failed", e);
 			runOnUiThread(() -> toastIfAlive("Apply failed: " + e.getMessage(), Toast.LENGTH_SHORT));
 		}
@@ -688,9 +685,8 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 	}
 
 	/**
-	 * UI-thread body of hideProgress. Extracted so the runOnUiThread call site stays a method-reference
-	 * one-liner instead of a 5-line lambda — CLAUDE.md caps lambda bodies at 3 lines, and the isDestroyed
-	 * guard + view-tree mutation tend to push past that. Symmetric to showProgressOnUi.
+	 * UI-thread body of hideProgress. Extracted so the runOnUiThread call site stays a method-reference one-liner
+	 * (isDestroyed guard + view-tree mutation push the body past 3 lines). Symmetric to showProgressOnUi.
 	 */
 	private void hideProgressOnUi()
 	{
@@ -702,9 +698,8 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 	}
 
 	/**
-	 * Result handler for the long-press graft picker. Extracted from the registerForActivityResult
-	 * call-site lambda — the body's null / non-null branch dispatch exceeds CLAUDE.md's 3-line lambda
-	 * cap and benefits from a name in stack traces.
+	 * Result handler for the long-press graft picker. Extracted from the registerForActivityResult call-site
+	 * lambda so the null / non-null branch dispatch has a name in stack traces.
 	 *
 	 * @param uri SAF document URI returned by the picker; null when the user cancelled
 	 */
@@ -764,10 +759,10 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 
 	/**
 	 * Open the Settings dialog, or show the busy toast if a save / load / detect / graft is in flight.
-	 * Mirrors showSaveDialog's busy gate. The gate matters because SettingsDialog mutates state.gridConfig
-	 * (color picker, line width, presets) on the UI thread while a concurrent load on the bg executor runs
-	 * state.reset() — which read-modify-writes the same non-volatile gridConfig field. Without the gate,
-	 * tapping Settings during a Share/View load can lose either the user's preference change or the reset's
+	 * The gate matters because SettingsDialog mutates state.gridConfig (color picker, line width,
+	 * presets) on the UI thread while a concurrent load on the bg executor runs state.reset() — which
+	 * read-modify-writes the same non-volatile gridConfig field. Without the gate, tapping Settings
+	 * during a Share/View load can lose either the user's preference change or the reset's
 	 * includeInExport=false clear.
 	 *
 	 * The complementary already-open-dialog race is closed by dismissTransientDialogs(): the dialog
@@ -782,12 +777,9 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 			showBusyToast();
 			return;
 		}
-		// BadTokenException guard mirrors SaveController.openSaveOptionsDialog / showReplaceDialog /
-		// showExtensionMismatchDialog and GraftController.confirmOversizedThenApply — config-change
-		// races can land between the Settings tap and the dialog show (Activity finishes after the
-		// tap but before WindowManager accepts the dialog). isDestroyed is the first line of defense;
-		// the try/catch around .show is the second (the race window between the check and the actual
-		// show is still open).
+		// BadTokenException guard: config-change races can land between the Settings tap and the
+		// dialog show. isDestroyed is the first line of defense; the try/catch is the second (the
+		// race window between the check and the actual show is still open).
 		if (isDestroyed())
 		{
 			return;

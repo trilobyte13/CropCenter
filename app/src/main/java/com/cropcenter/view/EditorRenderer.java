@@ -42,14 +42,11 @@ final class EditorRenderer
 	private final Path selectionPolygonPath = new Path();
 	private final View view;
 	private final ViewportMath viewport;
-	// Cached per-draw scratch — reset / overwritten at the top of each use so onDraw does no allocation.
-	// Sorted into the lowercase-primitive sub-block per CLAUDE.md's uppercase-before-lowercase rule.
+	// Per-draw scratch — reset at the top of each use so onDraw does no allocation.
 	private final int[] aabbScratch = new int[4];
-	// Single shared 2-float scratch used by the visible-bounds AABB walk (4 corner reads, sequentially used
-	// for min/max — single buffer is safe because we don't need to keep all 4 corners alive at once) and the
-	// selection-label imageToScreenRotatedInto calls in drawSelectionLabels (single label position consumed
-	// immediately by drawText). Both paths run on the UI thread and don't overlap with each other within a
-	// single draw call.
+	// Shared 2-float scratch for the visible-bounds AABB walk (4 sequential corner reads for min/max) and
+	// the selection-label imageToScreenRotatedInto calls in drawSelectionLabels. Both run on the UI thread
+	// and don't overlap within a single draw call.
 	private final float[] coordScratch = new float[2];
 
 	private float density = 1f;
@@ -65,9 +62,8 @@ final class EditorRenderer
 		cropBorderPaint.setStrokeWidth(2f);
 		cropBorderPaint.setStyle(Paint.Style.STROKE);
 		crosshairPaint.setStrokeWidth(1f);
-		// crosshair / point / polygon / horizon colors are set per-draw from GridConfig — crosshair tracks
-		// grid.color() so the centerpoint marker stays visually consistent with the grid lines around it
-		// (user reported the mismatch as a bug when the grid was recoloured but the crosshair stayed mauve).
+		// crosshair / point / polygon / horizon colors are set per-draw from GridConfig — crosshair
+		// tracks grid.color() so the centerpoint marker stays visually consistent with the grid lines.
 		pointPaint.setStyle(Paint.Style.FILL);
 		polygonPaint.setStyle(Paint.Style.FILL);
 		infoPaint.setColor(ThemeColors.TEXT);
@@ -86,20 +82,16 @@ final class EditorRenderer
 	 */
 	void draw(Canvas canvas, CropState state, HorizonPaintOverlay horizon)
 	{
-		// Snapshot once: sourceImage can be nulled on the background executor during loadImage's reset() while
-		// this draw is mid-flight. A null check followed by a second read can race — the check passes on the
-		// previous bitmap and the second read returns null, NPE'ing the subsequent bmp.getWidth(). One local
-		// read is consistent for the whole frame regardless of concurrent writes.
+		// Snapshot once per frame: sourceImage can be nulled on the bg executor during loadImage's reset()
+		// while this draw is mid-flight. A null check followed by a second read could pass the check and
+		// then NPE on bmp.getWidth(). gridConfig follows the same rule so a multi-stage draw doesn't mix
+		// old and new configs across stages (selection markers / horizon overlay briefly mismatched).
 		Bitmap bmp = state == null ? null : state.getSourceImage();
 		if (bmp == null)
 		{
 			drawEmptyHint(canvas);
 			return;
 		}
-		// Same snapshot reasoning for gridConfig: CropState.reset() replaces the gridConfig reference on the
-		// bg executor, and a multi-stage draw that re-reads `state.getGridConfig()` per stage could see the
-		// old config in early stages and the new config in later stages — selection markers and the horizon
-		// overlay would briefly paint in different colors during a load. One read = one consistent frame.
 		GridConfig grid = state.getGridConfig();
 
 		canvas.drawColor(ThemeColors.BACKGROUND);

@@ -222,15 +222,12 @@ public final class GraftWriterTest
 	@Test
 	public void graftStripsOrphanMpfWhenSourceHasMpfButNoGainMap() throws IOException
 	{
-		// Round-45 F2 regression test. Source carries an MPF segment but NO gain map (e.g. Samsung "Best
-		// Photo" burst, focus-stacked panorama, ZSL — multi-picture JPEGs that pre-date Ultra HDR and
-		// don't carry the hdrgm namespace). The graft preserves source's metadata verbatim into the
-		// output, but the spliced primary doesn't carry the secondary images source's MPF describes —
-		// strict-MPF decoders (Samsung Gallery's Revert pre-flight) reject the orphan-MPF shape, lenient
-		// decoders walk past malformed entries. Output must NOT contain the "MPF\0" signature when
-		// gainMapToWrite == null. The dropOrphanMpf branch in GraftWriter.graft fires the strip; this
-		// test pins it so a "simplify the segment loop" refactor that removes the branch silently
-		// reintroduces the orphan.
+		// Source carries an MPF segment but NO gain map (Samsung "Best Photo" burst, focus-stacked
+		// panorama, ZSL — multi-picture JPEGs pre-dating Ultra HDR). The graft preserves source's
+		// metadata verbatim, but the spliced primary doesn't carry the secondary images source's MPF
+		// describes — strict-MPF decoders reject the orphan, lenient ones walk past malformed entries.
+		// Output must NOT contain "MPF\0" when gainMapToWrite == null. Pins the dropOrphanMpf branch
+		// against a "simplify the segment loop" refactor that removes it.
 		byte[] orig = JpegFixtures.concat(JpegFixtures.soi(),
 			JpegFixtures.appSegment(0xE2, mpfPayloadWithSignature()),
 			DQT_STUB, JpegFixtures.minimalScanAndEoi());

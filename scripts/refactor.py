@@ -563,20 +563,18 @@ def _reflow_md_text(src, width):
 def refactor_md(args):
 	"""Reflow markdown paragraphs to a target column width (default 120).
 	Skips fenced code blocks, tables, headings, horizontal rules, and
-	definition lines."""
+	definition lines. Preserves the file's existing EOL convention (CRLF vs LF)."""
 	if not args:
 		print('usage: refactor.py md <file> [width]', file=sys.stderr)
 		return 2
 	path = args[0]
 	width = int(args[1]) if len(args) > 1 else MAX_COLS
-	with open(path, encoding='utf-8') as f:
-		text = f.read()
+	text, eol = read_preserving_eol(path)
 	new_text = _reflow_md_text(text, width)
 	if new_text == text:
 		print(f'  {path}: no changes')
 		return 0
-	with open(path, 'w', encoding='utf-8') as f:
-		f.write(new_text)
+	write_preserving_eol(path, new_text, eol)
 	over = [(idx + 1, len(line)) for idx, line in enumerate(new_text.split('\n')) if len(line) > width]
 	if over:
 		print(f'  {path}: rewrapped; {len(over)} line(s) still over {width} cols (likely tables):')

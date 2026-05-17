@@ -40,10 +40,9 @@ public final class HdrSignature
 	 * gate gain-map extraction on this precise check so an SDR file with `hdrgm` outside XMP isn't
 	 * mis-classified as Ultra HDR.
 	 *
-	 * Walks both standard XMP (via JpegSegment.isXmp) and Extended XMP (the secondary-segment shape that
-	 * carries any XMP overflow past the JPEG APP1 ~64 KB cap; mirrors the pattern in
-	 * HorizonDetector.detectFromMetadata). A vendor whose hdrgm declaration ended up in the extension
-	 * segment would otherwise be silently mis-classified as SDR.
+	 * Walks both standard XMP (via JpegSegment.isXmp) and Extended XMP (the secondary-segment shape
+	 * that carries any XMP overflow past the JPEG APP1 ~64 KB cap). A vendor whose hdrgm declaration
+	 * ended up in the extension segment would otherwise be silently mis-classified as SDR.
 	 *
 	 * @param segments parsed JPEG segments from JpegMetadataExtractor.extract; may be null or empty
 	 * @return true when at least one XMP APP1 segment (standard or extended) contains "hdrgm" in its body

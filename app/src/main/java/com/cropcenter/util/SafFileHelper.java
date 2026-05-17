@@ -260,12 +260,10 @@ public final class SafFileHelper
 					}
 				}
 			}
-			// For SAF URIs, try to extract document ID and look up path in MediaStore. Gate on
+			// For SAF URIs, extract document ID and look up path in MediaStore. Gate on
 			// DocumentsContract.isDocumentUri before calling getDocumentId — a non-document URI carrying
-			// the providers.media.documents authority (constructed by a malicious / malformed Share intent)
-			// would make getDocumentId throw IllegalArgumentException. The outer catch absorbs it cleanly,
-			// but the precheck avoids the log noise and matches the asymmetric handling in
-			// fileFromSafUri's sister branch.
+			// the providers.media.documents authority would make getDocumentId throw
+			// IllegalArgumentException. Precheck avoids log noise (outer catch absorbs it cleanly).
 			if ("com.android.providers.media.documents".equals(uri.getAuthority())
 				&& DocumentsContract.isDocumentUri(ctx, uri))
 			{
@@ -290,17 +288,11 @@ public final class SafFileHelper
 					}
 				}
 			}
-			// External Storage SAF provider: docId format is "<volumeId>:<relPath>", e.g.
-			// "primary:DCIM/Camera/IMG.jpg". The "primary" volume maps to /storage/emulated/0; non-primary
-			// UUIDs map to /storage/<UUID>. With MANAGE_EXTERNAL_STORAGE we can read those paths directly
-			// via FileInputStream, bypassing the ContentProvider's EXIF-mangling openInputStream stream —
-			// which is the entire reason this resolver exists. MediaStore _id is unavailable on this path
-			// (the provider doesn't expose it), so we return path-only with id=null — the id slot is
-			// preserved in the return shape for symmetry with the MediaStore-Documents branch below, even
-			// though no current caller reads it.
-			// Same isDocumentUri precheck rationale as the providers.media.documents branch above:
-			// guard getDocumentId against IllegalArgumentException on a non-document URI that happens to
-			// carry the externalstorage.documents authority.
+			// External Storage SAF provider: docId format is "<volumeId>:<relPath>". "primary" maps to
+			// /storage/emulated/0; non-primary UUIDs map to /storage/<UUID>. With MANAGE_EXTERNAL_STORAGE
+			// we can read those paths directly via FileInputStream, bypassing the ContentProvider's
+			// EXIF-mangling openInputStream — the entire reason this resolver exists. MediaStore _id is
+			// unavailable on this path (provider doesn't expose it); id slot preserved for symmetry.
 			if ("com.android.externalstorage.documents".equals(uri.getAuthority())
 				&& DocumentsContract.isDocumentUri(ctx, uri))
 			{
@@ -400,14 +392,9 @@ public final class SafFileHelper
 	 */
 	public byte[] readUriBytes(Uri uri) throws IOException
 	{
-		// Try the on-disk path first. Samsung's MediaStore ContentProvider mutates EXIF as it streams JPEG
-		// bytes through openInputStream — repacks IFD0 in HashMap iteration order (not sorted), strips GPS
-		// coordinates and LensModel, shrinks the EXIF segment by ~440 bytes. Diagnosed via logcat trace: the
-		// bytes that arrive at applyBytes already have scrambled tag order before any of our code touches them.
-		// Direct file read from the resolved DATA column bypasses the ContentProvider entirely, returning
-		// pristine on-disk bytes. Requires MANAGE_EXTERNAL_STORAGE for paths under /storage/emulated — the same
-		// permission ReplaceStrategy needs for its File-I/O atomic-move strategy. Falls back to the SAF stream
-		// copy below when no path is resolvable (cloud / SAF-only URIs).
+		// Direct-from-disk read first to bypass Samsung's MediaStore EXIF-mangling stream
+		// (see tryReadDirectlyFromPath Javadoc). Falls back to the SAF stream copy below when no path
+		// is resolvable (cloud / SAF-only URIs).
 		byte[] direct = tryReadDirectlyFromPath(uri);
 		if (direct != null)
 		{

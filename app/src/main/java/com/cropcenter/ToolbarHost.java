@@ -28,9 +28,8 @@ interface ToolbarHost extends EditorHost
 	void ensureCropCenter();
 
 	/**
-	 * Shared busy flag gating Save / Load / horizon-detect so a long-running bg op (export, decode, paint
-	 * detection) can't be raced by another. Holders compareAndSet(false, true) on entry and set(false) on
-	 * exit — same contract used by SaveController, ImageLoadController, GraftController, and AutoRotateBinder.
+	 * @return shared busy flag gating Save / Load / horizon-detect so a long-running bg op can't be raced by
+	 *         another. Holders compareAndSet(false, true) on entry and set(false) on exit.
 	 */
 	AtomicBoolean getBusy();
 
@@ -73,27 +72,36 @@ interface ToolbarHost extends EditorHost
 
 	/**
 	 * Toggle Save / Open button enabled state while a background task is running.
+	 *
+	 * @param busy true while a save / load / detect task is in flight; false when complete
 	 */
 	void setBusyUi(boolean busy);
 
 	/**
 	 * Update the lock-mode preference for the currently-active editor mode.
+	 *
+	 * @param pref new center-lock preference (BOTH / HORIZONTAL / VERTICAL / LOCKED)
 	 */
 	void setCurrentPref(CenterMode pref);
 
 	/**
-	 * Post the shared "Busy — try again" toast. Used when a user triggers a bg-gated action while another task
+	 * Post the shared "Busy — try again" toast. Used when the user triggers a bg-gated action while another task
 	 * is already running.
 	 */
 	void showBusyToast();
 
 	/**
 	 * Show the full-screen progress overlay with a status message. Safe to call from any thread.
+	 *
+	 * @param msg status text shown over the overlay
 	 */
 	void showProgress(String msg);
 
 	/**
 	 * UI-thread-safe toast helper — noop if Activity is destroyed.
+	 *
+	 * @param msg    user-facing toast text
+	 * @param length Toast.LENGTH_SHORT or Toast.LENGTH_LONG
 	 */
 	void toastIfAlive(String msg, int length);
 }

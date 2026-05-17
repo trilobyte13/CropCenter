@@ -19,20 +19,15 @@ public final class StateBusTest
 	@Test
 	public void concurrentNotifyAcrossEndBatchNeverLosesDirtyFlag() throws Exception
 	{
-		// Round-40 F1 regression test. The pre-fix race: bg thread enters notifyChanged() and reads
-		// batchDepth > 0; UI thread interleaves an endBatch() that decrements depth to 0 and reads
-		// batchDirty == false (the bg thread hasn't set it yet); bg thread sets batchDirty = true and
-		// returns. The dirty flag is now stranded — endBatch already passed its check, and the next batch is
-		// what eventually flushes it. The bg-issued notify produces zero fires for this trial.
+		// Race: bg thread enters notifyChanged() and reads batchDepth > 0; UI thread interleaves
+		// endBatch() that decrements depth to 0 and reads batchDirty == false (bg hasn't set it yet);
+		// bg sets batchDirty = true and returns. The dirty flag is stranded — endBatch already passed
+		// its check, only the next batch flushes it. notifyChanged + endBatch share one synchronized
+		// section so endBatch either sees a dirty flag inside the lock-protected window or sees that
+		// no notify is in flight.
 		//
-		// The fix groups (depth, dirty) under one synchronized section so endBatch either sees a dirty flag
-		// set inside the lock-protected window or sees that no notify is in flight; the "set just after
-		// flush" gap is closed.
-		//
-		// Test design: fresh bus per trial; main thread opens a batch; bg + ui threads race notifyChanged
-		// against endBatch; assert every trial produces at least one fire (no stranding). Without the fix,
-		// the race scenario (bg-preempted-mid-notify, ui-finishes-endBatch, bg-resumes) leaves fired == 0
-		// for the trial — measurable across many iterations.
+		// Test: fresh bus per trial; main opens a batch; bg + ui race notifyChanged against endBatch;
+		// every trial must produce at least one fire (no stranding).
 		int trials = 1000;
 		int strandedTrials = 0;
 		for (int trial = 0; trial < trials; trial++)
@@ -94,18 +89,13 @@ public final class StateBusTest
 	@Test
 	public void concurrentSetListenerNullDuringFireNeverNpes() throws Exception
 	{
-		// Round-44 F1 regression test. The pre-fix race: bg thread enters fire(), reads
-		// `this.listener != null` in the guard, gets non-null; UI thread interleaves setListener(null),
-		// clearing the volatile field; bg thread re-reads `this.listener` at the invocation site and
-		// gets null → NullPointerException. Activity.onDestroy clears the listener precisely so a
-		// late-firing bg worker can no-op safely, so an NPE here would defeat the lifecycle guard.
+		// Race: bg enters fire(), reads `this.listener != null` in the guard (non-null); UI interleaves
+		// setListener(null); bg re-reads at the invocation site → NPE. Activity.onDestroy clears the
+		// listener precisely so a late-firing bg worker can no-op safely, so an NPE here defeats the
+		// lifecycle guard. fire() snapshots the volatile field to a local before the guard+invoke pair.
 		//
-		// The fix snapshots the volatile field to a local before the guard + invoke pair so the field
-		// can be cleared mid-fire without the invocation seeing null. Test design: bg thread spams
-		// notifyChanged() while UI thread alternates setListener(non-null) / setListener(null). Any
-		// NPE caught surfaces as a non-zero failure count. The race is probabilistic by nature, but a
-		// few thousand interleaved iterations reliably hits it on the pre-fix code while the fixed
-		// code remains clean (the snapshot pins whichever value was current at fire()-entry).
+		// Test: bg spams notifyChanged() while UI alternates setListener(non-null) / setListener(null).
+		// Any NPE caught surfaces as a non-zero failure count.
 		int iterations = 5000;
 		StateBus bus = new StateBus();
 		AtomicInteger fires = new AtomicInteger();

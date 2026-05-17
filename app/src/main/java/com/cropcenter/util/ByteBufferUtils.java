@@ -1,8 +1,10 @@
 package com.cropcenter.util;
 
 /**
- * Endian-aware read/write helpers for raw byte arrays. Used throughout the metadata pipeline for JPEG/TIFF/MPF parsing.
- * All methods validate bounds and throw IndexOutOfBoundsException on overflow.
+ * Endian-aware read/write helpers for raw byte arrays. Used throughout the metadata pipeline for JPEG / TIFF / MPF
+ * parsing. EXIF / TIFF fields set the endianness in the IFD header; downstream reads dispatch through
+ * readU16 / readU32 / writeU16 / writeU32 to avoid branching at every call site. u32 reads return long so the full
+ * range fits without sign-bit issues. All methods validate bounds and throw IndexOutOfBoundsException on overflow.
  */
 public final class ByteBufferUtils
 {
@@ -16,12 +18,11 @@ public final class ByteBufferUtils
 	// ── Endian-dispatched ──
 
 	/**
-	 * Read a 16-bit unsigned int at `offset`, dispatching on `isLittleEndian`. EXIF / TIFF fields set the
-	 * endianness in the IFD header; all downstream reads use this dispatcher to avoid branching at every call site.
+	 * Read a 16-bit unsigned integer at offset, dispatching on the IFD-declared byte order.
 	 *
-	 * @param data           byte buffer
+	 * @param data           byte buffer to read from
 	 * @param offset         start of the 2-byte field
-	 * @param isLittleEndian byte-order from the enclosing IFD
+	 * @param isLittleEndian byte order from the enclosing IFD header
 	 * @return value in [0, 65535]
 	 * @throws IndexOutOfBoundsException when the read would exceed buffer bounds
 	 */
@@ -31,13 +32,13 @@ public final class ByteBufferUtils
 	}
 
 	/**
-	 * Read a 32-bit unsigned int at `offset`, dispatching on `isLittleEndian`. Returns a long so the full u32 range
-	 * fits without sign-bit issues.
+	 * Read a 32-bit unsigned integer at offset, dispatching on the IFD-declared byte order. Returns long so
+	 * the full u32 range fits without sign-bit issues.
 	 *
-	 * @param data           byte buffer
+	 * @param data           byte buffer to read from
 	 * @param offset         start of the 4-byte field
-	 * @param isLittleEndian byte-order from the enclosing IFD
-	 * @return value in [0, 0xFFFFFFFF] as long
+	 * @param isLittleEndian byte order from the enclosing IFD header
+	 * @return value in [0, 0xFFFFFFFF] as a long
 	 * @throws IndexOutOfBoundsException when the read would exceed buffer bounds
 	 */
 	public static long readU32(byte[] data, int offset, boolean isLittleEndian)
@@ -46,12 +47,12 @@ public final class ByteBufferUtils
 	}
 
 	/**
-	 * Write a 16-bit unsigned int at `offset`, dispatching on `isLittleEndian`.
+	 * Write a 16-bit unsigned integer at offset, dispatching on the IFD-declared byte order.
 	 *
-	 * @param data           byte buffer
+	 * @param data           byte buffer to write into
 	 * @param offset         start of the 2-byte field
 	 * @param value          unsigned 16-bit value; bits beyond 16 are truncated
-	 * @param isLittleEndian byte-order from the enclosing IFD
+	 * @param isLittleEndian byte order from the enclosing IFD header
 	 * @throws IndexOutOfBoundsException when the write would exceed buffer bounds
 	 */
 	public static void writeU16(byte[] data, int offset, int value, boolean isLittleEndian)
@@ -67,12 +68,12 @@ public final class ByteBufferUtils
 	}
 
 	/**
-	 * Write a 32-bit unsigned int at `offset`, dispatching on `isLittleEndian`.
+	 * Write a 32-bit unsigned integer at offset, dispatching on the IFD-declared byte order.
 	 *
-	 * @param data           byte buffer
+	 * @param data           byte buffer to write into
 	 * @param offset         start of the 4-byte field
 	 * @param value          unsigned 32-bit value; bits beyond 32 are truncated
-	 * @param isLittleEndian byte-order from the enclosing IFD
+	 * @param isLittleEndian byte order from the enclosing IFD header
 	 * @throws IndexOutOfBoundsException when the write would exceed buffer bounds
 	 */
 	public static void writeU32(byte[] data, int offset, long value, boolean isLittleEndian)
@@ -90,9 +91,9 @@ public final class ByteBufferUtils
 	// ── Big-endian ──
 
 	/**
-	 * Read a big-endian u16 at `offset`.
+	 * Read a big-endian 16-bit unsigned integer at offset.
 	 *
-	 * @param data   byte buffer
+	 * @param data   byte buffer to read from
 	 * @param offset start of the 2-byte field
 	 * @return value in [0, 65535]
 	 * @throws IndexOutOfBoundsException when the read would exceed buffer bounds
@@ -104,11 +105,11 @@ public final class ByteBufferUtils
 	}
 
 	/**
-	 * Read a big-endian u32 at `offset`. Return type is long to fit the full u32 range.
+	 * Read a big-endian 32-bit unsigned integer at offset. Returns long so the full u32 range fits.
 	 *
-	 * @param data   byte buffer
+	 * @param data   byte buffer to read from
 	 * @param offset start of the 4-byte field
-	 * @return value in [0, 0xFFFFFFFF] as long
+	 * @return value in [0, 0xFFFFFFFF] as a long
 	 * @throws IndexOutOfBoundsException when the read would exceed buffer bounds
 	 */
 	public static long readU32BE(byte[] data, int offset)
@@ -119,11 +120,11 @@ public final class ByteBufferUtils
 	}
 
 	/**
-	 * Write a big-endian u16 at `offset`. `value` beyond 16 bits is truncated.
+	 * Write a big-endian 16-bit unsigned integer at offset.
 	 *
-	 * @param data   byte buffer
+	 * @param data   byte buffer to write into
 	 * @param offset start of the 2-byte field
-	 * @param value  unsigned 16-bit value
+	 * @param value  unsigned 16-bit value; bits beyond 16 are truncated
 	 * @throws IndexOutOfBoundsException when the write would exceed buffer bounds
 	 */
 	public static void writeU16BE(byte[] data, int offset, int value)
@@ -134,11 +135,11 @@ public final class ByteBufferUtils
 	}
 
 	/**
-	 * Write a big-endian u32 at `offset`. `value` beyond 32 bits is truncated.
+	 * Write a big-endian 32-bit unsigned integer at offset.
 	 *
-	 * @param data   byte buffer
+	 * @param data   byte buffer to write into
 	 * @param offset start of the 4-byte field
-	 * @param value  unsigned 32-bit value
+	 * @param value  unsigned 32-bit value; bits beyond 32 are truncated
 	 * @throws IndexOutOfBoundsException when the write would exceed buffer bounds
 	 */
 	public static void writeU32BE(byte[] data, int offset, long value)
@@ -153,9 +154,9 @@ public final class ByteBufferUtils
 	// ── Little-endian ──
 
 	/**
-	 * Read a little-endian u16 at `offset`.
+	 * Read a little-endian 16-bit unsigned integer at offset.
 	 *
-	 * @param data   byte buffer
+	 * @param data   byte buffer to read from
 	 * @param offset start of the 2-byte field
 	 * @return value in [0, 65535]
 	 * @throws IndexOutOfBoundsException when the read would exceed buffer bounds
@@ -167,11 +168,11 @@ public final class ByteBufferUtils
 	}
 
 	/**
-	 * Read a little-endian u32 at `offset`. Return type is long to fit the full u32 range.
+	 * Read a little-endian 32-bit unsigned integer at offset. Returns long so the full u32 range fits.
 	 *
-	 * @param data   byte buffer
+	 * @param data   byte buffer to read from
 	 * @param offset start of the 4-byte field
-	 * @return value in [0, 0xFFFFFFFF] as long
+	 * @return value in [0, 0xFFFFFFFF] as a long
 	 * @throws IndexOutOfBoundsException when the read would exceed buffer bounds
 	 */
 	public static long readU32LE(byte[] data, int offset)
@@ -182,11 +183,11 @@ public final class ByteBufferUtils
 	}
 
 	/**
-	 * Write a little-endian u16 at `offset`. `value` beyond 16 bits is truncated.
+	 * Write a little-endian 16-bit unsigned integer at offset.
 	 *
-	 * @param data   byte buffer
+	 * @param data   byte buffer to write into
 	 * @param offset start of the 2-byte field
-	 * @param value  unsigned 16-bit value
+	 * @param value  unsigned 16-bit value; bits beyond 16 are truncated
 	 * @throws IndexOutOfBoundsException when the write would exceed buffer bounds
 	 */
 	public static void writeU16LE(byte[] data, int offset, int value)
@@ -197,11 +198,11 @@ public final class ByteBufferUtils
 	}
 
 	/**
-	 * Write a little-endian u32 at `offset`. `value` beyond 32 bits is truncated.
+	 * Write a little-endian 32-bit unsigned integer at offset.
 	 *
-	 * @param data   byte buffer
+	 * @param data   byte buffer to write into
 	 * @param offset start of the 4-byte field
-	 * @param value  unsigned 32-bit value
+	 * @param value  unsigned 32-bit value; bits beyond 32 are truncated
 	 * @throws IndexOutOfBoundsException when the write would exceed buffer bounds
 	 */
 	public static void writeU32LE(byte[] data, int offset, long value)
@@ -218,10 +219,8 @@ public final class ByteBufferUtils
 	private static void checkRead(byte[] data, int offset, int length)
 	{
 		// `offset + length > data.length` could silently wrap to a negative value for offsets near
-		// Integer.MAX_VALUE, bypassing the bounds check. Subtracting on the right (`offset > data.length -
-		// length`) can't overflow when length is small positive (2 or 4 in practice here). Defensive — current
-		// callers cap offsets via metadata pipeline guards well below the overflow range, but the helper
-		// shouldn't rely on that invariant.
+		// Integer.MAX_VALUE. Subtracting on the right (`offset > data.length - length`) can't overflow when
+		// length is small positive (2 or 4 in practice here).
 		if (data == null || offset < 0 || length < 0 || offset > data.length - length)
 		{
 			String dataLen = data == null ? "null" : String.valueOf(data.length);

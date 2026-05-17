@@ -1,10 +1,7 @@
 # CropCenter Code Style
 
-This document captures the coding conventions for this project. Everything here is intentional — a compile-clean patch
-that violates these rules still needs fixing before merge. New files should match; existing files that drift should be
-corrected as they are touched.
-
-Sections are ordered alphabetically. Subsections inside each section are also alphabetical.
+Coding conventions for this project — rule violations need fixing before merge even on a compile-clean patch.
+Sections and subsections are ordered alphabetically.
 
 ## Android / Java idioms
 
@@ -15,10 +12,9 @@ Sections are ordered alphabetically. Subsections inside each section are also al
 - **String equality:** use `.equals()` or `.equalsIgnoreCase()`, never `==`.
 - **try-with-resources** for anything `Closeable` / `AutoCloseable`. Don't hand-roll close-in-finally.
 - **Intentionally swallowed exceptions** use the parameter name `ignored`, and the catch body must contain a `//`
-  comment explaining *why* the throw is safe to drop. The reader needs to see at a glance which throws are expected
-  by design (user mid-keystroke input not yet parseable, EXIF tag missing on a non-camera image, optional MediaStore
-  column absent on this OEM) versus which were silently swallowed bugs. The rule applies whether the catch body is
-  empty or carries fallback logic (`return defaultValue`):
+  comment explaining *why* the throw is safe to drop — readers should see at a glance which throws are expected by
+  design vs. accidentally lost. The rule applies whether the catch body is empty or carries fallback logic
+  (`return defaultValue`):
   ```java
   catch (NumberFormatException ignored)
   {
@@ -92,12 +88,7 @@ Sections are ordered alphabetically. Subsections inside each section are also al
   });
   ```
 
-- **Empty method bodies** on a single line are the one exception — they look sillier with the full Allman expansion:
-
-  ```java
-  @Override
-  public void onStartTrackingTouch(SeekBar seekBar) {}
-  ```
+- **Empty method bodies** stay on one line: `public void onStartTrackingTouch(SeekBar seekBar) {}`.
 
 ## Build & verify
 
@@ -107,8 +98,8 @@ Android build (primary gate):
 ./gradlew.bat compileDebugJavaWithJavac
 ```
 
-Must succeed with no errors. The trailing deprecation warning from `MainActivity.java` is a known Gradle-9 noise and not
-a regression signal.
+Must succeed with no errors. A trailing `Note: ToolbarBinder.java uses or overrides a deprecated API` is tolerated
+Android-platform noise — the warning file may shift as Android deprecates further APIs.
 
 ## Comments
 
@@ -125,11 +116,11 @@ a regression signal.
     Javadoc)
   - Private helpers under ~5 lines with self-documenting names: `isEmpty()`, `reset()`, `toPx(int dp)`
   - `withXxx(value)` record transformers whose behavior is exhaustively described by the name (`withRows`, `withColor`)
-    — a *non-obvious* transformer (`withFormat` accepting strings outside the FORMAT_* set, `withBounds` that also
-    recomputes derived state) still gets Javadoc
+    — a transformer that does more than swap one field (recomputes derived state, validates against a constrained set,
+    nulls a sibling field) still gets Javadoc
 
-When in doubt, write the Javadoc. But `/** Returns the width. */` on `int width()` is worse than nothing — it trains
-readers to skim every Javadoc block and lose the ones that actually say something.
+When in doubt, write the Javadoc — and write the full block (description + every tag) per the completeness rule below.
+A one-liner `/** Returns the width. */` without `@return` is a violation, not a tasteful minimum.
 
 - **When Javadoc IS present, it's a multi-line block.** Inline `/** Foo. */` on one physical line stays out; expand to:
 
@@ -140,13 +131,13 @@ readers to skim every Javadoc block and lose the ones that actually say somethin
   public Thing parse(String s)
   ```
 
-- **When Javadoc IS present, every parameter, return value, and declared exception is documented.** Add `@param` for
-  each parameter, `@return` for every non-void return, and `@throws` for each declared / documented checked exception.
-  The tags are not optional — if the method's parameters and return are obvious enough that tags would be tautological,
-  the rule isn't "skip the tags", it's "the method shouldn't have Javadoc at all" (per the optional-omission list
-  above). Tags should convey what the type and name alone don't: bound semantics, null behavior, ownership transfer,
-  side-effects on inputs (e.g. `recycled when rotation produces a new instance`), the meaning of edge-case return values
-  (`null when the EXIF byte-order field is malformed`), and the trigger conditions for each declared exception.
+- **Javadoc completeness is all-or-nothing.** When Javadoc is present, it must have a description plus `@param` for
+  every parameter, `@return` for every non-void return, and `@throws` for every declared / documented checked
+  exception. Write the full block or omit Javadoc entirely (per the optional-omission list above) — partial Javadoc
+  is a bug. Tags should convey what the type and name alone don't: bound semantics, null behavior, ownership
+  transfer, side-effects on inputs (e.g. `recycled when rotation produces a new instance`), the meaning of edge-case
+  return values (`null when the EXIF byte-order field is malformed`), and the trigger conditions for each declared
+  exception.
 
   ```java
   /**
@@ -169,23 +160,14 @@ readers to skim every Javadoc block and lose the ones that actually say somethin
 - **Section dividers inside a class use `//`**, e.g. `// ── Bounds checks ──`. They group related members rather than
   document a single declaration.
 - **No HTML or Javadoc inline tags in comments.** Do not write `<p>`, `<br>`, `<cite>`, `<code>`, `{@code ...}`, or
-  `{@link ...}`. Also no HTML entities — write `>` / `<` / `&` literally, never `&gt;` / `&lt;` / `&amp;` / `&nbsp;`.
-  This is an Android app — Javadoc is not rendered as HTML for end users, and the tags clutter the source. Use blank
-  Javadoc lines (`*` on its own line) to separate paragraphs. Reference types by their bare name instead of wrapping
-  them in `{@link}`.
-- **Don't state the obvious.** `// increment counter` before `counter++` is noise. This rule applies equally to Javadoc
-  — if the only thing the block would say is what the signature already says, omit it. Write comments that explain
-  *why*, not *what*. Common patterns to delete on sight:
-  - `// Log before` / `// Log after` above a loop whose body is a `Log.d`
-  - `// Update X: do Y` above a one-liner whose call site already says X = Y
-  - `// Find the X with the most votes` above a max-by-key loop with self-documenting variable names like `bestAngle` /
-    `bestCount`
-  - `// Check if tapping on existing point → remove it` above a loop body that calls `removeSelectionPointAt(...)` after
-    a hit-test
-
-Counter-examples (keep): comments that name a JPEG-spec literal (`// SOI` before `0xFFD8`), label a magic number with
-its meaning (`int budget = 60_000; // JPEG thumbnail cap`), or explain a non-obvious invariant / threading concern / why
-a defensive guard is in place.
+  `{@link ...}`. Also no HTML entities — write `>` / `<` / `&` / `"` literally, never `&gt;` / `&lt;` / `&amp;` /
+  `&nbsp;` / `&quot;`. This is an Android app — Javadoc is not rendered as HTML for end users, and the tags clutter
+  the source. Use blank Javadoc lines (`*` on its own line) to separate paragraphs. Reference types by their bare
+  name instead of wrapping them in `{@link}`.
+- **Don't state the obvious.** Comments explain *why*, not *what* — if the only thing the comment / Javadoc would
+  say is what the signature / next line already says, delete it. Counter-examples (keep): comments that name a
+  JPEG-spec literal (`// SOI` before `0xFFD8`), label a magic number (`int budget = 60_000; // JPEG thumbnail cap`),
+  or explain a non-obvious invariant / threading concern / defensive guard.
 
 ## Constants
 
@@ -210,21 +192,12 @@ stays load-bearing:
   tick marks invisible. The Self-audit grep below catches any new `(int) (N * density)` regression.
 - **`util/RotationMath.rotate / inverse`** — every 2D rotation around the image center. Sub-epsilon residual handling
   lives here.
-- **`util/BitmapUtils.getMaxDecodePixels()` + `BitmapUtils.computeInSampleSize` + `BitmapUtils.initialize(Context)`**
-  — the consistent-subsampling `BitmapFactory` decode sites route through this trio (load in
-  `ImageLoadController.applyBytes` and HDR-save re-decode in `UltraHdrCompat.decodeHdrBitmap`). The cap is
-  **device-adaptive**: `initialize` runs once from `MainActivity.onCreate`, reads
-  `ActivityManager.getMemoryInfo().totalMem`, budgets 1/16 of total RAM (4 bytes per ARGB pixel), and clamps to
-  `[32 MP, 512 MP]`. A 12 GB-RAM Samsung flagship gets ~187 MP (200 MP captures decode at `inSampleSize=1`,
-  no quality loss); a 4 GB phone gets ~64 MP; a hypothetical 2 GB phone floors at 32 MP. Two-pass decode:
-  bounds-only pre-pass reads the SOF dims, `computeInSampleSize` picks the smallest power-of-2 sample size
-  that fits the subsampled bitmap within the cap. Power-of-2 contract matters — Android rounds non-power-of-2
-  sampleSize values down internally, blowing the memory budget if a caller hand-rolls a "3" or "5". Both load
-  and HDR-save re-decode sites pull from `state.getOriginalFileBytes()`, so they land on identical
-  `inSampleSize` values — the HDR re-decode's coordinates stay self-consistent with the load-time subsampled
-  `CropRender.cropW/cropH`. `EditAligner.reorientEdit` deliberately does NOT route through this trio: the
-  graft splice requires full-resolution edit primary to match original's full-res metadata / gainmap; OOM
-  is caught and surfaced as a clean "Couldn't decode the edit during reorientation" toast instead.
+- **`util/BitmapUtils.getMaxDecodePixels()` + `BitmapUtils.computeInSampleSize` + `BitmapUtils.initialize(Context)`** —
+  device-adaptive decode-pixel cap. The trio is the chokepoint for every consistent-subsampling `BitmapFactory` site
+  (load in `ImageLoadController.applyBytes`, HDR re-decode in `UltraHdrCompat.decodeHdrBitmap`).
+  `EditAligner.reorientEdit` deliberately bypasses it — the graft splice needs full-resolution edit primary. See
+  `BitmapUtils.computeMaxDecodePixels` Javadoc for the math + device-class examples, and `BitmapUtils.computeInSampleSize`
+  for the power-of-2 sampleSize contract.
 - **`metadata/JpegMarker`** — every JPEG marker byte (`SOI` / `EOI` / `SOS` / `RST_FIRST` / `RST_LAST` / `STUFFING` /
   `TEM`). Don't repeat the hex literal with an explanatory comment.
 - **`metadata/JpegMarkerWalker.findPrimaryEoi(file, endBound)`** — every walk to find the byte just past the primary
@@ -235,12 +208,10 @@ stays load-bearing:
   by `isXmp()`, `HorizonDetector`, and `XmpItemLengthPatcher`.
 - **`model/Format`** — JPEG / PNG enum carrying `extension()` and `mimeType()`. Never re-derive `".jpg"` /
   `"image/jpeg"`; never compare format with `String.equals`.
-- **`crop/CropFitContext.of(...)`** — the rotated-clamp's pre-computed sin/cos/half-extents bundle. Replaced an
-  11-parameter signature; reuse rather than passing the values through individually.
-- **`crop/CropRender.of(...)`** — factory bundling (centerX, centerY, cropW, cropH, imgW, imgH, rotation) for the
-  export pipeline. Final class with a private constructor; the public `of(...)` factory is the only construction path
-  (private ctor closes the (W, H)-vs-(H, W) transposition footgun that a public record's positional canonical
-  constructor would re-open). Has derived `srcX()` / `srcY()`.
+- **`crop/CropRender.of(...)`** — factory bundling (centerX, centerY, cropW, cropH, imgW, imgH, rotation) for the export
+  pipeline. Final class with a private constructor; the public `of(...)` factory is the only construction path (private
+  ctor closes the (W, H)-vs-(H, W) transposition footgun that a public record's positional canonical constructor would
+  re-open). Has derived `srcX()` / `srcY()`.
 - **`util/SafPaths`** — pure-string SAF document-ID parsing (`parentDocIdOf`, `lastSegmentSeparatorEnd`,
   `hasImageSignature`, `hasParentTraversalSegment`). Static, no Context — testable directly.
 - **`model/StateBus`** — listener-dispatch + batch-suppression. CropState delegates here; never re-implement the batch
@@ -363,18 +334,16 @@ A class may become a `record` when **every field is effectively immutable** in p
 mutation, no external `.field = x;` assignments. `AspectRatio`, `ExportConfig`, `GridConfig`, `SelectionPoint`,
 `JpegSegment`, `Graft`, `CropFitContext`, and `AiRegionDetector.AiMask` qualify; classes with internal state machines or
 shared mutable buffers (`CropState`, the controller layer, `RotationRulerView`) do not. `CropRender` was record-eligible
-but converted to a `public final class` with a private constructor + public `of(...)` factory after the record's public
-canonical constructor (forced into (cropH, cropW, imgH, imgW) alphabetical order) became a transposition footgun
-against the codebase's (W, H) convention — when factory ergonomics rule out a positional constructor, drop the record.
-Mutable "config" records should expose `withXxx(value)` transformers alongside their accessors so callers can fold a
-single-field change through `CropState.updateExportConfig` / `updateGridConfig` without building a fresh instance by
-hand.
+but became a final class — see the canonical-helpers entry for the transposition-footgun rationale. When factory
+ergonomics rule out a positional constructor, drop the record. Mutable "config" records should expose `withXxx(value)`
+transformers alongside their accessors so callers can fold a single-field change through `CropState.updateExportConfig`
+/ `updateGridConfig` without building a fresh instance by hand.
 
 - Record components become method accessors: `point.x()` not `point.x`. When converting an existing class, grep for
   `.field` access sites and update them in the same commit.
 - `byte[]` components are fine. Records use `Object.equals` for arrays (reference equality), which matches the
   pre-record behaviour of a plain class without `equals` overrides — no behavioural change.
-- Instance methods (`isFree()`, `ratio()`) are allowed; records aren't just data bags.
+- Instance methods on records are fine (`isFree()`, `ratio()`).
 
 ## Method ordering
 
@@ -388,16 +357,16 @@ hand.
   follow. Within the static and instance sub-blocks, alphabetical sort still applies.
 - Android lifecycle overrides (`onCreate`, `onDestroy`, `onNewIntent`, `onDraw`, `onTouchEvent`) are ordinary protected
   methods — they sort alphabetically in their access-level section.
-- **Sort order is case-sensitive ASCII** (`compareTo` on `String`, not `compareToIgnoreCase`). Uppercase letters
-  sort before lowercase in the ASCII table — capital `'A'` (0x41) precedes lowercase `'a'` (0x61), so methods or
-  fields whose names start with an uppercase letter come before their lowercase-prefix siblings within the same
-  access tier. Concretely: `readU16` (capital `U` = 0x55) sorts BEFORE `readback...` (lowercase `b` = 0x62)
-  because after the shared `read` prefix the next character favours uppercase. Pick this convention so the audit
-  script and the IDE's default `Ctrl-F`/`Ctrl-Shift-F` ordering agree, and so a hand-edit can't oscillate between
-  case-insensitive and case-sensitive readings of "alphabetical" depending on which side of `Aa` the next
-  character lands on. The `scripts/audit.py method-order` check enforces this; section dividers that group
-  related members (endian-dispatched routers in `ByteBufferUtils`, image-processing primitives in
-  `HorizonDetector`) are explicit exceptions documented in their own files.
+- **Sort order is case-sensitive ASCII** (`compareTo` on `String`, not `compareToIgnoreCase`). Uppercase letters sort
+  before lowercase in the ASCII table — capital `'A'` (0x41) precedes lowercase `'a'` (0x61), so methods or fields whose
+  names start with an uppercase letter come before their lowercase-prefix siblings within the same access tier.
+  Concretely: `readU16` (capital `U` = 0x55) sorts BEFORE `readback...` (lowercase `b` = 0x62) because after the shared
+  `read` prefix the next character favours uppercase. Pick this convention so the audit script and the IDE's default
+  `Ctrl-F`/`Ctrl-Shift-F` ordering agree, and so a hand-edit can't oscillate between case-insensitive and case-sensitive
+  readings of "alphabetical" depending on which side of `Aa` the next character lands on. The `scripts/audit.py
+  method-order` check enforces this; section dividers that group related members (endian-dispatched routers in
+  `ByteBufferUtils`, image-processing primitives in `HorizonDetector`) are explicit exceptions documented in their own
+  files.
 
 ### Method references vs lambdas
 
@@ -439,23 +408,25 @@ When in doubt, stay imperative. Streams are a clarity tool, not a goal.
   field.
 - Methods that could be `private` should be. `public` only if the class contract actually exposes them.
 - Classes/interfaces that could be package-private should be.
-- A constant used in only one method should be declared `final` inside that method, not at class scope.
-- A constant used in only one class should be `private static final` on that class.
-- A constant used across multiple files should live in a shared utility class (`ThemeColors`, etc.) — but only then.
+- Scope a constant to its narrowest use site: `final` inside one method, `private static final` on a single class,
+  or a shared utility (`ThemeColors`, etc.) only when ≥ 2 files need it.
 - Unused fields and dead code get deleted, not commented out.
 
 ## Self-audit
 
-Before declaring a change done, these checks should come back empty. The fastest path is the
-consolidated runner:
+Before declaring a change done, run the consolidated runner:
 
 ```bash
-python scripts/audit.py   # runs over-cols, ignored-catches, static-first, method-order, adjacent-comment-styles, final-classes, reflow, lsloc
+python scripts/audit.py
 ```
 
-Individual subcommands (`python scripts/audit.py <name>`) are listed below alongside the awk
-one-liners they replace. The awk forms are canonical under bash; the Python audit runner is the
-cross-shell equivalent (Windows / PowerShell where escaping awk quoting is fragile).
+The runner has 8 checks: 6 failing (`over-cols`, `ignored-catches`, `static-first`, `method-order`,
+`adjacent-comment-styles`, `final-classes`) and 2 advisory (`reflow`, `lsloc` — always print, never fail). Exit code 0
+means the 6 failing checks are clean. Individual subcommands (`python scripts/audit.py <name>`) are available for any
+of the 8. The awk one-liners below cover the additional checks audit.py doesn't (inline FQNs, HTML/Javadoc tags,
+dp-px truncation, etc.) — all should produce zero output on a clean tree. The sibling
+`python scripts/refactor.py <code|comments|md|strip-blanks>` runner handles bulk-reflowing source / comments /
+markdown when a width-violation needs a mechanical fix.
 
 ```bash
 # Double-indent continuations (any line that starts with an operator and is
@@ -492,21 +463,28 @@ grep -rnE '<(p|br|code|cite|i|b|em|strong|ul|ol|li|pre)>' app/src/main/java
 grep -rnE '\{@(code|link)' app/src/main/java
 grep -rnE '&(amp|gt|lt|nbsp|quot);' app/src/main/java app/src/test/java
 
-# (int) (N * density) truncation — should be DpToPx.toPx(N, density). The
-# truncating form drops 1dp values to zero on density-0.75 screens. The
-# Math.round form in DpToPx is the documented fix.
+# (int) (N * density) truncation — should be DpToPx.toPx(N, density) (see
+# Canonical helpers section for why).
 grep -rnE '\(int\)\s*\([^)]*\*\s*density\)' app/src/main/java
 
-# Lingering one-letter variable decls that aren't standard idioms:
+# Lingering one-letter variable decls that aren't standard idioms. Allowlist matches the
+# single-letter idioms under Variable names: i/j/k loop indices, n read-count, e caught
+# exception, x/y 2D coords, r/g/b RGB channels. `ctx` (the 3-char Android Context idiom) is
+# filtered defensively against lines where it appears as part of a return type / preceding
+# word that the broader regex picks up incidentally.
 grep -rnE '\b(int|float|double|long|boolean|byte\[\]|String|[A-Z]\w+)\s+[a-z]\s*[=;,)]' app/src/main/java \
     | grep -vE 'catch|for \(|\bi\b|\bj\b|\bk\b|\bn\b|\be\b|\bx\b|\by\b|\br\b|\bg\b|\bb\b|\bctx\b'
 
 # Cryptic two-letter lambda parameter tuples:
 grep -rnE '\((d, w|b, c|sb, p|s, a|v, i)\)\s*->' app/src/main/java
 
-# Inlined conditionals (violates always-braced rule):
-grep -rnE '^\s*(if|else if|for|while)\s*\([^)]*\)\s+[a-zA-Z_]' app/src/main/java \
-    | grep -vE '\s+\{\s*$|\s+\{\s*//'
+# Inlined conditionals (violates always-braced rule). Matches a same-line statement after
+# `if (...)` / `else if (...)` / `for (...)` / `while (...)`; the parenthesis matcher uses a
+# no-paren character class so casts inside the condition don't trick it into matching the cast
+# as the body. The trailing `[(.=]` requires the would-be body to be a real statement (method
+# call, field access, assignment) rather than just a bare identifier — a `{` opener would have
+# `{` not `[(.=]` after the identifier, so single-statement non-braced bodies are the only hits.
+grep -rnE '^\s*(if|else if|for|while)\s*\(([^()]|\([^()]*\))*\)\s+[a-zA-Z_][a-zA-Z0-9_]*\s*[(.=]' app/src/main/java
 
 # Hand-rolled Math.max(lo, Math.min(hi, x)) — use Math.clamp instead:
 grep -rnE 'Math\.max\([^,]+,\s*Math\.min\(' app/src/main/java
@@ -514,17 +492,9 @@ grep -rnE 'Math\.max\([^,]+,\s*Math\.min\(' app/src/main/java
 # Single-line /** ... */ Javadoc on one physical line — expand to multi-line:
 grep -rnE '^\s*/\*\*[^*]*\*/\s*$' app/src/main/java
 
-# Lines exceeding the 120-column rendered limit (tab width 8). Pure stdlib
-# awk computation so it matches what the renderer actually displays — bash
-# grep counts UTF-8 bytes and false-positives on em-dashes / arrows. Fast
-# fix: extract padding-side locals (padHor / padVer) so multi-arg
-# setPadding(...) calls with DpToPx.toPx(...) wraps fit.
-awk '{ n=0; for (i=1;i<=length($0);i++) { c=substr($0,i,1); if (c=="\t") n=int(n/8)*8+8; else n++ } if (n>120) print FILENAME":"NR" cols="n }' \
-    $(find app/src -name '*.java')
-
-# Python equivalent of the awk above for environments where escaping the awk
-# quoting is fragile (Windows / PowerShell). Same tab=8 expansion, same output
-# format. Either runner is canonical — pick the one that works in your shell.
+# Lines exceeding the 120-column rendered limit (tab width 8). Fast fix:
+# extract padding-side locals (padHor / padVer) so multi-arg setPadding(...)
+# calls with DpToPx.toPx(...) wraps fit.
 python scripts/audit.py over-cols app/src
 
 # // comments directly above a class or method declaration (use Javadoc instead):
@@ -549,12 +519,8 @@ grep -rnE '/\*[^*\n/][^\n]*\*/' app/src/main/java
 # output = clean.
 python scripts/audit.py static-first app/src/main/java app/src/test/java
 
-# Catches that swallow an exception without explaining why. Flags any catch
-# whose parameter is named `ignored` or whose body is empty AND that has no
-# // comment line in the body. Mirrors the "Intentionally swallowed
-# exceptions" rule under Android / Java idioms — a reader should see at a
-# glance which throws are expected by design (mid-keystroke parse failure,
-# missing optional EXIF tag) versus accidentally lost. Empty output = clean.
+# Catches that swallow an exception without explaining why — enforces the
+# "Intentionally swallowed exceptions" rule above. Empty output = clean.
 python scripts/audit.py ignored-catches app/src/main/java app/src/test/java
 
 # Concrete classes that should be `final` per Effective Java item 19. The
@@ -569,18 +535,16 @@ python scripts/audit.py final-classes app/src/main/java app/src/test/java
 # acronym that should be camelCase — e.g. scanIFD → scanIfd, spinnerAR →
 # spinnerAr). Catches non-constant identifiers only; SCREAMING_SNAKE and
 # TAG are excluded by requiring a lowercase character before the run.
-# False-positive filter: standard Android API methods (getFD, getXVelocity),
-# single-letter axis suffixes followed by a real word (XFloat, YFloat), and
-# Samsung JSON literal keys (isBrightnessIPE etc. are strings inside "…").
+# False-positive filter: standard Android / JDK API methods (getFD,
+# getXVelocity, readNBytes), single-letter axis suffixes followed by a real
+# word (XFloat, YFloat), least-squares math accumulators (sumXX, sumXY for
+# Σx²/Σxy in HorizonDetector's regression), and vendor-key string literals
+# (any multi-cap run inside "…" — the final regex clause catches them).
 grep -rnE '\b[a-z][a-zA-Z0-9]*[a-z][A-Z][A-Z]+[a-zA-Z0-9]*\b' app/src/main/java \
-    | grep -vE 'SCREAMING|TAG\s*=|getFD\(|getXVelocity|[XY]Float|[XY]Int|\\\\?"[^"]*[A-Z]{2,}'
+    | grep -vE 'SCREAMING|TAG\s*=|getFD\(|getXVelocity|readNBytes|sumXX|sumXY|[XY]Float|[XY]Int|\\\\?"[^"]*[A-Z]{2,}'
 ```
 
-Build must also be clean:
-
-```bash
-./gradlew.bat compileDebugJavaWithJavac
-```
+Build must also be clean (see Build & verify section above).
 
 ## Theme colors
 
@@ -609,14 +573,12 @@ it there rather than copying the hex.
 - Do not use `l` (easily confused with `1`) or `I`/`O` (confused with `0`).
 - Android-specific short names that are acceptable because of widespread convention: `bmp` (Bitmap), `dp`/`dp4`/`dp8`
   (density-pixel conversions), `tv` (TextView) *inside tiny helper methods*, `lp` (LayoutParams) *inside tiny helper
-  methods*, `pp` (Paint) *inside tight drawing loops*. "Tiny" means roughly ≤ 15 lines and a single obvious purpose. A
-  170-line `show()` method with `colsLP`, `rowsLP`, `seekLP`, `spLP`, `btnLP` doesn't qualify — use `colsLayoutParams`
-  or spell it out as a descriptive `widthRowLp` / `alphaRowLp` / etc.
-- **Don't stack abbreviations.** Compounds of two short tokens compound their opacity: `srcGm`, `gmBmp`, `lblA`, `txtW`,
-  `seekA` force the reader to decode two pieces at once. Spell at least one side out: `sourceGainmap`, `gainmapBitmap`,
-  `alphaLabel`, `widthValueText`, `alphaSeekBar`. This is especially important in files ABOUT that data (a 350-line
-  `CropEngine` with `cx`/`cy`/`cw`/`ch` locals is worse than the same file with `centerX`/`centerY`/`cropW`/`cropH`,
-  because the abbreviations are the main content).
+  methods*, `pp` (Paint) *inside tight drawing loops*. "Tiny" means ≤ 15 lines and a single obvious purpose. Larger
+  methods should spell short names out descriptively (`colsLayoutParams`, `widthRowLp`, etc.).
+- **Don't stack abbreviations.** Compounds of two short tokens compound their opacity. Spell at least one side out:
+  `sourceGainmap` not `srcGm`, `gainmapBitmap` not `gmBmp`, `alphaLabel` not `lblA`. Especially important in files
+  ABOUT that data: a 350-line `CropEngine` with `cx`/`cy`/`cw`/`ch` locals is worse than the same file with
+  `centerX`/`centerY`/`cropW`/`cropH`, because the abbreviations are the main content.
 - **Cross-file consistency.** Pick one name per concept and use it everywhere. The image-axis midpoint is `imageMidX` /
   `imageMidY`, not `imgMidX` in one file and `imageMidX` in another; the un-rotated coordinate pair is `unrotatedX` /
   `unrotatedY`, not `unRotX` / `unRotY`; the image's screen-center is `imageScreenCenterX` / `imageScreenCenterY`, not

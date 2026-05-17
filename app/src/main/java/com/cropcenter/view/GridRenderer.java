@@ -6,11 +6,13 @@ import android.graphics.Paint;
 import com.cropcenter.model.GridConfig;
 
 /**
- * Draws grid overlay lines within the crop rectangle at the same integer image-pixel positions the exporter's
- * CropExporter.drawGridPixels bakes into the output. Snapping to integer image pixels means a zoomed-in preview shows
- * the grid lines at exactly the columns/rows the export will write — without the snap, Canvas anti-aliasing renders
- * lines at sub-pixel screen positions that diverge from the exporter's rounded pixel positions by up to half an image
- * pixel (visible as several screen pixels of offset at 10×+ zoom).
+ * Draws grid overlay lines within the crop rectangle at positions that match the exporter's
+ * CropExporter.drawGridPixels. Each line is at `cropOrigin + Math.round(cropExtent * i / count)` — the rounded
+ * relative-offset is an integer image-pixel step, so the line lands on an integer image pixel when the crop origin is
+ * integer (the export's crop-output-space coordinate system) and on an equivalent fractional source-image position
+ * when the preview's crop origin is fractional (centerX − cropW/2f for odd cropW with even centerX, etc.). Either way
+ * the relative spacing inside the crop matches the export's baked positions byte-for-byte, so a zoomed-in preview
+ * shows the grid lines at exactly the columns / rows the export will write.
  *
  * The rounding formula mirrors CropExporter.gridLinePixel exactly: first-half lines round `cropExtent * i / count`;
  * second-half lines mirror through `cropExtent - round(cropExtent * (count - i) / count)` (relative to cropExtent,
@@ -18,9 +20,9 @@ import com.cropcenter.model.GridConfig;
  * selection markers still sit at the grid intersection; the 0.5-pixel export divergence for odd cropExtent + count ∈
  * {2, 4} is accepted as the only remaining mismatch, and rule-of-thirds (count == 3, the common case) has no middle.
  *
- * Side effect: during a rotation sweep, as CropEngine.recomputeCrop changes cropW by integer amounts, the rounded line
- * positions can jump by one pixel at cropW parity boundaries. The rotation ruler moves in discrete ticks so this
- * happens at tick rate, not per-frame — acceptable trade for preview-matches-export fidelity.
+ * Side effect: during a rotation sweep, as CropEngine.recomputeCrop changes cropW by integer amounts, the rounded
+ * relative offsets can jump by one pixel at cropW parity boundaries. The rotation ruler moves in discrete ticks so
+ * this happens at tick rate, not per-frame — acceptable trade for preview-matches-export fidelity.
  */
 public final class GridRenderer
 {
@@ -85,15 +87,17 @@ public final class GridRenderer
 	}
 
 	/**
-	 * Position line i of a count-N grid along one axis, snapped to an integer image pixel so the preview matches
-	 * CropExporter.gridLinePixel's rounding.
+	 * Position line i of a count-N grid along one axis. Returns `cropOrigin + Math.round(...)` so the relative
+	 * offset inside the crop matches CropExporter.gridLinePixel's integer rounding byte-for-byte; the absolute
+	 * image-pixel coordinate is integer when cropOrigin is integer and fractional when it isn't, which keeps
+	 * preview and export aligned regardless of float-origin state.
 	 *
 	 * Middle line (i * 2 == count) preserves cropCenter rather than snapping — this keeps single-point selection
 	 * markers at the grid intersection. Count ∈ {2, 4} with odd cropExtent is the only case where this line
 	 * disagrees with the export by 0.5 px; rule of thirds (count == 3) has no middle line.
 	 *
-	 * Second-half lines mirror through cropExtent (not cropCenter) so the rounding matches the exporter's `dim -
-	 * round(dim * (count - i) / count)` exactly.
+	 * Second-half lines mirror through cropExtent (not cropCenter) so the rounding matches the exporter's
+	 * `dim - round(dim * (count - i) / count)` exactly.
 	 */
 	private static float linePos(int i, int count, float cropOrigin, int cropExtent, float cropCenter)
 	{

@@ -42,13 +42,9 @@ public final class SeftExtractor
 			return null;
 		}
 
-		// Find the SEFT trailer's true start by walking the JPEG marker chain forward — first to primary's EOI,
-		// then (if a gain map is present) to the gain map's EOI. The SEFT trailer starts immediately after.
-		//
-		// The previous backwards-FF-D9 scan from len-9 could land on a byte-stuffed FF D9 inside a SEFT data
-		// block (which can hold embedded thumbnails — themselves JPEGs ending in FF D9 — and edit-history
-		// blobs). Walking the JPEG marker chain instead of pattern-matching on raw bytes ignores byte-stuffed
-		// 0xFFD9 within entropy data and stops only at real EOI markers.
+		// Walk the JPEG marker chain forward — first to primary's EOI, then (if a gain map is present)
+		// to the gain map's EOI. The SEFT trailer starts immediately after. (Forward walking required
+		// because SEFT data can short-circuit a backward FF D9 scan — see JpegMarkerWalker.findEoi.)
 		int primaryEnd = JpegMarkerWalker.findPrimaryEoi(file, file.length);
 		if (primaryEnd < 0)
 		{
@@ -57,14 +53,12 @@ public final class SeftExtractor
 
 		int trailerStart;
 		if (hasGainMap && primaryEnd + 1 < file.length
-			&& (file[primaryEnd] & 0xFF) == 0xFF && (file[primaryEnd + 1] & 0xFF) == 0xD8)
+			&& (file[primaryEnd] & 0xFF) == JpegMarker.PREFIX
+			&& (file[primaryEnd + 1] & 0xFF) == JpegMarker.SOI)
 		{
 			// Gain map present — walk it to find its EOI; SEFT trailer starts right after. findEoi
-			// scans `file` directly in [primaryEnd, sliceEnd) without allocating a Arrays.copyOfRange
-			// slice. On a 100 MB HDR source with gain map at byte 30 MB, the previous slice form
-			// allocated ~70 MB of transient byte[] just to give findPrimaryEoi a buffer whose offset 0
-			// was the gain-map SOI. Sister site GainMapExtractor.extract migrated to findEoi earlier
-			// for the same reason.
+			// scans the file directly in [primaryEnd, sliceEnd) — avoids the ~70 MB transient byte[]
+			// a Arrays.copyOfRange slice would allocate on a 100 MB HDR source.
 			int sliceEnd = file.length - FOOTER_SIZE;
 			if (sliceEnd <= primaryEnd)
 			{

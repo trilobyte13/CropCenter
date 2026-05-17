@@ -177,10 +177,9 @@ public final class HorizonDetectorTest
 	@Test
 	public void detectFromMetadataPrefersStandardXmpOverExtendedXmp() throws IOException
 	{
-		// Round-22 test coverage B: pin the three-pass priority chain. Standard XMP must return its
-		// Roll value WITHOUT invoking Extended XMP reassembly, even when both segments are present and
-		// disagree. A refactor that moved the reassemble call before the primary loop would change the
-		// returned value here without any other failing assertion.
+		// Pin the three-pass priority chain. Standard XMP must return its Roll value WITHOUT invoking
+		// Extended XMP reassembly, even when both segments are present and disagree. A refactor moving
+		// the reassemble call before the primary loop would silently change the returned value.
 		String guid = "1111222233334444AAAABBBBCCCCDDDD";
 		String chunk0 = "<rdf:Description xmlns:c='c' c:Ro";
 		String chunk1 = "ll=\"9.99\"/>";
@@ -197,10 +196,10 @@ public final class HorizonDetectorTest
 	@Test
 	public void detectFromMetadataReassemblesAdobeExtendedXmpAcrossDistinctGuidGroups() throws IOException
 	{
-		// Round-22 test coverage C: spec-legal multiple GUID groups in one file. The first group's
-		// chunks carry no Roll/Tilt; the SECOND alphabetic group carries a Roll attribute split across
-		// its two chunks. A speed-tweak that broke after the first GUID group, or that sorted only by
-		// offset and lost the GUID primary key, would mis-reassemble and miss the Roll value.
+		// Spec-legal multiple GUID groups in one file. The first group's chunks carry no Roll/Tilt; the
+		// SECOND alphabetic group carries a Roll attribute split across its two chunks. A speed-tweak
+		// that breaks after the first GUID group, or sorts only by offset and loses the GUID primary
+		// key, would mis-reassemble and miss the Roll value.
 		String guidA = "AAAA0000000000000000000000000000";
 		String guidB = "BBBB0000000000000000000000000000";
 		String aChunk0 = "<rdf:Description xmlns:dc='dc' dc:tit";

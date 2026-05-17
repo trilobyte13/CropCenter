@@ -418,8 +418,11 @@ final class SaveController
 			restorePriorSaveSettings();
 			return;
 		}
-		// Extension follows the format the user just picked in SaveDialog; if they change the extension in the
-		// SAF picker, applyFormatFromFilename updates ExportConfig.format again before encode.
+		// Extension follows the format the user just picked in SaveDialog. The SAF result path validates
+		// the picker-edited name against the requested format: matching (or extensionless) names
+		// continue and applyFormatFromFilename re-derives the format; mismatched known/unknown
+		// extensions are rejected up-front via showExtensionMismatchDialog to avoid MIME/type
+		// disagreements between the SAF document and the encoder's output bytes.
 		String stem = host.getState().getOriginalFilename();
 		if (stem == null || stem.isEmpty())
 		{
@@ -466,15 +469,13 @@ final class SaveController
 	 *
 	 * isDestroyed pre-check is the first line of defense against the config-change race; the
 	 * try/catch around .show is the second (the race window between the check and the actual show is
-	 * still open). Mirrors the pattern in showReplaceDialog and showExtensionMismatchDialog.
+	 * still open).
 	 */
 	private void openSaveOptionsDialog()
 	{
-		// BadTokenException guard — if onDestroy ran between the user's Save tap and this call (rare but
-		// reachable on config change racing the handler), AlertDialog.Builder would throw on .show(). The
-		// isDestroyed pre-check + try/catch around the show call mirror the pattern in showReplaceDialog,
-		// showExtensionMismatchDialog, and GraftController.confirmOversizedThenApply — config-change races
-		// can land between the pre-check and the actual show, so the catch is the second line of defense.
+		// BadTokenException guard — if onDestroy ran between the user's Save tap and this call (config
+		// change racing the handler), AlertDialog.Builder throws on .show(). isDestroyed is the first
+		// line of defense; the try/catch is the second (the race window between them is still open).
 		if (host.isDestroyed())
 		{
 			return;
@@ -541,30 +542,18 @@ final class SaveController
 
 	/**
 	 * Probe the SAF-returned URI for pre-existing content and dispatch to the appropriate save path. The URI
-	 * may point to a fresh placeholder document just created by SAF (no prior content; brand-new save) OR to
-	 * an existing document the provider returned after its own Replace prompt (Case A exact-name match, or
-	 * Case C where the user typed an existing name in the picker). The URI's prior-content status is
-	 * ambiguous from the URI alone — querySafFileSize returns 0 for both empty placeholders and zero-byte
-	 * existing files, and -1 from providers that don't expose OpenableColumns.SIZE — so the crash-safe
-	 * write-then-swap pattern via a sibling placeholder is the conservative default. The wasOverwrite
-	 * classification:
-	 *   priorSize  >  0                 → confirmed overwrite (real content)
-	 *   priorSize == 0                  → ambiguous (treat as not-overwrite; empty placeholder nearly
-	 *                                     always, no meaningful content there either way)
-	 *   priorSize == -1 (no-SIZE)       → fall back to a content-stream probe; if the URI serves at least
-	 *                                     one byte it's a real existing file regardless of missing SIZE
-	 *                                     metadata. Probe returns false on empty / provider-refused /
-	 *                                     security-exception, all of which coincide with "don't claim
-	 *                                     overwrite".
+	 * may point to a fresh placeholder (brand-new save) OR to an existing document the provider returned
+	 * after its own Replace prompt. The prior-content status is ambiguous from the URI alone, so the
+	 * crash-safe write-then-swap pattern via a sibling placeholder is the conservative default. The
+	 * wasOverwrite classification:
+	 *   priorSize  >  0           → confirmed overwrite
+	 *   priorSize == 0            → ambiguous (treat as not-overwrite; nearly always an empty placeholder)
+	 *   priorSize == -1 (no-SIZE) → fall back to a content-stream probe (one byte served = real file)
 	 *
-	 * Shared by Case A (exact-name match) and Case C (user-renamed without "(N)" pattern): the previous
-	 * Case-C straight-to-exportTo path used preserveOnFailure=false and could truncate pre-existing content
-	 * on path-backed providers when the user typed an existing name and accepted the provider's own Replace
-	 * prompt; it also reported "Saved" for confirmed overwrites that should have toasted "Replaced".
+	 * Shared by Case A (exact-name match) and Case C (user-renamed without "(N)" pattern).
 	 *
 	 * @param newUri SAF document URI returned by the picker
-	 * @param name   user's intended filename — Case A: original `requested`; Case C: `chosen` (the
-	 *               user-edited name and what should appear in a "Replaced X" toast)
+	 * @param name   user's intended filename — Case A: original `requested`; Case C: `chosen`
 	 */
 	private void routeCrashSafeSave(Uri newUri, String name)
 	{
@@ -616,11 +605,9 @@ final class SaveController
 			+ "the format in the format picker instead.";
 		try
 		{
-			// BadTokenException guard mirrors openSaveOptionsDialog / showReplaceDialog /
-			// GraftController.confirmOversizedThenApply — config-change races can land between the
-			// isDestroyed pre-check and the actual show() call (the Activity finishes after the
-			// pre-check but before WindowManager accepts the dialog). The catch keeps the warning
-			// best-effort instead of crashing the UI thread.
+			// BadTokenException guard: config-change races can land between the isDestroyed pre-check
+			// and the actual show() call (the Activity finishes after the pre-check but before
+			// WindowManager accepts the dialog). The catch keeps the warning best-effort.
 			new AlertDialog.Builder(host.getActivity())
 				.setTitle("Change format in Save, not the picker")
 				.setMessage(message)
@@ -637,7 +624,7 @@ final class SaveController
 	 * Build and show the Replace / Keep / Cancel dialog for case (B) of the save flow. Guards against the
 	 * Activity finishing between the SAF result and this prompt: without the isDestroyed gate, .show() throws
 	 * BadTokenException before any button / cancel listener runs, leaving savePending stuck and the SAF
-	 * placeholder undeleted. Mirrors the same pattern in openSaveOptionsDialog and showExtensionMismatchDialog.
+	 * placeholder undeleted.
 	 */
 	private void showReplaceDialog(Uri newUri, String requested, String safName)
 	{
@@ -655,11 +642,10 @@ final class SaveController
 		try
 		{
 			// Register with the host's transient-dialog tracker so a Share/View intent or graft apply
-			// dismisses this dialog before the bg state.reset(). Without this, a stale Replace prompt
-			// could outlive the source image it was opened for — pressing Replace/Keep then would write
-			// image B's state to image A's SAF target. dismissTransientDialogs uses
-			// cancel(), which fires the OnCancelListener below — so the cleanupPlaceholder + savePending
-			// reset still run even on forced dismissal.
+			// dismisses this dialog before bg state.reset(). Without this, a stale Replace prompt could
+			// outlive its source image — Replace/Keep would write image B's state to image A's SAF
+			// target. dismissTransientDialogs uses cancel(), so cleanupPlaceholder + savePending reset
+			// still run on forced dismissal.
 			host.registerTransientDialog(new AlertDialog.Builder(host.getActivity())
 				.setTitle("Replace " + requested + "?")
 				.setMessage(message)

@@ -10,10 +10,10 @@ package com.cropcenter.metadata;
  * immutable: patchers produce NEW segments via `Result.ok(...)` rather than mutating in place, and
  * `CropState.getJpegMeta()` wraps the list with `Collections.unmodifiableList`. A caller who writes through the
  * `data()` accessor would silently corrupt later metadata-injection / save / round-trip steps that share the
- * same reference. Per CLAUDE.md's "byte[] components are fine" guidance, defensive copies are NOT made (every
- * load decodes 5-15 segments and copying on every accessor read would be a measurable hot-path tax) — the
- * convention is documentation-level immutability, enforced by code review and the patchers' replace-don't-mutate
- * pattern. Callers that need an actually-defensive copy can use `Arrays.copyOf(seg.data(), seg.data().length)`.
+ * same reference. Defensive copies are NOT made because every load decodes 5-15 segments and copying on each
+ * accessor read would be a measurable hot-path tax — the convention is documentation-level immutability, enforced
+ * by code review and the patchers' replace-don't-mutate pattern. Callers that need an actually-defensive copy can
+ * use `Arrays.copyOf(seg.data(), seg.data().length)`.
  */
 public record JpegSegment(int marker, byte[] data)
 {
@@ -36,9 +36,6 @@ public record JpegSegment(int marker, byte[] data)
 	// Samsung writes EXIF at 65535 but XMP at 65533 to leave room for stuffing bytes).
 	public static final int MAX_SEGMENT_BYTES = 65535;
 
-	/**
-	 * Check if this is an EXIF APP1 segment (starts with "Exif\0\0").
-	 */
 	public boolean isExif()
 	{
 		return marker == JpegMarker.APP1 && data.length >= 10
@@ -71,9 +68,6 @@ public record JpegSegment(int marker, byte[] data)
 		return true;
 	}
 
-	/**
-	 * Check if this is an ICC Profile APP2 segment (starts with "ICC_PROFILE\0").
-	 */
 	public boolean isIcc()
 	{
 		if (marker != JpegMarker.APP2 || data.length < 18)
@@ -91,18 +85,12 @@ public record JpegSegment(int marker, byte[] data)
 		return true;
 	}
 
-	/**
-	 * Check if this is an MPF APP2 segment (starts with "MPF\0").
-	 */
 	public boolean isMpf()
 	{
 		return marker == JpegMarker.APP2 && data.length >= 8
 			&& data[4] == 'M' && data[5] == 'P' && data[6] == 'F' && data[7] == 0;
 	}
 
-	/**
-	 * Check if this is an XMP APP1 segment.
-	 */
 	public boolean isXmp()
 	{
 		if (marker != JpegMarker.APP1 || data.length < 4 + XMP_HEADER.length())

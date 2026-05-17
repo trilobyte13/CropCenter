@@ -50,11 +50,10 @@ public final class CropExporterPngExifTest
 		assertNotEquals("Splice must preserve IFD0's next-IFD pointer (rebuilt IFD1 carries new thumbnail)",
 			0L, nextIfdPointer);
 
-		// Round-35 test-coverage P1: pin content provenance — without this assertion a regression where
-		// the splice silently writes back the source 0xAA bytes (or the splice no-ops and the source's
-		// IFD1 stays intact under a different reject path) would still pass the non-zero-pointer check.
-		// Walk the rebuilt IFD1, read JPEGInterchangeFormat (offset, length), and assert the bytes at
-		// that offset are the fresh 0x55 sentinel rather than the source 0xAA pattern.
+		// Pin content provenance — without this, a regression where the splice silently writes the
+		// source 0xAA bytes (or no-ops with source's IFD1 intact) still passes the non-zero-pointer
+		// check. Walk the rebuilt IFD1, read JPEGInterchangeFormat, and assert the bytes are the fresh
+		// 0x55 sentinel rather than the source 0xAA pattern.
 		int ifd1Off = (int) nextIfdPointer; // TIFF-relative; patched bytes are unwrapped TIFF
 		int ifd1EntryCount = ByteBufferUtils.readU16(patched, ifd1Off, true);
 		int thumbOff = -1;

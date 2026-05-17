@@ -74,8 +74,7 @@ public final class GainMapComposer
 		// Null return means Item:Length couldn't be safely rewritten — either it lives in Extended XMP
 		// (>64 KB packet form), or it lives in standard XMP but the segment is unpatchable (over-cap
 		// segLen, malformed quote, unterminated digit run). The patcher logs the specific reason at
-		// the W level before returning null; we just drop HDR here rather than ship stale Item:Length
-		// rather than ship a misleading file.
+		// the W level before returning null; we drop HDR here rather than ship stale Item:Length.
 		byte[] patched = XmpItemLengthPatcher.patch(primary, gainMap.length);
 		if (patched == null)
 		{

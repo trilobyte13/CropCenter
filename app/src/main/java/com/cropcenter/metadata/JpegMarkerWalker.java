@@ -34,6 +34,11 @@ public final class JpegMarkerWalker
 	 * within `endBound` — caller treats this as "no recoverable scan" and surfaces a real failure toast
 	 * rather than relying on an undefined post-EOF read.
 	 *
+	 * Forward marker-chain walking (vs. backward FF D9 scan) is required for any JPEG embedded in a container
+	 * that holds other binary content — SEFT trailers can contain embedded thumbnails whose own FF D9 EOIs and
+	 * arbitrary edit-history bytes would short-circuit a backward scan onto a wrong terminator. Walking the
+	 * marker chain forward stops only at the first real EOI.
+	 *
 	 * Hardened against four classes of malformed / adversarial input:
 	 *   - segLen < 2 (per spec the length must include the 2 length bytes themselves; smaller is invalid and
 	 *     would advance off by 2 or 3 instead of the real segment size, getting stuck mid-segment)
@@ -189,8 +194,7 @@ public final class JpegMarkerWalker
 		// sosLen < 2 is structurally impossible for a well-formed SOS. Without this guard, sosLen=0 makes
 		// scanOff = off + 2 (lands inside the length field) and sosLen=1 makes scanOff = off + 3 (lands
 		// inside the SOS header body); both let the entropy walk treat the header bytes as scan content
-		// and accept a coincidental FF D9 there as a "valid EOI". Mirrors the segLen<2 guard in the outer
-		// findPrimaryEoi walker (line 100). Same invariant, same defensive shape.
+		// and accept a coincidental FF D9 there as a "valid EOI".
 		if (sosLen < 2)
 		{
 			return SOS_BAIL;

@@ -202,8 +202,7 @@ final class AutoRotateBinder
 			return;
 		}
 		// Pre-enqueue cleanup guard — any throw from setBusyUi / showProgress / runInBackground would otherwise
-		// strand busy=true (runHorizonDetectionInBackground's failure path only runs if the Runnable was
-		// accepted). Mirrors ImageLoadController.load and ExportPipeline.exportTo.
+		// strand busy=true (the bg-task failure path only runs if the Runnable was accepted).
 		try
 		{
 			host.setBusyUi(true);

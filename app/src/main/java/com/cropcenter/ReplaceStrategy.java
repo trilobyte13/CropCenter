@@ -22,23 +22,17 @@ import java.nio.file.StandardCopyOption;
  * most reliable when MANAGE_EXTERNAL_STORAGE is granted), then SAF direct overwrite, then SAF delete-then-rename.
  * Verifies the end state and surfaces a failure dialog when disk doesn't match the intent.
  *
- * Existing SEFT trailers on the source survive untouched: CropExporter re-appends the byte-for-byte trailer captured
- * at load, so a Gallery-edited file re-edited by CropCenter keeps its working Revert chain. CropCenter does not
- * generate fresh SEFT trailers for new edits — Gallery's Revert validates the backup path against Samsung-blessed
- * locations our writes can't reach.
- *
- * Lives downstream of the save flow — SaveController decides whether to invoke this.
+ * Lives downstream of the save flow — SaveController decides whether to invoke this. SEFT preservation is the
+ * exporter's responsibility (see CropExporter.appendSeft for the verbatim-re-append contract and the why-we-don't-
+ * fabricate-fresh-SEFT rationale).
  */
 final class ReplaceStrategy
 {
 	/**
-	 * One failure outcome of verifyReplace — a (title, message) pair that the caller logs and surfaces in a dialog.
-	 * Built by per-case factory methods (truncated, twoFiles, etc.) that own the wording for each
-	 * branch; verifyReplace itself becomes a clean router from "what's on disk" to a factory call.
-	 *
-	 * Package-private so ReplaceStrategyClassifierTest can assert the right factory ran for each disk-state
-	 * branch — checking the title/message wording at the test layer is the only way to distinguish (e.g.) "two
-	 * files" from "placeholder only" from "truncated" without mocking dialogs.
+	 * One failure outcome of verifyReplace — a (title, message) pair surfaced in a dialog. Per-case
+	 * factory methods (truncated, twoFiles, etc.) own the wording so verifyReplace stays a clean
+	 * router from "what's on disk" to a factory call. Package-private so
+	 * ReplaceStrategyClassifierTest can distinguish branches by their dialog wording.
 	 */
 	record VerifyFailure(String title, String message) {}
 
@@ -63,15 +57,18 @@ final class ReplaceStrategy
 	}
 
 	/**
-	 * Filesystem-authoritative classifier. Handles two structural cases: Strategy-C rename (placeholder == target
-	 * on disk) and the general two-files / one-missing fan-out. Deletes the corrupt target on truncation paths so
-	 * the user isn't offered "Replace" on a bad file next save.
+	 * Filesystem-authoritative classifier. Handles two structural cases: Strategy-C rename
+	 * (placeholder == target on disk) and the general two-files / one-missing fan-out. Deletes the
+	 * corrupt target on truncation paths so the user isn't offered "Replace" on a bad file next save.
+	 * Package-private + static so ReplaceStrategyClassifierTest can pin all six disk-state outcomes
+	 * (clean, truncated, missingAfterRename, twoFiles, placeholderOnly, bothMissing). Mis-classification
+	 * ships a corrupt file as "saved" or strands orphan auto-renames.
 	 *
-	 * Package-private + static so ReplaceStrategyClassifierTest can pin all six disk-state outcomes (clean,
-	 * truncated, missingAfterRename, twoFiles, placeholderOnly, bothMissing) without instantiating
-	 * ReplaceStrategy. The method only reads files and calls private static factories, so `this` was never
-	 * load-bearing. A mis-classification would either ship a corrupt file as "saved" or strand orphan
-	 * auto-renames the user has to clean up manually.
+	 * @param placeholder    sibling placeholder file written by the crash-safe pipeline
+	 * @param requestedName  filename the user typed in the picker
+	 * @param expectedLength byte count the verify-step expects on disk for a successful write
+	 * @return null when the outcome is clean; a populated VerifyFailure when the on-disk state is
+	 *         missing, truncated, or split across two files
 	 */
 	static VerifyFailure classifyFilesystemOutcome(File placeholder, String requestedName, int expectedLength)
 	{
@@ -149,9 +146,7 @@ final class ReplaceStrategy
 			data -> writeReplacementPayload(newUri, requestedName, wasOverwrite, verifyUriBox, data));
 	}
 
-	// ── VerifyFailure factory methods ── One factory per failure case. Wording is the only difference;
-	// centralising it here lets a translator or copy editor change one site without re-walking the verifyReplace
-	// if/else ladder. Sorted alphabetically per CLAUDE.md method ordering.
+	// ── VerifyFailure factory methods ── one per failure case so wording lives in one place.
 
 	private static VerifyFailure bothMissing(String requestedName, String placeholderName)
 	{
@@ -289,11 +284,8 @@ final class ReplaceStrategy
 		}
 		try
 		{
-			// BadTokenException guard mirrors openSaveOptionsDialog / showReplaceDialog /
-			// showExtensionMismatchDialog / GraftController.confirmOversizedThenApply — config-change
-			// races can land between the isDestroyed pre-check and the actual show() call (the Activity
-			// finishes after the pre-check but before WindowManager accepts the dialog). The catch keeps
-			// the warning best-effort instead of crashing the UI thread.
+			// BadTokenException guard: config-change races can land between the isDestroyed pre-check
+			// and the actual show() call. The catch keeps the warning best-effort.
 			builder.show();
 		}
 		catch (RuntimeException e)
@@ -382,7 +374,6 @@ final class ReplaceStrategy
 		// Force mtime update even when the temp's bytes matched the prior target bytes. Samsung's
 		// FUSE-backed storage has been observed to skip mtime refresh on dedup-detected
 		// content-identical moves — leaving userspace observers convinced the save didn't run.
-		// Mirrors the explicit setLastModified in ExportPipeline.writePhase.
 		if (!target.setLastModified(System.currentTimeMillis()))
 		{
 			Log.w(TAG, "setLastModified failed on " + target + " — mtime may show stale");

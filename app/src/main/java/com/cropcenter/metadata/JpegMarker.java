@@ -21,6 +21,10 @@ public final class JpegMarker
 	// HDR signaling block.
 	public static final int APP2 = 0xE2;
 
+	// APP3 — FF E3. First of the vendor-private APP range (APP3..APP15) used by GraftWriter.isVendorApp to detect
+	// markers carrying camera-specific data (Samsung's PreviewImage / Apple's depth maps / etc.).
+	public static final int APP3 = 0xE3;
+
 	// APP15 — FF EF. Highest APPn marker; the APP range walkers test as `marker >= APP0 && marker <= APP_LAST`.
 	public static final int APP_LAST = 0xEF;
 

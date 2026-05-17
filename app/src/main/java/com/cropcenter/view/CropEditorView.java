@@ -207,29 +207,10 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 	}
 
 	/**
-	 * Drag-release handler: applies parity snap to centerX/centerY so the crop lands on a pixel-aligned position
-	 * once the finger lifts. Mid-drag keeps centerX/Y continuous (CropEngine.recomputeCrop intentionally does NOT
-	 * snap per-frame — a continuous snap makes cropW flip even↔odd during rotation sweeps and the crop flickers). A
-	 * one-shot snap on release has no such flicker problem: no sweep is in progress.
-	 *
-	 * Snap formula matches what getCropImageXFloat / exporter integer floor expect:
-	 *   cropW even → centerX must be integer   → round to nearest int
-	 *   cropW odd  → centerX must end in .5    → floor + 0.5
-	 * Both cases produce an integer cropImageX = centerX − cropW/2, so the grid's outer
-	 * borders land exactly on pixel boundaries and the rule-of-thirds lines hit pixel
-	 * centers when cropW is divisible by 3. Viewport-pan releases (not moving the crop)
-	 * skip the snap entirely.
-	 *
-	 * Tie-preserving snap: when centerX sits exactly half-way between two valid snap targets (e.g., centerX
-	 * is at P+0.5 with even cropW; both P and P+1 are 0.5 px away), the previous Math.round / floor+0.5
-	 * formulas always biased toward one side (half-up). On a SELECT-then-MOVE flow that's a real
-	 * user-visible bug — the SELECT-mode tap snaps the selection point to P+0.5 so the grid central line
-	 * passes through the marker square's center, but a subsequent MOVE-mode no-op pan would shift the
-	 * center by exactly 0.5 px in a fixed direction, leaving the grid offset from the selection dot the
-	 * user originally placed. snapAxisPreservingTies returns the current center on the equidistant
-	 * tie-case and snaps normally otherwise; cropImageX may then be fractional but the exporter handles
-	 * that via bilinear sampling in BitmapUtils.drawCropped (the integer-cropImageX property is for
-	 * crispness, not correctness).
+	 * Drag-release: applies parity snap to centerX/centerY via snapAxisPreservingTies. Mid-drag stays
+	 * continuous (CropEngine.recomputeCrop does not snap per-frame — a continuous snap would flip
+	 * cropW even↔odd during rotation sweeps and flicker the crop). Viewport-pan releases skip the
+	 * snap. See snapAxisPreservingTies for the formula and tie-preservation rationale.
 	 */
 	@Override
 	public void onPanRelease()
@@ -377,9 +358,7 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 					// Genuine stroke completion — feed the final point and trigger detection.
 					horizon.end(viewport.screenToImagePixel(screenX, screenY, state));
 					invalidate();
-					// Standard accessibility hook — route the gesture release through performClick
-					// so a11y services can replicate the horizon-paint interaction.
-					performClick();
+					performClick(); // a11y hook
 				}
 				case MotionEvent.ACTION_CANCEL ->
 				{
@@ -407,10 +386,6 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 	@Override
 	public boolean performClick()
 	{
-		// Required by the View / accessibility contract for any view that overrides onTouchEvent —
-		// the editor's primary interactions (selection-point taps, drag-to-pan, pinch-zoom, horizon
-		// paint) are dispatched via gestureHandler / horizon above; this hook just delegates to super
-		// for the standard click sound + accessibility events.
 		return super.performClick();
 	}
 
@@ -517,22 +492,14 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 	}
 
 	/**
-	 * Snap a centerX or centerY value to the parity-valid pixel grid for the given crop dim, but preserve the
-	 * input when both candidate snap targets are equidistant. Even dim → integer center; odd dim → half-integer.
+	 * Snap a centerX/Y to the parity-valid pixel grid: even dim → integer center, odd dim → half-integer.
+	 * Returns the input unchanged when both candidate targets are equidistant — a half-up bias would
+	 * shift the crop 0.5 px on a no-op MOVE pan after a SELECT-mode tap had placed the selection at the
+	 * pixel half-integer where the grid central line passes through the marker square's center.
+	 * cropImageX may then be fractional; BitmapUtils.drawCropped bilinear-samples through it (the
+	 * integer-cropImageX property is for crispness, not correctness).
 	 *
-	 * Tie-preservation: when center sits exactly half-way between two valid targets (e.g., center = P+0.5 with
-	 * even dim — both P and P+1 are 0.5 px away, OR center = integer P with odd dim — both P-0.5 and P+0.5 are
-	 * 0.5 px away), the previous Math.round / floor+0.5 formulas always biased toward one side (half-up). On
-	 * a SELECT-then-MOVE flow that's a real user-visible bug: SELECT-mode taps snap selection points to
-	 * pixel-half-integer positions so the grid central line passes through the marker square's center, but a
-	 * subsequent no-op MOVE-mode pan would shift the center 0.5 px in a fixed direction, leaving the grid
-	 * offset from the selection dot the user originally placed. Returning the input on the equidistant case
-	 * preserves that alignment; cropImageX may then be fractional but the exporter handles fractional origin
-	 * via bilinear sampling (BitmapUtils.drawCropped) — the integer-cropImageX property is for crispness, not
-	 * correctness.
-	 *
-	 * Package-private for direct unit-test access — onPanRelease itself is wired through view machinery
-	 * (gesture handler, listener) that's awkward to drive from a JUnit 4 test, but the snap math is pure.
+	 * Package-private so snap math can be unit-tested directly.
 	 *
 	 * @param center current axis-center value (post-drag)
 	 * @param dim    crop dim along that axis (cropW for X, cropH for Y); parity drives the target type

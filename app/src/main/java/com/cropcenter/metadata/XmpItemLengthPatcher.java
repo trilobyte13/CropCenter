@@ -10,31 +10,19 @@ import java.util.List;
 
 /**
  * Patches the GContainer Item:Length attribute in the primary's XMP packet to match the actual gain map
- * byte size. The Ultra HDR pipeline preserves the source's XMP byte-identically (so all the hdrgm
- * attributes — Version, GainMapMin / Max, Gamma, OffsetSDR / HDR, HDRCapacityMin / Max — round-trip
- * unchanged), but the Container Item:Length attribute on the gain-map item carries the SOURCE's gain-map
- * size and goes stale the moment we re-encode. Strict GContainer-respecting decoders (Google's
- * libUltraHdr is one) slice the gain map by Item:Length and would decode a truncated stream — dropping
- * HDR boost on a file that's otherwise correct. Samsung Gallery is more lenient and reads the gain map
- * straight from the MPF table, so it doesn't see the bug; not all HDR-aware tooling is.
+ * byte size. The Ultra HDR pipeline preserves the source's XMP byte-identically, but the GContainer
+ * Item:Length carries the SOURCE's gain-map size and goes stale on re-encode. Strict decoders (Google's
+ * libUltraHdr) slice the gain map by Item:Length and decode a truncated stream — dropping HDR boost on a
+ * file that's otherwise correct. Samsung Gallery reads from MPF instead and doesn't see the bug.
  *
- * Operates on the raw primary JPEG bytes BEFORE GainMapComposer appends the gain map and patches MPF —
- * the patch may grow / shrink the primary by the digit-count delta of the new size, and downstream
- * MpfPatcher.patch's primarySize must reflect the post-patch length.
- *
- * Single-target match: the patch updates the FIRST Item:Length found in the standard XMP packet. Per
- * the GContainer schema only the GainMap item carries Item:Length (Primary's length is implicit), so
- * a single match is the spec-conformant case. Multi-gain-map XMP packets are rare and would already
- * have been rejected upstream by MpfPatcher's >1 MPType-match guard, leaving the gain map dropped and
- * this patcher uninvoked.
+ * Operates on the raw primary JPEG bytes BEFORE GainMapComposer appends the gain map — the patch may
+ * grow / shrink the primary by the digit-count delta, and MpfPatcher.patch's primarySize must reflect
+ * the post-patch length.
  *
  * Extended XMP fail-closed: when the source emits a >64 KB XMP packet, Adobe Extended XMP splits it
- * across multiple APP1 segments with a different namespace prefix and per-chunk reassembly headers
- * (32-byte GUID + 4-byte total length + 4-byte offset). Patching one of those chunks in-place would
- * desync the per-chunk total-length / offset headers shared across all chunks of the same GUID —
- * complex enough that we instead refuse the whole patch, signal the caller via a null return, and let
- * GainMapComposer drop HDR rather than ship a file with stale Item:Length. For the
- * standard ~99% case where Item:Length lives in the main XMP packet, the patch path is unchanged.
+ * across multiple APP1 segments with per-chunk reassembly headers (32-byte GUID + total length +
+ * offset). Patching a chunk in-place would desync those headers, so we refuse the whole patch via a
+ * null return and let GainMapComposer drop HDR rather than ship stale Item:Length.
  */
 public final class XmpItemLengthPatcher
 {
@@ -154,17 +142,6 @@ public final class XmpItemLengthPatcher
 		return primary;
 	}
 
-	/**
-	 * Compare n bytes of two arrays starting at the given offsets. Pure helper — used to short-circuit
-	 * the patch when the existing digits already equal the new gain-map size, sparing an allocation.
-	 *
-	 * @param a    first array
-	 * @param aOff start offset into a
-	 * @param b    second array
-	 * @param bOff start offset into b
-	 * @param n    number of bytes to compare
-	 * @return true when all n bytes match
-	 */
 	private static boolean bytesEqual(byte[] a, int aOff, byte[] b, int bOff, int n)
 	{
 		for (int i = 0; i < n; i++)
@@ -256,9 +233,6 @@ public final class XmpItemLengthPatcher
 	}
 
 	/**
-	 * Locate the byte offset just past the standard XMP APP1 segment's body containing pattern. Linear
-	 * search (the XMP packet is at most ~64 KB; pattern is 12 bytes; ~5µs typical).
-	 *
 	 * @param data    bytes to scan
 	 * @param start   inclusive start offset
 	 * @param end     exclusive end offset
@@ -287,8 +261,7 @@ public final class XmpItemLengthPatcher
 	 * Try to patch Item:Length inside the given XMP segment range. Returns a new byte array on
 	 * successful patch (may differ in length from primary by the digit-count delta), null when the
 	 * segment doesn't contain Item:Length or the patched segment would exceed the APP1 segLen-field
-	 * cap. Extracted so the patch step can be re-used for both the standard XMP segment and (if we
-	 * later support it) Extended XMP chunks.
+	 * cap.
 	 *
 	 * @param primary     full JPEG bytes
 	 * @param gainMapSize new gain-map size in bytes to write into Item:Length
@@ -414,8 +387,6 @@ public final class XmpItemLengthPatcher
 			{
 				break;
 			}
-			// Honor legal fill bytes (ITU-T T.81 §B.1.1.2) by routing through the canonical walker so
-			// a `FF FF E1 ...` shape doesn't break the walk on the second 0xFF.
 			int markerByteOff = JpegMarkerWalker.skipFillBytes(primary, off, primary.length);
 			if (markerByteOff < 0)
 			{
@@ -438,13 +409,8 @@ public final class XmpItemLengthPatcher
 				break;
 			}
 			int segLen = ByteBufferUtils.readU16BE(primary, afterMarker);
-			// `next < off` guards against `afterMarker + segLen` wrapping int-negative on adversarial
-			// inputs whose primary.length is near Integer.MAX_VALUE — SafFileHelper's MAX_READ_BYTES
-			// cap (128 MB) keeps real inputs well below the overflow range, but the sister walkers
-			// (JpegMetadataExtractor.extract, JpegMarkerWalker.findPrimaryEoi, MpfPatcher.patch,
-			// BitmapUtils.readExifOrientationInternal) all carry the same defensive check so this
-			// walker stays consistent with them and won't silently regress if the cap is ever raised
-			// for defence-in-depth.
+			// `next < afterMarker` guards against `afterMarker + segLen` wrapping int-negative on
+			// adversarial inputs with primary.length near Integer.MAX_VALUE.
 			int next = afterMarker + segLen;
 			if (segLen < 2 || next < afterMarker || next > primary.length)
 			{

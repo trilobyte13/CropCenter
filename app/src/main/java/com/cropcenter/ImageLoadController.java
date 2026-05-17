@@ -9,6 +9,7 @@ import android.widget.Toast;
 
 import com.cropcenter.metadata.GainMapExtractor;
 import com.cropcenter.metadata.HdrSignature;
+import com.cropcenter.metadata.JpegMarker;
 import com.cropcenter.metadata.JpegMetadataExtractor;
 import com.cropcenter.metadata.JpegSegment;
 import com.cropcenter.metadata.PngMetadataExtractor;
@@ -154,7 +155,8 @@ final class ImageLoadController
 	 */
 	static boolean isJpegSignature(byte[] fileBytes)
 	{
-		return fileBytes.length >= 2 && (fileBytes[0] & 0xFF) == 0xFF && (fileBytes[1] & 0xFF) == 0xD8;
+		return fileBytes.length >= 2 && (fileBytes[0] & 0xFF) == JpegMarker.PREFIX
+			&& (fileBytes[1] & 0xFF) == JpegMarker.SOI;
 	}
 
 	/**
@@ -215,7 +217,7 @@ final class ImageLoadController
 		// we can pick an inSampleSize that fits the decoded bitmap within BitmapUtils.getMaxDecodePixels()
 		// — the device-adaptive cap set at MainActivity.onCreate via BitmapUtils.initialize. On a 12 GB-RAM
 		// flagship the cap reaches ~187 MP so 200 MP sources decode at inSampleSize=1 (no quality loss).
-		// On a 4 GB device the cap floors at 32 MP and subsampling protects against OOM. Pass 2 does the
+		// On a 4 GB device the cap lands at ~64 MP and subsampling protects against OOM. Pass 2 does the
 		// real decode at that subsampling. BitmapFactory's bounds pre-pass is essentially free — header
 		// walk only, no entropy decode — so the overhead is negligible for sources that don't need to
 		// subsample.
@@ -313,12 +315,9 @@ final class ImageLoadController
 			state.setSeftTrailer(extracted.seftTrailer());
 			String metaInfo = extracted.displayString();
 
-			// `handedOff = true` flips ONLY AFTER runOnUiThread successfully posts the runnable. If
-			// the post itself throws (RejectedExecutionException on a handler whose looper is quitting
-			// during a config change, or any other UI-post failure), the catch path with handedOff
-			// still false triggers the finally's bmp.recycle() so the native pixel buffer is reclaimed
-			// promptly rather than orphaning to the GC finalizer. Mirrors the ordering already used by
-			// GraftController.assembleGraftOnBg.
+			// `handedOff = true` flips ONLY AFTER runOnUiThread successfully posts the runnable. A
+			// throw from the post (RejectedExecutionException on a quitting looper) leaves handedOff
+			// false, so the finally's bmp.recycle() reclaims the native pixel buffer promptly.
 			host.runOnUiThread(() -> host.installImageOnUi(bmp, sizeInfo, metaInfo));
 			handedOff = true;
 			return true;
@@ -384,9 +383,7 @@ final class ImageLoadController
 		// Between the busy acquire and the runInBackground enqueue, any throw from the UI setup
 		// (setBusyUi / showProgress can hit findViewById / setText during an unusual view-tree state) or the
 		// executor submission (RejectedExecutionException after onDestroy) would otherwise strand busy=true
-		// forever — runLoadBg's finally never runs because the Runnable was never accepted. Clear busy + hide
-		// UI before propagating so a second Open tap isn't permanently rejected with "Busy — try again".
-		// Mirrors ExportPipeline.exportTo's pre-enqueue guard.
+		// forever. Clear busy + hide UI before propagating so a second Open tap isn't permanently rejected.
 		try
 		{
 			host.setBusyUi(true);
@@ -485,10 +482,8 @@ final class ImageLoadController
 		{
 			// Widened to include OutOfMemoryError so a multi-MP / HDR source whose primary-bitmap or
 			// applyOrientation rotated copy blows the heap budget surfaces a "Load failed: …" toast
-			// instead of dying silently — finally still releases busy and hides the overlay, but the
-			// catch is the only place the user-facing toast posts. Mirrors ExportPipeline.encodePhase
-			// and the graft-side catches in MainActivity.applyGraftedBytesOnBg +
-			// GraftController.assembleGraftOnBg.
+			// instead of dying silently — finally releases busy and hides the overlay, but the catch
+			// is the only place the user-facing toast posts.
 			Log.e(TAG, "Load failed", e);
 			host.runOnUiThread(() -> host.toastIfAlive(
 				"Load failed: " + e.getMessage(), Toast.LENGTH_SHORT));

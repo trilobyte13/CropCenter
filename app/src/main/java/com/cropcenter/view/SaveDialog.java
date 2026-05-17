@@ -37,7 +37,8 @@ public final class SaveDialog
 
 	/**
 	 * Build and show the save dialog. The user can pick the output format (JPEG / PNG), toggle the bake-grid
-	 * option, and tweak related export config; on confirmation, onSave is invoked. Cancellation does nothing.
+	 * option, and tweak related export config; on confirmation, onSave is invoked. Cancellation routes
+	 * through onCancel — see the OnCancel paragraph below for the rollback contract.
 	 *
 	 * Note on state mutation: applySettings commits the user's choices to CropState BEFORE onSave fires —
 	 * the SAF picker that follows needs the format-aware filename extension already on state. This means

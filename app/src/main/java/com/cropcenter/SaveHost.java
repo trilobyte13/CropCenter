@@ -13,14 +13,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
 interface SaveHost extends EditorHost
 {
 	/**
-	 * Shared busy flag gating Save and Load so rapid taps can't stack two background threads that both mutate
-	 * CropState.
+	 * @return shared busy flag gating Save and Load so rapid taps can't stack two background threads that both
+	 *         mutate CropState.
 	 */
 	AtomicBoolean getBusy();
 
 	/**
-	 * Launcher registered in onCreate for the ACTION_CREATE_DOCUMENT save-as flow. SaveController triggers it with
-	 * a pre-filled filename.
+	 * @return launcher registered in onCreate for the ACTION_CREATE_DOCUMENT save-as flow. SaveController triggers
+	 *         it with a pre-filled filename.
 	 */
 	ActivityResultLauncher<String> getSaveAsLauncher();
 
@@ -44,23 +44,30 @@ interface SaveHost extends EditorHost
 
 	/**
 	 * Toggle Save / Open button enabled state while a background task is running.
+	 *
+	 * @param busy true while a save / load / detect task is in flight; false when complete
 	 */
 	void setBusyUi(boolean busy);
 
 	/**
-	 * Post the shared "Busy — try again" toast. Used when a user triggers Save/Load while another task is already
+	 * Post the shared "Busy — try again" toast. Used when the user triggers Save/Load while another task is already
 	 * running.
 	 */
 	void showBusyToast();
 
 	/**
 	 * Show the full-screen progress overlay with a status message. Safe to call from any thread.
+	 *
+	 * @param msg status text shown over the overlay
 	 */
 	void showProgress(String msg);
 
 	/**
 	 * UI-thread-safe toast helper — noop if Activity is destroyed. Callers that need a toast from a background
 	 * thread route through here rather than Toast.makeText directly.
+	 *
+	 * @param msg    user-facing toast text
+	 * @param length Toast.LENGTH_SHORT or Toast.LENGTH_LONG
 	 */
 	void toastIfAlive(String msg, int length);
 }

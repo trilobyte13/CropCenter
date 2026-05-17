@@ -30,15 +30,14 @@ public final class JpegMetadataInjector
 	 */
 	public static byte[] inject(byte[] reencoded, List<JpegSegment> segments) throws IOException
 	{
-		if (reencoded.length < 4 || (reencoded[0] & 0xFF) != 0xFF || (reencoded[1] & 0xFF) != 0xD8)
+		if (reencoded.length < 4 || (reencoded[0] & 0xFF) != JpegMarker.PREFIX
+			|| (reencoded[1] & 0xFF) != JpegMarker.SOI)
 		{
 			throw new IOException("Not a valid JPEG");
 		}
 
-		// Find where re-encoded image data starts (skip its APP/COM markers). Fill bytes (legal per
-		// ITU-T T.81 §B.1.1.2 — any number of 0xFF before the marker byte) are skipped via the canonical
-		// JpegMarkerWalker.skipFillBytes helper so a Skia output that uses fill-byte alignment doesn't
-		// get its first APP misread as marker code 0xFF.
+		// Find where re-encoded image data starts (skip its APP/COM markers). JpegMarkerWalker.skipFillBytes
+		// handles the `FF FF MARKER` alignment shape some encoders emit.
 		int scanStart = 2;
 		while (scanStart < reencoded.length - 3)
 		{
@@ -67,14 +66,11 @@ public final class JpegMetadataInjector
 			{
 				break; // malformed segment
 			}
-			// A lying segLen claiming to extend past EOF means the re-encoded buffer is genuinely malformed
-			// (Skia produced a corrupt JPEG, or the byte stream got damaged between encode and injector).
-			// Earlier versions silently fell back to `scanStart = 2`, which then wrote a verbatim copy of
-			// the entire re-encoded image AFTER the SOI as the "primary scan" — that included the
-			// re-encoder's own APP markers (JFIF, sRGB ICC) duplicated alongside original's, exactly the
-			// situation this function is supposed to avoid. Throw instead so the caller
-			// (ExportPipeline.encodePhase) surfaces a real "Export failed" toast rather than silently
-			// shipping a JPEG with duplicate APP segments.
+			// A segLen claiming to extend past EOF means the re-encoded buffer is genuinely malformed
+			// (Skia corruption, or damage between encode and injector). Throw so encodePhase surfaces a
+			// real "Export failed" toast rather than silently shipping duplicate APP segments (a
+			// fallback to scanStart=2 would copy the whole re-encoded image including its own JFIF /
+			// sRGB ICC markers).
 			long next = (long) afterMarker + segLen;
 			if (next > reencoded.length)
 			{

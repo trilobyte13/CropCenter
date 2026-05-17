@@ -43,11 +43,8 @@ public final class UltraHdrCompat
 	private UltraHdrCompat() {}
 
 	/**
-	 * Produce an Ultra HDR JPEG using the same canvas rendering as CropExporter. The gain map undergoes the
-	 * analogous spatial transform as the primary (same EXIF rotation, same scaled draw offset). Alignment is
-	 * structurally identical for rotated draws; the unrotated branch snaps the gain map's fractional draw offset
-	 * to the nearest integer for pixel-exact reproduction, accepting ≤ 0.5 gainmap-pixel drift as the cost of
-	 * avoiding bilinear softening — see class-level Javadoc for the trade-off rationale.
+	 * Produce an Ultra HDR JPEG using the same canvas rendering as CropExporter. See the class Javadoc for the
+	 * gain-map sub-pixel alignment trade-off (unrotated branch snaps + nearest-neighbor; rotated keeps bilinear).
 	 *
 	 * @param originalBytes   source JPEG bytes (must carry an Ultra HDR gain map)
 	 * @param quality         JPEG quality for the final compress
@@ -170,19 +167,20 @@ public final class UltraHdrCompat
 	}
 
 	/**
-	 * Apply EXIF orientation to the decoded bitmap AND to the embedded gainmap. BitmapFactory.decodeFile does NOT
-	 * auto-apply EXIF orientation, and the previous heuristic "autoRotated = decoded dimensions match display
-	 * dimensions" silently skipped orientations 2/3/4 (mirror, 180°, vertical flip) because those don't swap W/H
-	 * even though they still need the matrix. Always apply when orientation > 1. Uses filter=false: EXIF transforms
-	 * are pure mirror / 90° / 180° integer-pixel remaps — lossless, and bilinear would only add softening. Returns
-	 * the new bitmap (may be the same reference when the matrix is identity); recycles the old one if it differs.
+	 * Apply EXIF orientation to the decoded bitmap AND to the embedded gainmap. BitmapFactory.decodeFile
+	 * does NOT auto-apply EXIF orientation; always apply when orientation > 1 (orientations 2/3/4 don't
+	 * swap W/H but still need the matrix). filter=false because EXIF transforms are integer-pixel remaps.
 	 *
-	 * Bitmap.createBitmap(matrix) propagates the Gainmap reference to the new bitmap but does NOT rotate the
-	 * gainmap contents (the Gainmap pixel buffer is opaque to Canvas.drawBitmap's matrix path). Without an explicit
-	 * rotation, primary ends up in display orientation while the gainmap stays in stored orientation, so
-	 * renderGainmap's scaleX = gmW/primW vs scaleY = gmH/primH diverge — squashing the gainmap and producing the
-	 * catastrophic spatial incoherence panel-3 of the graft-analyze heatmaps shows for orient=6 sources. Rotate
-	 * the gainmap with the same matrix and re-attach so both stay coherent.
+	 * Bitmap.createBitmap(matrix) propagates the Gainmap reference but does NOT rotate the gainmap
+	 * contents (its pixel buffer is opaque to drawBitmap's matrix path). Without an explicit rotation,
+	 * primary in display orientation + gainmap in stored orientation makes renderGainmap's scaleX vs
+	 * scaleY diverge, squashing the gainmap. Rotate it with the same matrix and re-attach.
+	 *
+	 * @param current         decoded bitmap; recycled when the rotation produces a new instance
+	 * @param exifOrientation EXIF orientation tag (1..8); values outside that range return current
+	 *                        unchanged
+	 * @return correctly rotated bitmap (may be the same reference as current when orientation ≤ 1 or
+	 *         out of range)
 	 */
 	private static Bitmap applyExifOrientation(Bitmap current, int exifOrientation)
 	{
@@ -204,10 +202,9 @@ public final class UltraHdrCompat
 		Matrix matrix = BitmapUtils.orientationMatrix(exifOrientation);
 		Bitmap rotated = Bitmap.createBitmap(current, 0, 0,
 			current.getWidth(), current.getHeight(), matrix, false);
-		// Once `rotated` is allocated, any subsequent throw (gainmap createBitmap OOM, new Gainmap
-		// allocation OOM, copyGainmapMetadata exception) would otherwise orphan rotated's native pixel
-		// buffer to the GC finalizer — exactly when the heap is most pressured. Recycle on throw to
-		// release immediately, mirroring renderPrimary / renderGainmap's recycle-on-throw shape.
+		// Recycle on throw — once rotated is allocated, a subsequent OOM (gainmap createBitmap, new
+		// Gainmap, copyGainmapMetadata) would orphan its native pixel buffer to the GC finalizer
+		// exactly when the heap is most pressured.
 		Bitmap rotatedGainmapBitmap = null;
 		try
 		{
@@ -422,7 +419,18 @@ public final class UltraHdrCompat
 	/**
 	 * Render the cropped + rotated gain-map bitmap, spatially aligned with the primary render. Scales the draw
 	 * offset by gainmap/primary ratio so the gainmap subregion lines up pixel-for-pixel with the primary crop (at
-	 * the gainmap's native resolution, which is typically lower than the primary's).
+	 * the gainmap's native resolution, typically lower than the primary's).
+	 *
+	 * @param sourceGainmap  source Gainmap, used by the caller; this method only needs gainmapBitmap
+	 * @param gainmapBitmap  source gain-map pixel buffer at its native resolution
+	 * @param primaryW       primary bitmap width (used to derive gainmap-to-primary scale)
+	 * @param primaryH       primary bitmap height
+	 * @param srcX           crop origin X on the primary (continuous float — see CropState.getCropImageXFloat)
+	 * @param srcY           crop origin Y on the primary
+	 * @param cropW          crop width in primary pixels
+	 * @param cropH          crop height in primary pixels
+	 * @param userRotation   rotation in degrees applied to the primary; mirrored on the gainmap
+	 * @return freshly-allocated bitmap at the gain-map's quarter-res cropped output dims
 	 */
 	private static Bitmap renderGainmap(Gainmap sourceGainmap, Bitmap gainmapBitmap,
 		int primaryW, int primaryH, float srcX, float srcY, int cropW, int cropH, float userRotation)
@@ -433,19 +441,19 @@ public final class UltraHdrCompat
 		int gainmapOutputH = Math.max(1, Math.round(cropH * gainmapScaleY));
 		// Natural rounded gain-map dims — do NOT snap to (Wᵣ·k, Hᵣ·k) here even though the primary did.
 		// Snapping shrinks the sampled source region (16:9 quarter-res 1000×563 → 992×558 loses 8 cols
-		// + 5 rows of source gain-map data on the right / bottom edges), and Android's HDR decoder
-		// scales the gain map over the primary's full extent — so a shrunk gain map effectively
-		// "stretches" the remaining source region to cover pixels it was never meant to. The 0.0002
-		// AR drift between primary (exact (Wᵣ·k, Hᵣ·k)) and gain map (round-of-quarter) is
-		// imperceptible after the decoder's scale-to-fit, and is the lesser evil vs spatial HDR
-		// misalignment on high-contrast crop edges.
+		// + 5 rows on the right / bottom), and Android's HDR decoder scales the gain map over the
+		// primary's full extent — a shrunk gain map effectively stretches over pixels it wasn't meant
+		// for. The AR drift from half-pixel rounding at gainmap-side dims (≤ ~6e-04 worst case at
+		// gainmapH ~900-1000; see REQUIREMENTS §4 locked-AR exact-integer realisation) is
+		// sub-perceptible after scale-to-fit and is the lesser evil vs spatial HDR misalignment on
+		// high-contrast crop edges.
 
 		Bitmap.Config gainmapConfig = gainmapBitmap.getConfig() != null
 			? gainmapBitmap.getConfig()
 			: Bitmap.Config.ARGB_8888;
 		Bitmap gainmapOutput = Bitmap.createBitmap(gainmapOutputW, gainmapOutputH, gainmapConfig);
-		// Mirror renderPrimary's recycle-on-throw guard: a Canvas-init / drawBitmap OOM mid-method would
-		// strand `gainmapOutput` and defer native reclaim to the GC bitmap finalizer. Catch and recycle.
+		// Recycle on throw — a Canvas-init / drawBitmap OOM would strand gainmapOutput and defer native
+		// reclaim to the GC bitmap finalizer.
 		try
 		{
 			Canvas gainmapCanvas = new Canvas(gainmapOutput);
@@ -461,19 +469,13 @@ public final class UltraHdrCompat
 			}
 			else
 			{
-				// Even integer-valued primary srcX/srcY produce fractional gainmapDrawX/Y once
-				// multiplied by the gainmap/primary scale (e.g., srcY=125 with scaleY=0.25 →
-				// drawY=-31.25). Drawing at a fractional offset with FILTER_BITMAP_FLAG bilinear-
-				// blends adjacent rows/cols of the gainmap, softening it and producing 5-30 levels of
-				// per-pixel diff against the source gainmap on high-contrast content (horizon lines,
-				// cliff edges, wave foam) — exactly the bright-orange band pattern the noise-proof
-				// heatmaps showed. The mirrored issue in drawGainmapRotated
-				// already had an integer-alignment check that uses nearest-neighbor when applicable;
-				// the unrotated path was missing this gate. Snap the draw offset to the nearest
-				// integer and switch to nearest-neighbor: the cost is ≤ 0.5 gainmap pixels of
-				// spatial misalignment (≤ 2 primary pixels at quarter-res gainmap — sub-perceptible
-				// on a 4000-pixel-tall image), and the benefit is pixel-exact gainmap reproduction
-				// at the JPEG round-trip noise floor instead of the bilinear softening above it.
+				// Snap draw offset + nearest-neighbor: integer primary srcX/srcY produce fractional
+				// gainmapDrawX/Y once multiplied by the gainmap/primary scale (srcY=125 × scaleY=0.25
+				// → -31.25). Bilinear at a fractional offset softens the gainmap and produces 5-30
+				// per-pixel diff levels on high-contrast content (horizon lines, cliff edges, foam).
+				// Cost: ≤ 0.5 gainmap pixels of misalignment (sub-perceptible at quarter-res on a
+				// 4000-pixel image); benefit: pixel-exact reproduction at the JPEG round-trip noise
+				// floor. drawGainmapRotated has the same gate.
 				int snappedDrawX = Math.round(gainmapDrawX);
 				int snappedDrawY = Math.round(gainmapDrawY);
 				Paint nearestPaint = new Paint(gainmapPaint);
@@ -502,12 +504,9 @@ public final class UltraHdrCompat
 	{
 		Bitmap output = Bitmap.createBitmap(cropW, cropH, Bitmap.Config.ARGB_8888, true,
 			ColorSpace.get(ColorSpace.Named.DISPLAY_P3));
-		// Recycle `output` if any subsequent step throws — without this, an OOM during Canvas init or
-		// drawCropped strands the partial allocation, deferring native pixel-buffer reclaim to the GC
-		// finalizer at the exact moment we need immediate reclaim. The compressWithGainmap-level finally
-		// would have recycled `output` only if the assignment had completed, but a throw before return
-		// means the caller's `output` field is still null. Catch Exception | OutOfMemoryError (Error, not
-		// Exception, must be caught explicitly) and rethrow after recycling.
+		// Recycle on throw — an OOM during Canvas init or drawCropped strands the partial allocation
+		// and defers native pixel-buffer reclaim to the GC finalizer. The compressWithGainmap-level
+		// finally only recycles if the assignment completed.
 		try
 		{
 			Canvas canvas = new Canvas(output);

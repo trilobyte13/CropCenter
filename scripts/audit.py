@@ -14,7 +14,7 @@ Audit names:
     over-cols                 lines exceeding 120 rendered columns (tab=8)
     ignored-catches           catches that swallow exceptions without explaining why
     static-first              static methods that follow instance methods in the same tier
-    method-order              private-before-package + case-sensitive alphabetical within tier
+    method-order              public→protected→package→private tier order + case-sensitive alphabetical within tier
     adjacent-comment-styles   `*/` immediately followed by `//` (consolidate into Javadoc)
     final-classes             classes that should be `final` per Effective Java item 19
     reflow                    multi-line comment blocks whose last line could fold into the prior

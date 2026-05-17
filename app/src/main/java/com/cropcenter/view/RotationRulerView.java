@@ -466,14 +466,13 @@ public final class RotationRulerView extends View
 
 	/**
 	 * Snap the given target degree value to the nearest detent / minor tick, clamp to the ruler range, and
-	 * commit it as the new currentDegrees — notifying the listener and invalidating only when the result
-	 * differs from the existing currentDegrees. Both the tap and the drag/fling release paths feed through
-	 * here so the listener sees a coherent post-gesture value regardless of mid-gesture state.
+	 * commit it as the new currentDegrees — notifying the listener and invalidating only when the snapped
+	 * result differs from the pre-call currentDegrees. Both the tap and the drag / fling release paths feed
+	 * through here so the listener sees a coherent post-gesture value regardless of mid-gesture state.
 	 *
-	 * The earlier shape — "currentDegrees = tappedDeg; snapAndNotify();" — silently swallowed the notify
-	 * when the tap landed exactly on a tick / detent because snapAndNotify compared the snap to the
-	 * just-overwritten currentDegrees rather than the pre-tap value. Taking the target as a parameter and
-	 * comparing the snapped result against the current (still pre-update) currentDegrees fixes that hole.
+	 * Critical contract: the diff is computed against the OLD currentDegrees, then assigned — a
+	 * write-then-compare order would silently swallow the notify when the gesture lands exactly on a
+	 * tick / detent (the snapped value would match the just-overwritten field).
 	 *
 	 * @param targetDeg desired new rotation in degrees (gesture-tapped or drag-end value)
 	 */
@@ -563,12 +562,9 @@ public final class RotationRulerView extends View
 		// focus-point motion) would trigger a spurious rotation change on release.
 		if (!isScaling && !scalingOccurred)
 		{
-			// Tap: total movement below the slop. Compute the tapped angle and feed it to the shared
-			// snap-and-commit helper so the comparison happens against the PRE-tap currentDegrees rather
-			// than the just-tapped value. The previous "currentDegrees = tappedDeg; snapAndNotify()"
-			// shape silently dropped the notify when the tap landed exactly on a tick / detent — the
-			// snapped value matched the just-overwritten currentDegrees, and the listener never heard
-			// about the tap.
+			// Tap: total movement below the slop. Feed the tapped angle through commitSnappedDegrees so
+			// the snapped value is compared against the PRE-tap currentDegrees (see that method's
+			// write-then-compare contract).
 			if (totalDragDx <= TAP_SLOP && event.getActionMasked() == MotionEvent.ACTION_UP)
 			{
 				float centerX = getWidth() / 2f;
@@ -615,17 +611,10 @@ public final class RotationRulerView extends View
 	}
 
 	/**
-	 * Snap a degree value to the nearest documented detent (0, ±45, ±90, ±180) when within the per-zoom detent
-	 * threshold (min(minor * 0.5, 0.8°)), otherwise fall back to the current zoom's minor-tick snap. The
-	 * threshold scales with the visible minor-tick spacing so the detent stays sticky enough at coarse zoom
-	 * (where the cap kicks in and detent values like ±45° aren't on the tick grid) without swallowing
-	 * legitimate fine-tune values at max zoom (where every fine tick is selectable).
-	 *
-	 * Concrete behaviour at different zoom levels:
-	 *   minor=10°   → threshold=0.8°: 44.95° → 45° even though only 40°/50° are real ticks.
-	 *   minor=1°    → threshold=0.5°: 44.95° → 45° (already a tick at this zoom; detent agrees).
-	 *   minor=0.1°  → threshold=0.05°: 0.05° → 0° (boundary), 0.06° → 0.1° (visible tick).
-	 *   minor=0.01° → threshold=0.005°: 0.01° → 0.01° (reachable), 0.50° → 0.50° (reachable).
+	 * Snap a degree value to the nearest documented detent (0, ±45, ±90, ±180) when within the per-zoom
+	 * detent threshold (min(minor * 0.5, 0.8°)), otherwise fall back to the current zoom's minor-tick snap.
+	 * The threshold scales with visible minor-tick spacing so the detent stays sticky at coarse zoom (where
+	 * ±45° isn't on the tick grid) without swallowing legitimate fine-tunes at max zoom.
 	 *
 	 * @param deg ruler reading at gesture release
 	 * @return detent value when within threshold; nearest minor tick otherwise
@@ -636,16 +625,14 @@ public final class RotationRulerView extends View
 	}
 
 	/**
-	 * Drag-release variant of `snapToDetentOrTick` that ignores the detent the gesture STARTED at, so a
-	 * drag-from-0° to a small angle (e.g., 0.4°) doesn't re-snap to 0° when the user clearly intended
-	 * to leave it. The skipped value is compared with a tight tolerance
-	 * because gestureStartDegrees is a previously-snapped value — exact equality to the detent it
-	 * landed on is the common case. Passing `Float.NaN` for `skipDetent` falls back to the original
+	 * Drag-release variant of snapToDetentOrTick that ignores the detent the gesture STARTED at, so a
+	 * drag from 0° to 0.4° doesn't re-snap back to 0°. Compared with a tight tolerance because
+	 * gestureStartDegrees is a previously-snapped value. NaN for skipDetent falls back to the original
 	 * snap-to-any-detent behaviour (used by tap, which has no "previous state" to escape from).
 	 *
 	 * @param deg        ruler reading at gesture release / tap
 	 * @param skipDetent detent value to skip (NaN to skip none)
-	 * @return detent value when within threshold (excluding `skipDetent`); nearest minor tick otherwise
+	 * @return detent value when within threshold (excluding skipDetent); nearest minor tick otherwise
 	 */
 	private float snapToDetentOrTick(float deg, float skipDetent)
 	{

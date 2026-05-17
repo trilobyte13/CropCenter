@@ -60,10 +60,10 @@ public final class ExifPatcherTest
 	@Test
 	public void buildMinimalExifSegmentProducesCanonicalIfd0Layout() throws IOException
 	{
-		// Round-38 test-coverage P0: pin the synthesised segment's IFD0 layout (3 entries:
-		// Orientation, ImageWidth, ImageLength) and IFD1 thumbnail pointer/length tags so a future
-		// regression that reorders entries or mis-sizes IFD0 surfaces here rather than via downstream
-		// EXIF-aware viewer wrong-rendering. The segment is little-endian per the documented format.
+		// Pin the synthesised segment's IFD0 layout (3 entries: Orientation, ImageWidth, ImageLength) and
+		// IFD1 thumbnail pointer/length tags so a regression that reorders entries or mis-sizes IFD0
+		// surfaces here rather than via downstream EXIF-aware viewer wrong-rendering. The segment is
+		// little-endian per the documented format.
 		byte[] thumb = uniqueThumbnailBytes((byte) 0x77, 1024);
 		JpegSegment seg = ExifPatcher.buildMinimalExifSegment(1920, 1080, thumb);
 		assertNotNull(seg);
@@ -144,22 +144,19 @@ public final class ExifPatcherTest
 	@Test
 	public void maxThumbnailBytesFallsBackToDefaultWhenIfd0OffsetWrapsIntCast() throws IOException
 	{
-		// Pre-fix, `maxThumbnailBytes` cast `(int)(TIFF_HEADER_OFFSET + ifd0Rel)` BEFORE the bounds check,
-		// which on a u32 ifd0Rel near `Integer.MAX_VALUE - TIFF_HEADER_OFFSET` produced a small-positive
-		// int that passed the `< TIFF_HEADER_OFFSET` guard by truncation. The function is in the critical
-		// path (`patchPngExifTiff` uses it to decide strip-vs-splice), so the bypass would let adversarial
-		// PNG eXIf inputs through to a doomed splice instead of
-		// force-stripping. Pin the long-arithmetic-first fix with an ifd0Rel value that ONLY the
-		// long-sum guard catches: 0x80000000 + 16 sums to a positive long > Integer.MAX_VALUE, but the
-		// pre-fix int cast wraps to 26 (a valid-looking small offset inside the buffer).
+		// Pin the long-arithmetic-first fix: a u32 ifd0Rel near Integer.MAX_VALUE - TIFF_HEADER_OFFSET
+		// must be caught by the long-sum bounds check, not by an int-cast that wraps to a small positive
+		// offset and slips through. maxThumbnailBytes is on the strip-vs-splice critical path, so the
+		// bypass would route adversarial PNG eXIf inputs to a doomed splice instead of force-stripping.
+		// 0x80000000 + 16 sums to a positive long > Integer.MAX_VALUE but the int cast wraps to 26.
 		ByteArrayOutputStream tiff = new ByteArrayOutputStream();
 		tiff.write('I');
 		tiff.write('I');
 		tiff.write('*');
 		tiff.write(0);
 		writeU32Le(tiff, 0x80000010L); // adversarial IFD0 offset
-		// Pad past offset 26 so the OLD code's bounds check (ifd0 + 2 > data.length) wouldn't catch the
-		// wrapped value either — only the long-arithmetic guard catches it.
+		// Pad past offset 26 so a bounds check on the int-wrapped value (ifd0 + 2 > data.length)
+		// wouldn't catch it either — only the long-arithmetic guard catches it.
 		for (int i = 0; i < 100; i++)
 		{
 			tiff.write(0);
@@ -179,7 +176,7 @@ public final class ExifPatcherTest
 	public void maxThumbnailBytesReturnsBaselineForValidByteOrder() throws IOException
 	{
 		// Baseline: a valid IFD0 with no IFD1 returns
-		//   APP1_MAX_SEGMENT_BYTES - (data.length + IFD1_ESTIMATED_OVERHEAD).
+		//   JpegSegment.MAX_SEGMENT_BYTES - (data.length + the 42-byte IFD1-overhead estimate).
 		// Pinning down a specific value here lets the byte-order-rejection test below
 		// distinguish "rejected, returned DEFAULT" from "parsed clean, returned the computed budget".
 		byte[] ifd = buildIfd(new int[][] {
@@ -221,24 +218,24 @@ public final class ExifPatcherTest
 	@Test
 	public void patchAppendsFreshIfd1OnRealSamsungGalaxyS25UltraExif() throws IOException
 	{
-		// User-reported P0: a Samsung Galaxy S25 Ultra photo whose saved-through-CropCenter output had
-		// no IFD1 thumbnail despite the existing append-fresh logic. The synthetic 16-entry IFD0 test
-		// below passes, but reality didn't. Feed the actual source EXIF
-		// segment (extracted from the user's diag-input.jpg, dropped into resources/samsung-exif.bin)
-		// through `patch` with a real thumbnail and assert the output has an appended IFD1 + thumb.
-		// If THIS test fails, we've reproduced the bug at the unit level.
-		InputStream stream = ExifPatcherTest.class.getClassLoader()
-			.getResourceAsStream("samsung-exif.bin");
-		assertNotNull("samsung-exif.bin fixture must be present in test resources", stream);
-		ByteArrayOutputStream buffer = new ByteArrayOutputStream();
-		byte[] chunk = new byte[4096];
-		int read;
-		while ((read = stream.read(chunk)) > 0)
+		// Real-world Samsung Galaxy S25 Ultra EXIF segment (dropped into resources/samsung-exif.bin):
+		// the synthetic 16-entry IFD0 test below passes but the real fixture revealed a missing IFD1
+		// thumbnail in saved output. Run patch with a real thumbnail and assert the output has an
+		// appended IFD1 + thumb.
+		byte[] exifBytes;
+		try (InputStream stream = ExifPatcherTest.class.getClassLoader()
+			.getResourceAsStream("samsung-exif.bin"))
 		{
-			buffer.write(chunk, 0, read);
+			assertNotNull("samsung-exif.bin fixture must be present in test resources", stream);
+			ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+			byte[] chunk = new byte[4096];
+			int read;
+			while ((read = stream.read(chunk)) > 0)
+			{
+				buffer.write(chunk, 0, read);
+			}
+			exifBytes = buffer.toByteArray();
 		}
-		stream.close();
-		byte[] exifBytes = buffer.toByteArray();
 		JpegSegment seg = new JpegSegment(0xE1, exifBytes);
 		assertTrue("source fixture must be recognised as EXIF", seg.isExif());
 
@@ -247,7 +244,7 @@ public final class ExifPatcherTest
 
 		byte[] resultData = patched.get(0).data();
 		// Exact size: appendFreshIfd1WithThumbnail extends the segment by 42 (fresh IFD1 header) +
-		// thumbnail.length. The previous `>= source + 4000` slop hid regressions that dropped/duplicated
+		// thumbnail.length. A `>= source + 4000` slop would hide a regression that drops or duplicates
 		// up to ~1000 bytes of MakerNote.
 		assertEquals("patched EXIF must equal source + 42 (IFD1 header) + thumbnail.length",
 			exifBytes.length + 42 + freshThumb.length, resultData.length);
@@ -271,12 +268,10 @@ public final class ExifPatcherTest
 	@Test
 	public void patchAppendsFreshIfd1WhenBigEndianSourceHasMultiEntryIfd0AndNoIfd1() throws IOException
 	{
-		// User-reported P0 (continued): a Samsung Galaxy S25 Ultra JPEG (big-endian MM byte order,
-		// 16-entry IFD0 with JPEGInterchangeFormat in IFD0, IFD0's next-IFD pointer = 0, no IFD1)
-		// produced saved output with segLen still 1280 — `appendFreshIfd1WithThumbnail` was silently
-		// failing on this real-world fixture even though all existing tests (which used little-endian
-		// II + 1-entry IFD0) pass. This test mimics the exact source shape so the failure is
-		// reproducible at the unit level.
+		// Mimic the Samsung Galaxy S25 Ultra source shape — big-endian MM byte order, 16-entry IFD0
+		// with JPEGInterchangeFormat in IFD0, IFD0's next-IFD pointer = 0, no IFD1. All-LE +
+		// 1-entry-IFD0 unit tests miss the failure mode appendFreshIfd1WithThumbnail had on this
+		// fixture (saved segLen still 1280, IFD1 silently dropped).
 		ByteArrayOutputStream tiff = new ByteArrayOutputStream();
 		tiff.write('M');
 		tiff.write('M');
@@ -329,15 +324,12 @@ public final class ExifPatcherTest
 	@Test
 	public void patchAppendsFreshIfd1WhenSourceIfd1LacksThumbnailTags() throws IOException
 	{
-		// User-reported P0: source has IFD1 carrying only non-thumbnail entries (e.g. Compression but no
+		// Source has IFD1 carrying only non-thumbnail entries (Compression but no
 		// JPEGInterchangeFormat / JPEGInterchangeFormatLength — typical of minimal-EXIF encoders). A
-		// strip-on-reject behaviour would zero IFD0's next-IFD pointer because `findThumbnailTags`
-		// returns null → `spliceExistingThumbnail` returns the same `data` reference → `replaceThumbnail`
-		// sees `rebuilt == data` and routes to strip. The user reported "no new thumbnail when source
-		// has no pre-computed thumbnail"; that's exactly this shape. Splice-reject must instead route
-		// through `appendFreshIfd1WithThumbnail` first: a new IFD1 is appended at end-of-segment and
-		// IFD0's next-IFD pointer is redirected to it, so the saved file carries the user's fresh
-		// thumbnail rather than nothing.
+		// strip-on-reject behaviour zeroes IFD0's next-IFD pointer because findThumbnailTags returns
+		// null → spliceExistingThumbnail returns the same data reference → replaceThumbnail sees
+		// `rebuilt == data` and routes to strip. Splice-reject must instead route through
+		// appendFreshIfd1WithThumbnail so the saved file carries the fresh thumbnail.
 		ByteArrayOutputStream tiff = new ByteArrayOutputStream();
 		tiff.write('I');
 		tiff.write('I');
@@ -422,18 +414,13 @@ public final class ExifPatcherTest
 	public void patchAppendsFreshIfd1WhenSpliceLongArithmeticGuardCatchesOverflowingOldThumbLen()
 		throws IOException
 	{
-		// Round-35 test-coverage P1: `spliceExistingThumbnail`'s long-arithmetic guard at
-		// ExifPatcher.java:405 (`(long) absOldOff + oldThumbLen > data.length`) is documented as
-		// load-bearing but was never adversarially exercised. `findThumbnailTags` clamps
-		// `oldThumbLen` to `[0, Integer.MAX_VALUE]`, so a value like 0x7FFFFF00 passes the
-		// per-tag rejection but, summed with a small `absOldOff`, produces a long-sum that
-		// vastly exceeds `data.length`. The guard's early return is still required (sign-bit
-		// arithmetic would otherwise bypass bounds and OOM/AIOOBE inside splice's arraycopy).
-		// Round-36 changes only the recovery outcome: the splice reject now routes through
-		// `appendFreshIfd1WithThumbnail`, so the saved IFD0's next-IFD pointer redirects to a
-		// fresh IFD1 carrying the user's new thumbnail rather than zeroing out entirely.
-		// The adversarial source IFD1 (with its overflowing JPEGInterchangeFormatLength) becomes
-		// orphan bytes — unreachable through the spec parse chain (same security as strip).
+		// Adversarial exercise of spliceExistingThumbnail's long-arithmetic guard
+		// (`(long) absOldOff + oldThumbLen > data.length`). findThumbnailTags clamps oldThumbLen to
+		// [0, Integer.MAX_VALUE], so a value like 0x7FFFFF00 passes per-tag rejection but, summed with
+		// a small absOldOff, overflows data.length — without the guard splice's arraycopy hits AIOOBE.
+		// Splice reject routes through appendFreshIfd1WithThumbnail: IFD0's next-IFD pointer redirects
+		// at a fresh IFD1 carrying the user's new thumbnail (the adversarial source IFD1 becomes
+		// orphan bytes — unreachable through the spec parse chain).
 		ByteArrayOutputStream tiff = new ByteArrayOutputStream();
 		tiff.write('I');
 		tiff.write('I');
@@ -533,9 +520,9 @@ public final class ExifPatcherTest
 			indexOfSubsequence(resultData, oldThumbnail) >= 0);
 		assertTrue("trailing sentinel bytes must survive unchanged in the orphaned region",
 			indexOfSubsequence(resultData, trailingSentinel) >= 0);
-		// Trailing sentinel offset preserved: pre-fix the splice would have shifted it by
-		// (newThumbnail.length - oldThumbnail.length) = +20 bytes. With the fix, appendFresh leaves
-		// the trailing bytes at their original absolute position.
+		// Trailing sentinel offset preserved: a splice would shift it by
+		// (newThumbnail.length - oldThumbnail.length) = +20 bytes. appendFresh leaves trailing bytes
+		// at their original absolute position.
 		int trailingPreFixOffset = indexOfSubsequence(seg.data(), trailingSentinel);
 		int trailingPostFixOffset = indexOfSubsequence(resultData, trailingSentinel);
 		assertEquals("trailing bytes must NOT be shifted (offsets in EXIF would otherwise break)",
@@ -734,16 +721,15 @@ public final class ExifPatcherTest
 	public void patchRejectsThumbnailExceedingApp1Cap() throws IOException
 	{
 		// A thumbnail so large it would push the rebuilt segment past 65535 bytes triggers the
-		// "newSegLen > APP1_MAX_SEGMENT_BYTES" guard inside `spliceExistingThumbnail`. A silently-return-
-		// the-cloned-source-data behaviour would leave the saved segment carrying the SOURCE's pre-edit
-		// IFD1 thumbnail — exactly the leak class addressed elsewhere for the `null` thumbnail API but
-		// missed for "non-null thumbnail + splice rejected". Routing splice rejection through
-		// `stripIfd1Thumbnail`: the rebuilt segment stays the same size (orientation rewrite is in-place;
-		// the strip zeros IFD0's
-		// next-IFD pointer in place too) but the source thumbnail is now unreachable through the spec
-		// parse chain, so EXIF-aware viewers render no preview rather than the wrong one. The orphan
-		// thumbnail bytes are still byte-present in the buffer (soft strip) — that's documented and
-		// asserted below so a future hard-strip change reads as intentional.
+		// "newSegLen > JpegSegment.MAX_SEGMENT_BYTES" guard inside `spliceExistingThumbnail`. A
+		// silently-return-the-cloned-source-data behaviour would leave the saved segment carrying the
+		// SOURCE's pre-edit IFD1 thumbnail — exactly the leak class addressed elsewhere for the `null`
+		// thumbnail API but missed for "non-null thumbnail + splice rejected". Routing splice rejection
+		// through `stripIfd1Thumbnail`: the rebuilt segment stays the same size (orientation rewrite is
+		// in-place; the strip zeros IFD0's next-IFD pointer in place too) but the source thumbnail is
+		// now unreachable through the spec parse chain, so EXIF-aware viewers render no preview rather
+		// than the wrong one. The orphan thumbnail bytes are still byte-present in the buffer (soft
+		// strip) — documented and asserted below so a future hard-strip change reads as intentional.
 		byte[] oldThumbnail = uniqueThumbnailBytes((byte) 0xAA, 60);
 		// Need a thumbnail size that pushes (78-byte segment overhead + thumbnail) past APP1's 65537-byte
 		// total-segment cap to trigger the rejection. 65500 leaves the rebuilt segment at 65578 bytes which is
@@ -823,15 +809,11 @@ public final class ExifPatcherTest
 	@Test
 	public void patchRewritesAllFourDimensionTagsAcrossIfd0AndExifSubIfd() throws IOException
 	{
-		// Round-34 test-coverage P0: every prior dimension-rewrite test only assertion-checked
-		// Orientation, leaving scanIfd's IMAGE_WIDTH / IMAGE_LENGTH / PIXEL_X_DIMENSION /
-		// PIXEL_Y_DIMENSION branches and writeValue's TYPE_SHORT vs TYPE_LONG dispatch entirely
-		// unverified. A regression that swapped newW ↔ newH, dropped the SubIFD recursion, or
-		// mis-ordered SHORT vs LONG writes would ship without surfacing. Build a TIFF with all
-		// four dimension tags split between IFD0 (IMAGE_WIDTH=LONG, IMAGE_LENGTH=SHORT) and
-		// ExifSubIFD (PIXEL_X_DIMENSION=LONG, PIXEL_Y_DIMENSION=SHORT) so both branches of the
-		// type dispatcher fire on both axes, then read all four back to confirm 100/200 landed
-		// in the right slots.
+		// All four dimension tags split across IFD0 (IMAGE_WIDTH=LONG, IMAGE_LENGTH=SHORT) and
+		// ExifSubIFD (PIXEL_X_DIMENSION=LONG, PIXEL_Y_DIMENSION=SHORT) so both branches of writeValue's
+		// TYPE_SHORT vs TYPE_LONG dispatch fire on both axes. Catches regressions that swap newW ↔ newH,
+		// drop the SubIFD recursion, or mis-order SHORT vs LONG writes (orientation-only assertions
+		// leave those code paths unverified).
 		int subIfdOffset = 8 + 54; // IFD0 = 2 + 4*12 + 4 = 54 bytes; SubIFD starts right after
 		byte[] ifd0 = buildIfd(new int[][] {
 			{ 0x0112, 3, 1, 0x0006 },         // Orientation = 6 SHORT
@@ -998,15 +980,12 @@ public final class ExifPatcherTest
 	@Test
 	public void patchSynthesizesFreshExifSegmentWhenSourceHasNone() throws IOException
 	{
-		// Round-36 user-reported P0 (continued): when the source has NO EXIF segment at all
-		// (screenshots, generated bitmaps, files re-encoded by minimal tools that strip metadata),
-		// `patch` previously iterated the non-EXIF segments verbatim and the freshly-generated
-		// thumbnail was silently dropped on the floor. The fix synthesises a minimal EXIF segment
-		// with IFD0 (orientation=1, ImageWidth=newW, ImageLength=newH) + IFD1 (compression,
-		// JPEGInterchangeFormat, JPEGInterchangeFormatLength) + thumbnail bytes when no source EXIF
-		// is found AND a real thumbnail is requested. Empty-list input is the canonical screenshot
-		// case (state.getJpegMeta() returned an empty list); pin the synthesise path with that
-		// input and verify the result contains exactly one EXIF segment carrying the fresh bytes.
+		// Source has NO EXIF segment at all (screenshots, generated bitmaps, files re-encoded by tools
+		// that strip metadata). patch must synthesise a minimal EXIF segment with IFD0 (orientation=1,
+		// ImageWidth=newW, ImageLength=newH) + IFD1 (compression, JPEGInterchangeFormat,
+		// JPEGInterchangeFormatLength) + thumbnail bytes — otherwise the freshly-generated thumbnail
+		// is silently dropped. Empty-list input is the canonical screenshot case
+		// (state.getJpegMeta() returned an empty list).
 		byte[] freshThumb = uniqueThumbnailBytes((byte) 0x55, 500);
 		List<JpegSegment> patched = ExifPatcher.patch(Collections.emptyList(), 1024, 768, freshThumb);
 
@@ -1032,12 +1011,11 @@ public final class ExifPatcherTest
 	@Test
 	public void patchSynthesizesFreshExifWhenSourceHasOnlyNonExifSegments() throws IOException
 	{
-		// Real-world shape of a source-with-no-pre-computed-thumbnail: a JPEG that carries APP0 JFIF
-		// (and maybe APP2 ICC / APP1 XMP) but no APP1 EXIF. Without the synthesize-fresh-EXIF path,
-		// patch would iterate the JFIF segment verbatim, the loop would never call replaceThumbnail
-		// (since there's no EXIF segment to patch), and the freshly-generated thumbnail would be
-		// silently dropped. This test pins that the result list now contains BOTH the original JFIF
-		// AND a synthesized EXIF carrying the fresh thumbnail bytes.
+		// Source with no pre-computed thumbnail: a JPEG that carries APP0 JFIF (and maybe APP2 ICC /
+		// APP1 XMP) but no APP1 EXIF. Without the synthesize-fresh-EXIF path, patch would iterate the
+		// JFIF segment verbatim, replaceThumbnail would never fire, and the fresh thumbnail would be
+		// silently dropped. Result list must contain BOTH the original JFIF AND a synthesised EXIF
+		// carrying the fresh thumbnail bytes.
 		byte[] jfifPayload = new byte[] { 'J', 'F', 'I', 'F', 0, 0x01, 0x02, 0x01, 0x00 };
 		byte[] jfifBytes = JpegFixtures.appSegment(0xE0, jfifPayload);
 		JpegSegment jfif = new JpegSegment(0xE0, jfifBytes);

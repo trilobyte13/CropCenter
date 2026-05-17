@@ -71,8 +71,8 @@ public final class ExifPatcher
 			return null;
 		}
 		byte[] data = new byte[2 + segLenValue];
-		data[0] = (byte) 0xFF;
-		data[1] = (byte) 0xE1;
+		data[0] = (byte) JpegMarker.PREFIX;
+		data[1] = (byte) JpegMarker.APP1;
 		data[2] = (byte) ((segLenValue >> 8) & 0xFF);
 		data[3] = (byte) (segLenValue & 0xFF);
 		data[4] = 'E';
@@ -141,8 +141,8 @@ public final class ExifPatcher
 		}
 		// Outer try/catch defaults to false (bypass disabled = safe) on any unexpected parse failure —
 		// the caller (`ExportPipeline.canBypassEncode`) runs on the UI thread for every Save tap, so an
-		// uncaught exception here would crash save-prep. Mirrors `replaceThumbnail`'s leak-prevention
-		// shape: treat "I don't understand this EXIF" as "no thumbnail, re-encode".
+		// uncaught exception here would crash save-prep. Treat "I don't understand this EXIF" as
+		// "no thumbnail, re-encode".
 		try
 		{
 			for (JpegSegment seg : segments)
@@ -164,12 +164,9 @@ public final class ExifPatcher
 					continue;
 				}
 				boolean isLittleEndian = byteOrderHi == 0x49;
-				// TIFF magic = 42 (0x002A) — a coincidental II/MM byte-order match without the magic
-				// means the chunk isn't actually TIFF. Without this check a malformed APP1 with valid
-				// II plus garbage at TIFF+2 would have its "IFD0 offset" read from random bytes; sister
-				// walkers (BitmapUtils.readExifOrientationInternal,
-				// PngMetadataExtractor.extractOrientationInternal) both validate magic-42, so the four
-				// ExifPatcher TIFF entry points stay aligned with them.
+				// TIFF magic = 42 (0x002A). A coincidental II/MM match without the magic means the
+				// chunk isn't actually TIFF; without this check a malformed APP1 with valid II plus
+				// garbage at TIFF+2 would read IFD0 offset from random bytes.
 				int magic = ByteBufferUtils.readU16(data, TIFF_HEADER_OFFSET + 2, isLittleEndian);
 				if (magic != TiffTag.MAGIC)
 				{
@@ -203,7 +200,7 @@ public final class ExifPatcher
 				int ifd1EntryCount = ByteBufferUtils.readU16(data, ifd1, isLittleEndian);
 				for (int i = 0; i < ifd1EntryCount; i++)
 				{
-					// Long-arithmetic stride matches the hardening in sister walkers.
+					// Long stride: u16 entry count × 12 can wrap int on uncapped PNG eXIf inputs.
 					long entryOffsetLong = (long) ifd1 + 2 + (long) i * 12;
 					if (entryOffsetLong + 12 > data.length)
 					{
@@ -264,9 +261,9 @@ public final class ExifPatcher
 			{
 				continue;
 			}
-			// TIFF byte-order marker is 2 bytes — "II" (little) or "MM" (big). Validate both halves; a
-			// malformed "IM" / "MI" treated as little-endian would parse every subsequent u32 with wrong
-			// byte order and corrupt offset arithmetic.
+			// Validate byte-order (II/MM, not "IM"/"MI") and TIFF magic = 42 before reading anything else
+			// — a malformed APP1 with garbage at TIFF+0..3 would otherwise return a budget from random
+			// bytes.
 			int byteOrderHi = data[TIFF_HEADER_OFFSET] & 0xFF;
 			int byteOrderLo = data[TIFF_HEADER_OFFSET + 1] & 0xFF;
 			if (!((byteOrderHi == 0x49 && byteOrderLo == 0x49)
@@ -275,10 +272,6 @@ public final class ExifPatcher
 				continue;
 			}
 			boolean isLittleEndian = byteOrderHi == 0x49;
-			// TIFF magic = 42 (0x002A). A coincidental II/MM byte-order match without the magic means the
-			// chunk isn't actually TIFF; refuse to walk further so a malformed APP1 doesn't return a budget
-			// from random bytes. Matches the magic-42 guards in BitmapUtils.readExifOrientationInternal
-			// and PngMetadataExtractor.extractOrientationInternal.
 			if (ByteBufferUtils.readU16(data, TIFF_HEADER_OFFSET + 2, isLittleEndian) != TiffTag.MAGIC)
 			{
 				continue;
@@ -288,13 +281,9 @@ public final class ExifPatcher
 			// fall back to defaultThumbBudget rather than zero — corrupt-IFD source EXIF is still
 			// preserve-worthy at load / save round-trip, and a non-zero budget keeps the embedded-
 			// thumbnail injection from silently dropping just because we couldn't measure it.
+			// Long arithmetic throughout: u32 offsets + small base wrap into small-positive ints
+			// that would silently slip past TIFF_HEADER_OFFSET / data.length bounds.
 			long ifd0Rel = ByteBufferUtils.readU32(data, TIFF_HEADER_OFFSET + 4, isLittleEndian);
-			// Long-arithmetic guard before the int cast — match the rest of ExifPatcher (patch,
-			// replaceThumbnail, stripIfd1Thumbnail) and the sister walkers in BitmapUtils /
-			// MpfPatcher / PngMetadataExtractor. A u32 ifd0Rel near 0xFFFFFFFF would truncate to a
-			// small-positive int that passes `< TIFF_HEADER_OFFSET` only by luck; this function is in
-			// the critical path for the PNG strip-vs-splice decision, so a cast-first regression would
-			// silently bypass the strip fallback on adversarial inputs.
 			long absIfd0 = TIFF_HEADER_OFFSET + ifd0Rel;
 			if (ifd0Rel < 0 || absIfd0 < TIFF_HEADER_OFFSET || absIfd0 + 2 > data.length)
 			{
@@ -302,10 +291,6 @@ public final class ExifPatcher
 			}
 			int ifd0 = (int) absIfd0;
 			int ifd0EntryCount = ByteBufferUtils.readU16(data, ifd0, isLittleEndian);
-			// `nextIfdPointer` arithmetic via long so a near-MAX_INT `ifd0` paired with
-			// `ifd0EntryCount = 0xFFFF` (786,420-byte stride) doesn't overflow int and then evaluate
-			// `nextIfdPointer + 4 > data.length` against a wrap-negative LHS. Same long-first pattern
-			// guards the parallel walk in `replaceThumbnail` and `stripIfd1Thumbnail`.
 			long nextIfdPointerLong = (long) ifd0 + 2 + (long) ifd0EntryCount * 12;
 			if (nextIfdPointerLong + 4 > data.length)
 			{
@@ -334,8 +319,6 @@ public final class ExifPatcher
 			int oldThumbLen = 0;
 			for (int i = 0; i < ifd1EntryCount; i++)
 			{
-				// Long-arithmetic stride matches the rest of ExifPatcher. Reachable on uncapped PNG
-				// eXIf where data.length can be ~2GB.
 				long entryOffsetLong = (long) ifd1 + 2 + (long) i * 12;
 				if (entryOffsetLong + 12 > data.length)
 				{
@@ -415,9 +398,7 @@ public final class ExifPatcher
 				result.add(seg);
 				continue;
 			}
-			// TIFF byte-order marker is 2 bytes — "II" (little) or "MM" (big). Validate both halves; a
-			// malformed "IM" / "MI" treated as little-endian would parse every subsequent u32 with wrong
-			// byte order and corrupt offset arithmetic.
+			// Validate byte-order (II/MM) and magic-42 before parsing — see hasIfd1Thumbnail for rationale.
 			int byteOrderHi = data[TIFF_HEADER_OFFSET] & 0xFF;
 			int byteOrderLo = data[TIFF_HEADER_OFFSET + 1] & 0xFF;
 			if (!((byteOrderHi == 0x49 && byteOrderLo == 0x49)
@@ -427,11 +408,6 @@ public final class ExifPatcher
 				continue;
 			}
 			boolean isLittleEndian = byteOrderHi == 0x49;
-			// TIFF magic = 42 (0x002A). A coincidental II/MM byte-order match without the magic means the
-			// chunk isn't actually TIFF; preserve the segment as-is (still copyable bytes) rather than
-			// walking its IFDs to write a thumbnail / patch SOF dims into random data. Matches the
-			// magic-42 guards in BitmapUtils.readExifOrientationInternal and
-			// PngMetadataExtractor.extractOrientationInternal.
 			if (ByteBufferUtils.readU16(data, TIFF_HEADER_OFFSET + 2, isLittleEndian) != TiffTag.MAGIC)
 			{
 				result.add(new JpegSegment(seg.marker(), data));
@@ -439,10 +415,6 @@ public final class ExifPatcher
 			}
 
 			long ifdOffRel = ByteBufferUtils.readU32(data, TIFF_HEADER_OFFSET + 4, isLittleEndian);
-			// Same long-arithmetic guard as scanIfd's SubIFD pointer: ifdOffRel is u32 (range 0..2^32-1)
-			// and the addition `TIFF_HEADER_OFFSET + ifdOffRel` can exceed Integer.MAX_VALUE on adversarial
-			// EXIF. Validate the long sum before casting — a malicious 0xFFFFFFFF would truncate to a
-			// small-positive int that lands inside the buffer, bypassing the bounds check below.
 			long absIfdOff = TIFF_HEADER_OFFSET + ifdOffRel;
 			if (ifdOffRel < 0 || absIfdOff < TIFF_HEADER_OFFSET || absIfdOff + 2 > data.length)
 			{
@@ -556,10 +528,9 @@ public final class ExifPatcher
 			return synthesizedNonThumb;
 		}
 		// Outer try/catch defends the bg-thread save pipeline against an unexpected RuntimeException
-		// slipping past the explicit bounds / long-arithmetic guards below. Mirrors
-		// `hasIfd1Thumbnail`'s defensive shape — caller would crash save-prep otherwise, and the
-		// generous-budget fallback at worst wastes the thumb encode if the actual patch silently
-		// drops the thumbnail (malformed source EXIF case).
+		// slipping past the explicit bounds / long-arithmetic guards below — caller would crash
+		// save-prep otherwise. Generous-budget fallback at worst wastes the thumb encode if the
+		// actual patch silently drops the thumbnail (malformed source EXIF case).
 		try
 		{
 			for (JpegSegment seg : segments)
@@ -778,10 +749,6 @@ public final class ExifPatcher
 
 		for (int i = 0; i < ifd1EntryCount; i++)
 		{
-			// Long-arithmetic stride matches the hardening in sister walkers. A u16
-			// ifd1EntryCount paired with a near-MAX_INT ifd1 (only reachable via uncapped PNG eXIf)
-			// would wrap int and bypass the bounds check; outer `replaceThumbnail` try/catch would
-			// then strip IFD1 — graceful but inconsistent with the rest of the file's hardening.
 			long entryOffsetLong = (long) ifd1 + 2 + (long) i * 12;
 			if (entryOffsetLong + 12 > data.length)
 			{
@@ -853,9 +820,6 @@ public final class ExifPatcher
 		try
 		{
 			long ifd0Rel = ByteBufferUtils.readU32(data, tiffStart + 4, isLittleEndian);
-			// Long-arithmetic guard before the int cast — see ExifPatcher.patch and scanIfd for the full
-			// rationale. A u32 ifd0Rel of 0xFFFFFFFF would truncate to a small-positive int that satisfies
-			// `>= tiffStart` only by luck; computing the long sum first rules out the overflow case.
 			long absIfd0 = tiffStart + ifd0Rel;
 			if (ifd0Rel < 0 || absIfd0 < tiffStart || absIfd0 + 2 > data.length)
 			{
@@ -863,9 +827,6 @@ public final class ExifPatcher
 			}
 			int ifd0 = (int) absIfd0;
 			int ifd0EntryCount = ByteBufferUtils.readU16(data, ifd0, isLittleEndian);
-			// Long-arithmetic on the IFD0 entry stride so a u16 ifd0EntryCount = 0xFFFF paired with
-			// a near-MAX_INT ifd0 (only reachable via the uncapped PNG eXIf path) doesn't overflow int
-			// and then evaluate `nextIfdPointer + 4 > data.length` against a wrap-negative LHS.
 			long nextIfdPointerLong = (long) ifd0 + 2 + (long) ifd0EntryCount * 12;
 			if (nextIfdPointerLong + 4 > data.length)
 			{
@@ -936,12 +897,6 @@ public final class ExifPatcher
 
 		for (int i = 0; i < entryCount; i++)
 		{
-			// Long-arithmetic stride matches the hardening in sister walkers (hasIfd1Thumbnail /
-			// findThumbnailTags / maxThumbnailBytes / replaceThumbnail / stripIfd1Thumbnail). Reachable
-			// via the uncapped PNG eXIf path where data.length can be ~2GB and ifdOff can be near
-			// Integer.MAX_VALUE; the int stride would wrap and bypass the bound check. The patch caller
-			// wraps scanIfd in its own try/catch so any residual throw degrades to "ship unmodified
-			// data" rather than crashing the bg thread on the save path.
 			long entryOffsetLong = (long) ifdOff + 2 + (long) i * 12;
 			if (entryOffsetLong + 12 > data.length)
 			{
@@ -994,19 +949,10 @@ public final class ExifPatcher
 				case TiffTag.EXIF_SUB_IFD ->
 				{
 					long off = ByteBufferUtils.readU32(data, entryOffset + 8, isLittleEndian);
-					// `off` is u32 (range 0..2^32-1) read into a long, so the addition `tiffStart +
-					// off` can exceed Integer.MAX_VALUE on adversarial EXIF. Validate the
-					// long-arithmetic result FIRST and only cast to int after we know it fits —
-					// without this guard, a malicious off like 0xFFFFFFFF would cast to a
-					// small-positive int that lands inside the buffer (e.g. (10 + 0xFFFFFFFFL)
-					// truncates to 9), which would re-enter scanIfd reading EXIF header bytes as
-					// IFD entries and writing orientation=1 over arbitrary data.
 					long absSubIfd = tiffStart + off;
-					// Require absSubIfd >= tiffStart so a sub-tiffStart pointer (e.g., 4) can't
-					// recurse into the EXIF/TIFF header bytes — otherwise scanIfd would treat
-					// header bytes as IFD entries and write orientation = 1 over the byte-order
-					// marker / magic, corrupting the EXIF segment. Matches the IFD0 guard in
-					// patch() and replaceThumbnail.
+					// absSubIfd >= tiffStart prevents a sub-tiffStart pointer recursing into the
+					// EXIF/TIFF header bytes (would let scanIfd write orientation=1 over the
+					// byte-order marker / magic, corrupting the segment).
 					if (off >= 0 && absSubIfd >= tiffStart && absSubIfd + 2 <= data.length)
 					{
 						scanIfd(data, (int) absSubIfd, tiffStart, isLittleEndian,
@@ -1049,12 +995,8 @@ public final class ExifPatcher
 		int oldThumbLen = thumbTags[3];
 
 		int absOldOff = tiffStart + oldThumbOff;
-		// Long-arithmetic guard: `findThumbnailTags` clamps `oldThumbLen` to `[0, Integer.MAX_VALUE]`,
-		// so an int `absOldOff + oldThumbLen` can wrap negative on adversarial input where
-		// `oldThumbLen` is near `Integer.MAX_VALUE`. The `> data.length` check would then evaluate
-		// false (negative > positive) and the subsequent `data.length - afterStart` arithmetic would
-		// blow up downstream — caught at `replaceThumbnail`'s catch which now strips IFD1, but routing
-		// through here cleanly avoids the throw entirely.
+		// Long sum: oldThumbLen can be near MAX_INT (uncapped PNG eXIf path), so int absOldOff +
+		// oldThumbLen wraps negative and would silently pass `> data.length`.
 		if (absOldOff < 0 || (long) absOldOff + oldThumbLen > data.length)
 		{
 			return data;
@@ -1137,8 +1079,6 @@ public final class ExifPatcher
 			}
 			int ifd0 = (int) absIfd0;
 			int ifd0EntryCount = ByteBufferUtils.readU16(data, ifd0, isLittleEndian);
-			// Long-arithmetic on the IFD0 entry stride; see replaceThumbnail / maxThumbnailBytes for
-			// the full overflow rationale. Reachable only via the uncapped PNG eXIf round-trip path.
 			long nextIfdPointerLong = (long) ifd0 + 2 + (long) ifd0EntryCount * 12;
 			if (nextIfdPointerLong + 4 > data.length)
 			{

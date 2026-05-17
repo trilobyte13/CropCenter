@@ -80,9 +80,9 @@ public record AspectRatio(float width, float height)
 		}
 		int wInt = (int) width;
 		int hInt = (int) height;
-		int g = gcd(wInt, hInt);
-		wInt /= g;
-		hInt /= g;
+		int divisor = gcd(wInt, hInt);
+		wInt /= divisor;
+		hInt /= divisor;
 		// k that minimises (wInt·k - cropW)² + (hInt·k - cropH)². Setting the derivative to 0 gives
 		// k = (wInt·cropW + hInt·cropH) / (wInt² + hInt²). Use long arithmetic so a 16:9 AR on a
 		// 50000×50000 image (50000·16 + 50000·9 ≈ 1.25M) doesn't overflow.

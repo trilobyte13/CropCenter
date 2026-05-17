@@ -249,8 +249,8 @@ public final class CropExporter
 		// ExifPatcher.patch / maxThumbnailBytes which both read data().length directly.
 		int segLen = 2 + 6 + tiff.length;
 		byte[] wrapped = new byte[2 + segLen];
-		wrapped[0] = (byte) 0xFF;
-		wrapped[1] = (byte) 0xE1;
+		wrapped[0] = (byte) JpegMarker.PREFIX;
+		wrapped[1] = (byte) JpegMarker.APP1;
 		wrapped[2] = (byte) ((segLen >> 8) & 0xFF);
 		wrapped[3] = (byte) (segLen & 0xFF);
 		wrapped[4] = 'E';
@@ -348,11 +348,8 @@ public final class CropExporter
 		{
 			return jpeg;
 		}
-		// Defensive long-arithmetic guard mirrors injectPngExifFromTiff's eXIf-chunk overflow check. The
-		// SafFileHelper.MAX_READ_BYTES = 128 MiB cap makes the int sum unreachable today, but the
-		// symmetric defensive style is what keeps sister concatenators from drifting apart — a future cap
-		// relaxation that lets a multi-GB JPEG plus a multi-MB SEFT through silently wraps the int sum
-		// negative and throws NegativeArraySizeException from the bg encode worker.
+		// Long-arithmetic guard against int overflow on jpeg.length + existingSeft.length — wrap
+		// produces a negative sum that NegativeArraySizeException's the bg encode worker.
 		long combinedLong = (long) jpeg.length + (long) existingSeft.length;
 		if (combinedLong > Integer.MAX_VALUE)
 		{
@@ -534,11 +531,10 @@ public final class CropExporter
 		File cacheDir) throws IOException
 	{
 		int quality = 100;
-		// Recycle the primary bitmap on every exit, covering the entire pre-compress + compress block.
-		// buildEmbeddedThumbnail and buildCroppedGainMap both render into intermediate bitmaps and can
-		// throw OutOfMemoryError on multi-MP HDR sources; before the wrap was extended to cover them, an
-		// OOM there would orphan bmp's native pixel buffer for the GC finalizer. The
-		// post-compress metadata work below doesn't touch bmp, so it stays outside.
+		// Recycle the primary bitmap on every exit. buildEmbeddedThumbnail and buildCroppedGainMap render
+		// into intermediate bitmaps that can OOM on multi-MP HDR sources; without the wrap covering them
+		// the OOM would orphan bmp's native pixel buffer for the GC finalizer. Post-compress metadata work
+		// doesn't touch bmp, so it stays outside.
 		byte[] thumbnail;
 		byte[] croppedGainMap;
 		byte[] jpegBytes;
@@ -547,16 +543,11 @@ public final class CropExporter
 			thumbnail = buildEmbeddedThumbnail(state, bmp);
 			croppedGainMap = buildCroppedGainMap(state, cropW, cropH, cacheDir, quality);
 			ByteArrayOutputStream bos = new ByteArrayOutputStream();
-			// Bitmap.compress returns false on Skia encoder rejection — but the partial output already
-			// in `bos` (headers, segments, mid-entropy bytes that landed before the failure) looks like a
-			// valid JPEG to a casual byte walker. Observed user report: the export produced an 8 MB file
-			// that ended mid-entropy with no EOI / gainmap / SEFT trailer; the cause was an unchecked
-			// compress return paired with `bos.toByteArray()` shipping the partial buffer onward to the
-			// inject / append pipeline. The Samsung-HDR case is the most likely trigger — Skia's
-			// Gainmap-aware JPEG encoder can fail when the bitmap's attached gainmap state isn't quite
-			// what it expects. Throwing IOException routes through the encodePhase catch and surfaces
-			// "Export failed" instead of writing a structurally invalid file the user discovers later
-			// when they try to open it.
+			// Bitmap.compress returns false on Skia encoder rejection — but the partial output in `bos`
+			// (headers, segments, mid-entropy bytes that landed before the failure) looks like a valid
+			// JPEG to a casual byte walker. Throw IOException so encodePhase routes it to "Export failed"
+			// instead of writing a structurally invalid file. Samsung HDR is the most likely trigger —
+			// Skia's Gainmap-aware encoder fails when the attached gainmap state isn't what it expects.
 			if (!bmp.compress(Bitmap.CompressFormat.JPEG, quality, bos))
 			{
 				throw new IOException("Bitmap.compress(JPEG, " + quality + ") returned false — "
@@ -569,25 +560,16 @@ public final class CropExporter
 			bmp.recycle();
 		}
 
-		// HDR-drop bookkeeping: an HDR source carries XMP-hdrgm + APP2-MPF metadata describing the gain map's
-		// presence and offset. If the gain-map composition is skipped (croppedGainMap == null because
-		// UltraHdrCompat couldn't produce a valid output) OR fails inside GainMapComposer.compose (MPF patch
-		// rejects, e.g. malformed source MPF), the output won't carry an attached gain map but the metadata
-		// would still claim one — strict decoders' Revert pre-flight would reject the orphaned-metadata
-		// shape, and lenient decoders that scan for the hdrgm signature would render with the wrong offset.
-		// Strip the HDR-specific segments from the injected metadata when we know the gain map didn't make
-		// it. ExportPipeline.reportSuccess relies on the structural hdrAttached flag returned in
-		// ExportResult below rather than a full-file substring scan for "hdrgm" (which would
-		// false-positive on preserved trailers, stale metadata, and Extended-XMP segments). The strip
-		// remains the right behaviour for honest output bytes.
+		// HDR-drop bookkeeping. If the gain-map composition is skipped (croppedGainMap == null) or fails
+		// inside GainMapComposer.compose (MPF patch rejects, malformed source MPF), the output can't
+		// carry an attached gain map but source's XMP-hdrgm + APP2-MPF metadata would still claim one.
+		// Strict decoders reject the orphan; lenient decoders render with the wrong offset. Strip the
+		// HDR-specific segments when we know the gain map didn't make it.
 		//
-		// When the source carries an MPF segment but no Ultra HDR gain map (e.g. Samsung
-		// "Best Photo" burst groups, focus-stacked panoramas, or any multi-picture JPEG without hdrgm),
-		// ImageLoadController leaves state.getGainMap() null and hdrAttempted is false. The injected
-		// metadata would otherwise carry source's MPF verbatim, anchored at non-existent secondary-image
-		// offsets — strict decoders' multi-picture pre-flight rejects the orphan, lenient decoders walk
-		// past the malformed entries. Strip MPF up-front for the non-HDR inject path so the output never
-		// ships orphan MPF metadata.
+		// When the source carries an MPF segment but no Ultra HDR gain map (Samsung "Best Photo" burst
+		// groups, focus-stacked panoramas, any multi-picture JPEG without hdrgm), source's MPF is
+		// anchored at non-existent secondary-image offsets — strip MPF up-front for the non-HDR inject
+		// path so the output never ships orphan MPF metadata.
 		boolean hdrAttempted = state.getGainMap() != null && state.getGainMap().length > 0
 			&& state.getOriginalFileBytes() != null;
 		List<JpegSegment> meta = state.getJpegMeta();
@@ -597,14 +579,11 @@ public final class CropExporter
 		// meta directly so orphan MPF can't survive a non-HDR re-encode.
 		List<JpegSegment> initialMeta = hdrAttempted ? meta : metaWithHdrStripped;
 
-		// Optimistically inject the (HDR-path) full metadata or (non-HDR-path) pre-stripped metadata, then
-		// attempt the gain-map compose. If compose drops the gain map (hdrAttached=false in the tagged
-		// result), re-inject from scratch with HDR-specific segments stripped so the output's metadata
-		// stays honest about what's actually attached. The previous reference-inequality detection
-		// (`withGainMap != withFullMeta`) broke once GainMapComposer started returning the XMP-patched
-		// primary on the MPF-fail path — that's a freshly-allocated array distinct from withFullMeta, so
-		// the inequality wrongly fired hdrAttached=true and skipped stripping. The explicit boolean from
-		// ComposeResult.hdrAttached() is the canonical signal.
+		// Inject the chosen metadata, attempt the gain-map compose, and on drop (hdrAttached=false)
+		// re-inject from scratch with HDR-specific segments stripped so the output's metadata stays
+		// honest. Use ComposeResult.hdrAttached() as the canonical signal: reference-inequality
+		// (`withGainMap != withFullMeta`) is unreliable because the MPF-fail path returns a
+		// freshly-allocated XMP-patched primary distinct from withFullMeta.
 		byte[] withFullMeta = injectExifMetadata(jpegBytes, initialMeta, cropW, cropH, thumbnail);
 		GainMapComposer.ComposeResult composed = composeGainMap(withFullMeta, state, croppedGainMap);
 		byte[] withGainMap = composed.bytes();
@@ -620,12 +599,10 @@ public final class CropExporter
 		}
 		jpegBytes = appendSeft(jpegBytes, state.getSeftTrailer());
 
-		// Thread `hdrAttached` back to the caller structurally, so ExportPipeline.reportSuccess doesn't
-		// have to substring-scan the output for "hdrgm" — that scan would false-positive on preserved
-		// trailers, stale metadata, and Extended-XMP segments. The flag is sourced from the
-		// ComposeResult tagged record: true ONLY when the gain map was appended AND MPF offsets were
-		// patched to point at it; false on every drop path (including stripHdrSegments-cleaned re-inject
-		// above).
+		// hdrAttached threaded back structurally: true ONLY when the gain map was appended AND MPF
+		// offsets were patched to point at it; false on every drop path. ExportPipeline.reportSuccess
+		// uses this flag instead of substring-scanning the output for "hdrgm" (false-positives on
+		// preserved trailers, stale metadata, and Extended-XMP segments).
 		return new ExportResult(jpegBytes, hdrAttached);
 	}
 
@@ -708,32 +685,25 @@ public final class CropExporter
 	 * 55 → 50 in order; the first encoding that fits maxBytes wins. Returns null when 256-maxDim q50
 	 * still doesn't fit — caller routes that through STRIP_IFD1_THUMBNAIL.
 	 *
-	 * Why no 1024-maxDim "full" rung: on typical full-resolution crops (3-4 MP), a 819×1024 thumbnail
-	 * at any quality 50..90 produces 130-400 KB — well above the 65 535-byte APP1 segment cap, so the
-	 * rung was unreachable in practice. Starting at 512 maxDim matches Samsung's native embedded-
-	 * thumbnail dimensions and lets the quality cascade actually do work.
+	 * Cascade design: drop quality before dim. Viewers downscale the EXIF preview for grid / hover
+	 * display (96-256 px), and downscaling masks JPEG artifacts — a heavily-compressed 410×512 viewed
+	 * at 128×160 looks better than a small high-quality 205×256 upscaled to 256×320. Matches Samsung's
+	 * "preserve dim, scale quality" design. No 1024-maxDim rung because typical 3-4 MP source produces
+	 * 130-400 KB at any quality — well above the 65 535-byte APP1 cap, so the rung was unreachable.
 	 *
-	 * Why a dim-preserving cascade (drop quality before dim): bigger wins at typical thumbnail viewing
-	 * scale. Viewers downscale the EXIF preview for grid / hover display (96-256 px), and downscaling
-	 * masks JPEG artifacts substantially — a heavily-compressed 410×512 viewed at 128×160 looks
-	 * substantially better than its 1:1 view suggests, while a small high-quality 205×256 viewed at
-	 * 256×320 has to be upscaled which can't hide its sins the way downscale can. So the cascade
-	 * tries quality 95 → 50 at 512 maxDim before falling to 256, sacrificing per-pixel quality to
-	 * keep more pixels. Matches Samsung's "preserve dim, scale quality" design.
+	 * q95 is currently unreachable on CropCenter's re-encoded source bitmap (JPEG cascade tax inflates
+	 * bytes-per-pixel 2-4× over fresh-sensor input), but kept in the cascade as future-proofing for
+	 * a cleaner input pipeline (raw decode, lossless intermediate).
 	 *
-	 * Why q95 is in the cascade even though it's currently unreachable: on CropCenter's re-encoded
-	 * source bitmap, the JPEG cascade tax (first encoder's quantization noise becoming "real content"
-	 * for the second encoder) inflates bytes-per-pixel 2-4× over fresh-sensor input, putting q95
-	 * over the 65 KB APP1 segment cap even on smooth content. Kept as future-proofing — if the
-	 * input pipeline ever lands cleaner pixels (raw decode, lossless intermediate), q95 becomes
-	 * reachable without a cascade re-edit.
+	 * The thumbnail is rendered into an sRGB bitmap regardless of bmp's color space: a DISPLAY_P3 bmp
+	 * would embed an APP2 ICC profile (~500-600 bytes) inside the thumbnail JPEG, which combined with
+	 * a tight maxBytes budget can cause ExifPatcher.replaceThumbnail to silently reject for APP1
+	 * overflow. sRGB matches camera-native thumbnails and keeps the byte budget predictable.
 	 *
-	 * The thumbnail is rendered into an sRGB bitmap regardless of `bmp`'s color space: when `bmp` is
-	 * DISPLAY_P3 (used for HDR JPEG exports), Bitmap.compress would embed an APP2 ICC profile
-	 * (~500-600 bytes) inside the thumbnail JPEG, and that overhead combined with a tight `maxBytes`
-	 * budget can cause `ExifPatcher.replaceThumbnail` to silently reject the thumbnail for APP1
-	 * overflow. sRGB compression produces a plain baseline JPEG with no ICC segment, matching
-	 * camera-native thumbnails and keeping the byte budget predictable.
+	 * @param bmp      source bitmap to encode; not recycled
+	 * @param maxBytes APP1 budget remaining for the thumbnail (incl. EXIF wrapper overhead the caller
+	 *                 already deducted)
+	 * @return thumbnail JPEG bytes that fit within maxBytes, or null when no cascade rung succeeds
 	 */
 	private static byte[] generateThumbnail(Bitmap bmp, int maxBytes)
 	{
@@ -921,11 +891,8 @@ public final class CropExporter
 				(byte) (crcVal >> 24), (byte) (crcVal >> 16), (byte) (crcVal >> 8), (byte) (crcVal)
 		};
 
-		// Defensive long-arithmetic: PNG eXIf is u31-uncapped, so on a pathological 2GB-class TIFF the
-		// int sum `4 + 4 + tiffLen + 4` would overflow to negative and `new byte[png.length + chunkTotal]`
-		// would throw NegativeArraySizeException uncaught. SafFileHelper's 128MB read cap makes this
-		// unreachable today but the sister walkers' defensive style keeps it consistent — bail with the
-		// original png unchanged when the result would exceed int range.
+		// PNG eXIf is u31-uncapped, so on a pathological 2GB-class TIFF the int sum `4+4+tiffLen+4`
+		// would overflow negative and NegativeArraySizeException the new byte[] allocation.
 		long chunkTotalLong = 4L + 4L + (long) tiffLen + 4L;
 		if (chunkTotalLong + png.length > Integer.MAX_VALUE)
 		{
@@ -953,8 +920,7 @@ public final class CropExporter
 	 *
 	 * Recycles `out` and rethrows on any Canvas / Paint / drawBitmap failure (RuntimeException) or
 	 * OutOfMemoryError. Without the wrap, `out`'s native pixel buffer would orphan to the GC finalizer
-	 * under the same allocation pressure that triggered the OOM. Mirrors UltraHdrCompat.renderPrimary's
-	 * recycle-and-rethrow shape.
+	 * under the same allocation pressure that triggered the OOM.
 	 */
 	private static Bitmap renderSrgbThumb(Bitmap src, int width, int height)
 	{

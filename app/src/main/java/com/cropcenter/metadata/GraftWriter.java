@@ -12,8 +12,9 @@ import java.util.List;
 /**
  * Build a "minimal pixel graft" — a JPEG that takes the external edit's primary entropy-coded scan but keeps the
  * original's identity metadata (EXIF, XMP, MPF) and HDR trailer (gain map + SEFT). Used by the "Apply External Edit"
- * feature to round-trip a Photoshop Generative Fill / Generative Remove edit through CropCenter while preserving
- * Samsung Gallery's Revert button.
+ * feature to round-trip a Photoshop Generative Fill / Generative Remove edit through CropCenter. SEFT is copied
+ * verbatim like every other identity segment, so the source's Revert chain (when present) survives the splice —
+ * see CropExporter.appendSeft for the verbatim-preservation contract.
  *
  * Caller-enforced precondition: both inputs MUST be JPEGs, AND the caller MUST guarantee they already share the same
  * stored SOF0 dimensions before calling this splice — otherwise the output's metadata (from original) describes
@@ -49,10 +50,9 @@ public final class GraftWriter
 {
 	private static final String TAG = "GraftWriter";
 
-	// Per-segment substitution toggles. Current production configuration is locked in — see the class Javadoc for
-	// rationale per segment. Toggles remain as named constants rather than baked-in branches so a future Samsung
-	// firmware change can be tested by flipping one flag without restructuring the splice loop. Sorted
-	// alphabetically (STRIP < SWAP) per field-ordering rule.
+	// Per-segment substitution toggles. Current production configuration is locked in (see class Javadoc per
+	// segment); toggles kept as named constants so a future Samsung firmware change can be tested by flipping one
+	// flag without restructuring the splice loop.
 	private static final boolean STRIP_VENDOR_APPS = false;
 	private static final boolean SWAP_EXIF = false;
 	private static final boolean SWAP_HDR_GAINMAP = false;
@@ -95,17 +95,9 @@ public final class GraftWriter
 		List<JpegSegment> editSegments = (SWAP_EXIF || SWAP_HDR_MPF || SWAP_ICC || SWAP_XMP)
 			? JpegMetadataExtractor.extract(edit)
 			: Collections.emptyList();
-		// HDR gate: the post-primary FF D8 byte sequence is only a gain map when the file ACTUALLY
-		// carries an Ultra HDR layout — both an MPF segment (describes the multi-picture offsets) AND
-		// the XMP hdrgm namespace marker INSIDE a parsed XMP APP1 segment. Three failure modes the
-		// gate closes: (1) MPF can describe non-HDR multi-picture (focus-stacked / panorama / ZSL),
-		// so MPF alone isn't sufficient; (2) a stray "hdrgm" 5-byte sequence in MakerNote / COM /
-		// vendor blob / SEFT history / entropy would false-positive a full-file scan, so the hdrgm
-		// check restricts to XMP segment bodies; (3) without this combined gate, a bare full-file scan
-		// would re-open the SEFT-thumbnail false-positive on the graft-pipeline path. Mirrors
-		// ImageLoadController.extractMetadata's
-		// gate. hasMpf is the cheap pre-filter — segment-list scan, near-free — so the XMP-only hdrgm
-		// scan runs only when MPF is present.
+		// HDR gate: MPF AND XMP-hdrgm — see HdrSignature.hasHdrgmInXmp for the rationale. hasMpf is the
+		// cheap pre-filter (segment-list scan, near-free); the XMP-only hdrgm scan runs only when MPF
+		// is present.
 		boolean origHasMpf = hasMpf(origSegments);
 		boolean editHasMpf = SWAP_HDR_GAINMAP && hasMpf(editSegments);
 		boolean origIsHdr = origHasMpf && HdrSignature.hasHdrgmInXmp(origSegments);
@@ -280,8 +272,9 @@ public final class GraftWriter
 	 * non-standalone marker after SOI. Typically this is the first DQT (FF DB) but could be DHT (FF C4) or SOF (FF
 	 * C0) depending on encoder ordering.
 	 *
-	 * Returns -1 if no such marker is found before SOS or EOI (which would mean the file has only APP/COM segments
-	 * — not a valid JPEG).
+	 * @param file full JPEG byte array
+	 * @return offset of the first pixel-content marker, or -1 when none is found before SOS/EOI (file has only
+	 *         APP/COM segments — not a valid JPEG)
 	 */
 	private static int findFirstNonAppNonCom(byte[] file)
 	{
@@ -292,7 +285,6 @@ public final class GraftWriter
 			{
 				return -1;
 			}
-			// Fill bytes (legal per ITU-T T.81 §B.1.1.2) — skip extra 0xFF bytes before reading the marker.
 			int markerByteOff = JpegMarkerWalker.skipFillBytes(file, off, file.length);
 			if (markerByteOff < 0)
 			{
@@ -364,17 +356,21 @@ public final class GraftWriter
 
 	private static boolean isJpeg(byte[] file)
 	{
-		return file.length >= 4 && (file[0] & 0xFF) == 0xFF && (file[1] & 0xFF) == 0xD8;
+		return file.length >= 4 && (file[0] & 0xFF) == JpegMarker.PREFIX
+			&& (file[1] & 0xFF) == JpegMarker.SOI;
 	}
 
 	/**
-	 * Vendor APP segment = APP3 through APP15 (markers 0xE3..0xEF). APP0 carries JFIF / JFXX (treated as
-	 * identity-side, kept), APP1 carries EXIF or XMP, APP2 carries ICC or MPF — those are handled by the dedicated
-	 * SWAP branches in graft().
+	 * Vendor APP segment = APP3 through APP15. APP0 carries JFIF / JFXX (treated as identity-side, kept),
+	 * APP1 carries EXIF or XMP, APP2 carries ICC or MPF — those are handled by the dedicated SWAP branches
+	 * in graft().
+	 *
+	 * @param seg JPEG segment to classify
+	 * @return true when seg's marker is in the APP3..APP15 vendor range
 	 */
 	private static boolean isVendorApp(JpegSegment seg)
 	{
 		int marker = seg.marker();
-		return marker >= 0xE3 && marker <= 0xEF;
+		return marker >= JpegMarker.APP3 && marker <= JpegMarker.APP_LAST;
 	}
 }

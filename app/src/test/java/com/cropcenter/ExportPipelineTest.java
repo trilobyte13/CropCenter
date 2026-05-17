@@ -130,10 +130,10 @@ public final class ExportPipelineTest
 	@Test
 	public void rejectsBypassWhenSourceHasNoPreComputedThumbnail()
 	{
-		// Round-36 user-reported bug: when the source has no IFD1 thumbnail (screenshot, generated image,
-		// minimal-EXIF re-encode), the verbatim-write bypass would preserve the empty-IFD1 state. The new
-		// gate forces re-encode so `CropExporter` can synthesise a thumbnail. State satisfies every other
-		// bypass condition; ONLY the missing-thumbnail gate must trip the rejection.
+		// When the source has no IFD1 thumbnail (screenshot, generated image, minimal-EXIF re-encode),
+		// the verbatim-write bypass would preserve the empty-IFD1 state — gate forces re-encode so
+		// CropExporter can synthesise a thumbnail. State satisfies every other bypass condition; ONLY
+		// the missing-thumbnail gate trips the rejection.
 		CropState state = new CropState();
 		state.setSourceFormat(Format.JPEG);
 		state.setOriginalFileBytes(new byte[]{ (byte) 0xFF, (byte) 0xD8 });

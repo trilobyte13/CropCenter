@@ -1,5 +1,7 @@
 package com.cropcenter.util;
 
+import com.cropcenter.metadata.JpegMarker;
+
 /**
  * Pure-string helpers for SAF document IDs. Extracted from SafFileHelper so the path-vs-volume-vs-opaque parsing logic
  * is testable and reusable without instantiating a Context-bound SafFileHelper. Static, no state.
@@ -31,8 +33,7 @@ public final class SafPaths
 		{
 			return false;
 		}
-		// JPEG SOI
-		if ((bytes[0] & 0xFF) == 0xFF && (bytes[1] & 0xFF) == 0xD8)
+		if ((bytes[0] & 0xFF) == JpegMarker.PREFIX && (bytes[1] & 0xFF) == JpegMarker.SOI)
 		{
 			return true;
 		}

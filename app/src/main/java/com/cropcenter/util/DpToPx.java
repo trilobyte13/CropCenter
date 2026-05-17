@@ -1,20 +1,12 @@
 package com.cropcenter.util;
 
 /**
- * Density-independent-pixel to pixel conversion helper. Hoisted from per-file static methods (in ToolbarBinder,
- * ColorPickerDialog) and inline truncation casts (in SaveDialog, SettingsDialog, DialogCards) so every caller uses
- * the same Math.round-based conversion.
+ * Density-independent-pixel to pixel conversion helper. Single chokepoint for every dp→px conversion in the codebase.
  *
  * Why Math.round, not int truncation: non-integer densities shrink small dp values when truncated. At density 1.5,
- * the truncation form turns 3-dp into 4-pixels while Math.round would produce 5; the difference shows up as
- * inconsistent paddings and stroke widths. At density 0.75 the bug is louder: truncating 1-dp produces 0 pixels,
- * collapsing every 1dp value to zero — thin dividers and 1-px tick marks become invisible on low-density screens.
- * Math.round is the documented fix; centralising here removes the four call-sites that were still using truncation
- * (SaveDialog, SettingsDialog, DialogCards inline casts) so the bug can't recur.
- *
- * The pre-fix banned pattern is documented in the CLAUDE.md self-audit grep, which this Javadoc deliberately
- * avoids reproducing literally — describing the bug class without including a sample that the audit grep would
- * itself flag.
+ * truncation turns 3-dp into 4-pixels while Math.round would produce 5; the difference shows up as inconsistent
+ * paddings and stroke widths. At density 0.75 the bug is louder: truncating 1-dp produces 0 pixels, collapsing every
+ * 1dp value to zero — thin dividers and 1-px tick marks become invisible on low-density screens.
  */
 public final class DpToPx
 {

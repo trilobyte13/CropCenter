@@ -98,6 +98,8 @@ public final class ImageLoadControllerApplyBytesTest
 			dismissTransientDialogsCount++;
 		}
 
+		// Stub override returning null — the test never reads the result. SuppressWarnings keeps the
+		// generic-method override quiet even though `return null` doesn't strictly require it.
 		@Override
 		@SuppressWarnings("unchecked")
 		public <T extends View> T findViewById(int id) { return null; }

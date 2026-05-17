@@ -20,8 +20,7 @@ import java.util.List;
  *   - 8-byte file signature
  *   - chunks, each: length(4 BE) + type(4) + data(length) + CRC(4)
  *
- * The chunk type 'eXIf' (0x65 0x58 0x49 0x66) — lowercase 'e' marks it ancillary, uppercase 'X' marks it public,
- * uppercase 'I' is the reserved bit, lowercase 'f' marks it safe-to-copy across edits.
+ * See `EXIF_CHUNK_TYPE` constant Javadoc for the chunk-type bit semantics.
  */
 public final class PngMetadataExtractor
 {
@@ -90,8 +89,8 @@ public final class PngMetadataExtractor
 		int segLen = 2 + 6 + length;
 		int totalSegBytes = 2 + segLen; // FF E1 + segLen + payload
 		byte[] exifSegBytes = new byte[totalSegBytes];
-		exifSegBytes[0] = (byte) 0xFF;
-		exifSegBytes[1] = (byte) 0xE1;
+		exifSegBytes[0] = (byte) JpegMarker.PREFIX;
+		exifSegBytes[1] = (byte) JpegMarker.APP1;
 		exifSegBytes[2] = (byte) ((segLen >> 8) & 0xFF);
 		exifSegBytes[3] = (byte) (segLen & 0xFF);
 		exifSegBytes[4] = 'E';
@@ -112,8 +111,8 @@ public final class PngMetadataExtractor
 	 * orientation=6 (rotate 90 CW) would be displayed in stored orientation while the export side normalises
 	 * orientation to 1, baking a permanent sideways rotation into the saved file.
 	 *
-	 * Returns 1 (upright) when the input isn't a valid PNG, has no eXIf chunk, has malformed TIFF byte-order
-	 * bytes, or has no Orientation tag. Mirrors the BitmapUtils.readExifOrientation contract for JPEG.
+	 * Returns 1 (upright) when the input isn't a valid PNG, has no eXIf chunk, has malformed TIFF
+	 * byte-order bytes, or has no Orientation tag.
 	 *
 	 * @param png raw PNG file bytes
 	 * @return orientation 1..8, or 1 when not present / malformed
@@ -126,8 +125,7 @@ public final class PngMetadataExtractor
 		}
 		catch (IndexOutOfBoundsException ignored)
 		{
-			// Mirrors BitmapUtils.readExifOrientation — malformed TIFF (truncated, lying offsets) maps
-			// to the same upright fallback as a missing tag.
+			// Malformed TIFF (truncated, lying offsets) maps to the same upright fallback as a missing tag.
 			return 1;
 		}
 	}
@@ -204,10 +202,8 @@ public final class PngMetadataExtractor
 		long tiffEndLong = (long) tiffStart + tiffLen;
 		for (int i = 0; i < entryCount; i++)
 		{
-			// Long-arithmetic stride matches the ExifPatcher hardening; reachable on the
-			// uncapped PNG eXIf path where tiffLen can be u31 (~2 GB) and ifd0 can be near MAX_INT.
-			// Without this, the int stride would wrap and the bound check evaluate wrap-negative ≯
-			// positive, silently falling back to orientation = 1 instead of reading the real entry.
+			// Long-stride is reachable here: PNG eXIf is u31-uncapped (tiffLen can be ~2 GB) and ifd0
+			// can be near MAX_INT. Int stride wrap would silently fall back to orientation = 1.
 			long entryLong = (long) ifd0 + 2 + (long) i * 12;
 			if (entryLong + 12 > tiffEndLong)
 			{

@@ -93,7 +93,8 @@ public final class CropEngine
 		if (!state.isCropSizeDirty() && state.getCropW() > 0 && state.getCropH() > 0)
 		{
 			// Size locked — keep cropW / cropH, let setCenter clamp centerX / centerY into the rotated
-			// image bounds. No parity snap: cropImageX comes from getCropImageXFloat's floor().
+			// image bounds. No parity snap: cropImageX is the continuous-float `centerX − cropW / 2f`
+			// from getCropImageXFloat; the exporter's float-origin path absorbs the sub-pixel bias.
 			state.setCropSizeSilent(state.getCropW(), state.getCropH());
 			state.setCenter(centerX, centerY);
 			return;

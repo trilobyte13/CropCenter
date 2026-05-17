@@ -31,44 +31,28 @@ import com.cropcenter.util.ThemeColors;
  */
 public final class SettingsDialog
 {
-	// Active color picker, tracked across all colorRow swatches so a forced parent cancellation (load
-	// arrived) cancels the open picker too, and a user picking a new swatch dismisses the prior picker
-	// before opening a new one. UI-thread-only — SettingsDialog runs on the UI thread, all colorRow /
-	// picker interactions happen there, no synchronisation needed. Cleared by the new picker's
-	// OnDismissListener so a normal user-OK / Cancel doesn't strand the reference.
+	// Active color picker tracked across all colorRow swatches so a forced parent cancellation cancels
+	// the open picker too, and a user picking a new swatch dismisses the prior picker first. UI-thread
+	// only — cleared by the picker's OnDismissListener.
 	private static AlertDialog activePicker;
 
 	/**
 	 * Build and show the settings dialog. Card-style layout: Grid (cols/rows + line color/width), Pixel Grid
 	 * (toggle + color), Selection & Paint (shared color), and a Build info card. Toggles and color-picker
-	 * selections commit to state via updateGridConfig immediately as the user interacts; the Cols / Rows
-	 * EditText values are deferred to the "Done" button (the dialog has no Cancel button — every other
-	 * interaction is already committed, so dismissing without "Done" only forfeits the typed-but-not-committed
-	 * dimension inputs).
+	 * selections commit immediately; Cols / Rows EditTexts are deferred to the "Done" button.
 	 *
-	 * Returns the AlertDialog so the caller can track it for forced dismissal — the SettingsDialog mutates
-	 * state.gridConfig on the UI thread, and a Share/View intent that arrives mid-dialog runs state.reset()
-	 * on bg, racing the user's in-dialog commits. MainActivity.showSettingsDialog stores the returned
-	 * dialog and dismisses it from ImageLoadController.load's UI-thread entry before any bg work begins
-	 * before applying its bg mutations.
+	 * Returns the AlertDialog so the caller can track it for forced dismissal — a Share/View intent that
+	 * arrives mid-dialog runs state.reset() on bg, racing the user's in-dialog commits.
 	 *
-	 * Both the OnCancelListener AND the OnDismissListener cancel any open ColorPickerDialog: the picker
-	 * is a separate AlertDialog that mutates state.gridConfig through its own OK button, so without
-	 * forced cancellation a stale picker outliving SettingsDialog could keep applying colors to the new
-	 * image's state. The cancel-hook covers user-initiated cancels; the dismiss-listener extension
-	 * covers the Done button, the Activity-destroyed-at-config-change path, and any future dialog-API
-	 * dismissal — all of which reach dismiss-but-not-cancel. Leaving the picker alone on those paths
-	 * would leak the destroyed window through the static `activePicker` reference until the next
-	 * show() defensively cleared it.
+	 * Both OnCancel AND OnDismiss cancel any open ColorPickerDialog: the picker is a separate AlertDialog
+	 * that mutates state.gridConfig through its own OK button, so without forced cancellation a stale
+	 * picker outliving SettingsDialog could keep applying colors to the new image's state. Cancel covers
+	 * user-initiated cancels; dismiss covers Done, the Activity-destroyed-at-config-change path, and any
+	 * future dialog-API dismissal — all of which reach dismiss-but-not-cancel.
 	 *
-	 * `hostDismissListener` is the host's own cleanup (typically the activity-tracking clear that
-	 * `MainActivity.registerTransientDialog` would otherwise install). SettingsDialog installs ONE
-	 * `setOnDismissListener` that calls `cancelActivePicker` AND then the host's callback —
-	 * `AlertDialog.setOnDismissListener` replaces rather than chains, so the host cannot install its
-	 * own listener separately without clobbering the embedded-picker cleanup — wrapping with
-	 * `registerTransientDialog(SettingsDialog.show(...))` would silently discard the picker cleanup
-	 * on Done / config-change dismissals. Pass `null` when the caller doesn't need a host dismiss
-	 * hook.
+	 * AlertDialog.setOnDismissListener replaces rather than chains, so SettingsDialog installs one
+	 * listener that calls cancelActivePicker AND then hostDismissListener — a caller cannot install
+	 * its own dismiss listener without clobbering the picker cleanup.
 	 *
 	 * @param ctx                 Activity context for inflation
 	 * @param state               CropState whose gridConfig is mutated as the user interacts
@@ -79,12 +63,10 @@ public final class SettingsDialog
 	public static AlertDialog show(Context ctx, CropState state,
 		DialogInterface.OnDismissListener hostDismissListener)
 	{
-		// Dismiss any prior picker before resetting the tracker. A stale activePicker reference can
-		// outlive its parent Activity when the previous SettingsDialog was closed without its dismiss
-		// listener firing (Activity destroyed by config change mid-picker, or some other torn-down
-		// path) — the static field then holds a strong reference to the destroyed Activity's window
-		// through the AlertDialog → Context chain. Cancelling first severs that chain even when the
-		// dialog's own dismiss listener never ran.
+		// Dismiss any prior picker before resetting the tracker. A stale activePicker can outlive its
+		// parent Activity when the previous SettingsDialog closed without its dismiss listener firing
+		// (config change mid-picker, torn-down path) — the static field would hold the destroyed
+		// Activity's window through the AlertDialog → Context chain.
 		AlertDialog stalePicker = activePicker;
 		if (stalePicker != null && stalePicker.isShowing())
 		{
@@ -119,20 +101,16 @@ public final class SettingsDialog
 
 		Runnable applyDimensions = () -> applyDimensionInputs(state, dimensionInputs[0], dimensionInputs[1]);
 
-		// Outer dialog reference qualified as `settingsDialog` so the lambda parameters below can use
-		// the canonical CLAUDE.md `dialog` / `(dialog, which)` names without shadowing.
+		// Outer dialog reference qualified as `settingsDialog` so the lambda parameters below can use the
+		// canonical `dialog` / `(dialog, which)` names without shadowing.
 		AlertDialog settingsDialog = new AlertDialog.Builder(ctx)
 			.setTitle("Settings")
 			.setView(scroll)
 			.setPositiveButton("Done", (dialog, which) -> applyDimensions.run())
 			.setOnCancelListener(dialog -> cancelActivePicker())
 			.create();
-		// Dismiss listener covers paths the cancel listener misses: the "Done" button (no cancel fires
-		// when the user commits), the Activity-destroyed-mid-dialog config-change path (the parent
-		// window goes away before any user event reaches the cancel hook), and any future dialog-API
-		// dismissal. Without this, a SettingsDialog + ColorPicker stack open at config-change time
-		// leaked the destroyed Activity's window through the static `activePicker` reference until the
-		// next `show()` call defensively cleared it. Compose with the host's optional cleanup so a
+		// Dismiss listener covers paths the cancel listener misses: Done, the config-change destroy
+		// path, and any future dialog-API dismissal. Compose with the host's optional cleanup so a
 		// caller's host-tracking listener doesn't clobber cancelActivePicker.
 		settingsDialog.setOnDismissListener(dialog ->
 		{
@@ -156,8 +134,12 @@ public final class SettingsDialog
 	}
 
 	/**
-	 * Commit the Columns / Rows EditText values to state, clamping each to [1, 50]. A blank / non-numeric field is
-	 * silently ignored — this is called on OK, and preset-chip taps already synced the inputs back in.
+	 * Commit the Columns / Rows EditText values to state, clamping each to [1, 50]. A blank / non-numeric
+	 * field is silently ignored — preset-chip taps already synced the inputs back in.
+	 *
+	 * @param state    CropState whose gridConfig is mutated with the parsed values
+	 * @param editCols Columns input — text trimmed, parsed as int, clamped to [1, 50]
+	 * @param editRows Rows input — same parse / clamp as editCols
 	 */
 	private static void applyDimensionInputs(CropState state, EditText editCols, EditText editRows)
 	{
@@ -174,15 +156,6 @@ public final class SettingsDialog
 		}
 	}
 
-	/**
-	 * Commit a freshly-picked color to the swatch + tracked-state box and notify the caller's listener.
-	 *
-	 * @param color    new ARGB color
-	 * @param tracked  1-element box holding the current color (mutated)
-	 * @param swatchBg drawable backing the swatch view (color updated in place)
-	 * @param swatch   swatch view to invalidate so the new color renders
-	 * @param onPick   caller-supplied listener invoked with the new color
-	 */
 	private static void applyPickedColor(int color, int[] tracked, GradientDrawable swatchBg,
 		View swatch, ColorPickerDialog.OnColorSelectedListener onPick)
 	{
@@ -193,15 +166,15 @@ public final class SettingsDialog
 	}
 
 	/**
-	 * Build the "Grid" card — column / row dimensions, presets, line color, line width. Stores the Cols / Rows
-	 * EditTexts in dimensionInputs so the OK button can commit them.
+	 * Build the "Grid" card — Cols / Rows EditTexts, presets, line color, line width.
 	 *
-	 * @param ctx             Activity context for view inflation
+	 * @param ctx             Activity context for inflation
 	 * @param state           CropState whose gridConfig is mutated as the user interacts
 	 * @param cfg             snapshot of the initial gridConfig used to seed control values
 	 * @param density         display density used by DpToPx for sizing
-	 * @param dimensionInputs out parameter — the Cols / Rows EditTexts are stored at indices [0] and [1] so
-	 *                        the dialog's OK button can commit them via applyDimensionInputs
+	 * @param dimensionInputs OUT — Cols EditText written to index [0], Rows EditText written to index [1] so the
+	 *                        dialog's "Done" button can commit them via applyDimensionInputs. Caller must pass a
+	 *                        2-element array.
 	 * @return the assembled card LinearLayout, ready for the dialog root
 	 */
 	private static LinearLayout buildGridCard(Context ctx, CropState state, GridConfig cfg,
@@ -307,11 +280,11 @@ public final class SettingsDialog
 	}
 
 	/**
-	 * Build the 2×2..8×8 equal-weight preset chip row. Tapping a chip syncs both the GridConfig and the Cols / Rows
-	 * EditTexts (so the user sees the new values).
+	 * 2×2..8×8 equal-weight preset chip row. Tapping a chip syncs both the GridConfig and the Cols / Rows
+	 * EditTexts so the user sees the new values.
 	 *
-	 * @param ctx      Activity context for view inflation
-	 * @param state    CropState whose gridConfig is mutated when a preset chip is tapped
+	 * @param ctx      Activity context for inflation
+	 * @param state    CropState whose gridConfig is mutated on chip tap
 	 * @param editCols Columns input — chip taps reflect the new value back so the user sees it
 	 * @param editRows Rows input — same as editCols
 	 * @param density  display density used by DpToPx for sizing
@@ -381,7 +354,7 @@ public final class SettingsDialog
 	 * Build the "Width" seek-bar row — user drags to pick a grid stroke width (1-20 image pixels). The zero
 	 * position clamps up to 1 so the grid is never invisible.
 	 *
-	 * @param ctx     Activity context for view inflation
+	 * @param ctx     Activity context for inflation
 	 * @param state   CropState whose gridConfig.lineWidth is mutated as the seek-bar drags
 	 * @param cfg     snapshot of the initial gridConfig used to seed the seek-bar position
 	 * @param density display density used by DpToPx for sizing
@@ -424,11 +397,9 @@ public final class SettingsDialog
 
 	/**
 	 * Dismiss any open ColorPickerDialog and clear the tracker. Called by the parent SettingsDialog's
-	 * OnCancelListener (forced cancel from a load arrival, back-press, or outside-touch) so the
-	 * picker's OK button can't mutate gridConfig after the parent is gone. Hoisted out of the inline
-	 * cancel-listener lambda to keep the body under the CLAUDE.md 3-line cap. Snapshot the field
-	 * before clearing so a re-entrant cancel from picker.cancel()'s own OnCancelListener doesn't see
-	 * a half-cleared state.
+	 * OnCancelListener so the picker's OK button can't mutate gridConfig after the parent is gone. Snapshot
+	 * the field before clearing so a re-entrant cancel from picker.cancel()'s own OnCancelListener doesn't
+	 * see a half-cleared state.
 	 */
 	private static void cancelActivePicker()
 	{
@@ -529,18 +500,17 @@ public final class SettingsDialog
 	}
 
 	/**
-	 * Open a ColorPickerDialog for one of the swatch rows. Extracted from colorRow's openPicker click
-	 * listener to keep the lambda body within CLAUDE.md's 3-line cap. Tracks the
-	 * fresh picker as the active one so SettingsDialog's OnCancelListener can cancel it on forced
-	 * parent dismissal, and dismisses any prior picker first so rapid swatch taps don't stack two
-	 * pickers (the deeper one would still fire its OK listener and mutate gridConfig).
+	 * Open a ColorPickerDialog for one of the swatch rows. Tracks the fresh picker as the active one so
+	 * SettingsDialog's OnCancelListener can cancel it on forced parent dismissal, and dismisses any prior
+	 * picker first so rapid swatch taps don't stack two pickers (the deeper one would still fire its OK
+	 * listener and mutate gridConfig).
 	 *
-	 * @param ctx       Activity context for inflation
-	 * @param tracked   1-element int array holding the row's currently-tracked color (ARGB)
-	 * @param swatchBg  the row's swatch background drawable, repainted by applyPickedColor
-	 * @param swatch    the row's swatch view (background re-set by applyPickedColor)
-	 * @param palette   PALETTE_OPAQUE or PALETTE_TRANSLUCENT
-	 * @param onPick    state-update callback fired by applyPickedColor after the picker confirms
+	 * @param ctx      Activity context for inflation
+	 * @param tracked  1-element box holding the row's currently-tracked color (ARGB)
+	 * @param swatchBg drawable backing the swatch view; repainted by applyPickedColor
+	 * @param swatch   the row's swatch view; invalidated by applyPickedColor
+	 * @param palette  PALETTE_OPAQUE or PALETTE_TRANSLUCENT
+	 * @param onPick   listener invoked by applyPickedColor after the picker confirms
 	 */
 	private static void openColorPicker(Context ctx, int[] tracked, GradientDrawable swatchBg,
 		View swatch, int[] palette, ColorPickerDialog.OnColorSelectedListener onPick)

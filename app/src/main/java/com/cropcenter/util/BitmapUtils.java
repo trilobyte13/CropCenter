@@ -79,9 +79,11 @@ public final class BitmapUtils
 	 *
 	 * Used by ImageLoadController.applyBytes and UltraHdrCompat.decodeHdrBitmap to bound peak decode memory
 	 * on very-large sources (Samsung's 200 MP mode produces 16384×12288 captures ≈ 200M pixels = ~800 MB
-	 * ARGB). On a 12 GB-RAM flagship the device-adaptive cap (`getMaxDecodePixels`) returns ~187 MP, so
-	 * those sources decode at `inSampleSize=1` (no quality loss). On a 4 GB-RAM device the cap floors at
-	 * 32 MP and subsampling kicks in. The trade-off when sampleSize > 1 is that the saved crop uses the
+	 * ARGB). On a 12 GB-RAM flagship the device-adaptive cap (`getMaxDecodePixels`) returns ~187 MP
+	 * (raw math is 192 MP; real devices report ~5% less totalMem after kernel / firmware reservations),
+	 * so those sources decode at `inSampleSize=1` (no quality loss). On a 4 GB-RAM device the cap lands
+	 * at ~64 MP (the 32 MP floor only applies to lower-RAM devices or pre-`initialize` reads) and
+	 * subsampling kicks in. The trade-off when sampleSize > 1 is that the saved crop uses the
 	 * subsampled bitmap as its source, so output resolution scales down — preferable to instant OOM.
 	 *
 	 * Android's BitmapFactory.Options.inSampleSize requires a power of 2 (any other value is rounded down
@@ -203,10 +205,8 @@ public final class BitmapUtils
 		}
 		else
 		{
-			// Fractional srcX / srcY (continuous-float crop origin during rotation or rotated-selection
-			// placement). Draw at the float offset so Android's renderer bilinear-samples at sub-pixel
-			// positions — matches the rotated path above and matches what the editor preview renders via
-			// the same crop origin.
+			// Fractional srcX / srcY — draw at the float offset so Android's renderer bilinear-samples
+			// at sub-pixel positions.
 			canvas.drawBitmap(src, drawX, drawY, paint);
 		}
 	}
@@ -333,7 +333,7 @@ public final class BitmapUtils
 		{
 			return 1;
 		}
-		if ((jpeg[0] & 0xFF) != 0xFF || (jpeg[1] & 0xFF) != 0xD8)
+		if ((jpeg[0] & 0xFF) != JpegMarker.PREFIX || (jpeg[1] & 0xFF) != JpegMarker.SOI)
 		{
 			return 1;
 		}
@@ -345,7 +345,6 @@ public final class BitmapUtils
 			{
 				return 1;
 			}
-			// Fill bytes (legal per ITU-T T.81 §B.1.1.2) — skip extra 0xFF bytes before reading the marker.
 			int markerByteOff = JpegMarkerWalker.skipFillBytes(jpeg, off, jpeg.length);
 			if (markerByteOff < 0)
 			{
@@ -370,13 +369,8 @@ public final class BitmapUtils
 			int segLen = ByteBufferUtils.readU16BE(jpeg, afterMarker);
 			if (segLen < 2)
 			{
-				// Segment length MUST include the 2 length bytes themselves (JPEG spec). Zero or one
-				// would advance off by 0 or 1 instead of the real segment size, getting stuck
-				// mid-segment and mis-reading payload as the next marker. Matches the defensive guard
-				// in every sister walker (JpegMarkerWalker.findPrimaryEoi,
-				// JpegMetadataExtractor.extract, JpegMetadataInjector.inject, MpfPatcher.patch,
-				// GraftWriter.findFirstNonAppNonCom, XmpItemLengthPatcher.walkApp1Ranges) — the
-				// cross-walker invariant kept consistent.
+				// Segment length must include the 2 length bytes themselves (JPEG spec). Zero or one
+				// would advance off by 0 or 1 instead of the real segment size.
 				return 1;
 			}
 
@@ -413,11 +407,9 @@ public final class BitmapUtils
 				}
 
 				// Validate the long sum BEFORE casting — an adversarial u32 ifdOff like 0xFFFFFFFE plus
-				// a small tiffStart wraps to a small positive int that passes both bounds checks on the
-				// truncated value, letting the IFD entry walk read garbage as tag/type/value and rotate
-				// pixels. Mirrors the long-arithmetic guard in ExifPatcher.scanIfd, MpfPatcher.patch,
-				// and PngMetadataExtractor.extractOrientationInternal — was the lone JPEG-side site
-				// that relied on signed-int wrap to catch the overflow.
+				// a small tiffStart wraps to a small positive int that passes both bounds checks on
+				// the truncated value, letting the IFD entry walk read garbage as tag/type/value and
+				// rotate pixels.
 				long ifdOff = ByteBufferUtils.readU32(jpeg, tiffStart + 4, isLittleEndian);
 				long absIfd = (long) tiffStart + ifdOff;
 				if (absIfd < tiffStart || absIfd + 2 > jpeg.length || absIfd > Integer.MAX_VALUE)
@@ -429,9 +421,6 @@ public final class BitmapUtils
 				int count = ByteBufferUtils.readU16(jpeg, ifd, isLittleEndian);
 				for (int i = 0; i < count; i++)
 				{
-					// Long-arithmetic stride matches sister walkers in ExifPatcher / MpfPatcher /
-					// PngMetadataExtractor. JPEG inputs are 128 MB capped
-					// so int stride is unreachable in practice; kept for cross-walker symmetry.
 					long entryLong = (long) ifd + 2 + (long) i * 12;
 					if (entryLong + 12 > jpeg.length)
 					{

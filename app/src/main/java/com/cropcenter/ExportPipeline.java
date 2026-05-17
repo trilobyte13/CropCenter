@@ -36,7 +36,6 @@ final class ExportPipeline
 	 * the write via the resolved filesystem path instead of querying SAF provider metadata that may not have
 	 * flushed yet: a direct write that bypassed the provider would otherwise verify against a stale
 	 * provider-cached SIZE / cached input stream, false-failing a correct write and then deleting it.
-	 * Field order follows CLAUDE.md's uppercase-type-before-primitive rule (Exception < File alphabetically).
 	 */
 	private record WriteOutcome(Exception exception, File directPath, boolean writeReturned)
 	{
@@ -94,9 +93,9 @@ final class ExportPipeline
 			return false;
 		}
 		// Honor the same epsilon the renderer uses — sub-epsilon rotation is a no-op there, so forcing a
-		// re-encode for it would burn cycles + add quantization noise to a visually identical primary. The
-		// ruler caps its finest snap step at this same epsilon so it can never produce a rotation we'd treat as
-		// "real" while CropEngine / ViewportMath / BitmapUtils.drawCropped collapse it to zero.
+		// re-encode for it would burn cycles + add quantization noise to a visually identical primary.
+		// ROTATION_EPSILON (0.005°) is half the ruler's finest tick (0.01°), so every nonzero ruler value
+		// clears the gate but float-noise residuals on a "back to zero" gesture collapse to no-op.
 		if (Math.abs(state.getRotationDegrees()) >= BitmapUtils.ROTATION_EPSILON)
 		{
 			return false;
@@ -290,7 +289,6 @@ final class ExportPipeline
 			// a multi-MP source still surfaces a user-facing "Export failed" toast — without OOM in the
 			// catch, runExportBg's finally would hide the progress overlay while the worker died with an
 			// uncaught Error, leaving the user staring at an unresponsive editor with no feedback.
-			// Mirrors the load path's OOM handling and CropExporter.generateThumbnail's catch widening.
 			Log.e(TAG, "Encode failed", e);
 			final String emsg = "Export failed: " + e.getMessage();
 			host.runOnUiThread(() -> host.toastIfAlive(emsg, Toast.LENGTH_SHORT));
@@ -454,8 +452,7 @@ final class ExportPipeline
 	 * mode is unsafe (a disk-full / I/O error between open and full-write would leave the original
 	 * zeroed). Writes the payload to `.<name>.cropcenter-tmp-<nanos>` in the same parent directory, fsyncs,
 	 * confirms byte count, and atomic-moves the temp onto the target via Files.move with
-	 * ATOMIC_MOVE + REPLACE_EXISTING. Mirrors the proven pattern in ReplaceStrategy.replaceViaFileIo and
-	 * keeps the target file content intact on any pre-move failure.
+	 * ATOMIC_MOVE + REPLACE_EXISTING — target content stays intact on any pre-move failure.
 	 *
 	 * Returns the WriteOutcome on success, or null when any step failed. Caller's fall-through behavior
 	 * depends on the preserveOnFailure mode: when preserveOnFailure=true, writePhase converts a null

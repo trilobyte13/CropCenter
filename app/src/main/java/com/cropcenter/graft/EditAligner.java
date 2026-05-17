@@ -4,6 +4,7 @@ import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.util.Log;
 
+import com.cropcenter.metadata.JpegMarker;
 import com.cropcenter.util.BitmapUtils;
 
 import java.io.ByteArrayOutputStream;
@@ -13,9 +14,7 @@ import java.io.ByteArrayOutputStream;
  * dimensions, and re-encodes the edit so its stored pixel layout matches the original's — required for GraftWriter's
  * splice (= edit's primary scan + original's metadata, including the EXIF orientation tag) to decode coherently.
  *
- * Extracted from GraftController so the alignment math is testable without mocking the SaveHost / picker state machine.
- * The class is stateless and reports outcomes via the Result record — the caller (GraftController) owns the toast
- * surface and decides what to do with each error string. No invariants migrate; this is a pure-function lift.
+ * Stateless; reports outcomes via the Result record. Caller owns the toast surface.
  */
 public final class EditAligner
 {
@@ -36,10 +35,8 @@ public final class EditAligner
 	public record Result(byte[] alignedBytes, String errorMessage)
 	{
 		/**
-		 * Build a failure Result. Caller surfaces errorMessage and aborts.
-		 *
 		 * @param message user-facing error text
-		 * @return a failure Result with no aligned bytes
+		 * @return a failure Result; caller surfaces message as a toast and aborts
 		 */
 		public static Result error(String message)
 		{
@@ -47,8 +44,6 @@ public final class EditAligner
 		}
 
 		/**
-		 * Build a success Result. Caller's invariant: alignedBytes is non-null and decodes cleanly.
-		 *
 		 * @param bytes edit bytes whose stored layout matches the original's
 		 * @return a success Result wrapping the bytes
 		 */
@@ -86,7 +81,7 @@ public final class EditAligner
 		// the user what kind of file they need rather than the generic "Couldn't read JPEG dimensions" which
 		// they could mis-read as "the file is corrupt, retry".
 		if (editBytes == null || editBytes.length < 4
-			|| (editBytes[0] & 0xFF) != 0xFF || (editBytes[1] & 0xFF) != 0xD8)
+			|| (editBytes[0] & 0xFF) != JpegMarker.PREFIX || (editBytes[1] & 0xFF) != JpegMarker.SOI)
 		{
 			return Result.error("Selected file is not a JPEG");
 		}
@@ -139,13 +134,11 @@ public final class EditAligner
 	}
 
 	/**
-	 * Apply EXIF orientation to stored dims to get display dims. EXIF tags 5/6/7/8 swap the axes (90° rotations +
-	 * transpose / transverse); 1/2/3/4 leave them alone. Returns a fresh int[2] so callers can mutate without
-	 * aliasing.
+	 * Apply EXIF orientation to stored dims to get display dims. Tags 5/6/7/8 swap axes; 1/2/3/4 don't.
 	 *
 	 * @param stored [width, height] in stored coordinates
-	 * @param orient EXIF orientation tag (1..8); values outside that range pass through as identity
-	 * @return [width, height] in display coordinates
+	 * @param orient EXIF orientation tag (1..8); out-of-range passes through as identity
+	 * @return fresh [width, height] in display coordinates
 	 */
 	static int[] displayDims(int[] stored, int orient)
 	{
@@ -154,12 +147,11 @@ public final class EditAligner
 	}
 
 	/**
-	 * Inverse of an EXIF orientation transform — applying orient then inverseOrientation gives the identity. Most
-	 * orientations (1, 2, 3, 4, 5, 7) are involutions and map to themselves; only the 90° rotations (6 ↔ 8) form an
-	 * inverse pair.
+	 * Inverse of an EXIF orientation transform — applying orient then inverseOrientation gives identity.
+	 * Only the 90° rotations form an inverse pair (6 ↔ 8); others are involutions.
 	 *
 	 * @param orient EXIF orientation tag (1..8)
-	 * @return the orientation tag whose composition with `orient` is identity
+	 * @return the orientation tag whose composition with orient is identity
 	 */
 	static int inverseOrientation(int orient)
 	{
@@ -227,13 +219,9 @@ public final class EditAligner
 		}
 		catch (RuntimeException | OutOfMemoryError e)
 		{
-			// Widened to RuntimeException as well as OutOfMemoryError so a truly malformed JPEG (Skia
-			// can throw IllegalArgumentException / RuntimeException from decodeByteArray on bad
-			// Huffman tables, truncated DQT, etc.) surfaces the same "Couldn't decode the edit during
-			// reorientation — try exporting again" toast as the OOM and decode-null paths. Without
-			// this widening, the throw escapes to GraftController.assembleGraftOnBg's catch and
-			// reports the generic "Graft failed: …" instead of the more accurate decode-failure
-			// message.
+			// Catch RuntimeException too: Skia throws IllegalArgumentException / RuntimeException from
+			// decodeByteArray on bad Huffman tables, truncated DQT, etc. Returning null routes through
+			// the decode-failure toast the same way as OOM and decode-null.
 			Log.w(TAG, "reorientEdit failed on full-resolution decode of "
 				+ editBytes.length + "-byte edit; graft will surface "
 				+ "'Couldn't decode the edit during reorientation' toast", e);
@@ -266,13 +254,9 @@ public final class EditAligner
 			// Same alias logic for inDisplay → inOrigStored.
 			inDisplay = null;
 			ByteArrayOutputStream bos = new ByteArrayOutputStream();
-			// Bitmap.compress returns false on Skia encoder rejection (extreme dims, corrupt native state,
-			// unsupported config). The previous code ignored the return and shipped whatever partial bytes
-			// landed in the stream — downstream GraftWriter then bailed with a generic "Edit is not a JPEG"
-			// because the result had no SOI marker, leaving the user with a confusing "graft failed" error
-			// when the actual cause was the re-encode. Detect here so the caller (align) can surface a
-			// specific "couldn't re-encode the edit during reorientation" remediation matching the existing
-			// decode-failure phrasing.
+			// Bitmap.compress returns false on Skia encoder rejection (extreme dims, corrupt native
+			// state). Surface the failure here so the caller's toast matches the decode-failure phrasing
+			// (without this, GraftWriter would bail with a generic "Edit is not a JPEG" downstream).
 			if (!inOrigStored.compress(Bitmap.CompressFormat.JPEG, 100, bos))
 			{
 				Log.w(TAG, "reorientEdit Bitmap.compress(JPEG, 100) returned false");

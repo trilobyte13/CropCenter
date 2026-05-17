@@ -23,69 +23,51 @@ public final class CropState
 		void onStateChanged();
 	}
 
-	// Listener dispatch + batch-suppression protocol extracted into a dedicated helper. Setters call
-	// bus.notifyChanged() to fire the registered listener; the Activity wraps recomputeCrop + UI updates in
-	// bus.beginBatch / bus.endBatch so inner setter calls coalesce into one listener invocation.
+	// Listener dispatch + batch-suppression protocol. Setters call bus.notifyChanged() to fire the registered
+	// listener; the Activity wraps recomputeCrop + UI updates in bus.beginBatch / bus.endBatch so inner setter
+	// calls coalesce into one listener invocation.
 	private final StateBus bus = new StateBus();
 
-	// Set by GraftController.onEditPicked when an Apply External Edit produces an AI region; cleared by reset() on
-	// the next image load. Read by UltraHdrCompat at HDR re-encode time so the gain map's HDR boost in the AI
-	// region can be inpainted from surrounding values (matches the visual intent of Generative Remove without the
-	// stale "boost the features that used to be there" artifact). Volatile because the install path
-	// (assembleGraftOnBg → applyGraftedBytesOnBg → installGraft) writes from the bg executor, but the read path
-	// (CropExporter.exportJpeg → UltraHdrCompat.compressWithGainmap) also runs on the bg executor — serialised
-	// today, but a future helper that reads the mask from the UI thread (e.g. a "graft preview" badge) would
-	// otherwise see stale null without a happens-before. Cheap insurance.
+	// Volatile-field protocol: bg-thread writers (ImageLoadController.load, installGraft, extractMetadata) →
+	// UI-thread readers (EditorRenderer, ViewportMath, MainActivity.applyStateToUi, gesture handlers, Save
+	// pre-enqueue path). Without volatile, weak-memory devices can keep reading a stale reference across
+	// multiple frames. List fields use replace-instead-of-clear in reset() so an in-place ArrayList.clear()
+	// from bg doesn't CME the UI iterator.
+
+	// Set by GraftController.onEditPicked from Apply External Edit; cleared by reset(). Read by UltraHdrCompat
+	// at HDR re-encode time so the AI region's gain-map boost can be inpainted from surrounding values (avoids
+	// the stale "boost the features that used to be there" artifact). Volatile is cheap insurance — both sides
+	// are bg-serialised today, but a future UI-thread read (graft preview badge) would need the happens-before.
 	private volatile AiMask aiMask;
 	private AspectRatio aspectRatio = AspectRatio.R4_5;
-	// volatile to match the sister fields (jpegMeta, selectionPoints, pngExifTiff, aiMask, graftApplied)
-	// that publish cross-thread: bg-thread reset() writer (in ImageLoadController.load) → UI-thread
-	// readers (EditorRenderer.draw, ViewportMath, MainActivity.applyStateToUi, gesture handlers). The
-	// per-frame snapshot in EditorRenderer.draw protects a single frame from a mid-walk null swap, but
-	// without volatile the UI thread isn't guaranteed to OBSERVE a bg-thread null/replace write on weak-
-	// memory devices and could keep reading a stale Bitmap reference across multiple frames.
 	private volatile Bitmap sourceImage;
 	private CenterMode centerMode = CenterMode.BOTH;
 	private EditorMode editorMode = EditorMode.SELECT_FEATURE;
-	// Mutated only via updateExportConfig / updateGridConfig — the record types themselves are immutable, so state
-	// observers see a consistent snapshot and notifyChanged fires exactly once per logical transition. (Same
-	// applies to gridConfig below.)
+	// Mutated only via updateExportConfig / updateGridConfig — the record types are immutable, so observers see
+	// a consistent snapshot and notifyChanged fires exactly once per logical transition.
 	private ExportConfig exportConfig = ExportConfig.defaults();
 	private Format sourceFormat;
 	private GridConfig gridConfig = GridConfig.defaults();
-	// Volatile + replace-instead-of-clear in reset() so the background-thread loadImage path can safely null-swap
-	// the list while the UI thread iterates it — an in-place ArrayList.clear() from bg would CME the UI iterator.
-	// Same applies to selectionPoints below.
 	private volatile List<JpegSegment> jpegMeta = new ArrayList<>();
-	// Mutated only via addSelectionPoint / removeSelectionPoint* / replaceSelectionPoints / clearSelectionPoints.
-	// Callers never mutate directly — getSelectionPoints() returns an unmodifiable view. Volatile rationale matches
-	// jpegMeta above. Non-volatile mutation via addSelectionPoint / etc. runs only on the UI thread, so those don't
-	// need synchronisation.
+	// Mutated only via addSelectionPoint / removeSelectionPoint* / replaceSelectionPoints / clearSelectionPoints
+	// (UI thread); getSelectionPoints returns an unmodifiable view.
 	private volatile List<SelectionPoint> selectionPoints = new ArrayList<>();
 	private String originalFilename;
 	private boolean centerLocked = false; // when true, auto-recompute from points is suppressed
 	private boolean cropSizeDirty = true;
-	// True when the in-memory image came from the Apply External Edit graft flow rather than a direct file load.
-	// Set by MainActivity after applyBytes installs the spliced bytes. Read by ExportPipeline.canBypassEncode to
-	// refuse the verbatim-write bypass for graft saves — bypassing would ship source's gain map verbatim over the
-	// spliced primary, so any user crop afterwards shifts the gain map's HDR boost off the features it's meant for.
-	// The full encode regenerates the gain map from the spliced primary. Volatile because installGraft writes from
-	// the bg executor (applyGraftedBytesOnBg) and ExportPipeline.canBypassEncode reads from the UI thread (Save tap
-	// pre-enqueue path); without volatile a Save landing in the brief window between the bg-side write and the
-	// installImageOnUi runnable could miss the graft and bypass-encode despite the splice — silently shipping HDR
-	// misalignment.
+	// True when the in-memory image came from the Apply External Edit graft flow. Read by
+	// ExportPipeline.canBypassEncode to refuse the verbatim-write bypass for graft saves — bypassing would
+	// ship source's gain map verbatim over the spliced primary, so any user crop afterwards shifts the
+	// gain-map HDR boost off the features it's meant for. The full encode regenerates the gain map from the
+	// spliced primary.
 	private volatile boolean graftApplied;
 	private boolean hasCenter;
 	private byte[] gainMap;
 	private byte[] originalFileBytes;
-	// Raw TIFF bytes from the source PNG's eXIf chunk (PNG 1.6 spec). Set by ImageLoadController.extractMetadata
-	// for PNG sources via PngMetadataExtractor.extractRawTiff. CropExporter.exportPng prefers this over jpegMeta
-	// for PNG → PNG round-trips because the PNG eXIf chunk has a u31 length field — JPEG APP1's u16 cap doesn't
-	// apply, so a PNG with > 64KB of EXIF (camera with extensive MakerNote / GPS metadata) keeps its full
-	// metadata when re-saved as PNG. Null for JPEG sources or PNGs without eXIf. Volatile to match the cross-thread
-	// publication contract of jpegMeta (set by extractMetadata on bg, observed by exportPng on bg via the single
-	// thread executor — but reset() also clears it on bg, so a future change that introduces a UI-thread read needs
-	// the happens-before).
+	// Raw TIFF bytes from the source PNG's eXIf chunk (PNG 1.6 spec). Set by extractMetadata on PNG sources;
+	// CropExporter.exportPng prefers this over jpegMeta for PNG → PNG round-trips because the PNG eXIf chunk
+	// has a u31 length field (JPEG APP1's u16 cap doesn't apply), so a PNG with > 64KB of EXIF keeps its full
+	// metadata when re-saved as PNG. Null for JPEG sources or PNGs without eXIf.
 	private volatile byte[] pngExifTiff;
 	private byte[] seftTrailer; // Samsung SEFT trailer (appended after gain map)
 	private float anchorX; // stable "intent" center for no-selection rotations
@@ -342,11 +324,9 @@ public final class CropState
 	}
 
 	/**
-	 * Samsung Extended Format Trailer captured at load, or null for non-Samsung sources. Re-appended verbatim to
-	 * the exported JPEG so a Gallery-edited source's existing Revert chain stays intact across CropCenter re-edits
-	 * — the trailer's backup-path reference still points at Gallery's own `/data/sec/photoeditor/` backup, which we
-	 * never touched. CropCenter does not generate fresh trailers for new edits (Gallery rejects backup paths
-	 * outside its blessed locations).
+	 * Samsung Extended Format Trailer captured at load, or null for non-Samsung sources. Re-appended verbatim by
+	 * CropExporter.appendSeft on every save — see that method's Javadoc for the verbatim-preservation contract
+	 * and why CropCenter cannot fabricate fresh trailers.
 	 *
 	 * Caller must not mutate the returned array. The reference is shared and gets re-appended verbatim by the
 	 * exporter; mutation would silently corrupt the saved trailer.

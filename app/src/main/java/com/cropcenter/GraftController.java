@@ -9,6 +9,7 @@ import androidx.activity.result.ActivityResultLauncher;
 
 import com.cropcenter.graft.EditAligner;
 import com.cropcenter.metadata.GraftWriter;
+import com.cropcenter.metadata.JpegMarker;
 import com.cropcenter.model.Format;
 import com.cropcenter.model.Graft;
 import com.cropcenter.util.AiRegionDetector;
@@ -177,8 +178,7 @@ final class GraftController
 			return;
 		}
 		// Pre-enqueue cleanup guard — any throw from setBusyUi / showProgress / runInBackground here would
-		// strand busy=true (assembleGraftOnBg's finally only runs if the Runnable was accepted). Mirrors
-		// ImageLoadController.load and ExportPipeline.exportTo.
+		// strand busy=true (assembleGraftOnBg's finally only runs if the Runnable was accepted).
 		try
 		{
 			host.setBusyUi(true);
@@ -242,7 +242,8 @@ final class GraftController
 			toast("Original bytes unavailable — reload the image");
 			return true;
 		}
-		if (originalBytes.length < 4 || (originalBytes[0] & 0xFF) != 0xFF || (originalBytes[1] & 0xFF) != 0xD8)
+		if (originalBytes.length < 4 || (originalBytes[0] & 0xFF) != JpegMarker.PREFIX
+			|| (originalBytes[1] & 0xFF) != JpegMarker.SOI)
 		{
 			// Loaded image is PNG (or some non-JPEG) — graft path requires JPEG identity metadata. Refuse
 			// upfront so the user doesn't navigate the picker for a graft that would fail validation later.
@@ -307,9 +308,9 @@ final class GraftController
 	}
 
 	/**
-	 * Bg-thread body of onEditPicked, extracted to satisfy CLAUDE.md's 3-line lambda cap. Reads the picked edit,
-	 * snapshots the source, aligns + detects + splices, then hands off to the UI thread via dispatchGraftToUi. Owns
-	 * the busy-release-on-failure / clear-snapshot finally contract.
+	 * Bg-thread body of onEditPicked. Reads the picked edit, snapshots the source, aligns + detects + splices,
+	 * then hands off to the UI thread via dispatchGraftToUi. Owns the busy-release-on-failure / clear-snapshot
+	 * finally contract.
 	 *
 	 * @param editUri SAF URI of the user-picked edit JPEG
 	 */
@@ -390,13 +391,10 @@ final class GraftController
 		}
 		catch (RuntimeException | OutOfMemoryError e)
 		{
-			// OOM merged with RuntimeException because EditAligner.reorientEdit allocates two full
-			// bitmaps in sequence (decode + applyOrientation) and AiRegionDetector + GraftWriter add
-			// pixel-array / byte-buffer pressure. A multi-MP HDR source's graft assembly is comparable
-			// in allocation to the export path — without OOM here, finally would clear pendingSource +
-			// release busy + hide progress, but no "Graft failed" toast would post and the user would
-			// have no signal. Mirrors the widenings in ImageLoadController.runLoadBg and
-			// MainActivity.applyGraftedBytesOnBg.
+			// OOM merged with RuntimeException so a multi-MP HDR source whose decode + applyOrientation
+			// + AiRegionDetector + GraftWriter allocation chain blows the heap surfaces a "Graft
+			// failed" toast instead of dying silently — finally clears pendingSource + busy + progress
+			// but doesn't post the user-facing toast.
 			Log.e(TAG, "Unexpected graft error", e);
 			toast("Graft failed: " + e.getMessage());
 			graftPending = false;
@@ -451,13 +449,11 @@ final class GraftController
 		try
 		{
 			// Register with the host's transient-dialog tracker so a Share/View intent or a follow-up
-			// graft apply that arrives mid-prompt dismisses this dialog before bg state.reset() — without
-			// this registration the dialog can outlive its source state, leaving the user staring at a
-			// stale "x% of pixels" prompt that targets a vanished graft. Mirrors the pattern in
-			// SaveController.showReplaceDialog / openSaveOptionsDialog / showExtensionMismatchDialog and
-			// ToolbarBinder.showCustomArDialog / showPreciseRotationDialog. dismissTransientDialogs uses
-			// cancel(), which fires the OnCancelListener below — so releaseBusy still runs on forced
-			// dismissal.
+			// graft apply that arrives mid-prompt dismisses this dialog before bg state.reset() —
+			// without this registration the dialog can outlive its source state, leaving the user
+			// staring at a stale "x% of pixels" prompt that targets a vanished graft.
+			// dismissTransientDialogs uses cancel(), which fires the OnCancelListener below so
+			// releaseBusy still runs on forced dismissal.
 			host.registerTransientDialog(new AlertDialog.Builder(host.getActivity())
 				.setTitle("Large edit detected")
 				.setMessage(message)

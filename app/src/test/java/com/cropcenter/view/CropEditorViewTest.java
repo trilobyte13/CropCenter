@@ -11,10 +11,9 @@ import org.junit.Test;
  *
  * The contract being pinned: snapAxisPreservingTies snaps centerX / centerY to the parity-valid pixel grid
  * (even dim → integer center; odd dim → half-integer) but PRESERVES the input when both candidate snap
- * targets are exactly equidistant. The tie-preserving behaviour fixes a user-reported bug where a
- * SELECT-mode-placed selection point at half-integer P+0.5 would visually shift 0.5 px after a no-op
- * MOVE-mode pan: the previous Math.round formula always biased half-up, breaking alignment between the
- * grid central line and the selection-point marker.
+ * targets are equidistant. Tie-preservation prevents a SELECT-mode-placed selection point at half-integer
+ * P+0.5 from shifting 0.5 px after a no-op MOVE-mode pan (Math.round always biases half-up, which breaks
+ * alignment between the grid central line and the selection-point marker).
  */
 public final class CropEditorViewTest
 {

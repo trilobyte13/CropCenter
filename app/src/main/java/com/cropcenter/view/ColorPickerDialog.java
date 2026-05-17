@@ -106,9 +106,7 @@ public final class ColorPickerDialog
 						listener.onTap(colors[idx]);
 					}
 					invalidate();
-					// Route through performClick so accessibility services see the swatch tap and
-					// any OnClickListener can replicate the selection programmatically.
-					performClick();
+					performClick(); // a11y: lets services replicate the tap programmatically
 				}
 				return true;
 			}
@@ -118,10 +116,6 @@ public final class ColorPickerDialog
 		@Override
 		public boolean performClick()
 		{
-			// Defer to super for the standard click sound + accessibility events; the swatch selection
-			// itself is performed at ACTION_DOWN above. Required by the View / accessibility contract:
-			// any view that handles touch events must also expose a programmatic click path so a11y
-			// services can replicate the touch interaction.
 			return super.performClick();
 		}
 
@@ -136,7 +130,6 @@ public final class ColorPickerDialog
 				int row = i / cols;
 				float left = col * cellWidth;
 				float top = row * cellHeight;
-				// Checkerboard behind transparent cells
 				if (Color.alpha(colors[i]) < 255)
 				{
 					paint.setColor(CHECKERBOARD_LIGHT);
@@ -197,21 +190,18 @@ public final class ColorPickerDialog
 		0x80FFFFFF, 0x80FF0000, 0x80FFFF00, 0x8000FF00, 0x8000FFFF, 0x800000FF, 0x80FF00FF, 0x80000000,
 	};
 
-	// Translucent-first palette for selection / paint overlays. All saturated colors at 50% alpha so selections
-	// don't obscure the image. Bottom row offers opaque fallbacks when needed.
+	// Translucent-first palette for selection / paint overlays. All saturated colors at 50% alpha so
+	// selections don't obscure the image. Bottom row offers opaque fallbacks.
 	public static final int[] PALETTE_TRANSLUCENT = {
 		0x80FF0000, 0x80FF8000, 0x80FFFF00, 0x8000FF00, 0x8000FFFF, 0x800080FF, 0x800000FF, 0x80FF00FF,
 		0x80CC0000, 0x80CC6600, 0x80CCCC00, 0x8000CC00, 0x8000CCCC, 0x800066CC, 0x800000CC, 0x80CC00CC,
 		0x80993333, 0x80996633, 0x80999933, 0x80339933, 0x80339999, 0x80336699, 0x80333399, 0x80993399,
 		0x80FF9999, 0x80FFCC99, 0x80FFFF99, 0x8099FF99, 0x8099FFFF, 0x8099CCFF, 0x809999FF, 0x80FF99FF,
 		0x80FFFFFF, 0x80DDDDDD, 0x80AAAAAA, 0x80888888, 0x80555555, 0x80333333, 0x80111111, 0x80000000,
-		// Bottom row: opaque fallbacks
 		0xFF000000, 0xFFFFFFFF, 0xFFFF0000, 0xFF00FF00, 0xFF0000FF, 0xFFFFFF00, 0xFF00FFFF, 0xFFFF00FF,
 	};
 
-	// Per-dialog instance state. ColorPickerDialog is constructed fresh from show() for each open; these fields
-	// hold the values that the previous static-helper version smuggled through 1-element arrays (`int[] selected`,
-	// `boolean[] suppressHexWatcher`) plus the view references the wireXxx methods need to cross-reference.
+	// Per-dialog instance state — ColorPickerDialog is constructed fresh from show() for each open.
 	private final Context context;
 	private final OnColorSelectedListener listener;
 	private final float density;
@@ -234,14 +224,9 @@ public final class ColorPickerDialog
 	}
 
 	/**
-	 * Build and show the picker. Constructs a fresh ColorPickerDialog instance to hold per-dialog state, then
-	 * delegates to its private buildAndShow.
-	 *
-	 * Returns the AlertDialog so the caller can track and cancel it — SettingsDialog opens pickers from its
-	 * swatch click handlers and needs to cancel any open picker when the parent dialog is cancelled to keep
-	 * transient state coherent. Without that propagation, a stale picker outliving SettingsDialog could fire
-	 * its OK listener and mutate state.gridConfig after the parent dialog had been forced-cancelled by an
-	 * inbound load.
+	 * Build and show the picker. Returns the AlertDialog so the caller can track it for forced-cancel
+	 * propagation — SettingsDialog needs to cancel any open picker when its parent dialog is cancelled
+	 * so a stale picker can't fire its OK listener after the parent is gone.
 	 *
 	 * @param context      Activity context for inflation
 	 * @param currentColor initial color (ARGB) to highlight + show in the hex input
@@ -310,12 +295,9 @@ public final class ColorPickerDialog
 	}
 
 	/**
-	 * Assemble the full picker layout, wire all interactions, and show the dialog. Each component-build method
-	 * stashes its created view(s) on instance fields; each wireXxx method then reads those fields to set up
-	 * cross-component listener callbacks. The 1-element-array smuggle hack (selected / suppressHexWatcher) is gone
-	 * — both are ordinary instance fields now.
+	 * Assemble the full picker layout, wire all interactions, and show the dialog.
 	 *
-	 * @return the shown AlertDialog (returned to caller for forced-cancel propagation; see show)
+	 * @return the shown AlertDialog (caller tracks for forced-cancel propagation; see show)
 	 */
 	private AlertDialog buildAndShow()
 	{

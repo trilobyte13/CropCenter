@@ -28,7 +28,7 @@ public final class JpegMetadataExtractor
 	public static List<JpegSegment> extract(byte[] jpeg)
 	{
 		List<JpegSegment> segments = new ArrayList<>();
-		if (jpeg.length < 4 || jpeg[0] != (byte) 0xFF || jpeg[1] != (byte) JpegMarker.SOI)
+		if (jpeg.length < 4 || jpeg[0] != (byte) JpegMarker.PREFIX || jpeg[1] != (byte) JpegMarker.SOI)
 		{
 			return segments;
 		}
@@ -40,7 +40,6 @@ public final class JpegMetadataExtractor
 			{
 				break;
 			}
-			// Fill bytes (legal per ITU-T T.81 §B.1.1.2) — skip extra 0xFF bytes before reading the marker.
 			int markerByteOff = JpegMarkerWalker.skipFillBytes(jpeg, off, jpeg.length);
 			if (markerByteOff < 0)
 			{

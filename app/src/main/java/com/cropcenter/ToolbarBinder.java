@@ -128,13 +128,11 @@ final class ToolbarBinder
 	 * setSelection back to previousArPosition so a future Custom tap fires onItemSelected (Spinner
 	 * suppresses same-position re-selections, so leaving it on Custom blocks reopen). suppressArListener
 	 * gates the synthetic setSelection's listener fire so it doesn't overwrite the just-applied custom AR
-	 * with the previous preset. Extracted from the showCustomArDialog Apply runnable to keep the
-	 * positive-button lambda within CLAUDE.md's 3-line cap (the inline body grew to 6 statements once
-	 * the customArLabel / customArActive / notifyDataSetChanged reflection landed).
+	 * with the previous preset.
 	 *
-	 * @param widthInput        custom-W EditText
-	 * @param heightInput       custom-H EditText
-	 * @param spinner           the AR spinner whose selection is reset
+	 * @param widthInput         custom-W EditText
+	 * @param heightInput        custom-H EditText
+	 * @param spinner            the AR spinner whose selection is reset
 	 * @param previousArPosition non-Custom spinner position to restore after Apply
 	 */
 	private void applyCustomArAndResetSpinner(EditText widthInput, EditText heightInput,
@@ -231,10 +229,9 @@ final class ToolbarBinder
 	private void onLockButtonClick(View view)
 	{
 		int id = view.getId();
-		// if/else-if ladder rather than a switch expression: R.id.* in an app module is generated as
-		// non-`final int` (only library modules generate `static final int`), so `case R.id.btnLockBoth`
-		// fails with "constant expression required". CLAUDE.md §Language level's "3+ discrete-value
-		// dispatch uses switch" yields to this Android-platform constraint here.
+		// if/else-if ladder: R.id.* in an app module is generated as non-`final int` (only library
+		// modules generate `static final int`), so case R.id.btnLockBoth fails "constant expression
+		// required".
 		CenterMode pref;
 		if (id == R.id.btnLockBoth)
 		{
@@ -326,7 +323,6 @@ final class ToolbarBinder
 	{
 		host.applyLockMode();
 		ui.updateLockHighlight();
-		// Recompute only when turning Pan off in Select mode
 		if (!isChecked && host.getState().getEditorMode() == EditorMode.SELECT_FEATURE
 			&& !host.getState().isCenterLocked())
 		{
@@ -556,11 +552,8 @@ final class ToolbarBinder
 		// dialog's Custom values after a load would set state.aspectRatio + customArLabel for image A's
 		// typed values onto image B's spinner.
 		//
-		// BadTokenException guard mirrors SaveController.openSaveOptionsDialog / showReplaceDialog /
-		// showExtensionMismatchDialog, MainActivity.showSettingsDialog, and
-		// GraftController.confirmOversizedThenApply: the spinner's onItemSelected fires from a posted
-		// layout pass, so a config-change race between the user tapping "Custom" and the dialog .show()
-		// is reachable. isDestroyed is the first line of defense; the try/catch is the second.
+		// BadTokenException guard: the spinner's onItemSelected fires from a posted layout pass, so a
+		// config-change race between the user tapping "Custom" and the dialog .show() is reachable.
 		if (host.isDestroyed())
 		{
 			restore.run();
@@ -612,10 +605,8 @@ final class ToolbarBinder
 		// dismisses this dialog before bg state.reset() \u2014 applyPreciseRotation otherwise commits image
 		// A's typed degrees onto image B's just-reset 0\u00B0.
 		//
-		// BadTokenException guard mirrors showCustomArDialog and the other tracked-dialog show sites: the
-		// rot-degrees text click is forwarded through a posted layout, so a config-change race between
-		// tap and .show() is reachable. isDestroyed is the first line of defense; the try/catch is the
-		// second.
+		// BadTokenException guard: the rot-degrees text click is forwarded through a posted layout, so
+		// a config-change race between tap and .show() is reachable.
 		if (host.isDestroyed())
 		{
 			return;

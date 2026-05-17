@@ -8,8 +8,6 @@ package com.cropcenter.metadata;
  * file rather than a multi-site bare-literal hunt.
  *
  * Values are from the TIFF 6.0 spec, EXIF 2.32 spec, and CIPA DC-007-2009 (MPF). All tags are u16 wire-format.
- *
- * Class-of-constants — never instantiated.
  */
 public final class TiffTag
 {

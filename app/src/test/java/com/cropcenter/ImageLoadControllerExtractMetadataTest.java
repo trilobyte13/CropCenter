@@ -35,10 +35,9 @@ public final class ImageLoadControllerExtractMetadataTest
 	@Test
 	public void extractEmitsHdrAndSamsungInDisplayWhenGainMapAndSeftPresent() throws IOException
 	{
-		// Round-19 F-B: full Samsung Ultra-HDR shape (MPF segment + XMP carrying the hdrgm namespace
-		// marker + primary scan + gain-map JPEG + SEFT footer). The display string must list both HDR
-		// and Samsung — UI honesty contract per feedback_ui_honesty.md. A regression that swapped the
-		// two appendIf calls or that flipped one of the gates would surface as a missing flag here.
+		// Full Samsung Ultra-HDR shape (MPF segment + XMP carrying hdrgm + primary scan + gain-map JPEG
+		// + SEFT footer). The display string must list both HDR and Samsung — UI-honesty contract. A
+		// regression that swaps the two appendIf calls or flips a gate surfaces as a missing flag.
 		byte[] mpfPayload = concat(
 			"MPF\0".getBytes(StandardCharsets.US_ASCII),
 			new byte[] { 'I', 'I', '*', 0x00 });
@@ -151,11 +150,10 @@ public final class ImageLoadControllerExtractMetadataTest
 	@Test
 	public void extractTreatsJpegWithHdrgmStringButNoMpfAsNonHdr() throws IOException
 	{
-		// Round-19 F-A: the HDR gate at extractMetadata is `hasMpf && HdrSignature.hasHdrgmInXmp(meta)`.
-		// hasMpf is the deliberate cheap pre-filter — without it, an SDR file with a coincidental
-		// "hdrgm" 5-byte sequence (XMP namespace fragment in a comment, vendor MakerNote blob, etc.)
-		// would be mis-tagged as HDR. Pin: a JPEG with "hdrgm" in a COM segment but NO MPF must NOT
-		// extract a gain map and must NOT advertise HDR in its display string.
+		// The HDR gate at extractMetadata is `hasMpf && HdrSignature.hasHdrgmInXmp(meta)`. hasMpf is a
+		// cheap pre-filter — without it, an SDR file with a coincidental "hdrgm" sequence (vendor
+		// MakerNote, COM, XMP fragment in a comment) would be mis-tagged as HDR. A JPEG with "hdrgm"
+		// in a COM segment but NO MPF must NOT extract a gain map.
 		byte[] commentWithHdrgm = "user comment hdrgm here".getBytes(StandardCharsets.US_ASCII);
 		byte[] comSeg = appSegment(0xFE, commentWithHdrgm);
 		byte[] jpeg = concat(JPEG_SOI, comSeg, scanBody(), JPEG_EOI);
@@ -191,11 +189,10 @@ public final class ImageLoadControllerExtractMetadataTest
 	@Test
 	public void extractTreatsJpegWithMpfPlusHdrgmOutsideXmpAsNonHdr() throws IOException
 	{
-		// Even when MPF AND the literal "hdrgm" 5-byte sequence are both present,
-		// the file is NOT HDR unless the marker lives inside an XMP APP1 segment. A pre-fix full-file
-		// scan would false-positive on "hdrgm" in MakerNote / COM / vendor blob / SEFT history /
-		// entropy. Pin the precise XMP-only contract: MPF + COM-with-hdrgm + post-primary FF D8
-		// thumbnail must NOT extract a gain map.
+		// Even when MPF AND the literal "hdrgm" sequence are both present, the file is NOT HDR unless
+		// the marker lives inside an XMP APP1 segment. A coarser full-file scan false-positives on
+		// "hdrgm" in MakerNote / COM / vendor blob / SEFT history / entropy. MPF + COM-with-hdrgm +
+		// post-primary FF D8 thumbnail must NOT extract a gain map.
 		byte[] mpfPayload = concat(
 			"MPF\0".getBytes(StandardCharsets.US_ASCII),
 			new byte[] { 'I', 'I', '*', 0x00 });
