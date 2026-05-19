@@ -64,14 +64,23 @@ public final class UltraHdrCompatTest
 	}
 
 	@Test
-	public void containsHdrgmRejectsPartialMatches()
+	public void containsHdrgmRejectsShortenedAndCorruptedPatternsButAcceptsLongerPrefixes()
 	{
-		// "hdrgmm" contains "hdrgm" as a prefix and SHOULD match.
-		assertTrue(UltraHdrCompat.containsHdrgm("hdrgmm".getBytes(StandardCharsets.US_ASCII)));
-		// These are too short or have a wrong byte mid-pattern.
-		assertFalse(UltraHdrCompat.containsHdrgm("hdrgxm".getBytes(StandardCharsets.US_ASCII)));
-		assertFalse(UltraHdrCompat.containsHdrgm("hdrg".getBytes(StandardCharsets.US_ASCII)));
-		assertFalse(UltraHdrCompat.containsHdrgm("drgm".getBytes(StandardCharsets.US_ASCII)));
+		// Pin both branches of the matcher's near-miss handling. ACCEPT side: "hdrgmm" extends past the
+		// 5-byte signature with a trailing 'm' — the matcher correctly treats the first 5 bytes as a
+		// successful match because it's a contains-search, not an equals-search. REJECT side: a
+		// mid-pattern byte swap ("hdrgxm") plus two truncations ("hdrg", "drgm") must each return false
+		// regardless of buffer length. The earlier test name implied reject-only, but the first assertion
+		// is an accept — keeping both in one test is intentional because the predicate's contract is a
+		// single contains-search whose accept/reject behavior on near-misses needs to be pinned together.
+		assertTrue("matcher is a contains-search; trailing bytes don't invalidate the 5-byte hit",
+			UltraHdrCompat.containsHdrgm("hdrgmm".getBytes(StandardCharsets.US_ASCII)));
+		assertFalse("mid-pattern byte swap must not match",
+			UltraHdrCompat.containsHdrgm("hdrgxm".getBytes(StandardCharsets.US_ASCII)));
+		assertFalse("truncated prefix must not match",
+			UltraHdrCompat.containsHdrgm("hdrg".getBytes(StandardCharsets.US_ASCII)));
+		assertFalse("truncated suffix must not match",
+			UltraHdrCompat.containsHdrgm("drgm".getBytes(StandardCharsets.US_ASCII)));
 	}
 
 	@Test

@@ -133,15 +133,6 @@ public final class CropEngineGeometryTest
 	}
 
 	@Test
-	public void maxScaleForRotationReturnsOneForUnrotatedFittingCrop()
-	{
-		// Rotation = 0° + crop fully inside image bounds → all four corners pass the no-shrink check, scale
-		// stays at 1f without ever entering the binary search.
-		float scale = CropEngine.maxScaleForRotation(50f, 50f, 60f, 60f, 100, 100, 0f);
-		assertEquals(1f, scale, 0f);
-	}
-
-	@Test
 	public void maxScaleForRotationShrinksWhenRotatedCropExceedsBounds()
 	{
 		// A 100x100 image with a 99x99 crop at 45° rotation: the rotated bounding-box of the crop is

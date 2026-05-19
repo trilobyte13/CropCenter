@@ -1,8 +1,6 @@
 package com.cropcenter.crop;
 
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotEquals;
-import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
 
@@ -13,57 +11,82 @@ import java.util.Collections;
 import java.util.List;
 
 /**
- * Tests for CropEngine's pure-math helpers — specifically rotatedSelectionMidpoint, which is the public API consumers
- * reach for and indirectly exercises the now-private selectionMidpoint logic. Both feed the auto-rotate / auto-center
- * flow that lays the crop on a user-painted selection. A regression in the bbox math, the rotation application order,
- * or the single-point pixel-snap would mis-place the crop center away from the user-marked feature.
+ * Tests for CropEngine's pure-math helpers — rotatedSelectionMidpoint (public) plus the package-private
+ * selectionMidpoint it delegates to. Both feed the auto-rotate / auto-center flow that lays the crop on a
+ * user-painted selection. A regression in the bbox math, the rotation application order, or the single-point
+ * pixel-snap would mis-place the crop center away from the user-marked feature.
  */
 public final class CropEngineTest
 {
 	private static final float TOL = 1e-3f;
 
+	// ── selectionMidpoint (the un-rotated AABB-midpoint helper) ──
+
 	@Test
-	public void multiPointBboxMidpointAtZeroRotation()
+	public void selectionMidpointSinglePointReturnsPointCoordinates()
 	{
-		// 3 points forming an asymmetric triangle: (10, 10), (20, 30), (40, 20). AABB is x=[10..40], y=[10..30]
-		// → midpoint (25, 20).
-		List<SelectionPoint> points = Arrays.asList(
-			new SelectionPoint(10f, 10f), new SelectionPoint(20f, 30f), new SelectionPoint(40f, 20f));
-		float[] mid = CropEngine.rotatedSelectionMidpoint(points, 100, 100, 0f);
-		assertEquals(25f, mid[0], TOL);
-		assertEquals(20f, mid[1], TOL);
+		// Single-point branch: returns the point's coords as-is (no pixel snap — that's the rotated wrapper's
+		// job). Pin so a regression that always averaged min/max would round (15.3, 27.8) to (15.3, 27.8)
+		// trivially but a regression that snapped to integer would surface here.
+		List<SelectionPoint> points = Collections.singletonList(new SelectionPoint(15.3f, 27.8f));
+		float[] mid = CropEngine.selectionMidpoint(points);
+		assertEquals(15.3f, mid[0], TOL);
+		assertEquals(27.8f, mid[1], TOL);
 	}
 
 	@Test
-	public void multiPointMidpointDiffersFromSinglePointSnap()
+	public void selectionMidpointTwoPointsAveragesCoordinates()
 	{
-		// Sanity: a 2-point bbox midpoint should NOT pixel-snap. Use input that produces a non-half-integer
-		// midpoint and assert it survives unrounded.
+		// Two points → midpoint is the average. Pin the count==2 → AABB-midpoint branch (a regression that
+		// kept the count==1 branch active for size 2 would return (10, 20) instead of (20, 30)).
 		List<SelectionPoint> points = Arrays.asList(
-			new SelectionPoint(0.0f, 0.0f), new SelectionPoint(7.0f, 11.0f));
-		float[] mid = CropEngine.rotatedSelectionMidpoint(points, 100, 100, 0f);
-		assertEquals(3.5f, mid[0], TOL);
-		assertEquals(5.5f, mid[1], TOL);
-		// Verify these are NOT the floor+0.5 snap output (which would be (0.5, 0.5) for the single-point branch
-		// on the first input).
-		assertNotEquals(0.5f, mid[0], TOL);
+			new SelectionPoint(10f, 20f), new SelectionPoint(30f, 40f));
+		float[] mid = CropEngine.selectionMidpoint(points);
+		assertEquals(20f, mid[0], TOL);
+		assertEquals(30f, mid[1], TOL);
 	}
+
+	@Test
+	public void selectionMidpointAsymmetricMultiPointReturnsAabbMidpoint()
+	{
+		// 3 asymmetric points: x ∈ {10, 30, 90} → AABB x=[10..90] → midX = 50; y ∈ {50, 10, 70} → midY = 40.
+		// Pin that the function uses AABB midpoint (cheap, predictable) and NOT a true centroid (which
+		// would return (43.3, 43.3) here).
+		List<SelectionPoint> points = Arrays.asList(
+			new SelectionPoint(10f, 50f), new SelectionPoint(30f, 10f), new SelectionPoint(90f, 70f));
+		float[] mid = CropEngine.selectionMidpoint(points);
+		assertEquals("AABB midX, not centroid", 50f, mid[0], TOL);
+		assertEquals("AABB midY, not centroid", 40f, mid[1], TOL);
+	}
+
+	@Test
+	public void selectionMidpointDegenerateAllSamePointReturnsThatPoint()
+	{
+		// Edge case: multiple points all at the same location. AABB collapses to a point; midpoint should
+		// equal the shared coordinates. count == 5 takes the multi-point branch but minX == maxX so the
+		// average degenerates.
+		SelectionPoint shared = new SelectionPoint(42f, 17f);
+		List<SelectionPoint> points = Arrays.asList(shared, shared, shared, shared, shared);
+		float[] mid = CropEngine.selectionMidpoint(points);
+		assertEquals(42f, mid[0], TOL);
+		assertEquals(17f, mid[1], TOL);
+	}
+
+	// ── rotatedSelectionMidpoint (the public wrapper that adds rotation + pixel snap) ──
 
 	@Test
 	public void rotationAppliedBeforeBboxComputation()
 	{
-		// 90° clockwise rotation around image center (50, 50). A point at (50, 0) — top- edge midpoint — should
-		// rotate to (100, 50) (right-edge midpoint). Verify the rotated single-point output reflects this
-		// (pixel-snapped to floor + 0.5).
+		// 90° clockwise rotation around image center (50, 50): point (50, 0) — top-edge midpoint — rotates
+		// to exactly (100, 50) (right-edge midpoint) under Canvas's Y-down convention. RotationMath's
+		// double-precision cos(π/2) ≈ 6.12e-17 contributes ~3e-15 to the Y component, which rounds back
+		// to exactly 50.0 when cast to float (float epsilon at 50 is ~6e-6, far larger). The pixel-snap
+		// is `floor + 0.5` → (100.5, 50.5) deterministically. Pin those exact values; a regression that
+		// swapped sin/cos signs or applied rotation after the AABB would land elsewhere.
 		List<SelectionPoint> points = Collections.singletonList(new SelectionPoint(50f, 0f));
 		float[] mid = CropEngine.rotatedSelectionMidpoint(points, 100, 100, 90f);
-		// floor(100) + 0.5 = 100.5 — but float precision on cos(90°) ≠ exactly 0 means the rotated x lands very
-		// close to 100. floor() then gives either 99 or 100 by rounding direction. Accept either pixel-snapped
-		// value to keep the test stable across float-precision deltas.
-		assertEquals(0f, mid[0] - (float) Math.floor(mid[0]), 0.5001f);
-		assertTrue("rotated x near 100 (got " + mid[0] + ")", Math.abs(mid[0] - 100.5f) < 1.5f);
-		// Y at 90° on (50, 0) rotated around (50, 50) lands near 50 — pixel-snapped to 50.5.
-		assertEquals(50.5f, mid[1], 1.0f);
+		assertEquals("rotated X pixel-snapped to right-edge midpoint", 100.5f, mid[0], 1e-4f);
+		assertEquals("rotated Y pixel-snapped to image-center Y", 50.5f, mid[1], 1e-4f);
 	}
 
 	@Test
@@ -75,17 +98,6 @@ public final class CropEngineTest
 		float[] zero = CropEngine.rotatedSelectionMidpoint(points, 100, 100, 0f);
 		assertEquals(20f, zero[0], TOL);
 		assertEquals(30f, zero[1], TOL);
-	}
-
-	@Test
-	public void rotationByZeroEqualsRawMidpointSinglePoint()
-	{
-		// Single-point branch pixel-snaps to floor + 0.5. With rotation=0, point (10.7, 20.3) stays put; the
-		// pixel-snap converts to (10.5, 20.5).
-		List<SelectionPoint> points = Collections.singletonList(new SelectionPoint(10.7f, 20.3f));
-		float[] mid = CropEngine.rotatedSelectionMidpoint(points, 100, 100, 0f);
-		assertEquals(10.5f, mid[0], TOL);
-		assertEquals(20.5f, mid[1], TOL);
 	}
 
 	@Test

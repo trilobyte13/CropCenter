@@ -53,10 +53,10 @@ final class SelectionHistory
 	}
 
 	/**
-	 * Pop a redo frame and return its snapshot. Pushes the current state onto undo. Returns null when the redo
-	 * stack is empty. Trims undoStack to MAX_DEPTH after the push because undo() / redo() exchange frames between
-	 * the two stacks and would otherwise let undoStack grow past the cap (push() trims, but push() isn't on the
-	 * undo→redo→undo→redo path).
+	 * Pop a redo frame and return its snapshot. Pushes the current state onto undoStack. Returns null when the
+	 * redo stack is empty. No trim needed on the undo-side push: redo() only fires when redoStack is non-empty,
+	 * which means the most recent op was an undo() that decreased undoStack — so undoStack is at most
+	 * MAX_DEPTH−1 going in and at most MAX_DEPTH after the push, never tripping a trim.
 	 */
 	List<SelectionPoint> redo(List<SelectionPoint> current)
 	{
@@ -65,17 +65,14 @@ final class SelectionHistory
 			return null;
 		}
 		undoStack.add(snapshot(current));
-		if (undoStack.size() > MAX_DEPTH)
-		{
-			undoStack.remove(0);
-		}
 		return redoStack.remove(redoStack.size() - 1);
 	}
 
 	/**
-	 * Pop an undo frame and return its snapshot. Pushes the current state onto redo. Returns null when the undo
-	 * stack is empty. Trims redoStack to MAX_DEPTH after the push for the same reason as redo() — an undo path
-	 * with deep history would otherwise push redoStack past the cap.
+	 * Pop an undo frame and return its snapshot. Pushes the current state onto redoStack. Returns null when the
+	 * undo stack is empty. No trim needed on the redo-side push: push() clears redoStack and caps undoStack at
+	 * MAX_DEPTH, so the maximum consecutive undos before undoStack drains is MAX_DEPTH — redoStack tops out at
+	 * MAX_DEPTH and never exceeds it.
 	 */
 	List<SelectionPoint> undo(List<SelectionPoint> current)
 	{
@@ -84,10 +81,6 @@ final class SelectionHistory
 			return null;
 		}
 		redoStack.add(snapshot(current));
-		if (redoStack.size() > MAX_DEPTH)
-		{
-			redoStack.remove(0);
-		}
 		return undoStack.remove(undoStack.size() - 1);
 	}
 

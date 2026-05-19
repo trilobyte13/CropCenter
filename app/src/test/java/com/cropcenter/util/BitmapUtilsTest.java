@@ -205,6 +205,40 @@ public final class BitmapUtilsTest
 	}
 
 	@Test
+	public void readExifOrientationRejectsAdversarialIfdOffsetThatWrapsInt() throws IOException
+	{
+		// Adversarial IFD0 offset 0xFFFFFFFE (u32) — without the long-arithmetic `absIfd > Integer.MAX_VALUE`
+		// guard, casting the sum (long tiffStart + ifdOff) directly to int would wrap to a small positive
+		// value that passes the in-bounds check, letting the IFD-entry walk read garbage as tag/type/value.
+		// Pin the long-overflow guard: this fixture must return 1.
+		byte[] jpeg = buildJpegWithOrientation(true, 6);
+		// TIFF header sits at offset 12 (SOI(2) + APP1 hdr(4) + "Exif\0\0"(6)). IFD0 offset field is at
+		// tiffStart + 4 = 16..19 (little-endian).
+		jpeg[16] = (byte) 0xFE;
+		jpeg[17] = (byte) 0xFF;
+		jpeg[18] = (byte) 0xFF;
+		jpeg[19] = (byte) 0xFF;
+		assertEquals("adversarial u32 ifdOff must hit the overflow guard",
+			1, BitmapUtils.readExifOrientation(jpeg));
+	}
+
+	@Test
+	public void readExifOrientationRejectsLengthFieldUnderTwo() throws IOException
+	{
+		// JPEG segment length field is u16 and INCLUDES the 2 length bytes themselves. Anything < 2 is
+		// malformed: 0 or 1 would advance the walk offset by 0 or 1 instead of the real segment size,
+		// looping forever (off never grows past the segment) or skipping into the middle of subsequent
+		// segments. The `if (segLen < 2) return 1` guard short-circuits cleanly.
+		byte[] base = buildJpegWithOrientation(true, 6);
+		// APP1 length field is at offset 4..5 (after SOI + FF E1). Overwrite with segLen=1 to trip the
+		// guard before the EXIF body parser runs.
+		base[4] = 0x00;
+		base[5] = 0x01;
+		assertEquals("segLen < 2 must return upright (1)",
+			1, BitmapUtils.readExifOrientation(base));
+	}
+
+	@Test
 	public void readExifOrientationRejectsOutOfRangeValues() throws IOException
 	{
 		// EXIF orientation is defined for values 1..8. A coincidental byte sequence that resolves to 9
@@ -214,6 +248,22 @@ public final class BitmapUtilsTest
 		assertEquals(1, BitmapUtils.readExifOrientation(jpeg));
 		byte[] jpegZero = buildJpegWithOrientation(true, 0);
 		assertEquals(1, BitmapUtils.readExifOrientation(jpegZero));
+	}
+
+	@Test
+	public void readExifOrientationRejectsShortApp1WhereTiffHeaderTruncated() throws IOException
+	{
+		// The `tiffStart + 8 > jpeg.length` guard catches an APP1 whose Exif identifier is present but
+		// whose trailing bytes don't include 8 bytes of TIFF header. Build the segment header + "Exif\0\0"
+		// but truncate before the TIFF byte-order field; the function must return 1 without AIOOBE.
+		byte[] truncated = {
+			(byte) 0xFF, (byte) 0xD8,  // SOI
+			(byte) 0xFF, (byte) 0xE1,  // APP1 marker
+			0x00, 0x0A,                // segLen = 10 (just enough for Exif\0\0)
+			'E', 'x', 'i', 'f', 0, 0,  // EXIF identifier — segment ends here
+		};
+		assertEquals("short APP1 (no TIFF header bytes) must return upright (1)",
+			1, BitmapUtils.readExifOrientation(truncated));
 	}
 
 	@Test
@@ -256,10 +306,11 @@ public final class BitmapUtilsTest
 	@Test
 	public void readExifOrientationReturnsAllValidValuesOneThroughEight() throws IOException
 	{
-		// Baseline tests above only exercise orientation=6. A regression that masked the orientation low
-		// byte (e.g. `& 0x07` instead of `& 0xFF`) would still pass orientation=6 (6 & 7 = 6) but corrupt
-		// orientation=8 (8 & 7 = 0 → out-of-range → maps to 1). Iterating over the full valid 1..8 range
-		// closes that gap. Both byte orders since the production code branches on isLittleEndian.
+		// Iterate the full valid 1..8 EXIF orientation range across BOTH byte orders. A regression that
+		// masked the orientation low byte (e.g. `& 0x07` instead of `& 0xFF`) would still pass orientation=6
+		// (6 & 7 = 6) but corrupt orientation=8 (8 & 7 = 0 → out-of-range → maps to 1). The two-loop pass
+		// over LE and BE also covers the production code's `isLittleEndian` branch so a single-endian
+		// short-circuit regression surfaces here.
 		for (int orient = 1; orient <= 8; orient++)
 		{
 			byte[] le = buildJpegWithOrientation(true, orient);
@@ -267,24 +318,6 @@ public final class BitmapUtilsTest
 			byte[] be = buildJpegWithOrientation(false, orient);
 			assertEquals("BE orient " + orient, orient, BitmapUtils.readExifOrientation(be));
 		}
-	}
-
-	@Test
-	public void readExifOrientationReturnsBigEndianOrientation() throws IOException
-	{
-		// Symmetric baseline for "MM" big-endian EXIF.
-		byte[] jpeg = buildJpegWithOrientation(false, 6);
-		assertEquals(6, BitmapUtils.readExifOrientation(jpeg));
-	}
-
-	@Test
-	public void readExifOrientationReturnsLittleEndianOrientation() throws IOException
-	{
-		// Baseline: a valid little-endian ("II") EXIF segment with Orientation=6 produces the expected u16
-		// value. Pinning the baseline lets the mismatched-byte-order test below distinguish "1 because
-		// rejected" from "1 because no orientation tag found".
-		byte[] jpeg = buildJpegWithOrientation(true, 6);
-		assertEquals(6, BitmapUtils.readExifOrientation(jpeg));
 	}
 
 	@Test

@@ -140,21 +140,7 @@ public final class AiRegionDetector
 			edit.getPixels(editPixels, 0, width, 0, 0, width, height);
 
 			boolean[] mask = new boolean[pixelCount];
-			int maskedCount = 0;
-			for (int i = 0; i < sourcePixels.length; i++)
-			{
-				int sourceArgb = sourcePixels[i];
-				int editArgb = editPixels[i];
-				int dr = Math.abs(((sourceArgb >> 16) & 0xFF) - ((editArgb >> 16) & 0xFF));
-				int dg = Math.abs(((sourceArgb >> 8) & 0xFF) - ((editArgb >> 8) & 0xFF));
-				int db = Math.abs((sourceArgb & 0xFF) - (editArgb & 0xFF));
-				int maxChannelDiff = Math.max(dr, Math.max(dg, db));
-				if (maxChannelDiff > DIFF_THRESHOLD)
-				{
-					mask[i] = true;
-					maskedCount++;
-				}
-			}
+			int maskedCount = diffPixels(sourcePixels, editPixels, mask, DIFF_THRESHOLD);
 			Log.d(TAG, "AI mask: " + maskedCount + " of " + mask.length
 				+ " pixels (" + String.format(Locale.ROOT, "%.3f", 100.0 * maskedCount / mask.length)
 				+ "%) at " + width + "x" + height + " (sampleSize=" + IN_SAMPLE_SIZE + ")");
@@ -171,5 +157,46 @@ public final class AiRegionDetector
 				edit.recycle();
 			}
 		}
+	}
+
+	/**
+	 * Per-pixel max-channel-diff pass. Pure int-array math, package-private so AiRegionDetectorTest can pin the
+	 * channel-diff and threshold contract without Robolectric — the Bitmap decode side of detect() is what needs
+	 * an Android runtime, but the diff math is where the load-bearing correctness lives (a bad threshold or
+	 * channel-extraction bug would silently include encode noise OR exclude real AI fills).
+	 *
+	 * Mask + count contract: mask[i] is SET to true at indices where the max-channel diff exceeds threshold —
+	 * pre-existing true entries are not cleared. The returned count is the number of pixels whose diff exceeds
+	 * threshold (NOT the number of false → true transitions); when the production caller passes a fresh
+	 * boolean[] these two counts coincide, but a pre-populated input would double-count the already-true bits.
+	 *
+	 * @param sourcePixels ARGB-packed pixel array from the source bitmap
+	 * @param editPixels   ARGB-packed pixel array from the alignment-corrected edit bitmap; must be the same
+	 *                     length as sourcePixels
+	 * @param mask         caller-allocated boolean[sourcePixels.length] — filled with true at indices where the
+	 *                     max-channel diff exceeds `threshold`. Pre-existing true entries are NOT cleared (the
+	 *                     production caller always passes a fresh new boolean[]).
+	 * @param threshold    inclusive upper bound on "encode noise" — a diff equal to threshold is NOT flagged,
+	 *                     diff > threshold is. Production uses DIFF_THRESHOLD (30).
+	 * @return number of pixels whose diff exceeds threshold (regardless of prior mask state at that index)
+	 */
+	static int diffPixels(int[] sourcePixels, int[] editPixels, boolean[] mask, int threshold)
+	{
+		int maskedCount = 0;
+		for (int i = 0; i < sourcePixels.length; i++)
+		{
+			int sourceArgb = sourcePixels[i];
+			int editArgb = editPixels[i];
+			int dr = Math.abs(((sourceArgb >> 16) & 0xFF) - ((editArgb >> 16) & 0xFF));
+			int dg = Math.abs(((sourceArgb >> 8) & 0xFF) - ((editArgb >> 8) & 0xFF));
+			int db = Math.abs((sourceArgb & 0xFF) - (editArgb & 0xFF));
+			int maxChannelDiff = Math.max(dr, Math.max(dg, db));
+			if (maxChannelDiff > threshold)
+			{
+				mask[i] = true;
+				maskedCount++;
+			}
+		}
+		return maskedCount;
 	}
 }

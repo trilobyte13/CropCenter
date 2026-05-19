@@ -312,8 +312,10 @@ public final class HorizonDetector
 	}
 
 	// ── Image processing primitives ──
+	// Package-private rather than private so HorizonDetectorTest can pin the pure-array math without an
+	// Android Bitmap fixture — same pattern refineLineFitAngle uses above.
 
-	private static float computeThreshold(float[] edges, float topFraction)
+	static float computeThreshold(float[] edges, float topFraction)
 	{
 		float maxVal = 0;
 		int nonZero = 0;
@@ -354,66 +356,12 @@ public final class HorizonDetector
 		return maxVal * 0.5f;
 	}
 
-	private static float detectPaintedInternal(Bitmap src, List<float[]> paintPoints, float brushRadius)
-	{
-		int width = src.getWidth();
-		int height = src.getHeight();
-		int maskWidth = width / 4;
-		int maskHeight = height / 4;
-
-		boolean[] mask = rasterizePaintMask(paintPoints, maskWidth, maskHeight, brushRadius);
-		float[] edges = buildEdgeMap(src, width, height);
-
-		int[][] edgeCoords = gatherMaskedEdges(edges, mask, width, height, maskWidth, maskHeight);
-		// Release the large intermediates before the coarse+fine Hough pass — on a large source `edges` alone
-		// can be 100 MB of floats. Holding them alive through the Hough loops was a memory regression
-		// introduced when this method was decomposed; keeping the scope tight avoids a mid-detection OOM on
-		// mid-range devices that would not have fired before the refactor.
-		edges = null;
-		mask = null;
-		if (edgeCoords == null)
-		{
-			return Float.NaN;
-		}
-		int[] edgeX = edgeCoords[0];
-		int[] edgeY = edgeCoords[1];
-		int edgeCount = edgeX.length;
-		Log.d(TAG, "Masked edge pixels: " + edgeCount);
-
-		return runHoughAndConvertToRotation(edgeX, edgeY, edgeCount, width, height);
-	}
-
-	/**
-	 * Convert a raw roll/tilt reading from metadata into the UI's correction-angle convention:
-	 * snap near-zero values to exact zero, reject implausibly-large tilts as NaN (bad sensor data),
-	 * and otherwise invert and round to 2 decimal places. Shared across all XMP/APP1 entry points.
-	 */
-	private static float normalizeMetadataAngle(float deg)
-	{
-		// NaN bypasses both abs comparisons (NaN < x and NaN > x are always false), so an explicit guard
-		// here prevents the round-then-divide path from producing -0.0f and silently announcing a
-		// "valid 0° rotation" when XMP carries malformed roll data.
-		if (Float.isNaN(deg) || !Float.isFinite(deg))
-		{
-			return Float.NaN;
-		}
-		if (Math.abs(deg) < BitmapUtils.ROTATION_EPSILON)
-		{
-			return 0f;
-		}
-		if (Math.abs(deg) > MAX_HORIZON_TILT_DEGREES)
-		{
-			return Float.NaN;
-		}
-		return RotationMath.snapToHundredth(-deg);
-	}
-
 	/**
 	 * Stroke-to-mask rasterization. The paint stroke is rasterized at 1/4 source resolution into a boolean grid —
 	 * enough precision to localize which source pixels belong to the horizon region, 16× cheaper in memory than a
 	 * full-res mask.
 	 */
-	private static boolean[] rasterizePaintMask(List<float[]> paintPoints,
+	static boolean[] rasterizePaintMask(List<float[]> paintPoints,
 		int maskWidth, int maskHeight, float brushRadius)
 	{
 		float maskScale = 4f;
@@ -451,61 +399,11 @@ public final class HorizonDetector
 	}
 
 	/**
-	 * Canny-style edge pipeline: luminance → Gaussian blur → Sobel magnitude + direction
-	 * → non-max suppression → direction filter (keep only edges within 35° of
-	 * horizontal). Returns the edge strength at each pixel in row-major order.
-	 * Intermediate arrays are nulled as soon as they're consumed to let GC reclaim
-	 * the ~4 MB working sets early on mid-range devices.
-	 */
-	private static float[] buildEdgeMap(Bitmap src, int width, int height)
-	{
-		// width * height in int arithmetic silently overflows above ~46k px on a side. Use multiplyExact so a
-		// pathological input (synthetic / panorama wider than 65k px) throws ArithmeticException up to the
-		// outer catch in detectFromPaintedRegion (returns NaN) rather than allocating a negative-size array.
-		int pixelCount = Math.multiplyExact(width, height);
-		int[] pixels = new int[pixelCount];
-		src.getPixels(pixels, 0, width, 0, 0, width, height);
-		float[] luminance = new float[pixelCount];
-		for (int i = 0; i < pixels.length; i++)
-		{
-			int pixel = pixels[i];
-			luminance[i] = 0.299f * Color.red(pixel) + 0.587f * Color.green(pixel)
-				+ 0.114f * Color.blue(pixel);
-		}
-		pixels = null;
-
-		float[] blurred = gaussianBlur5x5(luminance, width, height);
-		luminance = null;
-
-		float[] gradientMag = new float[pixelCount];
-		float[] gradientDir = new float[pixelCount];
-		sobelGradient(blurred, width, height, gradientMag, gradientDir);
-		blurred = null;
-
-		float[] edges = nonMaxSuppression(gradientMag, gradientDir, width, height);
-
-		// Direction filter: keep only near-horizontal edges (±35° from horizontal).
-		for (int i = 0; i < pixelCount; i++)
-		{
-			if (edges[i] > 0)
-			{
-				float absDirection = Math.abs(gradientDir[i]);
-				if (absDirection < (float) (Math.PI / 2 - Math.PI * 35 / 180)
-					|| absDirection > (float) (Math.PI / 2 + Math.PI * 35 / 180))
-				{
-					edges[i] = 0;
-				}
-			}
-		}
-		return edges;
-	}
-
-	/**
 	 * Collect the coordinates of edge pixels that survive the strength threshold AND lie within the painted mask.
 	 * Returns {edgeX[], edgeY[]} packed as a 2-element array, or null when fewer than 30 pixels qualify (not enough
 	 * signal for the Hough pass to produce a trustworthy angle).
 	 */
-	private static int[][] gatherMaskedEdges(float[] edges, boolean[] mask,
+	static int[][] gatherMaskedEdges(float[] edges, boolean[] mask,
 		int width, int height, int maskWidth, int maskHeight)
 	{
 		float threshold = computeThreshold(edges, 0.15f);
@@ -556,7 +454,7 @@ public final class HorizonDetector
 	 * the tilt is beyond ±30° (the detector is too unreliable at larger angles), 0 when the tilt is effectively
 	 * zero, or the rounded-to-0.01° rotation otherwise.
 	 */
-	private static float runHoughAndConvertToRotation(int[] edgeX, int[] edgeY,
+	static float runHoughAndConvertToRotation(int[] edgeX, int[] edgeY,
 		int edgeCount, int width, int height)
 	{
 		float coarseAngle = houghPass(edgeX, edgeY, edgeCount, width, height,
@@ -600,38 +498,7 @@ public final class HorizonDetector
 		return RotationMath.snapToHundredth(-tilt);
 	}
 
-	/**
-	 * Search XMP XML for a float attribute whose name is exactly attrSuffix, optionally with a namespace prefix.
-	 * Handles patterns like: namespace:Roll="1.23" or Roll="1.23". The earlier version used "\\w*:?Suffix" which
-	 * greedy-matched unrelated names like CameraRoll or GyroRoll — any attribute whose name ends in the literal
-	 * suffix — and silently returned their value as the horizon angle.
-	 */
-	private static float findXmpFloat(String xml, String attrSuffix)
-	{
-		// Require either the start of a token (non-word char) or start of string, then an optional namespace
-		// prefix that ends in ':', then the exact suffix followed by whitespace or '='. This rules out AbcRoll,
-		// CameraRoll, GyroRoll, etc. Pattern is cached per suffix.
-		Pattern pattern = XMP_FLOAT_PATTERNS.computeIfAbsent(attrSuffix, suffix ->
-			Pattern.compile(
-				"(?:^|[^\\w:])(?:\\w+:)?" + Pattern.quote(suffix) + "\\s*=\\s*\"([^\"]+)\"",
-				Pattern.CASE_INSENSITIVE));
-		Matcher matcher = pattern.matcher(xml);
-		while (matcher.find())
-		{
-			try
-			{
-				return Float.parseFloat(matcher.group(1).trim());
-			}
-			catch (NumberFormatException ignored)
-			{
-				// Some namespaces store the attribute name as a non-float (CDATA fragment, enum
-				// token, IETF locale) — skip and try the next match; a later occurrence may parse.
-			}
-		}
-		return Float.NaN;
-	}
-
-	private static float[] gaussianBlur5x5(float[] src, int width, int height)
+	static float[] gaussianBlur5x5(float[] src, int width, int height)
 	{
 		float[] dst = new float[width * height];
 		for (int y = 2; y < height - 2; y++)
@@ -658,7 +525,7 @@ public final class HorizonDetector
 	 * Hough transform: find the angle of the single strongest near-horizontal line. Uses max-single-bin (longest
 	 * line wins) rather than sum-of-squares (all edges).
 	 */
-	private static float houghPass(int[] edgeX, int[] edgeY, int edgeCount,
+	static float houghPass(int[] edgeX, int[] edgeY, int edgeCount,
 		int width, int height, float minDeg, float maxDeg, float stepDeg)
 	{
 		int numAngles = (int) ((maxDeg - minDeg) / stepDeg) + 1;
@@ -738,7 +605,7 @@ public final class HorizonDetector
 		return bestAngle;
 	}
 
-	private static float[] nonMaxSuppression(float[] magnitude, float[] direction, int width, int height)
+	static float[] nonMaxSuppression(float[] magnitude, float[] direction, int width, int height)
 	{
 		float[] out = new float[width * height];
 		for (int y = 1; y < height - 1; y++)
@@ -785,7 +652,7 @@ public final class HorizonDetector
 		return out;
 	}
 
-	private static void sobelGradient(float[] src, int width, int height, float[] magnitude, float[] direction)
+	static void sobelGradient(float[] src, int width, int height, float[] magnitude, float[] direction)
 	{
 		for (int y = 1; y < height - 1; y++)
 		{
@@ -809,5 +676,145 @@ public final class HorizonDetector
 				direction[i] = (float) Math.atan2(gradY, gradX);
 			}
 		}
+	}
+
+	// ── Private helpers ──
+	// Internal dispatchers and small private utilities. These call into the package-private primitives above
+	// but stay private themselves — either because they need a Bitmap fixture (untestable on the host JVM)
+	// or because their only meaningful behavior is exercised through the public entry points.
+
+	/**
+	 * Canny-style edge pipeline: luminance → Gaussian blur → Sobel magnitude + direction
+	 * → non-max suppression → direction filter (keep only edges within 35° of
+	 * horizontal). Returns the edge strength at each pixel in row-major order.
+	 * Intermediate arrays are nulled as soon as they're consumed to let GC reclaim
+	 * the ~4 MB working sets early on mid-range devices.
+	 */
+	private static float[] buildEdgeMap(Bitmap src, int width, int height)
+	{
+		// width * height in int arithmetic silently overflows above ~46k px on a side. Use multiplyExact so a
+		// pathological input (synthetic / panorama wider than 65k px) throws ArithmeticException up to the
+		// outer catch in detectFromPaintedRegion (returns NaN) rather than allocating a negative-size array.
+		int pixelCount = Math.multiplyExact(width, height);
+		int[] pixels = new int[pixelCount];
+		src.getPixels(pixels, 0, width, 0, 0, width, height);
+		float[] luminance = new float[pixelCount];
+		for (int i = 0; i < pixels.length; i++)
+		{
+			int pixel = pixels[i];
+			luminance[i] = 0.299f * Color.red(pixel) + 0.587f * Color.green(pixel)
+				+ 0.114f * Color.blue(pixel);
+		}
+		pixels = null;
+
+		float[] blurred = gaussianBlur5x5(luminance, width, height);
+		luminance = null;
+
+		float[] gradientMag = new float[pixelCount];
+		float[] gradientDir = new float[pixelCount];
+		sobelGradient(blurred, width, height, gradientMag, gradientDir);
+		blurred = null;
+
+		float[] edges = nonMaxSuppression(gradientMag, gradientDir, width, height);
+
+		// Direction filter: keep only near-horizontal edges (±35° from horizontal).
+		for (int i = 0; i < pixelCount; i++)
+		{
+			if (edges[i] > 0)
+			{
+				float absDirection = Math.abs(gradientDir[i]);
+				if (absDirection < (float) (Math.PI / 2 - Math.PI * 35 / 180)
+					|| absDirection > (float) (Math.PI / 2 + Math.PI * 35 / 180))
+				{
+					edges[i] = 0;
+				}
+			}
+		}
+		return edges;
+	}
+
+	private static float detectPaintedInternal(Bitmap src, List<float[]> paintPoints, float brushRadius)
+	{
+		int width = src.getWidth();
+		int height = src.getHeight();
+		int maskWidth = width / 4;
+		int maskHeight = height / 4;
+
+		boolean[] mask = rasterizePaintMask(paintPoints, maskWidth, maskHeight, brushRadius);
+		float[] edges = buildEdgeMap(src, width, height);
+
+		int[][] edgeCoords = gatherMaskedEdges(edges, mask, width, height, maskWidth, maskHeight);
+		// Release the large intermediates before the coarse+fine Hough pass — on a large source `edges` alone
+		// can be 100 MB of floats. Holding them alive through the Hough loops was a memory regression
+		// introduced when this method was decomposed; keeping the scope tight avoids a mid-detection OOM on
+		// mid-range devices that would not have fired before the refactor.
+		edges = null;
+		mask = null;
+		if (edgeCoords == null)
+		{
+			return Float.NaN;
+		}
+		int[] edgeX = edgeCoords[0];
+		int[] edgeY = edgeCoords[1];
+		int edgeCount = edgeX.length;
+		Log.d(TAG, "Masked edge pixels: " + edgeCount);
+
+		return runHoughAndConvertToRotation(edgeX, edgeY, edgeCount, width, height);
+	}
+
+	/**
+	 * Search XMP XML for a float attribute whose name is exactly attrSuffix, optionally with a namespace prefix.
+	 * Handles patterns like: namespace:Roll="1.23" or Roll="1.23". The earlier version used "\\w*:?Suffix" which
+	 * greedy-matched unrelated names like CameraRoll or GyroRoll — any attribute whose name ends in the literal
+	 * suffix — and silently returned their value as the horizon angle.
+	 */
+	private static float findXmpFloat(String xml, String attrSuffix)
+	{
+		// Require either the start of a token (non-word char) or start of string, then an optional namespace
+		// prefix that ends in ':', then the exact suffix followed by whitespace or '='. This rules out AbcRoll,
+		// CameraRoll, GyroRoll, etc. Pattern is cached per suffix.
+		Pattern pattern = XMP_FLOAT_PATTERNS.computeIfAbsent(attrSuffix, suffix ->
+			Pattern.compile(
+				"(?:^|[^\\w:])(?:\\w+:)?" + Pattern.quote(suffix) + "\\s*=\\s*\"([^\"]+)\"",
+				Pattern.CASE_INSENSITIVE));
+		Matcher matcher = pattern.matcher(xml);
+		while (matcher.find())
+		{
+			try
+			{
+				return Float.parseFloat(matcher.group(1).trim());
+			}
+			catch (NumberFormatException ignored)
+			{
+				// Some namespaces store the attribute name as a non-float (CDATA fragment, enum
+				// token, IETF locale) — skip and try the next match; a later occurrence may parse.
+			}
+		}
+		return Float.NaN;
+	}
+
+	/**
+	 * Convert a raw roll/tilt reading from metadata into the UI's correction-angle convention:
+	 * snap near-zero values to exact zero, reject implausibly-large tilts as NaN (bad sensor data),
+	 * and otherwise invert and round to 2 decimal places. Shared across all XMP/APP1 entry points.
+	 */
+	private static float normalizeMetadataAngle(float deg)
+	{
+		// NaN bypasses both abs comparisons (NaN < x and NaN > x are always false), so an explicit guard
+		// here prevents the round-then-divide path from producing -0.0f and silently announcing a
+		// "valid 0° rotation" when XMP carries malformed roll data.
+		if (Float.isNaN(deg) || !Float.isFinite(deg))
+		{
+			return Float.NaN;
+		}
+		if (Math.abs(deg) < BitmapUtils.ROTATION_EPSILON)
+		{
+			return 0f;
+		}
+		if (Math.abs(deg) > MAX_HORIZON_TILT_DEGREES)
+		{
+			return Float.NaN;
+		}
+		return RotationMath.snapToHundredth(-deg);
 	}
 }

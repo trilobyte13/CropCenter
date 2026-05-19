@@ -178,6 +178,40 @@ public final class CropExporter
 	}
 
 	/**
+	 * Re-append an existing SEFT trailer verbatim, or return the JPEG unchanged when none was captured at load.
+	 * CropCenter does not generate fresh SEFTs — Samsung Gallery's Revert validates a backup path the SEFT claims,
+	 * and only honors paths under Samsung-blessed locations like `/data/sec/photoeditor/` that third-party apps
+	 * cannot write to. A SEFT we generate pointing at our own `/storage/emulated/0/.cropcenter/` write is silently
+	 * rejected by Gallery, so fabricating one is a net negative (disk bloat with no Revert benefit). Files that
+	 * came in with a SEFT — Gallery-edited originals — keep their working Revert chain because we re-append exactly
+	 * the bytes we extracted at load.
+	 *
+	 * Package-private so CropExporterSeftTest can pin the byte-concat contract and the int-overflow guard
+	 * directly — the rest of CropExporter needs a Canvas/Bitmap pipeline, but this is pure byte arithmetic.
+	 */
+	static byte[] appendSeft(byte[] jpeg, byte[] existingSeft)
+	{
+		if (existingSeft == null || existingSeft.length == 0)
+		{
+			return jpeg;
+		}
+		// Long-arithmetic guard against int overflow on jpeg.length + existingSeft.length — wrap
+		// produces a negative sum that NegativeArraySizeException's the bg encode worker.
+		long combinedLong = (long) jpeg.length + (long) existingSeft.length;
+		if (combinedLong > Integer.MAX_VALUE)
+		{
+			Log.w(TAG, "JPEG " + jpeg.length + " + SEFT " + existingSeft.length
+				+ " would overflow int; dropping SEFT trailer to keep the primary intact");
+			return jpeg;
+		}
+		Log.d(TAG, "Preserving existing SEFT trailer: " + existingSeft.length + " bytes");
+		byte[] result = new byte[(int) combinedLong];
+		System.arraycopy(jpeg, 0, result, 0, jpeg.length);
+		System.arraycopy(existingSeft, 0, result, jpeg.length, existingSeft.length);
+		return result;
+	}
+
+	/**
 	 * Pixel index for grid line i of a count-N grid along one axis of the exported crop. Matches the
 	 * continuous-float positions GridRenderer.linePos emits for the preview, rounded to the nearest output pixel.
 	 * Second-half lines mirror the first half around dim / 2 so (i, count − i) pairs stay symmetric — Java's
@@ -208,6 +242,83 @@ public final class CropExporter
 			return dim - mirror;
 		}
 		return (int) Math.round((double) dim * i / count);
+	}
+
+	/**
+	 * Write a PNG eXIf chunk carrying tiffData, inserted after the IHDR chunk. Unlike injectPngExif this takes
+	 * raw TIFF bytes directly with no JPEG APP1 u16 cap — used by the PNG → PNG round-trip path so a PNG with
+	 * > 64KB EXIF (camera with extensive MakerNote / GPS metadata) keeps its full metadata when re-saved. The
+	 * PNG eXIf length field is u31 so the chunk holds anything up to ~2GB.
+	 *
+	 * Package-private so CropExporterPngExifInjectionTest can pin the CRC32, IHDR-end positioning, and
+	 * adversarial overflow guards directly — the function is pure byte-array arithmetic with no Bitmap or
+	 * Canvas dependency.
+	 */
+	static byte[] injectPngExifFromTiff(byte[] png, byte[] tiffData)
+	{
+		int tiffLen = tiffData.length;
+		if (tiffLen == 0)
+		{
+			return png;
+		}
+		// PNG structure: 8-byte signature, then chunks. Insert eXIf after the first chunk (IHDR).
+		if (png.length < 8 + 12)
+		{
+			return png; // too small
+		}
+
+		// Find end of IHDR chunk: signature(8) + length(4) + "IHDR"(4) + data(13) + CRC(4) = 33. Read the
+		// length as a long so the high-bit-set u32 case (length ≥ 0x80000000) doesn't sign-flip into a negative
+		// int that would slip past the past-EOF guard and trigger an AIOOBE on System.arraycopy below.
+		long ihdrLen = ((long) (png[8] & 0xFF) << 24) | ((long) (png[9] & 0xFF) << 16)
+				| ((long) (png[10] & 0xFF) << 8) | (png[11] & 0xFF);
+		long insertPosLong = 8L + 4L + 4L + ihdrLen + 4L; // after IHDR chunk
+		// `>=` rejects an IHDR-only PNG (insertPos == png.length means IHDR's CRC is the last byte and
+		// there's no IEND chunk following). Strict PNG decoders reject IEND-less PNGs as truncated;
+		// inserting eXIf at the very tail would produce a PNG that ends with eXIf and still no IEND,
+		// which is no better than the source. The negative check guards the long-arithmetic wrap on
+		// adversarial ihdrLen values near MAX_INT.
+		if (insertPosLong >= png.length || insertPosLong < 0)
+		{
+			return png;
+		}
+		int insertPos = (int) insertPosLong;
+
+		// Build eXIf chunk: length(4) + "eXIf"(4) + tiffData + CRC(4)
+		byte[] chunkType = PngMetadataExtractor.EXIF_CHUNK_TYPE;
+		byte[] chunkLenBytes = {
+				(byte) (tiffLen >> 24), (byte) (tiffLen >> 16), (byte) (tiffLen >> 8), (byte) (tiffLen)
+		};
+
+		// CRC32 covers chunk type + data
+		CRC32 crc = new CRC32();
+		crc.update(chunkType);
+		crc.update(tiffData);
+		long crcVal = crc.getValue();
+		byte[] crcBytes = {
+				(byte) (crcVal >> 24), (byte) (crcVal >> 16), (byte) (crcVal >> 8), (byte) (crcVal)
+		};
+
+		// PNG eXIf is u31-uncapped, so on a pathological 2GB-class TIFF the int sum `4+4+tiffLen+4`
+		// would overflow negative and NegativeArraySizeException the new byte[] allocation.
+		long chunkTotalLong = 4L + 4L + (long) tiffLen + 4L;
+		if (chunkTotalLong + png.length > Integer.MAX_VALUE)
+		{
+			Log.w(TAG, "eXIf chunk total " + chunkTotalLong + " + png " + png.length
+				+ " would overflow int; returning png unchanged");
+			return png;
+		}
+		int chunkTotal = (int) chunkTotalLong;
+		byte[] result = new byte[png.length + chunkTotal];
+		System.arraycopy(png, 0, result, 0, insertPos);
+		System.arraycopy(chunkLenBytes, 0, result, insertPos, 4);
+		System.arraycopy(chunkType, 0, result, insertPos + 4, 4);
+		System.arraycopy(tiffData, 0, result, insertPos + 8, tiffLen);
+		System.arraycopy(crcBytes, 0, result, insertPos + 8 + tiffLen, 4);
+		System.arraycopy(png, insertPos, result, insertPos + chunkTotal, png.length - insertPos);
+
+		Log.d(TAG, "Injected eXIf chunk: " + tiffLen + " bytes TIFF data");
+		return result;
 	}
 
 	/**
@@ -331,37 +442,6 @@ public final class CropExporter
 			filtered.add(seg);
 		}
 		return filtered;
-	}
-
-	/**
-	 * Re-append an existing SEFT trailer verbatim, or return the JPEG unchanged when none was captured at load.
-	 * CropCenter does not generate fresh SEFTs — Samsung Gallery's Revert validates a backup path the SEFT claims,
-	 * and only honors paths under Samsung-blessed locations like `/data/sec/photoeditor/` that third-party apps
-	 * cannot write to. A SEFT we generate pointing at our own `/storage/emulated/0/.cropcenter/` write is silently
-	 * rejected by Gallery, so fabricating one is a net negative (disk bloat with no Revert benefit). Files that
-	 * came in with a SEFT — Gallery-edited originals — keep their working Revert chain because we re-append exactly
-	 * the bytes we extracted at load.
-	 */
-	private static byte[] appendSeft(byte[] jpeg, byte[] existingSeft)
-	{
-		if (existingSeft == null || existingSeft.length == 0)
-		{
-			return jpeg;
-		}
-		// Long-arithmetic guard against int overflow on jpeg.length + existingSeft.length — wrap
-		// produces a negative sum that NegativeArraySizeException's the bg encode worker.
-		long combinedLong = (long) jpeg.length + (long) existingSeft.length;
-		if (combinedLong > Integer.MAX_VALUE)
-		{
-			Log.w(TAG, "JPEG " + jpeg.length + " + SEFT " + existingSeft.length
-				+ " would overflow int; dropping SEFT trailer to keep the primary intact");
-			return jpeg;
-		}
-		Log.d(TAG, "Preserving existing SEFT trailer: " + existingSeft.length + " bytes");
-		byte[] result = new byte[(int) combinedLong];
-		System.arraycopy(jpeg, 0, result, 0, jpeg.length);
-		System.arraycopy(existingSeft, 0, result, jpeg.length, existingSeft.length);
-		return result;
 	}
 
 	/**
@@ -838,79 +918,6 @@ public final class CropExporter
 		byte[] tiffData = new byte[tiffLen];
 		System.arraycopy(exifApp1, 10, tiffData, 0, tiffLen);
 		return injectPngExifFromTiff(png, tiffData);
-	}
-
-	/**
-	 * Write a PNG eXIf chunk carrying tiffData, inserted after the IHDR chunk. Unlike injectPngExif this takes
-	 * raw TIFF bytes directly with no JPEG APP1 u16 cap — used by the PNG → PNG round-trip path so a PNG with
-	 * > 64KB EXIF (camera with extensive MakerNote / GPS metadata) keeps its full metadata when re-saved. The
-	 * PNG eXIf length field is u31 so the chunk holds anything up to ~2GB.
-	 */
-	private static byte[] injectPngExifFromTiff(byte[] png, byte[] tiffData)
-	{
-		int tiffLen = tiffData.length;
-		if (tiffLen == 0)
-		{
-			return png;
-		}
-		// PNG structure: 8-byte signature, then chunks. Insert eXIf after the first chunk (IHDR).
-		if (png.length < 8 + 12)
-		{
-			return png; // too small
-		}
-
-		// Find end of IHDR chunk: signature(8) + length(4) + "IHDR"(4) + data(13) + CRC(4) = 33. Read the
-		// length as a long so the high-bit-set u32 case (length ≥ 0x80000000) doesn't sign-flip into a negative
-		// int that would slip past the past-EOF guard and trigger an AIOOBE on System.arraycopy below.
-		long ihdrLen = ((long) (png[8] & 0xFF) << 24) | ((long) (png[9] & 0xFF) << 16)
-				| ((long) (png[10] & 0xFF) << 8) | (png[11] & 0xFF);
-		long insertPosLong = 8L + 4L + 4L + ihdrLen + 4L; // after IHDR chunk
-		// `>=` rejects an IHDR-only PNG (insertPos == png.length means IHDR's CRC is the last byte and
-		// there's no IEND chunk following). Strict PNG decoders reject IEND-less PNGs as truncated;
-		// inserting eXIf at the very tail would produce a PNG that ends with eXIf and still no IEND,
-		// which is no better than the source. The negative check guards the long-arithmetic wrap on
-		// adversarial ihdrLen values near MAX_INT.
-		if (insertPosLong >= png.length || insertPosLong < 0)
-		{
-			return png;
-		}
-		int insertPos = (int) insertPosLong;
-
-		// Build eXIf chunk: length(4) + "eXIf"(4) + tiffData + CRC(4)
-		byte[] chunkType = PngMetadataExtractor.EXIF_CHUNK_TYPE;
-		byte[] chunkLenBytes = {
-				(byte) (tiffLen >> 24), (byte) (tiffLen >> 16), (byte) (tiffLen >> 8), (byte) (tiffLen)
-		};
-
-		// CRC32 covers chunk type + data
-		CRC32 crc = new CRC32();
-		crc.update(chunkType);
-		crc.update(tiffData);
-		long crcVal = crc.getValue();
-		byte[] crcBytes = {
-				(byte) (crcVal >> 24), (byte) (crcVal >> 16), (byte) (crcVal >> 8), (byte) (crcVal)
-		};
-
-		// PNG eXIf is u31-uncapped, so on a pathological 2GB-class TIFF the int sum `4+4+tiffLen+4`
-		// would overflow negative and NegativeArraySizeException the new byte[] allocation.
-		long chunkTotalLong = 4L + 4L + (long) tiffLen + 4L;
-		if (chunkTotalLong + png.length > Integer.MAX_VALUE)
-		{
-			Log.w(TAG, "eXIf chunk total " + chunkTotalLong + " + png " + png.length
-				+ " would overflow int; returning png unchanged");
-			return png;
-		}
-		int chunkTotal = (int) chunkTotalLong;
-		byte[] result = new byte[png.length + chunkTotal];
-		System.arraycopy(png, 0, result, 0, insertPos);
-		System.arraycopy(chunkLenBytes, 0, result, insertPos, 4);
-		System.arraycopy(chunkType, 0, result, insertPos + 4, 4);
-		System.arraycopy(tiffData, 0, result, insertPos + 8, tiffLen);
-		System.arraycopy(crcBytes, 0, result, insertPos + 8 + tiffLen, 4);
-		System.arraycopy(png, insertPos, result, insertPos + chunkTotal, png.length - insertPos);
-
-		Log.d(TAG, "Injected eXIf chunk: " + tiffLen + " bytes TIFF data");
-		return result;
 	}
 
 	/**

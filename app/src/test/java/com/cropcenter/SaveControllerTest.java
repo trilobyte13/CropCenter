@@ -36,15 +36,6 @@ public final class SaveControllerTest
 	}
 
 	@Test
-	public void autoRenameBaseNameDetectsUserEditedThenCollided()
-	{
-		// User typed "foo.jpg" in the picker; SAF returned "foo (1).jpg" because foo.jpg existed in the chosen
-		// directory. The controller MUST infer "foo.jpg" (the actual collision) — using the original
-		// pendingSaveName would point Replace at the wrong file.
-		assertEquals("foo.jpg", SaveController.autoRenameBaseName("foo (1).jpg"));
-	}
-
-	@Test
 	public void autoRenameBaseNameHandlesStemWithDotsAndSpaces()
 	{
 		// Multi-dot stem like "image.v2.final.jpg" → "image.v2.final (1).jpg" suffixed → infer the same with

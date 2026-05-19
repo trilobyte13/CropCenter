@@ -65,6 +65,36 @@ final class ImageLoadController
 	}
 
 	/**
+	 * Pick the right EXIF-orientation reader for the input format. JPEG bytes route through
+	 * BitmapUtils.readExifOrientation (APP1 segment walk); PNG bytes route through
+	 * PngMetadataExtractor.extractOrientation (eXIf chunk walk); anything else returns 1 (upright) — the same
+	 * default both underlying readers use for absent or malformed inputs, so callers can compose this with
+	 * BitmapUtils.applyOrientation without an extra null/range check.
+	 *
+	 * Package-private so ImageLoadControllerOrientationTest can pin the format-dispatch contract — a regression
+	 * that routed JPEG bytes through the PNG reader (or vice versa) would silently load the source in
+	 * stored-pixel orientation while the export side normalises to 1, baking a permanent rotation into every
+	 * saved image.
+	 *
+	 * @param fileBytes raw image bytes; recognised when bytes 0..1 match JPEG SOI (FF D8) OR bytes 0..7 match
+	 *                  the canonical PNG signature
+	 * @return EXIF orientation value (typically 1..8) from the format-appropriate reader, or 1 for unrecognised
+	 *         inputs / readers that produced no orientation tag
+	 */
+	static int chooseOrientationByFormat(byte[] fileBytes)
+	{
+		if (isJpegSignature(fileBytes))
+		{
+			return BitmapUtils.readExifOrientation(fileBytes);
+		}
+		if (isPngSignature(fileBytes))
+		{
+			return PngMetadataExtractor.extractOrientation(fileBytes);
+		}
+		return 1;
+	}
+
+	/**
 	 * Scan the loaded image's bytes for EXIF/ICC/XMP/HDR/SEFT markers and build a snapshot of everything that
 	 * needs to land on CropState. Caller commits the snapshot atomically AFTER state.reset() so a thrown
 	 * extractor (rare but possible on adversarial input) can't half-populate state and destroy the previous
@@ -247,16 +277,12 @@ final class ImageLoadController
 			host.runOnUiThread(() -> host.toastIfAlive("Failed to decode", Toast.LENGTH_SHORT));
 			return false;
 		}
-		// JPEG and PNG carry EXIF orientation differently. JPEG embeds APP1 segments;
-		// BitmapUtils.readExifOrientation walks JPEG markers and returns 1 for non-JPEG inputs. PNG carries the
-		// same TIFF orientation tag inside an eXIf chunk; PngMetadataExtractor.extractOrientation walks PNG
-		// chunks. Without this branch a PNG with eXIf orientation=6 (rotate 90 CW) would be displayed in
-		// stored pixel orientation while the export side normalises orientation back to 1, baking a permanent
-		// sideways rotation into the saved file. Both helpers return 1 (upright) on absence / malformed input,
-		// so the same applyOrientation call follows for both formats.
-		int orientation = isJpegSignature(fileBytes)
-			? BitmapUtils.readExifOrientation(fileBytes)
-			: PngMetadataExtractor.extractOrientation(fileBytes);
+		// JPEG and PNG carry EXIF orientation differently — chooseOrientationByFormat is the chokepoint that
+		// routes JPEG bytes to BitmapUtils.readExifOrientation (APP1 marker walk) and PNG bytes to
+		// PngMetadataExtractor.extractOrientation (eXIf chunk walk). Without this dispatch a PNG with eXIf
+		// orientation=6 would be displayed in stored pixel orientation while the export side normalises
+		// orientation back to 1, baking a permanent sideways rotation into the saved file.
+		int orientation = chooseOrientationByFormat(fileBytes);
 		// applyOrientation recycles raw and returns a new bitmap when orientation != 1, or returns raw
 		// unchanged when orientation == 1. If it throws partway through (OOM during Bitmap.createBitmap is the
 		// realistic case), raw might still own its native pixel buffer — recycle here so the buffer doesn't

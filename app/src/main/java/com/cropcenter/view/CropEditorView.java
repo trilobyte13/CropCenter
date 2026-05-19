@@ -492,6 +492,36 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 	}
 
 	/**
+	 * True when the locked axis moved more than 0.5 px between (preDragCenterX, preDragCenterY) and the
+	 * post-clamp (postCenterX, postCenterY) — i.e. the joint clamp in setCenter pushed the locked axis.
+	 * Used to reject moves on a locked axis and restore via recomputeCrop.
+	 *
+	 * Package-private static so CropEditorViewCrossAxisDriftedTest can pin the lock-axis selection AND the
+	 * 0.5px strict-greater threshold without a Context-bound View. CenterMode.BOTH / LOCKED / null all fall
+	 * through to false (only HORIZONTAL and VERTICAL are checked by name).
+	 *
+	 * @param lock           the current lock mode; only HORIZONTAL and VERTICAL trigger a drift check
+	 * @param preDragCenterX X-center captured before the drag began
+	 * @param preDragCenterY Y-center captured before the drag began
+	 * @param postCenterX    X-center after setCenter applied the joint clamp
+	 * @param postCenterY    Y-center after setCenter applied the joint clamp
+	 * @return true when the LOCKED axis moved more than 0.5 px from its pre-drag position
+	 */
+	static boolean crossAxisDrifted(CenterMode lock, float preDragCenterX, float preDragCenterY,
+		float postCenterX, float postCenterY)
+	{
+		if (lock == CenterMode.HORIZONTAL)
+		{
+			return Math.abs(postCenterY - preDragCenterY) > 0.5f;
+		}
+		if (lock == CenterMode.VERTICAL)
+		{
+			return Math.abs(postCenterX - preDragCenterX) > 0.5f;
+		}
+		return false;
+	}
+
+	/**
 	 * Snap a centerX/Y to the parity-valid pixel grid: even dim → integer center, odd dim → half-integer.
 	 * Returns the input unchanged when both candidate targets are equidistant — a half-up bias would
 	 * shift the crop 0.5 px on a no-op MOVE pan after a SELECT-mode tap had placed the selection at the
@@ -519,24 +549,6 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 			return center;
 		}
 		return target;
-	}
-
-	/**
-	 * True when the locked axis moved more than 0.5 px between preDrag* and the current state.centerX/centerY —
-	 * i.e. the joint clamp in setCenter pushed the locked axis. Used to reject moves on a locked axis and restore
-	 * via recomputeCrop.
-	 */
-	private boolean crossAxisDrifted(CenterMode lock, float preDragCenterX, float preDragCenterY)
-	{
-		if (lock == CenterMode.HORIZONTAL)
-		{
-			return Math.abs(state.getCenterY() - preDragCenterY) > 0.5f;
-		}
-		if (lock == CenterMode.VERTICAL)
-		{
-			return Math.abs(state.getCenterX() - preDragCenterX) > 0.5f;
-		}
-		return false;
 	}
 
 	/**
@@ -610,7 +622,8 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 			// 0.5 px from its pre-drag position.
 			state.setCropSizeDirty(false);
 			state.setCenter(newCenterX, newCenterY);
-			if (!crossAxisDrifted(lock, preDragCenterX, preDragCenterY))
+			if (!crossAxisDrifted(lock, preDragCenterX, preDragCenterY,
+				state.getCenterX(), state.getCenterY()))
 			{
 				// Advance the anchor to the clamped (still fractional) drag position so the next event
 				// continues accumulating from here.

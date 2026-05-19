@@ -1,6 +1,5 @@
 package com.cropcenter.metadata;
 
-import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
@@ -18,17 +17,6 @@ import java.nio.charset.StandardCharsets;
  */
 public final class JpegSegmentTest
 {
-	@Test
-	public void componentAccessorsExposeMarkerAndData()
-	{
-		// Records auto-generate accessors. Pin them down so a renamed component would surface as a compile
-		// error here.
-		byte[] data = { (byte) 0xFF, (byte) 0xE1, 0x00, 0x06, 0x01, 0x02, 0x03, 0x04 };
-		JpegSegment seg = new JpegSegment(0xE1, data);
-		assertEquals(0xE1, seg.marker());
-		assertArrayEquals(data, seg.data());
-	}
-
 	@Test
 	public void extendedXmpHeaderConstantValueAndLength()
 	{

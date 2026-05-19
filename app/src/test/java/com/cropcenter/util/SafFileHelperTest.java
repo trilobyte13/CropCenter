@@ -1,7 +1,6 @@
 package com.cropcenter.util;
 
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNull;
 
 import org.junit.Test;
 
@@ -10,123 +9,14 @@ import java.io.IOException;
 import java.io.InputStream;
 
 /**
- * Tests for SafFileHelper's pure-string SAF document-ID parsing helpers. These directly cover the bug class fixed when
- * root-level files (e.g., "primary:foo.jpg") were being misclassified as opaque-ID and dropping the crash-safe
- * sibling-replace path. The Context- bound parts of SafFileHelper (createDocument, openInputStream) need an Android
- * runtime and aren't tested here — but the parsing chokepoints that decide whether the path is sibling-derivable in the
- * first place are pure functions and well-suited to unit tests.
+ * Tests for SafFileHelper.readbackByteCountFromStream — the post-write read-back checker that distinguishes a clean
+ * full match (returns expected.length only after EOF), a divergence offset on mismatch, a short stream return, and the
+ * overflow / EOF-check error paths. Pure-string SafPaths parsing chokepoints (parentDocIdOf,
+ * lastSegmentSeparatorEnd, hasImageSignature) are covered in SafPathsTest; the Context-bound parts of SafFileHelper
+ * (createDocument, openInputStream) need an Android runtime and aren't tested here.
  */
 public final class SafFileHelperTest
 {
-	// ── hasImageSignature ── The cheap upfront filter that gates tryReadDirectlyFromPath. A stale MediaStore
-	// _data row pointing at a non-image file would otherwise poison the load with garbage bytes; without these
-	// tests pinning the JPEG/PNG-only contract a future relaxation that accepts HEIC / GIF / WebP signatures
-	// would slip through unnoticed.
-
-	@Test
-	public void hasImageSignatureAcceptsJpegMagicBytes()
-	{
-		// JPEG SOI: FF D8. Any bytes after the first two are ignored by the check.
-		assertEquals(true, SafPaths.hasImageSignature(
-			new byte[]{ (byte) 0xFF, (byte) 0xD8, 0x12, 0x34 }));
-	}
-
-	@Test
-	public void hasImageSignatureAcceptsPngMagicBytes()
-	{
-		// PNG signature: 89 50 4E 47 [...]. Only the first 4 are inspected.
-		assertEquals(true, SafPaths.hasImageSignature(
-			new byte[]{ (byte) 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A }));
-	}
-
-	@Test
-	public void hasImageSignatureRejectsHeicAndOtherFormats()
-	{
-		// HEIC ftyp box. BitmapFactory on Android 28+ can decode this, which is exactly why the explicit
-		// signature gate matters — without it, HEIC would slip past and corrupt the load pipeline.
-		byte[] heic = { 0x00, 0x00, 0x00, 0x18, 'f', 't', 'y', 'p' };
-		assertEquals(false, SafPaths.hasImageSignature(heic));
-		// WebP "RIFF????WEBP".
-		byte[] webp = { 'R', 'I', 'F', 'F', 0x00, 0x00, 0x00, 0x00 };
-		assertEquals(false, SafPaths.hasImageSignature(webp));
-		// GIF "GIF89a".
-		byte[] gif = { 'G', 'I', 'F', '8', '9', 'a' };
-		assertEquals(false, SafPaths.hasImageSignature(gif));
-	}
-
-	@Test
-	public void hasImageSignatureRejectsTooShortInput()
-	{
-		// Less than 4 bytes — the check needs all four to disambiguate JPEG (2 bytes) from PNG (4 bytes).
-		assertEquals(false, SafPaths.hasImageSignature(new byte[]{ (byte) 0xFF, (byte) 0xD8, 0x12 }));
-		assertEquals(false, SafPaths.hasImageSignature(new byte[0]));
-	}
-
-	@Test
-	public void lastSegmentSeparatorEndAtVolumeColonForRoot()
-	{
-		// Root-level file: the volume colon stands in as the segment separator. Returns the index just after
-		// the colon so docId.substring(0, end) + child == sibling.
-		assertEquals(8, SafPaths.lastSegmentSeparatorEnd("primary:foo.jpg"));
-		// Empty filename after the colon — still parsable.
-		assertEquals(8, SafPaths.lastSegmentSeparatorEnd("primary:"));
-	}
-
-	@Test
-	public void lastSegmentSeparatorEndPrefersSlashOverColon()
-	{
-		// Nested path: slash takes precedence even though a colon is also present. "primary:Pictures/foo.jpg" →
-		// after the slash that ends "primary:Pictures".
-		String docId = "primary:Pictures/foo.jpg";
-		assertEquals("primary:Pictures/".length(), SafPaths.lastSegmentSeparatorEnd(docId));
-		String deep = "primary:DCIM/Camera/IMG_0001.jpg";
-		assertEquals("primary:DCIM/Camera/".length(), SafPaths.lastSegmentSeparatorEnd(deep));
-	}
-
-	@Test
-	public void lastSegmentSeparatorEndReturnsMinusOneForOpaqueId()
-	{
-		// Opaque IDs (some cloud providers) have neither separator. Caller treats this as "can't derive
-		// sibling" and falls back to the in-place overwrite path.
-		assertEquals(-1, SafPaths.lastSegmentSeparatorEnd("opaqueDriveDocId123"));
-		assertEquals(-1, SafPaths.lastSegmentSeparatorEnd(""));
-	}
-
-	@Test
-	public void parentDocIdOfHandlesColonPrefixWithNoFilename()
-	{
-		// "primary:" itself — the volume root with no filename. Treat like "no parent available" since the
-		// volume root has no parent to look up. The current impl returns the volume prefix (= same as input)
-		// because indexOf(':') = 7 > 0. Worth pinning down so any change is intentional.
-		assertEquals("primary:", SafPaths.parentDocIdOf("primary:"));
-	}
-
-	@Test
-	public void parentDocIdOfNestedFileStripsLastSegment()
-	{
-		assertEquals("primary:Pictures", SafPaths.parentDocIdOf("primary:Pictures/foo.jpg"));
-		assertEquals("primary:DCIM/Camera", SafPaths.parentDocIdOf("primary:DCIM/Camera/IMG_0001.jpg"));
-	}
-
-	@Test
-	public void parentDocIdOfReturnsNullForOpaqueId()
-	{
-		// No slash AND no colon → caller's signal to skip the sibling-replace path entirely and use the
-		// narrower in-place fallback.
-		assertNull(SafPaths.parentDocIdOf("opaqueDriveDocId123"));
-		assertNull(SafPaths.parentDocIdOf(""));
-	}
-
-	@Test
-	public void parentDocIdOfRootFileFallsBackToVolumePrefix()
-	{
-		// The bug we just fixed: a file at the provider root must resolve to "primary:" as parent (the volume
-		// root document), NOT null. ExternalStorage- Provider accepts "primary:" as a valid root document for
-		// createDocument.
-		assertEquals("primary:", SafPaths.parentDocIdOf("primary:foo.jpg"));
-		assertEquals("home:", SafPaths.parentDocIdOf("home:bar.png"));
-	}
-
 	@Test
 	public void readbackFromStreamEofCheckThrowReturnsMinusOne() throws IOException
 	{
@@ -137,12 +27,6 @@ public final class SafFileHelperTest
 		InputStream is = new EofThrowingStream(expected.clone());
 		assertEquals(-1L, SafFileHelper.readbackByteCountFromStream(is, expected));
 	}
-
-	// ── readbackByteCountFromStream ── Verify the contract documented on readbackByteCount: full match returns
-	// expected.length only after EOF is confirmed clean; mismatch / short / trailing each map to a distinct
-	// return-value class so callers using strict equality see the mismatch unambiguously. The helper sits
-	// package-private so tests can drive it with ByteArrayInputStream subclasses that throw on close/read,
-	// exercising error paths without an Android Context.
 
 	@Test
 	public void readbackFromStreamFullMatchReturnsExpectedLength() throws IOException

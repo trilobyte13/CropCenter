@@ -1311,6 +1311,11 @@ public final class ExifPatcherTest
 		return out.toByteArray();
 	}
 
+	/**
+	 * Build an EXIF segment with IFD0 + an existing IFD1 carrying a thumbnail. IFD1 has three tags: 0x0103
+	 * (Compression=6=JPEG), 0x0201 (JPEGInterchangeFormat = thumbnail offset), 0x0202 (JPEGInterchangeFormatLength
+	 * = thumbnail byte count). The thumbnail bytes sit immediately after the IFD1 header.
+	 */
 	private static JpegSegment buildSegmentWithExistingThumbnail(byte[] thumbnail) throws IOException
 	{
 		ByteArrayOutputStream tiff = new ByteArrayOutputStream();
@@ -1356,11 +1361,6 @@ public final class ExifPatcherTest
 		return wrapTiffAsExifSegment(tiff.toByteArray());
 	}
 
-	/**
-	 * Build an EXIF segment with IFD0 + an existing IFD1 carrying a thumbnail. IFD1 has three tags: 0x0103
-	 * (Compression=6=JPEG), 0x0201 (JPEGInterchangeFormat = thumbnail offset), 0x0202 (JPEGInterchangeFormatLength
-	 * = thumbnail byte count). The thumbnail bytes sit immediately after the IFD1 header.
-	 */
 	/**
 	 * Like buildSegmentWithExistingThumbnail but with an extra non-empty trailing byte block AFTER the
 	 * thumbnail in the TIFF payload. Simulates non-Samsung EXIF layouts where MakerNote / SubIFD value

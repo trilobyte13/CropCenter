@@ -19,11 +19,15 @@ import java.util.List;
  *   - hasHdrgmInXmp(List of JpegSegment) — XMP-segment-only walk used by ImageLoadController.extractMetadata and
  *     GraftWriter.graft. Narrowed from a full-file scan because a stray "hdrgm" 5-byte sequence in
  *     MakerNote / COM / vendor blob / SEFT edit history / entropy could falsely flag SDR files as HDR.
+ *   - isHdrgmXmpSegment(JpegSegment) — per-segment predicate used by CropExporter.stripHdrSegments to drop
+ *     the XMP-with-hdrgm segments without touching unrelated APP1 segments. Lives here next to its sibling
+ *     so a regression that mis-classifies extended-XMP or non-XMP segments shows up alongside the list-walk
+ *     tests rather than as a downstream stripHdrSegments mis-strip.
  *   - isHdrSource(byte[]) — full-file scan used by UltraHdrCompat post-Bitmap.compress diagnostic only. Exercised
  *     here so a regression that broke the byte-pattern walk would be caught at the public API layer rather than
  *     transitively through UltraHdrCompatTest.
  *
- * Pure JUnit, no Android infrastructure needed — both methods are pure Java byte-pattern matchers.
+ * Pure JUnit, no Android infrastructure needed — all three methods are pure Java byte-pattern matchers.
  */
 public final class HdrSignatureTest
 {

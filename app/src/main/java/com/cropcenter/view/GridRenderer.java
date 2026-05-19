@@ -98,8 +98,12 @@ public final class GridRenderer
 	 *
 	 * Second-half lines mirror through cropExtent (not cropCenter) so the rounding matches the exporter's
 	 * `dim - round(dim * (count - i) / count)` exactly.
+	 *
+	 * Package-private so GridRendererTest can pin the preview-matches-export contract without a Canvas — the
+	 * draw() method itself needs an Android Canvas + Paint, but the line-position math is where the
+	 * preview/export alignment is enforced.
 	 */
-	private static float linePos(int i, int count, float cropOrigin, int cropExtent, float cropCenter)
+	static float linePos(int i, int count, float cropOrigin, int cropExtent, float cropCenter)
 	{
 		if (i * 2 == count)
 		{

@@ -20,10 +20,13 @@ public final class JpegMarkerTest
 		// `marker >= APP0 && marker <= APP_LAST`. A regression that flipped APP1 from 0xE1 to
 		// 0xE2 would silently route every EXIF reader through the MPF marker code path; the
 		// existing walker tests pass byte fixtures, so a constant-drift bug wouldn't surface
-		// there. Pin every value the codebase uses plus the 16-marker range invariant.
+		// there. Pin every value the codebase uses plus the 16-marker range invariant. APP3 is
+		// the low boundary of GraftWriter.isVendorApp's APP3..APP15 range — a drift from 0xE3
+		// would silently widen or narrow which markers get stripped from grafted output.
 		assertEquals(0xE0, JpegMarker.APP0);
 		assertEquals(0xE1, JpegMarker.APP1);
 		assertEquals(0xE2, JpegMarker.APP2);
+		assertEquals(0xE3, JpegMarker.APP3);
 		assertEquals(0xEF, JpegMarker.APP_LAST);
 		assertEquals("APP0..APP15 spans 16 markers", 16, JpegMarker.APP_LAST - JpegMarker.APP0 + 1);
 	}

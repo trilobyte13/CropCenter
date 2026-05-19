@@ -162,6 +162,69 @@ public final class CropStateTest
 		assertNull("no mask supplied — aiMask stays null", state.getAiMask());
 	}
 
+	// ── clearSelectionPoints ──
+
+	@Test
+	public void clearSelectionPointsEmptiesListAndFiresListenerOnce()
+	{
+		// Documented contract: when there's at least one point, the clear empties the list and fires the
+		// listener exactly once. The path is used by reset() and by some UI gestures that wipe the user's
+		// selection without re-loading the image.
+		CropState state = new CropState();
+		state.addSelectionPoint(new SelectionPoint(10f, 20f));
+		state.addSelectionPoint(new SelectionPoint(30f, 40f));
+		int[] fireCount = { 0 };
+		state.setListener(() -> fireCount[0]++);
+		state.clearSelectionPoints();
+		assertTrue("selection list must be empty after clear", state.getSelectionPoints().isEmpty());
+		assertEquals("listener fires exactly once", 1, fireCount[0]);
+	}
+
+	@Test
+	public void clearSelectionPointsOnEmptyListIsNoOp()
+	{
+		// Documented short-circuit: an already-empty list skips the clear() + notifyChanged() to avoid
+		// spurious listener fires. Pin so a regression that drops the empty-check would surface here as a
+		// 1-fire vs 0-fire mismatch — and the editor would gain noisy redraws every time a no-op clear runs
+		// (e.g., loading two images in a row).
+		CropState state = new CropState();
+		int[] fireCount = { 0 };
+		state.setListener(() -> fireCount[0]++);
+		state.clearSelectionPoints();
+		assertTrue(state.getSelectionPoints().isEmpty());
+		assertEquals("listener must not fire when there's nothing to clear", 0, fireCount[0]);
+	}
+
+	// ── getCropImageXFloat / getCropImageYFloat ──
+
+	@Test
+	public void getCropImageXFloatReturnsZeroBeforeCenterIsPlaced()
+	{
+		// Documented contract: with no center placed, the float-precision crop origin reads as 0 — not
+		// centerX - cropW/2 evaluated on the uninitialized fields. Without this guard the renderer would
+		// read NaN/inf during the load gap between sourceImage = bmp and the first applyStateToUi tick.
+		CropState state = new CropState();
+		assertFalse(state.hasCenter());
+		assertEquals(0f, state.getCropImageXFloat(), 0f);
+		assertEquals(0f, state.getCropImageYFloat(), 0f);
+	}
+
+	@Test
+	public void getCropImageXFloatReturnsCenterMinusHalfWidth()
+	{
+		// Sub-pixel precision is the whole point of getCropImageXFloat — a smoothly rotating selection
+		// midpoint produces smooth crop motion on screen instead of integer-snapped jitter. Pin the formula
+		// so a refactor to integer arithmetic surfaces here.
+		CropState state = new CropState();
+		state.setCropSizeSilent(101, 73);
+		state.setCenterUnclamped(150.25f, 200.75f);
+		assertTrue(state.hasCenter());
+		assertEquals("centerX - cropW / 2f = 150.25 - 50.5 = 99.75",
+			99.75f, state.getCropImageXFloat(), 0f);
+		assertEquals("centerY - cropH / 2f = 200.75 - 36.5 = 164.25",
+			164.25f, state.getCropImageYFloat(), 0f);
+	}
+
 	// ── replaceSelectionPoints ──
 
 	@Test

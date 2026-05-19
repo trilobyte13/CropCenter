@@ -1,6 +1,9 @@
 package com.cropcenter.util;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import com.cropcenter.metadata.JpegFixtures;
@@ -12,6 +15,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.List;
 
 /**
  * Tests the pure-Java precision refinements inside HorizonDetector. The bitmap edge pipeline itself depends on
@@ -47,6 +51,20 @@ public final class HorizonDetectorTest
 		byte[] payload = JpegFixtures.exifAppPayload();
 		JpegSegment exif = new JpegSegment(0xE1, JpegFixtures.appSegment(0xE1, payload));
 		assertTrue(Float.isNaN(HorizonDetector.detectFromMetadata(Collections.singletonList(exif))));
+	}
+
+	@Test
+	public void detectFromMetadataSkipsXmpSegmentWithEmptyBody() throws IOException
+	{
+		// An XMP APP1 segment carrying ONLY the 29-byte XMP_HEADER and no XML body. isXmp() returns true
+		// (data.length == 4 + 29 = 33 satisfies the >= guard), but the primary-loop's `segData.length <=
+		// xmlStart` continue fires so detectFromMetadata moves on without trying to parse XML. Pin that
+		// the empty-body path doesn't crash and ultimately returns NaN. Without this guard a regression
+		// that swapped `<=` for `<` would feed an empty string into findXmpFloat (harmless today, but the
+		// guard is the documented contract).
+		byte[] xmpIdBytes = XMP_ID.getBytes(StandardCharsets.UTF_8);
+		JpegSegment emptyBodyXmp = new JpegSegment(0xE1, JpegFixtures.appSegment(0xE1, xmpIdBytes));
+		assertTrue(Float.isNaN(HorizonDetector.detectFromMetadata(Collections.singletonList(emptyBodyXmp))));
 	}
 
 	@Test
@@ -342,6 +360,547 @@ public final class HorizonDetectorTest
 			line[0].length, WIDTH, HEIGHT, 91.70f);
 
 		assertTrue(Float.isNaN(refined));
+	}
+
+	@Test
+	public void lineFitReturnsNaNForDegenerateVerticalLine()
+	{
+		// All edge points share the same X coordinate — sumXX - sumX^2/n collapses below the 1e-6 denom
+		// guard and the slope-from-X regression is degenerate. With a Hough seed near 0° the rho
+		// computation collapses to rho = x*cos(0°) + y*sin(0°) ≈ x, so all 200 same-x edges land in the
+		// same histogram bin and pass the bestCount + inliers thresholds; the next pass then trips the
+		// explicit `denom <= 1e-6` guard rather than dividing by zero. Pin the guard so a refactor that
+		// removes the check surfaces here instead of producing Inf/NaN at the call site.
+		int[] edgeX = new int[200];
+		int[] edgeY = new int[200];
+		for (int i = 0; i < 200; i++)
+		{
+			edgeX[i] = WIDTH / 2;
+			edgeY[i] = 100 + i;
+		}
+		float refined = HorizonDetector.refineLineFitAngle(edgeX, edgeY, 200, WIDTH, HEIGHT, 0f);
+		assertTrue("degenerate vertical line must return NaN: " + refined, Float.isNaN(refined));
+	}
+
+	@Test
+	public void lineFitReturnsNaNWhenBestBinHasTooFewInliers()
+	{
+		// minInliers = max(30, width * 3 / 100). For WIDTH=1200 that's max(30, 36) = 36. A 20-pixel synthetic
+		// line packs all 20 votes into one bin but the count is still below the threshold, so the early
+		// `bestCount < minInliers` guard returns NaN before the slope fit runs. Pin the threshold so a
+		// regression that drops it would start accepting sparse-edge inputs that aren't trustworthy.
+		int[] edgeX = new int[20];
+		int[] edgeY = new int[20];
+		double slope = Math.tan(Math.toRadians(1.23f));
+		for (int i = 0; i < 20; i++)
+		{
+			edgeX[i] = i;
+			edgeY[i] = Math.round((float) (180 + slope * i));
+		}
+		float refined = HorizonDetector.refineLineFitAngle(edgeX, edgeY, 20, WIDTH, HEIGHT, 91.23f);
+		assertTrue("too few inliers must return NaN: " + refined, Float.isNaN(refined));
+	}
+
+	// ── computeThreshold ──
+
+	@Test
+	public void computeThresholdReturnsMaxValueForAllZeroInput()
+	{
+		// No non-zero edges → no signal at all. Returns Float.MAX_VALUE so the threshold comparison
+		// `edges[i] >= threshold` rejects every pixel, leaving the masked-edges count at 0 (downstream
+		// gatherMaskedEdges then returns null). Pin so a regression that returned 0 would let every
+		// zero-edge pixel through and crash the Hough pass on noise.
+		float[] edges = new float[100];
+		assertEquals(Float.MAX_VALUE, HorizonDetector.computeThreshold(edges, 0.15f), 0f);
+	}
+
+	@Test
+	public void computeThresholdSelectsTopFractionOfNonZeroEdges()
+	{
+		// Uniform-strength field with one outlier — topFraction 0.1 should land near the outlier,
+		// excluding the lower 90%. Pin that the histogram-based percentile lands in the upper portion
+		// rather than returning the absolute max (which would reject the outlier too).
+		float[] edges = new float[100];
+		for (int i = 0; i < 99; i++)
+		{
+			edges[i] = 10f;
+		}
+		edges[99] = 100f;
+		float threshold = HorizonDetector.computeThreshold(edges, 0.05f);
+		// With topFraction = 0.05, target index lands near the 95th percentile of non-zero values.
+		// The 99 values at 10 cluster in a low bin; the threshold should land at or above 10 (and well
+		// below 100 since the single 100 is only 1% of the sample).
+		assertTrue("threshold should clear the low-value plateau: " + threshold, threshold > 9f);
+	}
+
+	// ── gatherMaskedEdges ──
+
+	@Test
+	public void gatherMaskedEdgesReturnsNullWhenFewerThanThirtyQualify()
+	{
+		// A 40x40 source with a 10x10 mask where only the top-left 4×4 mask cells are flagged. Each mask
+		// cell covers a 4×4 block of source pixels — so the maximum possible edge count is 4*4*4*4 = 256
+		// pixels IF every pixel in those blocks crosses threshold. We give exactly 20 strong pixels and
+		// expect the < 30 guard to return null.
+		int width = 40;
+		int height = 40;
+		int maskWidth = 10;
+		int maskHeight = 10;
+		float[] edges = new float[width * height];
+		boolean[] mask = new boolean[maskWidth * maskHeight];
+		// Mask the upper-left 4×4 mask cells (covers source rows 0..15, cols 0..15).
+		for (int my = 0; my < 4; my++)
+		{
+			for (int mx = 0; mx < 4; mx++)
+			{
+				mask[my * maskWidth + mx] = true;
+			}
+		}
+		// Plant exactly 20 strong edges, all inside the masked area.
+		for (int i = 0; i < 20; i++)
+		{
+			edges[i] = 100f;
+		}
+		int[][] result = HorizonDetector.gatherMaskedEdges(edges, mask, width, height,
+			maskWidth, maskHeight);
+		assertNull("fewer than 30 edges → null", result);
+	}
+
+	@Test
+	public void gatherMaskedEdgesCollectsCoordinatesAboveThreshold()
+	{
+		// A 40x40 source with the entire mask flagged and 50 strong pixels. The function returns
+		// {edgeX[], edgeY[]} packed as a 2-element array. Pin: every edge above threshold inside the
+		// mask is collected, and the X/Y coordinates round-trip.
+		int width = 40;
+		int height = 40;
+		int maskWidth = 10;
+		int maskHeight = 10;
+		float[] edges = new float[width * height];
+		boolean[] mask = new boolean[maskWidth * maskHeight];
+		for (int i = 0; i < mask.length; i++)
+		{
+			mask[i] = true;
+		}
+		// Plant 50 strong pixels along row 5 (cols 0..49 → wraps once; cols 0..39 in row 5, then 10 in row 6).
+		for (int i = 0; i < 50; i++)
+		{
+			int x = i % width;
+			int y = 5 + (i / width);
+			edges[y * width + x] = 100f;
+		}
+		int[][] result = HorizonDetector.gatherMaskedEdges(edges, mask, width, height,
+			maskWidth, maskHeight);
+		assertNotNull("non-null when count >= 30", result);
+		assertEquals("returns {edgeX, edgeY} as 2-element array", 2, result.length);
+		assertEquals(50, result[0].length);
+		assertEquals(50, result[1].length);
+	}
+
+	// ── gaussianBlur5x5 ──
+
+	@Test
+	public void gaussianBlur5x5LeavesUniformFieldAtSameValue()
+	{
+		// A uniform-100 5x5 field with the kernel normalized to sum=1 must round-trip the center pixel
+		// to 100 (or within float rounding tolerance). The border-2 ring is zero because the blur skips
+		// the 2-pixel border. Pin both: center unchanged, border untouched.
+		float[] src = new float[25];
+		for (int i = 0; i < 25; i++)
+		{
+			src[i] = 100f;
+		}
+		float[] dst = HorizonDetector.gaussianBlur5x5(src, 5, 5);
+		assertEquals("center pixel preserves uniform value", 100f, dst[12], 0.01f);
+		assertEquals("top-left border-2 stays zero", 0f, dst[0], 0f);
+		assertEquals("bottom-right border-2 stays zero", 0f, dst[24], 0f);
+	}
+
+	@Test
+	public void gaussianBlur5x5SpreadsImpulseToNeighborhood()
+	{
+		// Single bright pixel at the center of a 7x7 field. Post-blur the center should drop (some weight
+		// distributes to neighbors) and the immediate 4-neighbours should pick up positive weight. Pin
+		// the spread direction so a regression to a center-only kernel surfaces here.
+		float[] src = new float[49];
+		src[24] = 255f; // center of 7x7 grid (3, 3)
+		float[] dst = HorizonDetector.gaussianBlur5x5(src, 7, 7);
+		// Kernel center coefficient is 41/273 ≈ 0.150. So dst[center] ≈ 0.150 * 255 ≈ 38.3.
+		assertTrue("center is reduced after spread: " + dst[24], dst[24] < 255f);
+		assertTrue("center retains some weight: " + dst[24], dst[24] > 20f);
+		// Immediate up/down/left/right neighbours pick up the 26/273 weight ≈ 0.0953 → ~24.3.
+		assertTrue("right neighbour gains weight: " + dst[25], dst[25] > 10f);
+		assertTrue("left neighbour gains weight: " + dst[23], dst[23] > 10f);
+	}
+
+	// ── sobelGradient ──
+
+	@Test
+	public void sobelGradientDetectsHorizontalIntensityStep()
+	{
+		// A 7x7 field with the left half dark (0) and the right half bright (255). The Sobel operator
+		// should produce a strong horizontal gradient (high gradX, near-zero gradY) along the column
+		// boundary, with direction ≈ 0 (pointing along +x). Pin the direction convention.
+		int width = 7;
+		int height = 7;
+		float[] src = new float[width * height];
+		for (int y = 0; y < height; y++)
+		{
+			for (int x = 0; x < width; x++)
+			{
+				src[y * width + x] = x >= width / 2 ? 255f : 0f;
+			}
+		}
+		float[] mag = new float[width * height];
+		float[] dir = new float[width * height];
+		HorizonDetector.sobelGradient(src, width, height, mag, dir);
+		// At the boundary column (x = width/2 = 3, interior y = 3), the gradient is purely horizontal.
+		int idx = 3 * width + 3;
+		assertTrue("magnitude on the step boundary is non-trivial: " + mag[idx], mag[idx] > 100f);
+		assertEquals("direction along +x is near zero radians", 0f, dir[idx], 0.1f);
+	}
+
+	@Test
+	public void sobelGradientDetectsVerticalIntensityStepAsPiOverTwo()
+	{
+		// Top half dark, bottom half bright — gradient direction should be ≈ +π/2 (Math.atan2(positive,
+		// 0) = π/2). Pin the orthogonal direction convention as a symmetry check on the horizontal-step
+		// test above.
+		int width = 7;
+		int height = 7;
+		float[] src = new float[width * height];
+		for (int y = 0; y < height; y++)
+		{
+			for (int x = 0; x < width; x++)
+			{
+				src[y * width + x] = y >= height / 2 ? 255f : 0f;
+			}
+		}
+		float[] mag = new float[width * height];
+		float[] dir = new float[width * height];
+		HorizonDetector.sobelGradient(src, width, height, mag, dir);
+		int idx = 3 * width + 3;
+		assertTrue("magnitude on the step boundary is non-trivial: " + mag[idx], mag[idx] > 100f);
+		assertEquals("direction is +π/2 radians for a vertical step",
+			(float) (Math.PI / 2), dir[idx], 0.1f);
+	}
+
+	// ── nonMaxSuppression ──
+
+	@Test
+	public void nonMaxSuppressionKeepsCenterPeakAndRidgeEdgesAtVerticalGradient()
+	{
+		// 5x5 magnitude field with a 3-wide horizontal ridge at row 2 — center pixel has the highest
+		// magnitude, flanked by smaller values. With direction = π/2 (vertical gradient), the
+		// suppression compares against the up/down neighbours which are zero in this fixture — so the
+		// ridge EDGES also survive (each is a local max along its own vertical axis). Pin both
+		// outcomes: a regression that flipped vertical-axis sampling to horizontal-axis sampling
+		// would suppress the edges (because the center is bigger horizontally) and break the test.
+		int width = 5;
+		int height = 5;
+		float[] mag = new float[width * height];
+		float[] dir = new float[width * height];
+		// Plant a horizontal ridge with the peak at the center.
+		mag[2 * width + 1] = 50f;
+		mag[2 * width + 2] = 100f;
+		mag[2 * width + 3] = 50f;
+		// Direction = π/2 (gradient pointing down) — comparison goes against (y-1, x) and (y+1, x).
+		for (int i = 0; i < dir.length; i++)
+		{
+			dir[i] = (float) (Math.PI / 2);
+		}
+		float[] out = HorizonDetector.nonMaxSuppression(mag, dir, width, height);
+		assertEquals("ridge peak survives (vertical neighbours are zero)",
+			100f, out[2 * width + 2], 0f);
+		assertEquals("ridge edge at x=1 survives — local max along vertical axis",
+			50f, out[2 * width + 1], 0f);
+		assertEquals("ridge edge at x=3 survives — local max along vertical axis",
+			50f, out[2 * width + 3], 0f);
+	}
+
+	@Test
+	public void nonMaxSuppressionHorizontalDirectionComparesAgainstLeftAndRightNeighbors()
+	{
+		// Direction near 0 (or near π) — horizontal gradient. Suppression compares against (y, x-1) and
+		// (y, x+1). Plant a vertical ridge: at (2, 2) center magnitude 100, with (2, 1) = 40 and (2, 3) =
+		// 60 as horizontal neighbours. Center MUST survive (100 >= max(40, 60)). The non-max neighbours
+		// (50 each) at (1, 2) and (3, 2) survive too because they're local-max along their own row
+		// (left/right neighbours are zero in that row).
+		int width = 5;
+		int height = 5;
+		float[] mag = new float[width * height];
+		float[] dir = new float[width * height];
+		mag[2 * width + 1] = 40f;
+		mag[2 * width + 2] = 100f;
+		mag[2 * width + 3] = 60f;
+		// Direction = 0 → angle < π/8 branch, compares (y, x-1) vs (y, x+1).
+		for (int i = 0; i < dir.length; i++)
+		{
+			dir[i] = 0f;
+		}
+		float[] out = HorizonDetector.nonMaxSuppression(mag, dir, width, height);
+		assertEquals("center peak survives", 100f, out[2 * width + 2], 0f);
+		assertEquals("(2, 1) magnitude 40 fails to beat right-neighbour 100 → suppressed",
+			0f, out[2 * width + 1], 0f);
+		assertEquals("(2, 3) magnitude 60 fails to beat left-neighbour 100 → suppressed",
+			0f, out[2 * width + 3], 0f);
+	}
+
+	@Test
+	public void nonMaxSuppressionDiagonalUpDirectionComparesAgainstTopRightAndBottomLeft()
+	{
+		// Direction in [π/8, 3π/8) — diagonal-up gradient. Suppression compares (y-1, x+1) vs (y+1, x-1).
+		// Plant a peak at (2, 2) with magnitude 100, flanked by 30 at the comparison axis (1, 3) and (3,
+		// 1). Pin: center MUST survive (100 >= 30). A regression that swapped to (y-1, x-1) / (y+1, x+1)
+		// would compare against 0 zeros — peak still survives — so we also plant 50 at (1, 1) and (3, 3)
+		// which only matters under the diagonal-DOWN branch. If diagonal-up's branch is correct, those
+		// don't influence the center; if a regression mis-routed to diagonal-down's branch, the center
+		// would compare against 50 (still pass since 100 > 50), but the (1, 1)/(3, 3) cells would behave
+		// differently — they're isolated points whose own diagonal-up comparisons are 0 and 0, so they
+		// survive. Use a sharper distinguisher: plant a STRONGER value at the diagonal-up comparison
+		// axis so a routing bug surfaces as a SURVIVING center instead of a SUPPRESSED one.
+		int width = 5;
+		int height = 5;
+		float[] mag = new float[width * height];
+		float[] dir = new float[width * height];
+		mag[2 * width + 2] = 100f;            // center
+		mag[1 * width + 3] = 150f;            // (y-1, x+1) — diagonal-up neighbour, stronger than center
+		mag[3 * width + 1] = 150f;            // (y+1, x-1) — diagonal-up neighbour, stronger than center
+		// Direction = π/4 (45°) → falls in [π/8, 3π/8) → diagonal-up branch.
+		for (int i = 0; i < dir.length; i++)
+		{
+			dir[i] = (float) (Math.PI / 4);
+		}
+		float[] out = HorizonDetector.nonMaxSuppression(mag, dir, width, height);
+		assertEquals("center 100 < diagonal-up neighbours 150 → suppressed",
+			0f, out[2 * width + 2], 0f);
+	}
+
+	@Test
+	public void nonMaxSuppressionDiagonalDownDirectionComparesAgainstTopLeftAndBottomRight()
+	{
+		// Direction in [5π/8, 7π/8) — diagonal-down gradient. Suppression compares (y-1, x-1) vs (y+1,
+		// x+1). Same distinguishing technique as the diagonal-up test: plant stronger neighbours on the
+		// diagonal-down axis so a routing regression surfaces as a center that survives when it
+		// shouldn't.
+		int width = 5;
+		int height = 5;
+		float[] mag = new float[width * height];
+		float[] dir = new float[width * height];
+		mag[2 * width + 2] = 100f;
+		mag[1 * width + 1] = 150f;            // (y-1, x-1)
+		mag[3 * width + 3] = 150f;            // (y+1, x+1)
+		// Direction = 3π/4 (135°) falls in [5π/8, 7π/8) → diagonal-down branch.
+		for (int i = 0; i < dir.length; i++)
+		{
+			dir[i] = (float) (3 * Math.PI / 4);
+		}
+		float[] out = HorizonDetector.nonMaxSuppression(mag, dir, width, height);
+		assertEquals("center 100 < diagonal-down neighbours 150 → suppressed",
+			0f, out[2 * width + 2], 0f);
+	}
+
+	@Test
+	public void nonMaxSuppressionWrapsNegativeDirectionToPositive()
+	{
+		// The production code adds π to negative directions so the bucket-classification only sees [0,
+		// π). A direction of -π/2 should behave identically to +π/2. Plant the same fixture as the
+		// vertical-direction "peak survives" test but with direction = -π/2; the result must match.
+		int width = 5;
+		int height = 5;
+		float[] mag = new float[width * height];
+		float[] dir = new float[width * height];
+		mag[2 * width + 2] = 100f;
+		mag[1 * width + 2] = 40f;             // (y-1, x) — vertical-axis neighbour
+		mag[3 * width + 2] = 40f;             // (y+1, x) — vertical-axis neighbour
+		for (int i = 0; i < dir.length; i++)
+		{
+			dir[i] = (float) (-Math.PI / 2);  // negative; wraps to +π/2 inside the function
+		}
+		float[] out = HorizonDetector.nonMaxSuppression(mag, dir, width, height);
+		assertEquals("negative direction wraps; center peak survives", 100f, out[2 * width + 2], 0f);
+		assertEquals("vertical-axis neighbour 40 < 100 → suppressed",
+			0f, out[1 * width + 2], 0f);
+	}
+
+	@Test
+	public void nonMaxSuppressionZeroMagnitudeCenterDoesNotSuppressNonZeroNeighbour()
+	{
+		// Pin the `if (center == 0) continue` short-circuit: when the center pixel's magnitude is 0, the
+		// loop skips it entirely and the surrounding non-zero magnitudes are evaluated against each other
+		// as usual. Plant a non-zero peak at (2, 2) and zero magnitude at (2, 3); verify the peak
+		// survives. A regression that removed the short-circuit would still produce the same outcome here
+		// (0 < neighbour fails the survival check and writes 0 — but 0 is already the default), so the
+		// real contract this test pins is that the function DOESN'T crash on a zero-magnitude pixel when
+		// other interior pixels exist. The peak's survival is the observable outcome.
+		int width = 5;
+		int height = 5;
+		float[] mag = new float[width * height];
+		float[] dir = new float[width * height];
+		// Plant a vertical-direction peak (π/2) at (2, 2) with non-zero neighbours along the gradient
+		// axis that are weaker. Zero magnitude at (2, 3) means that pixel hits the short-circuit.
+		mag[2 * width + 2] = 100f;
+		mag[1 * width + 2] = 40f;
+		mag[3 * width + 2] = 40f;
+		mag[2 * width + 3] = 0f;
+		for (int i = 0; i < dir.length; i++)
+		{
+			dir[i] = (float) (Math.PI / 2);
+		}
+		float[] out = HorizonDetector.nonMaxSuppression(mag, dir, width, height);
+		assertEquals("center peak survives, undisturbed by zero-mag neighbour", 100f,
+			out[2 * width + 2], 0f);
+		assertEquals("zero-mag pixel stays zero in output (default; short-circuit wrote nothing)",
+			0f, out[2 * width + 3], 0f);
+	}
+
+	@Test
+	public void nonMaxSuppressionSkipsBorderPixelsWithoutAioobeOnNeighbourReads()
+	{
+		// Pin the loop bound `(1, height-1) / (1, width-1)`: a regression that widened to `(0, height)
+		// / (0, width)` would AIOOBE on the neighbour reads at border pixels (e.g. at y=0 the diagonal
+		// branches sample `(y-1, x±1)` = row -1). The test plants non-zero magnitudes at ALL FOUR
+		// borders so a widened loop would either crash on the negative-row read or write non-zero values
+		// to out[] at border indices. The current contract: function returns without exception, and
+		// border indices stay at the default zero.
+		int width = 5;
+		int height = 5;
+		float[] mag = new float[width * height];
+		float[] dir = new float[width * height];
+		// Non-zero magnitudes along every border pixel.
+		for (int x = 0; x < width; x++)
+		{
+			mag[x] = 100f;                                 // top row
+			mag[(height - 1) * width + x] = 100f;          // bottom row
+		}
+		for (int y = 0; y < height; y++)
+		{
+			mag[y * width] = 100f;                         // left column
+			mag[y * width + width - 1] = 100f;             // right column
+		}
+		// Use direction = π/4 (diagonal-up branch) so a widened loop would sample (y-1, x+1) / (y+1, x-1)
+		// — those reads would AIOOBE at border indices.
+		for (int i = 0; i < dir.length; i++)
+		{
+			dir[i] = (float) (Math.PI / 4);
+		}
+		// The contract: no exception thrown, output array sized correctly, borders stay zero.
+		float[] out = HorizonDetector.nonMaxSuppression(mag, dir, width, height);
+		assertEquals(width * height, out.length);
+		for (int x = 0; x < width; x++)
+		{
+			assertEquals("top-row x=" + x + " border stays zero", 0f, out[x], 0f);
+			assertEquals("bottom-row x=" + x + " border stays zero",
+				0f, out[(height - 1) * width + x], 0f);
+		}
+		for (int y = 0; y < height; y++)
+		{
+			assertEquals("left-col y=" + y + " border stays zero", 0f, out[y * width], 0f);
+			assertEquals("right-col y=" + y + " border stays zero",
+				0f, out[y * width + width - 1], 0f);
+		}
+	}
+
+	// ── houghPass ──
+
+	@Test
+	public void houghPassFindsAngleNearNinetyForHorizontalLine()
+	{
+		// A perfectly horizontal line in screen coordinates has its Hough normal at 90° (since the
+		// normal points up/down). Generate WIDTH samples along Y = 100 and verify the coarse 80–100°
+		// scan returns ~90°. Pin the convention so a regression that flipped sin/cos would surface as
+		// the angle landing near 0° instead.
+		int[] edgeX = new int[WIDTH];
+		int[] edgeY = new int[WIDTH];
+		for (int x = 0; x < WIDTH; x++)
+		{
+			edgeX[x] = x;
+			edgeY[x] = 100;
+		}
+		float angle = HorizonDetector.houghPass(edgeX, edgeY, WIDTH, WIDTH, HEIGHT, 80f, 100f, 0.1f);
+		assertEquals("horizontal line → Hough normal at 90°", 90f, angle, 0.5f);
+	}
+
+	@Test
+	public void houghPassReturnsNaNWhenBestBinUnderThreeWidthPercent()
+	{
+		// houghPass requires bestPeak >= max(15, width * 3 / 100) to commit. For WIDTH=1200 that's
+		// max(15, 36) = 36. A 30-pixel line is below the gate → returns NaN. Pin the spec'd "line must
+		// span ≥ 3% of image width" rule.
+		int[] edgeX = new int[30];
+		int[] edgeY = new int[30];
+		for (int i = 0; i < 30; i++)
+		{
+			edgeX[i] = i;
+			edgeY[i] = 100;
+		}
+		float angle = HorizonDetector.houghPass(edgeX, edgeY, 30, WIDTH, HEIGHT, 80f, 100f, 0.1f);
+		assertTrue("short line must return NaN: " + angle, Float.isNaN(angle));
+	}
+
+	// ── rasterizePaintMask ──
+
+	@Test
+	public void rasterizePaintMaskMarksCirclesAroundPoints()
+	{
+		// One paint point at the mask center, brush radius 8 source pixels. The function operates at
+		// 1/4 source resolution so the mask circle radius is 8/4 = 2. The center pixel and its
+		// 4-neighbours should be flagged; pixels at distance > 2 (in mask coords) should not.
+		List<float[]> points = Collections.singletonList(new float[] { 40f, 40f }); // source coords
+		boolean[] mask = HorizonDetector.rasterizePaintMask(points, 20, 20, 8f);
+		int centerX = 40 / 4; // = 10
+		int centerY = 40 / 4; // = 10
+		assertTrue("center mask cell flagged", mask[centerY * 20 + centerX]);
+		assertTrue("up neighbour flagged (dist=1)", mask[(centerY - 1) * 20 + centerX]);
+		assertTrue("left neighbour flagged", mask[centerY * 20 + (centerX - 1)]);
+		// (centerX + 3, centerY + 3) is dist = sqrt(18) ≈ 4.24 > 2 → not flagged.
+		assertFalse("far cell beyond radius is not flagged",
+			mask[(centerY + 3) * 20 + (centerX + 3)]);
+	}
+
+	@Test
+	public void rasterizePaintMaskClampsToImageBounds()
+	{
+		// Paint point near the image edge — the radius would write outside [0, maskWidth) × [0,
+		// maskHeight) but the bounds checks must clip. Test that no IOOBE is thrown and the masked
+		// pixels are contained within the mask.
+		List<float[]> points = Collections.singletonList(new float[] { 0f, 0f });
+		boolean[] mask = HorizonDetector.rasterizePaintMask(points, 10, 10, 8f);
+		// Point at (0,0) source coords = (0,0) in mask coords. With radius 2 in mask coords, the
+		// kernel writes dx,dy ∈ [-2, +2]. The negative offsets are clipped; (0,0) and (1,0), (0,1),
+		// (1,1) all get flagged (dist ≤ 2).
+		assertTrue("top-left corner flagged", mask[0]);
+		assertTrue("right of corner flagged", mask[1]);
+	}
+
+	// ── runHoughAndConvertToRotation ──
+
+	@Test
+	public void runHoughAndConvertToRotationReturnsZeroForLevelHorizontalLine()
+	{
+		// End-to-end: a perfectly horizontal line should produce a 0° rotation correction. The wrapper
+		// runs the coarse + fine Hough scan, optionally refines via line-fit, then returns -(tilt) where
+		// tilt = fineAngle - 90°. For a level line the tilt is below the sub-epsilon threshold → 0.
+		int[] edgeX = new int[WIDTH];
+		int[] edgeY = new int[WIDTH];
+		for (int x = 0; x < WIDTH; x++)
+		{
+			edgeX[x] = x;
+			edgeY[x] = 100;
+		}
+		float rotation = HorizonDetector.runHoughAndConvertToRotation(edgeX, edgeY, WIDTH, WIDTH, HEIGHT);
+		assertEquals("level horizontal line → 0° rotation", 0f, rotation, 0f);
+	}
+
+	@Test
+	public void runHoughAndConvertToRotationProducesCorrectionForTiltedLine()
+	{
+		// 1.5° tilted line. The wrapper returns -(tilt) since the correction is the inverse rotation.
+		int[][] line = syntheticLine(1.5f);
+		float rotation = HorizonDetector.runHoughAndConvertToRotation(line[0], line[1],
+			line[0].length, WIDTH, HEIGHT);
+		// Result must be ≈ -1.5° (rounded to 0.01°), within ~0.05° to allow Hough + line-fit precision.
+		assertEquals("1.5° tilt → -1.5° correction", -1.5f, rotation, 0.05f);
 	}
 
 	/**

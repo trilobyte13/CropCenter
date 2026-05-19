@@ -11,7 +11,7 @@ a Gallery-edited file keeps its Revert chain across CropCenter re-edits).
 **Target/Compile SDK**: 36
 **Language**: Java 21
 **Build**: AGP 9.1.1, Gradle 9.3.1
-**LSLOC**: 14,197 total (7,812 main + 6,385 test) — UCC-style logical SLOC via `scripts/audit.py lsloc` (counts
+**LSLOC**: 15,307 total (7,842 main + 7,465 test) — UCC-style logical SLOC via `scripts/audit.py lsloc` (counts
 `;`-terminated statements, control-flow openers, type declarations, and method signatures; excludes blanks, comments,
 and bare-brace-only lines). **Numbers must be exact** — every change that adds, removes, or restructures Java code must
 refresh this line via `python scripts/audit.py lsloc` in the same commit. No tolerance band; the spec matches the

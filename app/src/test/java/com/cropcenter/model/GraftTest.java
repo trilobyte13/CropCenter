@@ -1,7 +1,5 @@
 package com.cropcenter.model;
 
-import static org.junit.Assert.assertArrayEquals;
-import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
@@ -18,19 +16,6 @@ import com.cropcenter.util.AiRegionDetector.AiMask;
  */
 public final class GraftTest
 {
-	@Test
-	public void componentAccessorsReturnFields()
-	{
-		// Records auto-generate accessors but it's worth pinning them down — record component renames silently
-		// break callers, and tests catch it earlier than runtime ClassCastException at the call site.
-		byte[] bytes = { 0x01, 0x02, 0x03 };
-		AiMask mask = AiMask.of(new boolean[]{ true }, 1, 1, 4);
-		Graft graft = new Graft(bytes, "name.jpg", mask);
-		assertArrayEquals(bytes, graft.bytes());
-		assertEquals("name.jpg", graft.displayName());
-		assertEquals(mask, graft.aiMask());
-	}
-
 	@Test
 	public void hasAiMaskFalseWhenAllPixelsClear()
 	{

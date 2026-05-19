@@ -25,6 +25,15 @@ android {
     }
 
     buildTypes {
+        debug {
+            // JaCoCo coverage opt-in: instrumentation is OFF by default so plain debug APKs deployed
+            // to a phone for manual SAF / HDR / gesture testing run at normal speed. Pass `-Pjacoco`
+            // to enable instrumentation when generating a coverage report:
+            //   ./gradlew.bat :app:createDebugUnitTestCoverageReport -Pjacoco
+            // HTML drill-down: app/build/reports/coverage/test/debug/index.html
+            // XML for CI: app/build/reports/coverage/test/debug/report.xml
+            testCoverageEnabled = project.hasProperty('jacoco')
+        }
         release {
             minifyEnabled = true
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'

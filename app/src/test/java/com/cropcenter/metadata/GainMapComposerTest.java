@@ -86,22 +86,18 @@ public final class GainMapComposerTest
 	}
 
 	@Test
-	public void composeReturnsPrimaryUnchangedForEmptyGainMap()
+	public void composeReturnsPrimaryUnchangedForAbsentGainMap()
 	{
+		// Single guard: `gainMap == null || gainMap.length == 0` short-circuits both cases through the
+		// same early-return. Pin both inputs against the same path so a regression that split the guard
+		// (e.g., only null → return, empty → fall through) surfaces here.
 		byte[] primary = { 1, 2, 3, 4 };
-		byte[] empty = new byte[0];
-		GainMapComposer.ComposeResult result = GainMapComposer.compose(primary, empty);
-		assertFalse("empty gain map must mark hdrAttached=false", result.hdrAttached());
-		assertSame("empty gain map should pass primary through verbatim", primary, result.bytes());
-	}
-
-	@Test
-	public void composeReturnsPrimaryUnchangedForNullGainMap()
-	{
-		byte[] primary = { 1, 2, 3, 4 };
-		GainMapComposer.ComposeResult result = GainMapComposer.compose(primary, null);
-		assertFalse("null gain map must mark hdrAttached=false", result.hdrAttached());
-		assertSame("null gain map should pass primary through verbatim", primary, result.bytes());
+		GainMapComposer.ComposeResult nullResult = GainMapComposer.compose(primary, null);
+		assertFalse("null gain map must mark hdrAttached=false", nullResult.hdrAttached());
+		assertSame("null gain map should pass primary through verbatim", primary, nullResult.bytes());
+		GainMapComposer.ComposeResult emptyResult = GainMapComposer.compose(primary, new byte[0]);
+		assertFalse("empty gain map must mark hdrAttached=false", emptyResult.hdrAttached());
+		assertSame("empty gain map should pass primary through verbatim", primary, emptyResult.bytes());
 	}
 
 	@Test

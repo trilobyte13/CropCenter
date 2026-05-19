@@ -21,6 +21,11 @@ import java.io.IOException;
  */
 public final class GraftWriterTest
 {
+	private static final byte[] DQT_STUB =
+	{
+		(byte) 0xFF, (byte) 0xDB, 0x00, 0x04, 0x00, 0x00,
+	};
+
 	@Test
 	public void graftAcceptsValidEditWithLegalSosAndEoi() throws IOException
 	{
@@ -375,9 +380,4 @@ public final class GraftWriterTest
 	{
 		return new byte[]{ 0x10, 0x00, 0x00, 0x00, 'S', 'E', 'F', 'T' };
 	}
-
-	private static final byte[] DQT_STUB =
-	{
-		(byte) 0xFF, (byte) 0xDB, 0x00, 0x04, 0x00, 0x00,
-	};
 }

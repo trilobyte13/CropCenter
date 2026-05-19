@@ -12,28 +12,72 @@ import com.cropcenter.util.RotationMath;
  * screenToImagePixel additionally un-rotates for CropState's rotation so callers can tap-select inside a rotated image.
  *
  * No rendering, no gestures — just math. The hosting View is referenced only for its width and height (the dimensions
- * the math is relative to).
+ * the math is relative to). Production callers pass a View via the View-bound constructor; tests construct against a
+ * ViewSize fixture so the conversions can be exercised on a host JVM without Robolectric.
  */
 final class ViewportMath
 {
+	/**
+	 * Abstracts the View dimensions used by every conversion. Production: a thin adapter around View.getWidth /
+	 * getHeight. Tests: a fixture with constant dimensions. Two methods rather than one so the lambda /
+	 * functional-interface shape (`int width(); int height();`) stays readable at call sites.
+	 */
+	interface ViewSize
+	{
+		int height();
+
+		int width();
+	}
+
 	private static final float MAX_ZOOM = 256f;
 	private static final float MIN_ZOOM = 1f;
 
-	private final View view;
+	private final ViewSize size;
 
 	private float baseScale = 1f;
 	private float viewportX = 0; // viewport origin in image space (X)
 	private float viewportY = 0; // viewport origin in image space (Y)
 	private float zoom = 1f;
 
+	/**
+	 * View-bound constructor. Wraps view.getWidth() / view.getHeight() in a ViewSize adapter so the rest of the
+	 * math reads dimensions through the same chokepoint a unit test would.
+	 *
+	 * @param view the hosting view; ViewportMath captures only getWidth() / getHeight() reads against it
+	 */
 	ViewportMath(View view)
 	{
-		this.view = view;
+		this(new ViewSize()
+		{
+			@Override
+			public int height()
+			{
+				return view.getHeight();
+			}
+
+			@Override
+			public int width()
+			{
+				return view.getWidth();
+			}
+		});
+	}
+
+	/**
+	 * Test-friendly constructor — takes the ViewSize directly so unit tests can supply fixed dimensions without a
+	 * Context-bound View.
+	 *
+	 * @param size source of width / height for every screen-space conversion
+	 */
+	ViewportMath(ViewSize size)
+	{
+		this.size = size;
 	}
 
 	/**
 	 * Clamp viewportX / viewportY so the viewport stays inside the image bounds. If the image is smaller than the
-	 * visible window on an axis, that axis is centered.
+	 * visible window on an axis, that axis is centered. Skips clamping when state is null or has no loaded image
+	 * (the gesture handlers reach this from any drag callback; a no-image session is a no-op).
 	 */
 	void clampViewport(CropState state)
 	{
@@ -41,11 +85,22 @@ final class ViewportMath
 		{
 			return;
 		}
-		int imgW = state.getImageWidth();
-		int imgH = state.getImageHeight();
+		clampViewport(state.getImageWidth(), state.getImageHeight());
+	}
+
+	/**
+	 * Pure-geometry overload taking image dimensions directly. Package-private so ViewportMathTest can pin the
+	 * clamp arithmetic and the centering branch without a Bitmap-bound CropState. Callers from production go
+	 * through the CropState overload above so the null-image short-circuit lives in one place.
+	 *
+	 * @param imgW image width in image pixels (must be ≥ 0; behavior degenerate at 0)
+	 * @param imgH image height in image pixels (must be ≥ 0; behavior degenerate at 0)
+	 */
+	void clampViewport(int imgW, int imgH)
+	{
 		float scale = baseScale * zoom;
-		float visibleW = view.getWidth() / scale;
-		float visibleH = view.getHeight() / scale;
+		float visibleW = size.width() / scale;
+		float visibleH = size.height() / scale;
 
 		if (visibleW >= imgW)
 		{
@@ -68,17 +123,31 @@ final class ViewportMath
 
 	/**
 	 * Reset zoom to 1, recompute baseScale to fit the full image in the view, and center the viewport on the image.
-	 * Called on image load and on double-tap (outside Select mode).
+	 * Called on image load and on double-tap (outside Select mode). No-ops when state is null, has no loaded
+	 * image, or the view hasn't been measured yet (size.width() == 0).
 	 */
 	void fitToView(CropState state)
 	{
-		if (state == null || state.getSourceImage() == null || view.getWidth() == 0)
+		if (state == null || state.getSourceImage() == null || size.width() == 0)
 		{
 			return;
 		}
-		int imgW = state.getImageWidth();
-		int imgH = state.getImageHeight();
-		baseScale = Math.min((float) view.getWidth() / imgW, (float) view.getHeight() / imgH);
+		fitToView(state.getImageWidth(), state.getImageHeight());
+	}
+
+	/**
+	 * Pure-geometry overload taking image dimensions directly. Package-private so ViewportMathTest can pin the
+	 * baseScale formula (min of width-ratio / height-ratio) and the zoom-reset / center-viewport contract
+	 * without a Bitmap-bound CropState. Assumes the caller has already null-checked the source image and the
+	 * view dimensions; production callers go through the CropState overload above so those guards live in one
+	 * place.
+	 *
+	 * @param imgW image width in image pixels (must be > 0; behavior undefined at 0)
+	 * @param imgH image height in image pixels (must be > 0; behavior undefined at 0)
+	 */
+	void fitToView(int imgW, int imgH)
+	{
+		baseScale = Math.min((float) size.width() / imgW, (float) size.height() / imgH);
 		zoom = 1f;
 		viewportX = imgW / 2f;
 		viewportY = imgH / 2f;
@@ -138,7 +207,7 @@ final class ViewportMath
 	float imageToScreenX(float ix)
 	{
 		float scale = baseScale * zoom;
-		return view.getWidth() / 2f + (ix - viewportX) * scale;
+		return size.width() / 2f + (ix - viewportX) * scale;
 	}
 
 	/**
@@ -147,11 +216,13 @@ final class ViewportMath
 	float imageToScreenY(float iy)
 	{
 		float scale = baseScale * zoom;
-		return view.getHeight() / 2f + (iy - viewportY) * scale;
+		return size.height() / 2f + (iy - viewportY) * scale;
 	}
 
 	/**
 	 * Pan the viewport by a SCREEN-space delta. Converts to image pixels via the current zoom, then clamps.
+	 * Skips clamping when state is null or has no loaded image — the pan-arithmetic side still runs, matching
+	 * the prior behavior where a pan without an image just updated the viewport variables.
 	 */
 	void panViewport(float dx, float dy, CropState state)
 	{
@@ -159,6 +230,23 @@ final class ViewportMath
 		viewportX -= dx / scale;
 		viewportY -= dy / scale;
 		clampViewport(state);
+	}
+
+	/**
+	 * Pure-geometry overload taking image dimensions directly. Package-private so ViewportMathTest can pin the
+	 * screen-delta-to-image-pixels conversion and the post-pan clamp without a Bitmap-bound CropState.
+	 *
+	 * @param dx   screen-space X delta (positive = pan right; viewport shifts left)
+	 * @param dy   screen-space Y delta (positive = pan down; viewport shifts up)
+	 * @param imgW image width in image pixels — forwarded to clampViewport
+	 * @param imgH image height in image pixels — forwarded to clampViewport
+	 */
+	void panViewport(float dx, float dy, int imgW, int imgH)
+	{
+		float scale = baseScale * zoom;
+		viewportX -= dx / scale;
+		viewportY -= dy / scale;
+		clampViewport(imgW, imgH);
 	}
 
 	/**
@@ -214,7 +302,7 @@ final class ViewportMath
 	float screenToImageX(float sx)
 	{
 		float scale = baseScale * zoom;
-		return viewportX + (sx - view.getWidth() / 2f) / scale;
+		return viewportX + (sx - size.width() / 2f) / scale;
 	}
 
 	/**
@@ -223,12 +311,13 @@ final class ViewportMath
 	float screenToImageY(float sy)
 	{
 		float scale = baseScale * zoom;
-		return viewportY + (sy - view.getHeight() / 2f) / scale;
+		return viewportY + (sy - size.height() / 2f) / scale;
 	}
 
 	/**
 	 * Zoom at a screen-space focus point, keeping that point stationary under the finger. Clamps zoom to [1, 256]
-	 * and re-clamps the viewport against the new scale.
+	 * and re-clamps the viewport against the new scale. Skips the viewport clamp when state is null or has no
+	 * loaded image — the zoom + focus-shift arithmetic still runs.
 	 */
 	void zoomAt(float scaleFactor, float focusX, float focusY, CropState state)
 	{
@@ -240,5 +329,28 @@ final class ViewportMath
 		viewportX += imgFocusX - newImgFocusX;
 		viewportY += imgFocusY - newImgFocusY;
 		clampViewport(state);
+	}
+
+	/**
+	 * Pure-geometry overload taking image dimensions directly. Package-private so ViewportMathTest can pin the
+	 * "focus stays under the finger" identity, the zoom clamp to [MIN_ZOOM, MAX_ZOOM], and the post-zoom
+	 * viewport clamp — without a Bitmap-bound CropState.
+	 *
+	 * @param scaleFactor multiplier applied to zoom (clamped post-multiply to [1, 256])
+	 * @param focusX      screen-space X of the focus point (stays under the finger across the zoom)
+	 * @param focusY      screen-space Y of the focus point
+	 * @param imgW        image width in image pixels — forwarded to the post-zoom clamp
+	 * @param imgH        image height in image pixels — forwarded to the post-zoom clamp
+	 */
+	void zoomAt(float scaleFactor, float focusX, float focusY, int imgW, int imgH)
+	{
+		float imgFocusX = screenToImageX(focusX);
+		float imgFocusY = screenToImageY(focusY);
+		zoom = Math.clamp(zoom * scaleFactor, MIN_ZOOM, MAX_ZOOM);
+		float newImgFocusX = screenToImageX(focusX);
+		float newImgFocusY = screenToImageY(focusY);
+		viewportX += imgFocusX - newImgFocusX;
+		viewportY += imgFocusY - newImgFocusY;
+		clampViewport(imgW, imgH);
 	}
 }

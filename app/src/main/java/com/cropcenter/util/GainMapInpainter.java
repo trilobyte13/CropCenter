@@ -295,6 +295,35 @@ public final class GainMapInpainter
 		return passes;
 	}
 
+	/**
+	 * Nearest-neighbor mask scale to (targetWidth, targetHeight). Long arithmetic for the index multiply so 8000
+	 * x 6000 sources don't overflow int when (y * srcH) grows past 4.8e7. Package-private so
+	 * GainMapInpainterTest can pin the long-arithmetic contract and the same-dimensions clone fast-path
+	 * directly — the Bitmap-bound callers (inpaintAlpha8 / inpaintArgb) need Android infrastructure, but this
+	 * pure-boolean-array helper does not.
+	 */
+	static boolean[] scaleMask(AiMask aiMask, int targetWidth, int targetHeight)
+	{
+		int srcWidth = aiMask.width();
+		int srcHeight = aiMask.height();
+		boolean[] src = aiMask.mask();
+		if (srcWidth == targetWidth && srcHeight == targetHeight)
+		{
+			return src.clone();
+		}
+		boolean[] dst = new boolean[targetWidth * targetHeight];
+		for (int y = 0; y < targetHeight; y++)
+		{
+			int sourceY = (int) ((long) y * srcHeight / targetHeight);
+			for (int x = 0; x < targetWidth; x++)
+			{
+				int sourceX = (int) ((long) x * srcWidth / targetWidth);
+				dst[y * targetWidth + x] = src[sourceY * srcWidth + sourceX];
+			}
+		}
+		return dst;
+	}
+
 	private static int[] extractChannel(int[] pixels, int shift)
 	{
 		int[] channel = new int[pixels.length];
@@ -408,29 +437,4 @@ public final class GainMapInpainter
 			+ " G=" + passesG + " B=" + passesB);
 	}
 
-	/**
-	 * Nearest-neighbor mask scale to (targetWidth, targetHeight). Long arithmetic for the index multiply so 8000 x
-	 * 6000 sources don't overflow int when (y * srcH) grows past 4.8e7.
-	 */
-	private static boolean[] scaleMask(AiMask aiMask, int targetWidth, int targetHeight)
-	{
-		int srcWidth = aiMask.width();
-		int srcHeight = aiMask.height();
-		boolean[] src = aiMask.mask();
-		if (srcWidth == targetWidth && srcHeight == targetHeight)
-		{
-			return src.clone();
-		}
-		boolean[] dst = new boolean[targetWidth * targetHeight];
-		for (int y = 0; y < targetHeight; y++)
-		{
-			int sourceY = (int) ((long) y * srcHeight / targetHeight);
-			for (int x = 0; x < targetWidth; x++)
-			{
-				int sourceX = (int) ((long) x * srcWidth / targetWidth);
-				dst[y * targetWidth + x] = src[sourceY * srcWidth + sourceX];
-			}
-		}
-		return dst;
-	}
 }

@@ -31,6 +31,21 @@ public final class GridConfigTest
 	}
 
 	@Test
+	public void withEnabledTogglesMasterFlagAndPreservesSiblings()
+	{
+		// The master toggle. Pin: flipping it from default-true to false rounds-trips through every
+		// sibling field (cols/rows/color/lineWidth/pixelGridColor/selectionColor) without touching them.
+		// A regression in the canonical constructor parameter order — easy with 9 boolean / int / float
+		// positional args — would silently reassign one field to another and surface here.
+		GridConfig original = GridConfig.defaults().withColumns(8).withSelectionColor(0xAA00FFFF);
+		GridConfig hidden = original.withEnabled(false);
+		assertFalse(hidden.enabled());
+		assertEquals(8, hidden.columns());
+		assertEquals(0xAA00FFFF, hidden.selectionColor());
+		assertEquals("lineWidth must survive enabled toggle", original.lineWidth(), hidden.lineWidth(), 0f);
+	}
+
+	@Test
 	public void withIncludeInExportTogglesIndependently()
 	{
 		// Bake-in is the per-save toggle that defaults() enforces off. The transformer must round-trip
@@ -39,6 +54,45 @@ public final class GridConfigTest
 		assertTrue(baked.includeInExport());
 		assertEquals("columns must survive bake-in toggle", 4, baked.columns());
 		assertEquals("color must survive bake-in toggle", 0xFFFFFFFF, baked.color());
+	}
+
+	@Test
+	public void withLineWidthReplacesStrokeAndPreservesSiblings()
+	{
+		// Grid line stroke width in image pixels. The toolbar's grid-thickness slider routes through this.
+		// Pin both the replacement (new value lands) AND the sibling preservation (cols / rows / colors
+		// don't get clobbered).
+		GridConfig original = GridConfig.defaults().withColumns(5).withSelectionColor(0xAA00FFFF);
+		GridConfig thicker = original.withLineWidth(3.5f);
+		assertEquals(3.5f, thicker.lineWidth(), 0f);
+		assertEquals(5, thicker.columns());
+		assertEquals(0xAA00FFFF, thicker.selectionColor());
+	}
+
+	@Test
+	public void withSelectionColorReplacesColorAndPreservesSiblings()
+	{
+		// The shared color for selection points, polygon fill, and horizon paint. A regression that
+		// dropped this from the transformer would leave the paint color stuck at the previous value
+		// across user changes — pin so the round-trip is observable here.
+		GridConfig original = GridConfig.defaults().withColumns(7);
+		GridConfig recolored = original.withSelectionColor(0x80FF00FF);
+		assertEquals(0x80FF00FF, recolored.selectionColor());
+		assertEquals("columns must survive selectionColor swap", 7, recolored.columns());
+		assertEquals("color must survive selectionColor swap", 0xFFFFFFFF, recolored.color());
+	}
+
+	@Test
+	public void withShowPixelGridTogglesPixelGridFlagAndPreservesSiblings()
+	{
+		// The per-pixel grid overlay that fires at zoom ≥ 6×. Independent toggle from `enabled`. Pin
+		// that flipping it doesn't disturb the main grid's own enabled state or any color / size siblings.
+		GridConfig original = GridConfig.defaults().withColumns(8).withColor(0xFF0000FF);
+		GridConfig hidden = original.withShowPixelGrid(false);
+		assertFalse(hidden.showPixelGrid());
+		assertTrue("main grid enabled flag must survive pixel-grid toggle", hidden.enabled());
+		assertEquals(8, hidden.columns());
+		assertEquals(0xFF0000FF, hidden.color());
 	}
 
 	@Test

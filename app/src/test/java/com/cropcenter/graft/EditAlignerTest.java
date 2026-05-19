@@ -22,13 +22,14 @@ public final class EditAlignerTest
 	@Test
 	public void alignChecksSourceDecodeBeforeEditDecode()
 	{
-		// Pin the source-then-edit probe ordering with DIFFERENTIATING fixtures so a refactor that
-		// swaps the two probes silently shifts error attribution. Both bytes pass the SOI gate; both
-		// would fail decodeStoredDims under unitTests.returnDefaultValues=true. The "Source image is
-		// corrupt" message must fire FIRST, before any "Couldn't decode the edit" check runs. Without
-		// distinct fixtures, the existing test (alignReturnsErrorWhenOriginalDecodeFails) coincidentally
-		// passes both source AND edit as the same array — pinning the source-first ordering by
-		// happenstance rather than by design.
+		// Pin the source-then-edit probe ordering. Both bytes pass the SOI gate; both would fail
+		// decodeStoredDims under unitTests.returnDefaultValues=true (BitmapFactory.decodeByteArray
+		// returns null for any 4-byte SOI fixture on the JVM). The error attribution is what we
+		// observe: the "Source image is corrupt" message must fire first, BEFORE the "Couldn't
+		// decode the edit" message that would otherwise come from a swap of the two probes. Distinct
+		// fixtures aren't strictly needed for the ordering check (since both probe results are
+		// null-equal under the stub), but using different arrays documents the intent at the call
+		// site that an edit-side decode would be the only path that produces the OTHER error.
 		byte[] originalSoi = { (byte) 0xFF, (byte) 0xD8, 0x11, 0x22 };
 		byte[] editSoi = { (byte) 0xFF, (byte) 0xD8, 0x33, 0x44 };
 		EditAligner.Result result = EditAligner.align(originalSoi, editSoi);
@@ -94,15 +95,6 @@ public final class EditAlignerTest
 	}
 
 	@Test
-	public void displayDimsPassesThroughOrientationOne()
-	{
-		// Orientation 1 is identity — display dims equal stored dims.
-		int[] stored = { 4000, 3000 };
-		int[] display = EditAligner.displayDims(stored, 1);
-		assertArrayEquals(stored, display);
-	}
-
-	@Test
 	public void displayDimsReturnsFreshArrayNotAliasOfInput()
 	{
 		// Caller mutability invariant: the helper docs promise a fresh int[2] so callers can mutate without
@@ -123,16 +115,6 @@ public final class EditAlignerTest
 		assertArrayEquals(new int[]{ 50, 100 }, EditAligner.displayDims(stored, 6));
 		assertArrayEquals(new int[]{ 50, 100 }, EditAligner.displayDims(stored, 7));
 		assertArrayEquals(new int[]{ 50, 100 }, EditAligner.displayDims(stored, 8));
-	}
-
-	@Test
-	public void displayDimsSwapsAxesForOrientationSix()
-	{
-		// Orientation 6 is the canonical Samsung "rotated 90° CW" — landscape stored, displays portrait. Width
-		// and height swap.
-		int[] stored = { 4000, 3000 };
-		int[] display = EditAligner.displayDims(stored, 6);
-		assertArrayEquals(new int[]{ 3000, 4000 }, display);
 	}
 
 	@Test

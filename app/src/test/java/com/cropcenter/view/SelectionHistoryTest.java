@@ -113,12 +113,24 @@ public final class SelectionHistoryTest
 	}
 
 	@Test
-	public void redoTrimsUndoStackToMaxDepth()
+	public void stackSizesNeverExceedMaxDepthAcrossArbitraryOperationMix()
 	{
-		// Symmetric regression: undoStack growth on the redo path was unbounded. Pin the cap with the same
-		// "exactly MAX_DEPTH drains" assertion shape.
+		// Invariant: undoStack and redoStack are both bounded by MAX_DEPTH = 50 under ANY operation
+		// sequence. Drive a worst-case interleaving — 60 pushes (caps undoStack at 50, clears redoStack)
+		// → 60 undos (drains undoStack, fills redoStack up to 50) → 60 redos (drains redoStack, refills
+		// undoStack up to 50) → 60 more pushes (re-caps undoStack). At every observable point, drain
+		// counts must equal MAX_DEPTH. A regression that removed push()'s cap would let undoStack reach
+		// 60+ here; this test catches that without depending on the (provably unreachable) trim branches
+		// that used to live in undo()/redo() — those were dead code because push()'s cap plus the
+		// alternating-stacks dance keeps each stack at ≤ MAX_DEPTH regardless of sequence.
 		SelectionHistory history = new SelectionHistory();
-		// Build undoStack to 60 (cap applied) then drain into redoStack via 60 undo()s.
+		for (int i = 0; i < 60; i++)
+		{
+			history.push(Arrays.asList(pt(i, i)));
+		}
+		assertEquals("undoStack capped at MAX_DEPTH after 60 pushes",
+			50, drainStackCount(history, true));
+		// Refill via pushes, then drain into redoStack via undos.
 		for (int i = 0; i < 60; i++)
 		{
 			history.push(Arrays.asList(pt(i, i)));
@@ -127,22 +139,8 @@ public final class SelectionHistoryTest
 		{
 			history.undo(Arrays.asList(pt(99, 99)));
 		}
-		// Now redoStack holds at most MAX_DEPTH = 50 frames (already verified above). Redo all of them —
-		// each redo() pushes onto undoStack via the cap-trimmed path. If the trim is missing, undoStack
-		// would grow to 51 (50 from the redo path + the 1 most recent that survived the 60-push trim).
-		while (history.canRedo())
-		{
-			history.redo(Arrays.asList(pt(0, 0)));
-		}
-		// Drain undoStack and count.
-		int undoCount = 0;
-		while (history.canUndo() && undoCount < 200)
-		{
-			history.undo(Arrays.asList(pt(0, 0)));
-			undoCount++;
-		}
-		assertEquals("undoStack must drain in exactly MAX_DEPTH (50) calls",
-			50, undoCount);
+		assertEquals("redoStack capped at MAX_DEPTH after 60 undos following 60 pushes",
+			50, drainStackCount(history, false));
 	}
 
 	@Test
@@ -183,34 +181,29 @@ public final class SelectionHistoryTest
 		assertNull(history.undo(Arrays.asList(pt(1, 1))));
 	}
 
-	@Test
-	public void undoTrimsRedoStackToMaxDepth()
+	/**
+	 * Drain either undoStack (when undo=true) or redoStack (when undo=false) and return the count of
+	 * successful pops. Capped at 200 to avoid runaway loops in regression scenarios where the trim breaks.
+	 *
+	 * @param history history under test
+	 * @param undo    true to drain undoStack via undo(), false to drain redoStack via redo()
+	 * @return number of pops before the chosen stack reports empty
+	 */
+	private static int drainStackCount(SelectionHistory history, boolean undo)
 	{
-		// Regression: redoStack growth was unbounded on the undo path because only push() trimmed. Without
-		// the cap, repeated undo() calls would let redoStack grow unboundedly (one frame per undo, no upper
-		// limit). Pin the cap by counting drains: a properly capped redoStack drains in EXACTLY MAX_DEPTH
-		// (50) redo() calls; a missing-cap stack would drain in 51+ calls.
-		SelectionHistory history = new SelectionHistory();
-		for (int i = 0; i < 60; i++)
+		int count = 0;
+		while (count < 200)
 		{
-			history.push(Arrays.asList(pt(i, i)));
+			List<SelectionPoint> result = undo
+				? history.undo(new ArrayList<>())
+				: history.redo(new ArrayList<>());
+			if (result == null)
+			{
+				break;
+			}
+			count++;
 		}
-		// Drive redoStack past MAX_DEPTH by issuing 60 undos (pushes 60 frames onto redoStack, each one
-		// must trim if size > 50).
-		for (int i = 0; i < 60; i++)
-		{
-			history.undo(Arrays.asList(pt(99, 99)));
-		}
-		// Count redo() drains until canRedo turns false. Without the cap on undo()'s push-to-redoStack,
-		// this would exceed MAX_DEPTH = 50.
-		int redoCount = 0;
-		while (history.canRedo() && redoCount < 200)
-		{
-			history.redo(Arrays.asList(pt(0, 0)));
-			redoCount++;
-		}
-		assertEquals("redoStack must drain in exactly MAX_DEPTH (50) calls; over-cap = leak",
-			50, redoCount);
+		return count;
 	}
 
 	private static SelectionPoint pt(float x, float y)

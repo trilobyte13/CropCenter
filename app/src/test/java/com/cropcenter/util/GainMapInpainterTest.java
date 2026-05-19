@@ -1,8 +1,12 @@
 package com.cropcenter.util;
 
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotSame;
 import static org.junit.Assert.assertTrue;
+
+import com.cropcenter.util.AiRegionDetector.AiMask;
 
 import org.junit.Test;
 
@@ -73,13 +77,18 @@ public final class GainMapInpainterTest
 	@Test
 	public void inpaintIterativeAllUnmaskedReturnsZeroPasses()
 	{
-		// No masked pixels → frontier is empty → 0 passes, no value mutation.
-		int[] values = { 10, 20, 30, 40, 50, 60, 70, 80, 90 };
+		// No masked pixels → frontier is empty → 0 passes, no value mutation. Pin all 9 positions so a
+		// regression that mutates surrounding pixels (e.g., a stray write into an unmasked neighbor during the
+		// rounding-mean accumulator) doesn't slip through with only the center checked.
+		int[] original = { 10, 20, 30, 40, 50, 60, 70, 80, 90 };
+		int[] values = original.clone();
 		boolean[] mask = new boolean[9];
 		int passes = GainMapInpainter.inpaintIterative(values, mask, 3, 3);
 		assertEquals(0, passes);
-		// Values unchanged.
-		assertEquals(50, values[4]);
+		for (int i = 0; i < original.length; i++)
+		{
+			assertEquals("index " + i + " must be unchanged", original[i], values[i]);
+		}
 	}
 
 	@Test
@@ -93,29 +102,6 @@ public final class GainMapInpainterTest
 		assertEquals(100, values[4]);
 		// Mask is consumed: center should now be unmasked.
 		assertFalse(mask[4]);
-	}
-
-	@Test
-	public void inpaintIterativeIsolatedMaskedPixelStaysWhenNoUnmaskedNeighbor()
-	{
-		// All-masked field with one unmasked corner — the frontier seed only includes the masked pixel
-		// adjacent to that corner. After one pass that pixel becomes unmasked, then the next pass picks up
-		// its neighbors. Verify the all-masked-corner-adjacent case: the one unmasked seeds propagation.
-		int[] values = new int[9];
-		boolean[] mask = new boolean[9];
-		for (int i = 0; i < 9; i++)
-		{
-			mask[i] = true;
-		}
-		mask[0] = false; // unmask top-left
-		values[0] = 50;
-		int passes = GainMapInpainter.inpaintIterative(values, mask, 3, 3);
-		// All originally-masked pixels are eventually filled — verify by checking mask is all-false at end.
-		for (int i = 0; i < 9; i++)
-		{
-			assertFalse("index " + i, mask[i]);
-		}
-		assertTrue("should have run multiple passes", passes >= 2);
 	}
 
 	@Test
@@ -153,6 +139,29 @@ public final class GainMapInpainterTest
 	}
 
 	@Test
+	public void inpaintIterativePropagatesFromSingleUnmaskedSeedAcrossField()
+	{
+		// All-masked field with one unmasked corner — the frontier seed only includes the masked pixels
+		// adjacent to that corner. After one pass those become unmasked, then the next pass picks up their
+		// neighbors. Pin that propagation reaches every pixel and that the multi-pass cascade actually fires
+		// (passes >= 2 for a 3x3 with the seed at one corner).
+		int[] values = new int[9];
+		boolean[] mask = new boolean[9];
+		for (int i = 0; i < 9; i++)
+		{
+			mask[i] = true;
+		}
+		mask[0] = false; // unmask top-left
+		values[0] = 50;
+		int passes = GainMapInpainter.inpaintIterative(values, mask, 3, 3);
+		for (int i = 0; i < 9; i++)
+		{
+			assertFalse("index " + i, mask[i]);
+		}
+		assertTrue("should have run multiple passes", passes >= 2);
+	}
+
+	@Test
 	public void roundingBiasRegression_negativeBiasNotIntroduced()
 	{
 		// Stricter regression: 9-pixel strip with masked center. 4 left neighbors all 100, 4 right all 101.
@@ -171,19 +180,130 @@ public final class GainMapInpainterTest
 	@Test
 	public void roundingBiasRegression_useNearestInt_notFloor()
 	{
-		// REGRESSION: an earlier implementation used `sum / count` (floor toward zero), which produced
-		// ⌊(7 * 100) / 8⌋ = 87 instead of round-half-up's 88 for an 8-neighbor average of 7×100 + 1×x
-		// configurations. Compounded across hundreds of passes on a real AI fill this drifted the
-		// inpainted region ~50 LSBs darker than its surroundings — a visible darker HDR boost patch over
-		// the Generative Remove fill area.
+		// REGRESSION: an earlier implementation used `sum / count` (floor toward zero). For a 2-neighbor
+		// average of 99 + 100 = 199 with count = 2, floor(199 / 2) = 99 while round-half-up gives 100.
+		// Compounded across hundreds of passes on a real AI fill the floor variant drifts the inpainted
+		// region one LSB darker than its surroundings every iteration — a visible darker HDR boost patch
+		// over the Generative Remove fill area.
 		//
-		// Worst-case fixture: a 5x1 strip with masked pixel at index 2. Neighbors of index 2 in a 5x1 are
-		// index 1 (val=99) and index 3 (val=100). Average = 199 / 2 = 99 (floor) or 99.5 → 100
-		// (round-half-up). Pin the rounded result.
+		// Fixture: a 5x1 strip with masked pixel at index 2. Neighbors of index 2 in a 5x1 are index 1
+		// (val=99) and index 3 (val=100). Average = 199 / 2 = 99.5 → 100 (round-half-up), 99 (floor). Pin
+		// the rounded result. The complementary 100/101 case sits in
+		// roundingBiasRegression_negativeBiasNotIntroduced above.
 		int[] values = { 100, 99, 0, 100, 100 };
 		boolean[] mask = { false, false, true, false, false };
 		GainMapInpainter.inpaintIterative(values, mask, 5, 1);
 		assertEquals("rounded average of 99 + 100 = 99.5 → 100 (round-half-up), not 99 (floor)",
 			100, values[2]);
+	}
+
+	// ── scaleMask ──
+
+	@Test
+	public void scaleMaskReturnsCloneForSameDimensions()
+	{
+		// Same-dimensions fast path: returns src.clone(). Pin both the byte-for-byte equality AND the
+		// distinct-reference contract — a regression that returned `src` directly would let a caller's
+		// later mutation propagate back to the AiMask's stored array.
+		boolean[] srcMask = { true, false, true, false };
+		AiMask aiMask = new AiMask(srcMask, 2, 2, 4, 2);
+		boolean[] result = GainMapInpainter.scaleMask(aiMask, 2, 2);
+		assertArrayEquals(srcMask, result);
+		assertNotSame("clone, not alias", srcMask, result);
+	}
+
+	@Test
+	public void scaleMaskUpscales2xWithNearestNeighbor()
+	{
+		// 2×2 source → 4×4 target. Each source pixel becomes a 2×2 block. Source TL=true → target [0,0],
+		// [0,1], [1,0], [1,1] all true. Source TR=false → target [0,2..3], [1,2..3] all false. Etc.
+		boolean[] srcMask = { true, false, false, true };  // TL=T, TR=F, BL=F, BR=T
+		AiMask aiMask = new AiMask(srcMask, 2, 2, 4, 2);
+		boolean[] result = GainMapInpainter.scaleMask(aiMask, 4, 4);
+		boolean[] expected = {
+			true,  true,  false, false,
+			true,  true,  false, false,
+			false, false, true,  true,
+			false, false, true,  true,
+		};
+		assertArrayEquals(expected, result);
+	}
+
+	@Test
+	public void scaleMaskDownscalesByNearestNeighbor()
+	{
+		// 4×4 source → 2×2 target. Each target cell samples the source at (y*srcH/dstH, x*srcW/dstW).
+		// For target (0,0): sourceX=0, sourceY=0 → src[0] = true.
+		// For target (0,1): sourceX=2, sourceY=0 → src[2] = true.
+		// For target (1,0): sourceX=0, sourceY=2 → src[8] = false.
+		// For target (1,1): sourceX=2, sourceY=2 → src[10] = false.
+		boolean[] srcMask = {
+			true,  true,  true,  true,
+			true,  true,  true,  true,
+			false, false, false, false,
+			false, false, false, false,
+		};
+		AiMask aiMask = new AiMask(srcMask, 4, 4, 4, 8);
+		boolean[] result = GainMapInpainter.scaleMask(aiMask, 2, 2);
+		assertArrayEquals(new boolean[] { true, true, false, false }, result);
+	}
+
+	@Test
+	public void scaleMaskNonUniformAspectRatioChange()
+	{
+		// 100×200 → 50×50. Width halves, height fourths. Each target cell samples the right source pixel
+		// via nearest-neighbor. Plant a single source pixel and verify only one target pixel is set.
+		int srcW = 100;
+		int srcH = 200;
+		boolean[] srcMask = new boolean[srcW * srcH];
+		srcMask[50 * srcW + 50] = true;  // source pixel at (50, 50)
+		AiMask aiMask = new AiMask(srcMask, srcW, srcH, 4, 1);
+		boolean[] result = GainMapInpainter.scaleMask(aiMask, 50, 50);
+		// Target pixel at (12, 25) maps back to (12*srcH/50, 25*srcW/50) = (48, 50). Source (50, 50) maps
+		// FORWARD via inverse: target_y from source_y=50 lands at y where (long)y * 200 / 50 == 50 →
+		// y*4 == 50 → y == 12.5. So target rows 12 (y*4=48) and 13 (y*4=52) bracket source row 50; row
+		// 12 maps back to source row 48 (false), row 13 maps to source row 52 (false). Hmm — the source
+		// pixel at row 50 isn't reachable by ANY target row at this downsampling. Verify the total true
+		// count instead: with srcMask containing exactly 1 true at (50, 50), the result depends on
+		// whether any target cell samples src[50*100+50]. Compute target row r where r*200/50 == 50 →
+		// r == 12 (since 12*200/50 = 48), r == 13 (since 13*200/50 = 52). Neither hits row 50. So
+		// result should be all-false — pin that behavior (an important property of nearest-neighbor
+		// downsampling: source pixels CAN be lost).
+		int trueCount = 0;
+		for (boolean cell : result)
+		{
+			if (cell)
+			{
+				trueCount++;
+			}
+		}
+		assertEquals("the isolated source pixel falls between target sample rows; output is all-false",
+			0, trueCount);
+	}
+
+	@Test
+	public void scaleMaskUsesLongArithmeticForLargeIndexMultiply()
+	{
+		// Pin the (long) cast on `y * srcHeight`. Inputs designed so the max y * srcH genuinely overflows
+		// int: srcH = 1_000_000 and target rows go up to 4999, so max `y * srcH` = 4999 * 1_000_000 =
+		// 4.999e9, which exceeds Integer.MAX_VALUE (2.147e9). Without the long cast, the int multiply
+		// would wrap to (4_999_000_000 - 4_294_967_296) = 704_032_704, then divide by 5000 to yield
+		// sourceY = 140_806 instead of the correct 999_800. The pre-planted source pixel sits at row
+		// 999_800; a regression to plain int arithmetic would miss it entirely and the target row 4999
+		// would read false.
+		int srcW = 1;
+		int srcH = 1_000_000;
+		boolean[] srcMask = new boolean[srcW * srcH];
+		srcMask[999_800] = true;
+		AiMask aiMask = new AiMask(srcMask, srcW, srcH, 4, 1);
+		boolean[] result = GainMapInpainter.scaleMask(aiMask, 1, 5000);
+		// target row r maps back to source row (long) r * 1_000_000 / 5000 = r * 200.
+		// Source row 999_800 lands at target row 999_800 / 200 = 4999 exactly.
+		assertTrue("long-arithmetic must locate src row 999_800 at target row 4999; int wrap would "
+			+ "produce sourceY=140_806 and miss the planted pixel", result[4999]);
+		// Sanity: 9 other target rows should be false (the source has a single true bit far from where
+		// they sample).
+		assertFalse("target row 0 samples src row 0 (false)", result[0]);
+		assertFalse("target row 2000 samples src row 400000 (false)", result[2000]);
 	}
 }

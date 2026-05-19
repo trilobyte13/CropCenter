@@ -149,8 +149,10 @@ public final class RotationMathTest
 	@Test
 	public void snapToHundredthRoundsToTwoDecimalPlaces()
 	{
-		// Pin the contract: 1.234 → 1.23 (round-half-to-even via Math.round). Used by the auto-rotate / horizon
-		// paths so the announced angle lands on a ruler tick rather than between two of them.
+		// Pin the contract: 1.234 → 1.23 (half-up rounding via Math.round — the .004 stays under .5 so it
+		// rounds down regardless of half-up vs half-even). Used by the auto-rotate / horizon paths so the
+		// announced angle lands on a ruler tick rather than between two of them. Sibling
+		// snapToHundredthRoundsHalfwayUp pins the .005 boundary case.
 		assertEquals(1.23f, RotationMath.snapToHundredth(1.234f), 0f);
 	}
 }

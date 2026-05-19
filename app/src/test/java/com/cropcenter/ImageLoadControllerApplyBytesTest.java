@@ -31,15 +31,17 @@ public final class ImageLoadControllerApplyBytesTest
 	public void applyBytesRejectsEmptyInput()
 	{
 		// Zero-length array — both signature checks short-circuit on the length predicate. Pin the
-		// rejection so a future change that loosens the length guard still surfaces as a user-visible
-		// rejection rather than a silent state mutation on whatever default Bitmap.decodeByteArray returns
-		// for empty bytes.
+		// rejection AND the user-visible toast so a future change that loosens the length guard still
+		// surfaces as a user-facing rejection rather than a silent state mutation on whatever default
+		// Bitmap.decodeByteArray returns for empty bytes. Matches the assertion shape used by the HEIC /
+		// WebP sibling tests so all three unsupported-input paths pin the toast contract symmetrically.
 		FakeImageLoadHost fake = new FakeImageLoadHost();
 		ImageLoadController controller = new ImageLoadController(fake, null);
 
 		boolean result = controller.applyBytes(new byte[0], "empty.jpg");
 
 		assertFalse("empty bytes must not be accepted", result);
+		assertNotNull("rejection toast must fire for empty input too", fake.lastToastMessage);
 	}
 
 	@Test
