@@ -5,10 +5,15 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
 
 import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
+import java.nio.file.Files;
 import java.util.zip.CRC32;
 
 /**
@@ -27,6 +32,9 @@ public final class CropExporterPngExifInjectionTest
 	private static final byte[] PNG_SIGNATURE = {
 		(byte) 0x89, 'P', 'N', 'G', (byte) 0x0D, (byte) 0x0A, (byte) 0x1A, (byte) 0x0A,
 	};
+
+	@Rule
+	public final TemporaryFolder tmp = new TemporaryFolder();
 
 	@Test
 	public void chunkLengthFieldIsBigEndianU32() throws IOException
@@ -195,6 +203,78 @@ public final class CropExporterPngExifInjectionTest
 		byte[] tiff = { 'I', 'I' };
 		byte[] result = CropExporter.injectPngExifFromTiff(tooShort, tiff);
 		assertSame("too-short PNG returns input reference", tooShort, result);
+	}
+
+	@Test
+	public void streamingInjectByteEqualsByteArrayVariant() throws IOException
+	{
+		// Streaming pipeline regression: `injectPngExifFromTiffFileToFile` must produce byte-identical
+		// output to `injectPngExifFromTiff(Files.readAllBytes(inFile), tiffData)` for the same input.
+		// Without this contract, the streaming PNG save path could ship a different byte sequence than
+		// the (tested) in-memory path — a silent divergence that 200 MP saves would be the only place
+		// to discover. Cover the regular case + a non-trivial TIFF payload size to exercise the
+		// chunk-write loop.
+		byte[] png = buildMinimalPng();
+		byte[] tiff = new byte[1024];
+		for (int i = 0; i < tiff.length; i++)
+		{
+			tiff[i] = (byte) (i & 0xFF);
+		}
+		byte[] inMemoryResult = CropExporter.injectPngExifFromTiff(png, tiff);
+		File inFile = tmp.newFile("in.png");
+		File outFile = tmp.newFile("out.png");
+		try (FileOutputStream fos = new FileOutputStream(inFile))
+		{
+			fos.write(png);
+		}
+		CropExporter.injectPngExifFromTiffFileToFile(inFile, tiff, outFile);
+		byte[] streamingResult = Files.readAllBytes(outFile.toPath());
+		assertArrayEquals("streaming output must be byte-identical to byte[] variant",
+			inMemoryResult, streamingResult);
+	}
+
+	@Test
+	public void streamingInjectCopiesVerbatimWhenPngIsIhdrOnly() throws IOException
+	{
+		// Mirror returnsPngUnchangedForIhdrOnlyPng for the streaming variant: an IHDR-only PNG has no
+		// IEND past insertPos, so the byte[] variant returns input unchanged. The streaming variant
+		// produces a byte-identical outFile (the input was the only valid output) so callers can
+		// dispose of inFile without losing data.
+		ByteArrayOutputStream out = new ByteArrayOutputStream();
+		out.write(PNG_SIGNATURE);
+		out.write(new byte[] { 0, 0, 0, 13 });
+		out.write(new byte[] { 'I', 'H', 'D', 'R' });
+		out.write(new byte[13]);
+		out.write(new byte[] { 0, 0, 0, 0 });
+		byte[] ihdrOnly = out.toByteArray();
+		File inFile = tmp.newFile("in.png");
+		File outFile = tmp.newFile("out.png");
+		try (FileOutputStream fos = new FileOutputStream(inFile))
+		{
+			fos.write(ihdrOnly);
+		}
+		CropExporter.injectPngExifFromTiffFileToFile(inFile, new byte[] { 'I', 'I' }, outFile);
+		byte[] streamingResult = Files.readAllBytes(outFile.toPath());
+		assertArrayEquals("IHDR-only PNG stream-copies verbatim", ihdrOnly, streamingResult);
+	}
+
+	@Test
+	public void streamingInjectCopiesVerbatimWhenTiffIsEmpty() throws IOException
+	{
+		// tiffLen == 0 → byte[] variant returns input unchanged (assertSame). The streaming variant
+		// can't return the input file unchanged (different File reference), but it produces an outFile
+		// byte-identical to inFile. Pin the contract so a future regression that elides the verbatim
+		// copy and ships an empty outFile is caught.
+		byte[] png = buildMinimalPng();
+		File inFile = tmp.newFile("in.png");
+		File outFile = tmp.newFile("out.png");
+		try (FileOutputStream fos = new FileOutputStream(inFile))
+		{
+			fos.write(png);
+		}
+		CropExporter.injectPngExifFromTiffFileToFile(inFile, new byte[0], outFile);
+		byte[] streamingResult = Files.readAllBytes(outFile.toPath());
+		assertArrayEquals("empty-TIFF stream-copies inFile verbatim", png, streamingResult);
 	}
 
 	/**

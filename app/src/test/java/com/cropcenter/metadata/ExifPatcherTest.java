@@ -880,6 +880,82 @@ public final class ExifPatcherTest
 	}
 
 	@Test
+	public void patchSplicesWithZeroPaddingWhenNewThumbnailIsSmallerThanOldWithTrailingBytes()
+		throws IOException
+	{
+		// Samsung HDR EXIF regression. Source has IFD1 thumbnail FOLLOWED by 7+ KB of trailing
+		// MakerNote / SubIFD value data (afterLen > 0). Pre-fix, when the freshly-generated cropped
+		// thumbnail was SMALLER than source's existing thumbnail, the splice bailed (returned input
+		// unchanged) because shrinking the slot would shift trailing bytes by a negative offset and
+		// corrupt any TIFF offset that pointed past the thumbnail. replaceThumbnail then fell
+		// through to appendFreshIfd1WithThumbnail, which on full segments rejected for APP1-cap
+		// overflow, and the final fallback stripped IFD1 entirely. Net result: every Samsung HDR
+		// save shipped with no embedded preview, even though the cascade had successfully produced
+		// a fitting thumbnail. The padding fix lets the splice succeed by zero-filling the gap
+		// between the new (smaller) thumbnail's EOI and the trailing bytes — total segment length
+		// unchanged, trailing bytes stay at their original offset, and IFD1's
+		// JPEGInterchangeFormatLength tag (rewritten to newThumb.length) tells decoders to read
+		// only the actual thumbnail bytes.
+		byte[] oldThumbnail = uniqueThumbnailBytes((byte) 0xAA, 200);
+		byte[] trailingSentinel = uniqueThumbnailBytes((byte) 0xCC, 24);
+		byte[] newThumbnail = uniqueThumbnailBytes((byte) 0xBB, 80);
+		JpegSegment seg = buildSegmentWithThumbnailAndTrailingBytes(oldThumbnail, trailingSentinel);
+		int inputLen = seg.data().length;
+
+		List<JpegSegment> patched = ExifPatcher.patch(Collections.singletonList(seg), 100, 200, newThumbnail);
+
+		byte[] resultData = patched.get(0).data();
+		assertTrue("output should contain NEW thumbnail bytes",
+			indexOfSubsequence(resultData, newThumbnail) >= 0);
+		assertTrue("trailing sentinel bytes must survive unchanged",
+			indexOfSubsequence(resultData, trailingSentinel) >= 0);
+		// Trailing sentinel offset preserved: the splice padded the new-thumbnail-to-trailing gap
+		// with zeros so the trailing bytes stay at the SAME absolute offset they had pre-patch.
+		// This is the critical invariant — any TIFF offset elsewhere in the EXIF that points at
+		// the trailing data (MakerNote value block, SubIFD value data) remains valid.
+		int trailingPreFixOffset = indexOfSubsequence(seg.data(), trailingSentinel);
+		int trailingPostFixOffset = indexOfSubsequence(resultData, trailingSentinel);
+		assertEquals("trailing bytes must NOT shift (TIFF offsets pointing here must stay valid)",
+			trailingPreFixOffset, trailingPostFixOffset);
+		// Segment length unchanged because the smaller-than-old thumbnail is followed by
+		// (oldThumbLen - newThumb.length) bytes of zero padding before the trailing data.
+		assertEquals("segment length must stay identical (padded splice, no append fallback)",
+			inputLen, resultData.length);
+	}
+
+	@Test
+	public void patchSplicesEqualSizeWithoutPaddingWhenTrailingBytesExist() throws IOException
+	{
+		// Boundary case of the padded splice: when the new thumbnail is EXACTLY the same length as
+		// the source's existing IFD1 thumbnail AND trailing bytes follow, the splice should write
+		// the new bytes in place with padLen=0 (no padding needed) and the trailing sentinel must
+		// stay at its original offset. This is the boundary between the shrink-with-trailing splice
+		// (newThumb < oldThumb → padded) and the grow-with-trailing bail-out (newThumb > oldThumb
+		// → falls through to appendFresh). Without this test, a future refactor that conflates the
+		// padded shrink path with the equal-size path (e.g., always assumes padLen > 0) would
+		// silently break the common "same-quality re-save" case.
+		byte[] oldThumbnail = uniqueThumbnailBytes((byte) 0xAA, 200);
+		byte[] trailingSentinel = uniqueThumbnailBytes((byte) 0xCC, 24);
+		byte[] newThumbnail = uniqueThumbnailBytes((byte) 0xBB, 200); // EXACTLY same length
+		JpegSegment seg = buildSegmentWithThumbnailAndTrailingBytes(oldThumbnail, trailingSentinel);
+		int inputLen = seg.data().length;
+
+		List<JpegSegment> patched = ExifPatcher.patch(Collections.singletonList(seg), 100, 200, newThumbnail);
+
+		byte[] resultData = patched.get(0).data();
+		assertTrue("output should contain NEW thumbnail bytes",
+			indexOfSubsequence(resultData, newThumbnail) >= 0);
+		assertTrue("trailing sentinel bytes must survive unchanged",
+			indexOfSubsequence(resultData, trailingSentinel) >= 0);
+		int trailingPreFixOffset = indexOfSubsequence(seg.data(), trailingSentinel);
+		int trailingPostFixOffset = indexOfSubsequence(resultData, trailingSentinel);
+		assertEquals("trailing bytes must not shift on equal-size splice",
+			trailingPreFixOffset, trailingPostFixOffset);
+		assertEquals("segment length must stay identical (equal-size splice, padLen=0)",
+			inputLen, resultData.length);
+	}
+
+	@Test
 	public void patchStripIsNoOpWhenSourceHasNoIfd1() throws IOException
 	{
 		// STRIP_IFD1_THUMBNAIL on a segment whose IFD0 already has nextIfdPointer=0
@@ -1101,6 +1177,26 @@ public final class ExifPatcherTest
 	}
 
 	@Test
+	public void patchedNonThumbBytesCapsBudgetAtOldThumbLenWhenAfterLenIsNonZero() throws IOException
+	{
+		// Samsung HDR EXIF regression. When trailing data exists AFTER the IFD1 thumbnail (afterLen > 0
+		// — MakerNote / SubIFD value blocks past the thumbnail in Samsung captures), the splice can
+		// only ACCEPT new thumbnails ≤ oldThumbLen (anything larger would shift trailing bytes and
+		// corrupt offset references; the padding fix can't widen the slot). To keep the cascade's
+		// budget math (`thumbBudget = MAX_SEGMENT_BYTES - patchedNonThumbBytes`) from over-promising
+		// a budget > oldThumbLen, the predictor returns `CAP - oldThumbLen` for the splice-with-
+		// trailing-data case. Verify: budget == oldThumbLen.
+		byte[] oldThumbnail = uniqueThumbnailBytes((byte) 0xAA, 200);
+		byte[] trailing = uniqueThumbnailBytes((byte) 0xCC, 24);
+		JpegSegment seg = buildSegmentWithThumbnailAndTrailingBytes(oldThumbnail, trailing);
+		int predicted = ExifPatcher.patchedNonThumbBytes(Collections.singletonList(seg));
+		int budget = JpegSegment.MAX_SEGMENT_BYTES - predicted;
+		assertEquals("budget must clamp at oldThumbLen when afterLen>0 (anything larger bails splice "
+			+ "to appendFresh which fails on Samsung's near-full segments → IFD1 strip)",
+			oldThumbnail.length, budget);
+	}
+
+	@Test
 	public void patchedNonThumbBytesPredictsAppendForBigEndianSourceWithoutIfd1() throws IOException
 	{
 		// Big-endian (MM) byte-order coverage — the bulk of Samsung Galaxy sources are MM, so a
@@ -1256,9 +1352,10 @@ public final class ExifPatcherTest
 	{
 		// End-to-end check of the save-without-pre-computed-thumbnail flow: empty source
 		// meta + a fresh thumbnail must produce an output JPEG containing the synthesised EXIF
-		// segment with the new thumbnail bytes after `JpegMetadataInjector.inject` runs. Mirrors what
-		// `CropExporter.injectExifMetadata` does on a source whose `state.getJpegMeta()` was empty
-		// (screenshots, generated images). Without this integration test the patch-level
+		// segment with the new thumbnail bytes after `JpegMetadataInjector.inject` runs. Mirrors
+		// what `CropExporter.exportJpeg`'s Stage 3 metadata-pick + inject does on a source whose
+		// `state.getJpegMeta()` was empty (screenshots, generated images). Without this integration
+		// test the patch-level
 		// `patchSynthesizesFreshExifSegmentWhenSourceHasNone` could pass while the inject step
 		// silently drops the synthesised segment (e.g., a marker mis-detection on the byte layout).
 		byte[] freshThumb = uniqueThumbnailBytes((byte) 0x55, 1024);

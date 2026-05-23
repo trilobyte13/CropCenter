@@ -347,6 +347,53 @@ public final class MpfPatcherTest
 		assertEquals(newPrimarySize - fx.mpfStart, readU32Le(fx.bytes, fx.entry0Off + 16 + 8));
 	}
 
+	@Test
+	public void patchThreeArgUsesExplicitGainMapSizeRatherThanBufferLength() throws IOException
+	{
+		// Streaming-pipeline regression. `GainMapComposer.composeFileToFile` calls the 3-arg overload
+		// with the primary's APP-marker HEAD (a few hundred bytes for MPF/XMP) as `jpeg`, while
+		// `primarySize` is the FULL primary size (which can be > head.length on any non-trivial save).
+		// The 2-arg overload would compute `gainMapSize = jpeg.length - primarySize` and write a
+		// negative u32 into the MPF size field. The 3-arg overload takes gainMapSize explicitly so
+		// the patched bytes are byte-identical to what the in-memory `compose` produces.
+		int primarySize = 1000;      // claimed full primary size (post-XMP-patch + tail concatenation)
+		int gainMapSize = 60;
+		MpfFixture fx = buildMpfFile(primarySize, gainMapSize, 2);
+		// Truncate the bytes to the HEAD ONLY: keep just enough to cover the MPF segment, drop the
+		// scan body and gain-map tail that the in-memory variant would also see. Verifies the patcher
+		// no longer relies on `jpeg.length` past the MPF segment.
+		int headLen = fx.mpfStart + 38 + 2 * 16; // mpfStart + IFD + 2 entries
+		byte[] headOnly = new byte[headLen];
+		System.arraycopy(fx.bytes, 0, headOnly, 0, headLen);
+		assertTrue("3-arg patch should succeed on head-only buffer when gainMapSize given explicitly",
+			MpfPatcher.patch(headOnly, primarySize, gainMapSize));
+		// entry[0] size patched to primarySize.
+		assertEquals(primarySize, readU32Le(headOnly, fx.entry0Off + 4));
+		// entry[1] size = gainMapSize (the explicit arg, NOT jpeg.length - primarySize which would be
+		// negative for headLen < primarySize). Without the 3-arg overload + GainMapComposer's switch
+		// to it, this assertion fails with the negative-as-u32 value ~0xFFFFFx (e.g. 4 294 966 296
+		// when primarySize=1000 and headLen=300, instead of the expected 60).
+		assertEquals("gain-map entry size must come from the explicit arg, not buffer length",
+			gainMapSize, readU32Le(headOnly, fx.entry0Off + 16 + 4));
+		// Offset still derived from primarySize - mpfStart (no buffer-length dependency).
+		assertEquals(primarySize - fx.mpfStart, readU32Le(headOnly, fx.entry0Off + 16 + 8));
+	}
+
+	@Test
+	public void patchTwoArgBackwardCompatStillUsesBufferLengthDerivation() throws IOException
+	{
+		// Backward-compatible 2-arg entry point — the in-memory `compose` and existing test fixtures
+		// pass the full `[primary][gainMap]` buffer, so gainMapSize derived from `jpeg.length -
+		// primarySize` is correct. Pin the contract that the 2-arg overload still derives the size
+		// from the buffer (no behavior change for the byte[] callers).
+		int primarySize = 200;
+		int gainMapSize = 60;
+		MpfFixture fx = buildMpfFile(primarySize, gainMapSize, 2);
+		assertTrue(MpfPatcher.patch(fx.bytes, primarySize));
+		assertEquals("2-arg derives gainMapSize from buffer length", gainMapSize,
+			readU32Le(fx.bytes, fx.entry0Off + 16 + 4));
+	}
+
 	/**
 	 * Convenience overload that gives every entry the same placeholder `attr` value. Used by tests that don't care
 	 * which entry carries the gain-map MPType (the patcher's fall-through to entry[1] handles that case).

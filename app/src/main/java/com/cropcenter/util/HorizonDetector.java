@@ -55,6 +55,13 @@ public final class HorizonDetector
 		1 / 273f, 4 / 273f,  7 / 273f,  4 / 273f, 1 / 273f,
 	};
 	private static final int MIN_LINE_FIT_INLIERS = 30;
+	// Minimum edge-pixel count surviving the mask intersection before the Hough vote can run. Below this,
+	// the vote produces noise-driven peaks with no statistical signal — bail to a NaN "no line detected"
+	// rather than ship a random angle. Numerically equal to MIN_LINE_FIT_INLIERS by historical accident
+	// (both pinned at 30); kept as a separate constant because the rationales diverge — this gate is
+	// about Hough-vote sample-size sanity, MIN_LINE_FIT_INLIERS is about RANSAC inlier-count sanity. If
+	// a future tuning pass adjusts one, the other shouldn't drift in lockstep.
+	private static final int MIN_MASKED_EDGE_PIXELS = 30;
 
 	private HorizonDetector() {}
 
@@ -315,6 +322,21 @@ public final class HorizonDetector
 	// Package-private rather than private so HorizonDetectorTest can pin the pure-array math without an
 	// Android Bitmap fixture — same pattern refineLineFitAngle uses above.
 
+	/**
+	 * Otsu-style top-percentile threshold over a non-negative edge magnitude array. Builds a 256-bin
+	 * histogram normalised to the maximum non-zero value, then returns the magnitude at which the cumulative
+	 * count from the bottom reaches `(1 - topFraction)` of the non-zero population — i.e. the cutoff that
+	 * isolates the top `topFraction` strongest edges. Float.MAX_VALUE on a no-edge input (all zeros or empty)
+	 * so callers' "above threshold" tests cleanly reject; `maxVal * 0.5f` if the histogram walk runs off the
+	 * end (numerical edge case from rounding into the top bin).
+	 *
+	 * @param edges       non-negative edge magnitudes, one per source pixel; zero entries are treated as no
+	 *                    edge and skipped
+	 * @param topFraction fraction of the non-zero edge population to keep ABOVE the returned threshold,
+	 *                    in [0, 1] (e.g. 0.1 = top 10% of edges)
+	 * @return magnitude threshold; edges strictly greater than this are the top-topFraction population;
+	 *         Float.MAX_VALUE when no non-zero edges exist
+	 */
 	static float computeThreshold(float[] edges, float topFraction)
 	{
 		float maxVal = 0;
@@ -421,7 +443,7 @@ public final class HorizonDetector
 				}
 			}
 		}
-		if (edgeCount < 30)
+		if (edgeCount < MIN_MASKED_EDGE_PIXELS)
 		{
 			Log.d(TAG, "Too few masked edge pixels: " + edgeCount);
 			return null;

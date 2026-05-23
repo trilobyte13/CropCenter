@@ -157,10 +157,23 @@ public final class TouchGestureHandler
 		boolean handled = scaleDetector.onTouchEvent(event);
 		handled |= gestureDetector.onTouchEvent(event);
 		int action = event.getActionMasked();
-		if ((action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) && isPanning)
+		if (action == MotionEvent.ACTION_UP && isPanning)
 		{
+			// Real release — commit the gesture (parity-snap, anchor update). onPanRelease performs
+			// CropEditorView's setCenter/setAnchor + snapAxisPreservingTies, which is the right
+			// terminal step ONLY when the user genuinely lifted their finger.
 			isPanning = false;
 			callback.onPanRelease();
+		}
+		else if (action == MotionEvent.ACTION_CANCEL && isPanning)
+		{
+			// Cancelled — parent intercepted the gesture, system back fired, multi-touch
+			// disambiguation rejected the pan, etc. Reset the panning flag WITHOUT committing
+			// onPanRelease's snap: persisting a parity-snap or anchor update from an interrupted
+			// drag leaves the crop at a position the user never released to. Symmetric to
+			// RotationRulerView.handleTouchRelease which already gates fling/snap/notify on
+			// ACTION_UP only.
+			isPanning = false;
 		}
 		return handled;
 	}

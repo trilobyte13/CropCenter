@@ -1,15 +1,21 @@
 package com.cropcenter.metadata;
 
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
 
 import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 
 /**
  * Tests for GainMapComposer.compose covering the four documented outcomes — three HDR-drop paths plus the
@@ -23,6 +29,41 @@ import java.nio.charset.StandardCharsets;
  */
 public final class GainMapComposerTest
 {
+	@Rule
+	public final TemporaryFolder tmp = new TemporaryFolder();
+
+	@Test
+	public void composeFileToFileProducesByteIdenticalOutputToInMemoryCompose() throws IOException
+	{
+		// Streaming-variant regression: composeFileToFile must produce a byte-for-byte identical
+		// output to `compose(primaryBytes, gainMap).bytes()` on the full-success path. Without this
+		// contract, a future divergence (different MpfPatcher invocation shape, different chunk
+		// boundary, head-truncation off-by-one) could silently ship different bytes for the
+		// streaming PNG-save path vs the in-memory JPEG-save path — a divergence that wouldn't
+		// surface until a user reported mismatched outputs across formats.
+		byte[] primary = buildPrimaryWithMpf();
+		byte[] gainMap = new byte[40];
+		for (int i = 0; i < gainMap.length; i++)
+		{
+			gainMap[i] = 0x42;
+		}
+		// In-memory baseline.
+		GainMapComposer.ComposeResult inMemory = GainMapComposer.compose(primary, gainMap);
+		assertTrue("in-memory full-success path must mark hdrAttached", inMemory.hdrAttached());
+		// Streaming variant — same input written to a tempfile, output to another tempfile.
+		File inFile = tmp.newFile("primary.jpg");
+		File outFile = tmp.newFile("composed.jpg");
+		try (FileOutputStream fos = new FileOutputStream(inFile))
+		{
+			fos.write(primary);
+		}
+		boolean hdrAttached = GainMapComposer.composeFileToFile(inFile, gainMap, outFile);
+		assertTrue("streaming full-success path must mark hdrAttached", hdrAttached);
+		byte[] streamingOutput = Files.readAllBytes(outFile.toPath());
+		assertArrayEquals("streaming compose must produce byte-identical output to in-memory variant",
+			inMemory.bytes(), streamingOutput);
+	}
+
 	@Test
 	public void composeHdrAttachedFalseWhenXmpPatchedButMpfFails() throws IOException
 	{

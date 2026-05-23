@@ -73,21 +73,33 @@ final class EditorRenderer
 	/**
 	 * Top-level frame draw. Renders (in order): background fill, source bitmap with rotation, optional pixel grid,
 	 * optional crop overlay (dim outside + grid lines + crosshair), selection points/polygon/labels, horizon paint
-	 * overlay. Snapshots `state.getSourceImage()` once at entry to avoid races with the bg-thread loadImage path
-	 * nulling the field mid-frame.
+	 * overlay. Snapshots `state.getSourceImage()` AND `state.getDisplayImage()` once at entry to avoid races with
+	 * the bg-thread loadImage path nulling either field mid-frame.
 	 *
 	 * @param canvas  destination canvas (the View's onDraw canvas)
-	 * @param state   editor state — source image, crop rect, rotation, selection, grid config
+	 * @param state   editor state — source image, display proxy, crop rect, rotation, selection, grid config
 	 * @param horizon overlay that draws the painted horizon-region polygon
 	 */
 	void draw(Canvas canvas, CropState state, HorizonPaintOverlay horizon)
 	{
-		// Snapshot once per frame: sourceImage can be nulled on the bg executor during loadImage's reset()
-		// while this draw is mid-flight. A null check followed by a second read could pass the check and
-		// then NPE on bmp.getWidth(). gridConfig follows the same rule so a multi-stage draw doesn't mix
-		// old and new configs across stages (selection markers / horizon overlay briefly mismatched).
-		Bitmap bmp = state == null ? null : state.getSourceImage();
-		if (bmp == null)
+		// Snapshot once: sourceImage / displayImage can be nulled on the background executor during loadImage's
+		// reset() while this draw is mid-flight. A null check followed by a second read can race — the check
+		// passes on the previous bitmap and the second read returns null, NPE'ing the subsequent getWidth().
+		// One local read each is consistent for the whole frame regardless of concurrent writes.
+		Bitmap source = state == null ? null : state.getSourceImage();
+		Bitmap display = state == null ? null : state.getDisplayImage();
+		if (source == null || display == null)
+		{
+			drawEmptyHint(canvas);
+			return;
+		}
+		// Zero-dimension guard. A pathological source / proxy with width or height 0 would (a) divide-by-zero
+		// in the proxyToSource ratio below, producing Infinity that propagates through bitmapMatrix and renders
+		// nothing visible AND (b) trip downstream pixel-grid culling. Real Bitmaps from BitmapFactory always
+		// have positive dimensions, but the guard catches a recycled-during-snapshot race or a future test
+		// fixture that constructs a 0-dim bitmap.
+		if (source.getWidth() <= 0 || source.getHeight() <= 0
+			|| display.getWidth() <= 0 || display.getHeight() <= 0)
 		{
 			drawEmptyHint(canvas);
 			return;
@@ -97,27 +109,59 @@ final class EditorRenderer
 		canvas.drawColor(ThemeColors.BACKGROUND);
 		float scale = viewport.getBaseScale() * viewport.getZoom();
 
-		// Crisp pixels when zoomed past 4x
-		imagePaint.setFilterBitmap(scale < 4f);
+		// Switch from display proxy to full source at zoom ≥ 4 so the pixel-grid (which activates at scale ≥ 6)
+		// shows true source pixels rather than the proxy's bilinear-filtered samples. Below 4× the proxy
+		// (≤ MAX_DISPLAY_PIXELS = 16 MP, HARDWARE config) renders as a GPU-resident texture — the whole point
+		// of the display-proxy pattern. The 4× boundary picks up just before pixel-grid territory so the
+		// user gets a brief source texture upload at the transition rather than seeing softened pixels at
+		// grid scale. proxyToSource ≥ 1 always (display is always ≤ source pixel count); equals 1 in the
+		// aliased (display == source) case where source already fit MAX_DISPLAY_PIXELS, making the matrix
+		// math behave identically to the pre-proxy path.
+		//
+		// Source-switch gate: TWO axes of protection. (1) Pixel-count gate at MAX_SOURCE_RENDER_PIXELS
+		// (64 MP) — above this, the GPU texture upload would be ~800 MB at 200 MP, past most phone GPUs'
+		// addressable texture memory. (2) Per-axis gate at MAX_SOURCE_RENDER_AXIS (16384 px) — a panorama
+		// like 32767×1000 sits under the pixel cap (32 MP) but its width exceeds every supported GPU's
+		// GL_MAX_TEXTURE_SIZE (typically 8192–16384). Either gate failing keeps the renderer on the proxy;
+		// the user trades crisp pixel-grid pixels for a non-freezing app on those out-of-budget sources.
+		// drawPixelGridIfZoomed below still reads source.getWidth/getHeight directly so the grid LINE
+		// spacing stays in source coords either way; only the bitmap-render path is gated.
+		long sourcePixels = (long) source.getWidth() * source.getHeight();
+		boolean sourceFitsBudget = sourcePixels <= BitmapUtils.MAX_SOURCE_RENDER_PIXELS
+			&& source.getWidth() <= BitmapUtils.MAX_SOURCE_RENDER_AXIS
+			&& source.getHeight() <= BitmapUtils.MAX_SOURCE_RENDER_AXIS;
+		boolean useSource = scale >= 4f && sourceFitsBudget;
+		Bitmap bmp = useSource ? source : display;
+		// Filtering hint: nearest-neighbor when actually drawing the full source above 4× (the user wants
+		// crisp pixel-grid pixels), bilinear otherwise. The proxy path above MAX_SOURCE_RENDER_PIXELS /
+		// MAX_SOURCE_RENDER_AXIS keeps filtering ON even at zoom ≥ 4 so the documented "soft pixels"
+		// fallback is genuinely interpolated, not nearest-neighbor magnified proxy texels — without this,
+		// a 200 MP panorama at zoom 8 would magnify each proxy texel as a hard rectangle.
+		imagePaint.setFilterBitmap(!useSource);
+		float proxyToSource = (float) source.getWidth() / bmp.getWidth();
+		float drawScale = scale * proxyToSource;
 
 		float left = viewport.imageToScreenX(0);
 		float top = viewport.imageToScreenY(0);
 		float rotation = state.getRotationDegrees();
 		// setScale initialises the matrix to a pure scale — overwrites any prior state, so we can reuse
 		// bitmapMatrix across frames without an explicit reset().
-		bitmapMatrix.setScale(scale, scale);
+		bitmapMatrix.setScale(drawScale, drawScale);
 		bitmapMatrix.postTranslate(left, top);
 		// Treat sub-UI-resolution residues as exactly zero — skipping postRotate keeps the identity transform
 		// path (crisper preview) when the user has returned the ruler to "0" but a tiny float residue remains.
+		// Rotation pivot uses source dims × scale (not bmp dims × drawScale) so the rotation pivot stays at
+		// the geometric image center regardless of whether the display proxy or the source is being rendered
+		// — both render at the same on-screen size, so the on-screen center is the same.
 		if (Math.abs(rotation) >= BitmapUtils.ROTATION_EPSILON)
 		{
-			float imageScreenCenterX = left + bmp.getWidth() * scale / 2f;
-			float imageScreenCenterY = top + bmp.getHeight() * scale / 2f;
+			float imageScreenCenterX = left + source.getWidth() * scale / 2f;
+			float imageScreenCenterY = top + source.getHeight() * scale / 2f;
 			bitmapMatrix.postRotate(rotation, imageScreenCenterX, imageScreenCenterY);
 		}
 		canvas.drawBitmap(bmp, bitmapMatrix, imagePaint);
 
-		drawPixelGridIfZoomed(canvas, state, grid, bmp, scale);
+		drawPixelGridIfZoomed(canvas, state, grid, source, scale);
 
 		float gridImgX;
 		float gridImgY;
@@ -141,8 +185,12 @@ final class EditorRenderer
 		{
 			gridImgX = 0;
 			gridImgY = 0;
-			gridW = bmp.getWidth();
-			gridH = bmp.getHeight();
+			// Read from source (NOT bmp) — bmp switches between source and proxy on the 4× zoom threshold,
+			// so reading bmp.getWidth() would make the no-crop overlay grid visibly jump in extent every
+			// time the user crosses zoom=4 on a downsampled image. The grid renders in image-pixel space
+			// via the viewport's imageToScreen mapping, so the dimensions must always be in source coords.
+			gridW = source.getWidth();
+			gridH = source.getHeight();
 		}
 
 		gridRenderer.draw(canvas, gridImgX, gridImgY, gridW, gridH,
@@ -177,6 +225,14 @@ final class EditorRenderer
 	 * before drawing. The crosshair colour is taken from `grid.color()` (with 0xCC alpha) so the centerpoint
 	 * marker visually matches the grid lines the user picked — earlier the crosshair was a hard-coded mauve
 	 * and stayed mauve even after the user recoloured the grid (user-reported bug).
+	 *
+	 * @param canvas   target Canvas; drawn into in place
+	 * @param state    CropState providing the crop center (read-only)
+	 * @param grid     GridConfig supplying crop / grid colors and the crosshair color
+	 * @param gridImgX crop origin X in image-space coordinates
+	 * @param gridImgY crop origin Y in image-space coordinates
+	 * @param cropW    crop width in image pixels
+	 * @param cropH    crop height in image pixels
 	 */
 	private void drawCropOverlay(Canvas canvas, CropState state, GridConfig grid,
 		float gridImgX, float gridImgY, int cropW, int cropH)
@@ -227,8 +283,18 @@ final class EditorRenderer
 	 * the threshold the grid lines would be sub-pixel and unreadable. Computes a rotation-aware axis-aligned
 	 * bounding box of the visible image area and only draws lines inside that AABB to avoid the O(W * H) full-image
 	 * walk.
+	 *
+	 * @param canvas target Canvas; drawn into in place
+	 * @param state  CropState supplying rotation + image dimensions
+	 * @param grid   GridConfig; pixel-grid color and the toggle that gates this method
+	 * @param source full-resolution source bitmap; only width/height are read. Must NOT be the display proxy
+	 *               — at zoom ≥ 6 (when this method runs) the renderer's bmp variable already holds the
+	 *               source, but passing the proxy here would scale the pixel grid to proxy resolution and
+	 *               the per-pixel lines would no longer land on source-coord pixel boundaries
+	 * @param scale  current screen-pixels-per-image-pixel (baseScale * zoom); sub-6× short-circuits to no-op
 	 */
-	private void drawPixelGridIfZoomed(Canvas canvas, CropState state, GridConfig grid, Bitmap bmp, float scale)
+	private void drawPixelGridIfZoomed(Canvas canvas, CropState state, GridConfig grid, Bitmap source,
+		float scale)
 	{
 		if (!grid.showPixelGrid() || scale < 6f)
 		{
@@ -254,8 +320,8 @@ final class EditorRenderer
 		// outside that AABB is guaranteed off-screen. For a 10000×10000 bitmap zoomed to ~6× on a 1080p view we
 		// go from ~20 000 lines drawn to a few hundred — the difference shows up in onDraw time on lower-end
 		// devices. Add a one-pixel margin so the border lines of the visible region always draw.
-		int imgW = bmp.getWidth();
-		int imgH = bmp.getHeight();
+		int imgW = source.getWidth();
+		int imgH = source.getHeight();
 		int[] bounds = visibleImageBoundsAabb(state, imgW, imgH);
 		int startX = bounds[0];
 		int startY = bounds[1];
@@ -287,6 +353,13 @@ final class EditorRenderer
 	 * Draw the numeric index label next to each selection point. Labels are drawn axis-aligned (upright) at the
 	 * rotated screen position of each point so the digits stay legible under rotation. This runs in the un-rotated
 	 * canvas — caller must have already restored out of the rotated canvas before calling.
+	 *
+	 * @param canvas target Canvas; drawn into in place. Caller must have already restored out of any rotated save
+	 *               layer.
+	 * @param state  CropState supplying rotation + image dimensions for the rotated screen-position mapping
+	 * @param points selection points in image-space coordinates; read-only
+	 * @param scale  current screen-pixels-per-image-pixel (baseScale * zoom); selects between the zoomed-in
+	 *               pixel-center label placement and the zoomed-out fallback
 	 */
 	private void drawSelectionLabels(Canvas canvas, CropState state, List<SelectionPoint> points, float scale)
 	{
@@ -323,6 +396,11 @@ final class EditorRenderer
 	 * Draw the per-selection-point marker. Filled image-pixel square when zoomed past 6× screen-pixel per
 	 * image-pixel (marker visibly follows the rotated pixel grid, becoming a rotated quadrilateral at non-cardinal
 	 * angles); a 10-px circle when zoomed out (single pixel is too small to see).
+	 *
+	 * @param canvas target Canvas; runs inside the caller's rotated save layer when the image is rotated
+	 * @param points selection points in image-space coordinates; read-only
+	 * @param scale  current screen-pixels-per-image-pixel (baseScale * zoom); selects between the pixel-square
+	 *               and circle marker styles
 	 */
 	private void drawSelectionMarkers(Canvas canvas, List<SelectionPoint> points, float scale)
 	{
@@ -352,6 +430,14 @@ final class EditorRenderer
 	 * Draw selection markers + connecting polygon + labels for state.getSelectionPoints(). Wraps the marker draws
 	 * in a canvas save/rotate/restore when the editor is rotated, so markers stay axis-aligned in image-space
 	 * (visually rotating with the image) rather than appearing to slide as the image rotates underneath.
+	 *
+	 * @param canvas target Canvas; drawn into in place (a save/rotate/restore pair brackets the marker + polygon
+	 *               draws when the image is rotated)
+	 * @param points selection points in image-space coordinates; read-only
+	 * @param state  CropState supplying rotation + image dimensions
+	 * @param grid   GridConfig supplying the selection color shared by points and the connecting polygon
+	 * @param scale  current screen-pixels-per-image-pixel (baseScale * zoom); forwarded to the marker / label
+	 *               helpers
 	 */
 	private void drawSelectionPoints(Canvas canvas, List<SelectionPoint> points, CropState state,
 		GridConfig grid, float scale)
@@ -389,6 +475,9 @@ final class EditorRenderer
 	 * Draw the translucent polygon connecting selection points. Only rendered when 3+ points are placed (fewer
 	 * don't form a closed region). Runs inside the caller's rotated canvas so the polygon follows the image under
 	 * rotation.
+	 *
+	 * @param canvas target Canvas; runs inside the caller's rotated save layer when the image is rotated
+	 * @param points selection points in image-space coordinates; no-op when fewer than 3 are supplied
 	 */
 	private void drawSelectionPolygon(Canvas canvas, List<SelectionPoint> points)
 	{
@@ -420,6 +509,12 @@ final class EditorRenderer
 	 * Return [startX, startY, endX, endY] — the integer AABB of image coords visible under the current viewport +
 	 * rotation, clamped to the bitmap's bounds. Computed by un-rotating each of the four screen-viewport corners
 	 * into image space and taking the axis-aligned bbox of those points.
+	 *
+	 * @param state CropState supplying rotation; forwarded to viewport.screenToImagePixelInto
+	 * @param imgW  bitmap width in pixels; used to clamp the AABB to the image's right edge
+	 * @param imgH  bitmap height in pixels; used to clamp the AABB to the image's bottom edge
+	 * @return new int[]{startX, startY, endX, endY} — integer AABB of visible image coords, clamped to
+	 *         [0, imgW] × [0, imgH]
 	 */
 	private int[] visibleImageBoundsAabb(CropState state, int imgW, int imgH)
 	{

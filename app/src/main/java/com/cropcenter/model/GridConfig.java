@@ -40,9 +40,6 @@ public record GridConfig(boolean enabled, boolean includeInExport, boolean showP
 			color, columns, pixelGridColor, rows, selectionColor);
 	}
 
-	/**
-	 * Replace the column count. Clamped by CropState's update path — this method itself does not validate.
-	 */
 	public GridConfig withColumns(int columns)
 	{
 		return new GridConfig(enabled, includeInExport, showPixelGrid, lineWidth,
@@ -79,19 +76,12 @@ public record GridConfig(boolean enabled, boolean includeInExport, boolean showP
 			color, columns, pixelGridColor, rows, selectionColor);
 	}
 
-	/**
-	 * Replace the shared selection color (ARGB) — used by selection points, polygon fill, and horizon paint
-	 * together for visual consistency.
-	 */
 	public GridConfig withSelectionColor(int selectionColor)
 	{
 		return new GridConfig(enabled, includeInExport, showPixelGrid, lineWidth,
 			color, columns, pixelGridColor, rows, selectionColor);
 	}
 
-	/**
-	 * Toggle the per-pixel grid overlay that appears at high zoom levels.
-	 */
 	public GridConfig withShowPixelGrid(boolean showPixelGrid)
 	{
 		return new GridConfig(enabled, includeInExport, showPixelGrid, lineWidth,

@@ -95,7 +95,7 @@ public final class UltraHdrCompat
 
 			if (sourceGainmap != null && gainmapBitmap != null)
 			{
-				gainmapOutput = renderGainmap(sourceGainmap, gainmapBitmap,
+				gainmapOutput = renderGainmap(gainmapBitmap,
 					current.getWidth(), current.getHeight(),
 					srcX, srcY, render.cropW(), render.cropH(), render.rotation());
 				Gainmap newGainmap = new Gainmap(gainmapOutput);
@@ -164,6 +164,57 @@ public final class UltraHdrCompat
 	public static boolean containsHdrgm(byte[] data)
 	{
 		return HdrSignature.isHdrSource(data);
+	}
+
+	/**
+	 * Sweep stale cache files from previous sessions. Two prefixes participate:
+	 *   - `hdr_src_<pid>_<nanos>` — written by decodeHdrBitmap / CropExporter for HDR re-decode and
+	 *     encode pipeline scratch (5-50 MB on Samsung HDR captures, 200 MB-class on 200 MP HDR).
+	 *   - `input_raw_*` — written by SafFileHelper.readUriBytes as the cache-file fallback when a SAF
+	 *     URI doesn't resolve to a direct filesystem path (cloud / SAF-only providers). Up to the
+	 *     MAX_READ_BYTES cap (128 MB).
+	 *
+	 * Both prefixes are deleted in `finally` blocks on clean exit; hard process kills (Android OOM
+	 * killer, user force-stop, low-memory eviction during the read/decode) bypass both the finally and
+	 * the `deleteOnExit()` JVM hook, leaving stale multi-MB blobs that accumulate across sessions —
+	 * also a privacy concern since they're full source-image copies.
+	 *
+	 * Called once at host startup (MainActivity.onCreate) with the cache dir the read/export paths use;
+	 * deletes any file matching either prefix regardless of pid (the writers encode pid/nanos to avoid
+	 * intra-session collisions, but a different pid at sweep time means "previous app launch — safe to
+	 * delete"). Silent on individual delete failure (caller's prior crash may have left a file the
+	 * current process can't unlink — better to log + continue than to abort startup).
+	 *
+	 * @param cacheDir cache directory to sweep; null short-circuits without throwing
+	 */
+	public static void sweepStaleCacheFiles(File cacheDir)
+	{
+		if (cacheDir == null || !cacheDir.isDirectory())
+		{
+			return;
+		}
+		File[] entries = cacheDir.listFiles(
+			(dir, name) -> name.startsWith("hdr_src_") || name.startsWith("input_raw_"));
+		if (entries == null)
+		{
+			return;
+		}
+		int deleted = 0;
+		for (File entry : entries)
+		{
+			if (entry.delete())
+			{
+				deleted++;
+			}
+			else
+			{
+				Log.w(TAG, "sweepStaleCacheFiles: failed to delete " + entry.getName());
+			}
+		}
+		if (deleted > 0)
+		{
+			Log.d(TAG, "sweepStaleCacheFiles: reclaimed " + deleted + " stale cache file(s)");
+		}
 	}
 
 	/**
@@ -266,6 +317,10 @@ public final class UltraHdrCompat
 	 * Copy the HDR tone-mapping parameters (ratios, gamma, epsilon, display-ratio thresholds) from source to target
 	 * Gainmap. Preserving these verbatim is what keeps the cropped HDR looking identical to the source at the kept
 	 * pixels.
+	 *
+	 * @param sourceGainmap source Gainmap providing the tone-mapping parameters (read-only)
+	 * @param newGainmap    destination Gainmap; its ratio / gamma / epsilon / display-ratio fields are overwritten
+	 *                      from `sourceGainmap`
 	 */
 	private static void copyGainmapMetadata(Gainmap sourceGainmap, Gainmap newGainmap)
 	{
@@ -290,14 +345,21 @@ public final class UltraHdrCompat
 	 *
 	 * Subsampled via a two-pass decode: the bounds-only pre-pass reads the SOF dimensions, and
 	 * BitmapUtils.computeInSampleSize picks the smallest power-of-2 sample size that fits the decoded bitmap
-	 * under BitmapUtils.getMaxDecodePixels() (the device-adaptive cap set at MainActivity.onCreate).
-	 * Without this cap a 200 MP Samsung HDR source (16384×12288) would OOM the HDR-save path even though
-	 * ImageLoadController.applyBytes already loaded the display bitmap at
-	 * subsampled resolution — this method re-decodes the original bytes from scratch to preserve the gainmap,
-	 * so without its own subsampling it bypasses the load-time cap and burns the heap at export time. Skia's
-	 * HDR-aware decoder applies inSampleSize to both the primary AND the embedded gainmap consistently, so
-	 * the gainmap-to-primary ratio (typically 4:1 quarter-res) stays correct after subsampling and the
-	 * downstream renderGainmap math is unaffected.
+	 * under BitmapUtils.MAX_DECODE_PIXELS (256 MP — handles a 200 MP Samsung capture at sampleSize=1).
+	 * Without this cap a future > 256 MP source would OOM the HDR-save path even though
+	 * ImageLoadController.applyBytes already loaded the original at subsampled resolution — this method
+	 * re-decodes the original bytes from scratch to preserve the gainmap, so without its own subsampling
+	 * it bypasses the load-time cap and burns the heap at export time. Skia's HDR-aware decoder applies
+	 * inSampleSize to both the primary AND the embedded gainmap consistently, so the gainmap-to-primary
+	 * ratio (typically 4:1 quarter-res) stays correct after subsampling and the downstream renderGainmap
+	 * math is unaffected.
+	 *
+	 * @param originalBytes raw source JPEG bytes including the gainmap segments
+	 * @param cacheDir      writable scratch directory; this method creates and immediately deletes a unique cache
+	 *                      file inside it
+	 * @return decoded Bitmap with its gainmap attached (subsampled when the source exceeds MAX_DECODE_PIXELS); may
+	 *         be null if BitmapFactory.decodeFile fails to decode the cache file
+	 * @throws IOException if writing the source bytes to the cache file fails
 	 */
 	private static Bitmap decodeHdrBitmap(byte[] originalBytes, File cacheDir) throws IOException
 	{
@@ -305,6 +367,11 @@ public final class UltraHdrCompat
 		// is cheap insurance against future parallelism.
 		File hdrSourceCache = new File(cacheDir,
 			"hdr_src_" + Process.myPid() + "_" + System.nanoTime() + ".jpg");
+		// Belt-and-braces against process kill mid-decode: the explicit delete() in the finally below
+		// runs on clean exit; deleteOnExit() registers a JVM shutdown hook for graceful Application
+		// teardown. Hard kills (OOM killer, force-stop) bypass both — sweepStaleCacheFiles handles those
+		// at next launch.
+		hdrSourceCache.deleteOnExit();
 		try
 		{
 			try (FileOutputStream fos = new FileOutputStream(hdrSourceCache))
@@ -317,7 +384,7 @@ public final class UltraHdrCompat
 			BitmapFactory.Options opts = new BitmapFactory.Options();
 			opts.inPreferredColorSpace = ColorSpace.get(ColorSpace.Named.DISPLAY_P3);
 			opts.inSampleSize = BitmapUtils.computeInSampleSize(
-				boundsOpts.outWidth, boundsOpts.outHeight, BitmapUtils.getMaxDecodePixels());
+				boundsOpts.outWidth, boundsOpts.outHeight, BitmapUtils.MAX_DECODE_PIXELS);
 			if (opts.inSampleSize > 1)
 			{
 				Log.d(TAG, "HDR re-decode subsampling " + boundsOpts.outWidth + "x"
@@ -335,6 +402,14 @@ public final class UltraHdrCompat
 	 * Rotated gain-map draw. Cardinal rotations at integer-aligned draw offsets are lossless integer-pixel remaps —
 	 * disable bilinear so nearest-neighbor reads source pixels verbatim. Fractional draw offsets need bilinear to
 	 * match the primary path (which bilinear-samples at sub-pixel offsets).
+	 *
+	 * @param gainmapCanvas Canvas wrapping the destination gainmap output bitmap; drawn into in place
+	 * @param gainmapBitmap source gainmap bitmap to draw
+	 * @param gainmapDrawX  draw origin X in destination gainmap pixels (typically negative when cropping into the
+	 *                      source)
+	 * @param gainmapDrawY  draw origin Y in destination gainmap pixels
+	 * @param userRotation  user-applied rotation in degrees
+	 * @param gainmapPaint  base Paint; cloned with FILTER_BITMAP disabled for the cardinal-rotation fast path
 	 */
 	private static void drawGainmapRotated(Canvas gainmapCanvas, Bitmap gainmapBitmap,
 		float gainmapDrawX, float gainmapDrawY, float userRotation, Paint gainmapPaint)
@@ -363,6 +438,10 @@ public final class UltraHdrCompat
 	 * null/empty or the bitmap has no gainmap. Must run BEFORE applyExifOrientation so the mask coordinates (in
 	 * source's stored orientation, since BitmapFactory doesn't auto-rotate by EXIF) align with the gainmap bitmap's
 	 * coordinates.
+	 *
+	 * @param current source Bitmap whose attached Gainmap is inpainted (replaced when the original gainmap bitmap
+	 *                is immutable and a mutable copy succeeds)
+	 * @param aiMask  AI mask in source stored-orientation coords; null / no-masked-pixels short-circuits to no-op
 	 */
 	private static void inpaintGainmapIfMasked(Bitmap current, AiMask aiMask)
 	{
@@ -421,7 +500,6 @@ public final class UltraHdrCompat
 	 * offset by gainmap/primary ratio so the gainmap subregion lines up pixel-for-pixel with the primary crop (at
 	 * the gainmap's native resolution, typically lower than the primary's).
 	 *
-	 * @param sourceGainmap  source Gainmap, used by the caller; this method only needs gainmapBitmap
 	 * @param gainmapBitmap  source gain-map pixel buffer at its native resolution
 	 * @param primaryW       primary bitmap width (used to derive gainmap-to-primary scale)
 	 * @param primaryH       primary bitmap height
@@ -432,7 +510,7 @@ public final class UltraHdrCompat
 	 * @param userRotation   rotation in degrees applied to the primary; mirrored on the gainmap
 	 * @return freshly-allocated bitmap at the gain-map's quarter-res cropped output dims
 	 */
-	private static Bitmap renderGainmap(Gainmap sourceGainmap, Bitmap gainmapBitmap,
+	private static Bitmap renderGainmap(Bitmap gainmapBitmap,
 		int primaryW, int primaryH, float srcX, float srcY, int cropW, int cropH, float userRotation)
 	{
 		float gainmapScaleX = (float) gainmapBitmap.getWidth() / primaryW;
@@ -498,6 +576,14 @@ public final class UltraHdrCompat
 	 * Render the primary output bitmap via BitmapUtils.drawCropped so the result is byte-identical to what
 	 * CropExporter produces — crucial because the primary bytes shipped to the user come from CropExporter, while
 	 * the gainmap alignment depends on UltraHdrCompat's primary matching.
+	 *
+	 * @param current      source primary bitmap to crop / rotate; not recycled here
+	 * @param srcX         continuous-float crop origin X on `current` (see CropState.getCropImageXFloat)
+	 * @param srcY         continuous-float crop origin Y on `current`
+	 * @param cropW        crop output width in pixels
+	 * @param cropH        crop output height in pixels
+	 * @param userRotation user-applied rotation in degrees
+	 * @return freshly-allocated DISPLAY_P3 ARGB_8888 bitmap of size (cropW, cropH); ownership transfers to caller
 	 */
 	private static Bitmap renderPrimary(Bitmap current, float srcX, float srcY,
 		int cropW, int cropH, float userRotation)

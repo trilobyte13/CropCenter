@@ -106,6 +106,23 @@ public final class RotationMathTest
 	}
 
 	@Test
+	public void naNRotationPropagatesAsNaN()
+	{
+		// Pin the current contract: NaN rotation in produces NaN dimensions out. The helper has no
+		// internal NaN guard — Math.cos(NaN) = NaN and the output multiplications cascade. Callers
+		// that need a finite fallback (e.g. ViewportMath.effectiveMinZoom) must check the output
+		// before using it. Symmetric Infinity case included so a future short-circuit added for one
+		// of them surfaces here for the other.
+		float[] out = new float[2];
+		RotationMath.rotatedAabbDimensions(100, 200, Float.NaN, out);
+		assertEquals("NaN rotation in must propagate to first axis", Float.NaN, out[0], 0f);
+		assertEquals("NaN rotation in must propagate to second axis", Float.NaN, out[1], 0f);
+		RotationMath.rotatedAabbDimensions(100, 200, Float.POSITIVE_INFINITY, out);
+		assertEquals("Infinity rotation in must propagate to first axis", Float.NaN, out[0], 0f);
+		assertEquals("Infinity rotation in must propagate to second axis", Float.NaN, out[1], 0f);
+	}
+
+	@Test
 	public void returnsTheSameArrayForChaining()
 	{
 		// The Javadoc explicitly says "Returns out for chaining". A regression that allocated a fresh array
@@ -116,6 +133,77 @@ public final class RotationMathTest
 
 		float[] returnedInv = RotationMath.inverse(0f, 0f, 0f, 0f, 30f, out);
 		assertSame(out, returnedInv);
+	}
+
+	@Test
+	public void rotatedAabbDimensionsAt45DegreesSquareIsSqrt2TimesSide()
+	{
+		// Square of side 1000 rotated 45° has AABB sqrt(2) * 1000 on each side.
+		float[] out = new float[2];
+		RotationMath.rotatedAabbDimensions(1000, 1000, 45f, out);
+		float expected = (float) (1000 * Math.sqrt(2));
+		assertEquals(expected, out[0], 1e-2f);
+		assertEquals(expected, out[1], 1e-2f);
+	}
+
+	@Test
+	public void rotatedAabbDimensionsAt90DegreesSwapsAxes()
+	{
+		// At 90°, the bounding box rotates by 90° too, so width / height swap.
+		float[] out = new float[2];
+		RotationMath.rotatedAabbDimensions(4000, 3000, 90f, out);
+		assertEquals(3000f, out[0], 1e-3f);
+		assertEquals(4000f, out[1], 1e-3f);
+	}
+
+	@Test
+	public void rotatedAabbDimensionsAtSubEpsilonCollapsesToUnrotated()
+	{
+		// Sub-epsilon rotation (< BitmapUtils.ROTATION_EPSILON = 0.005°) must take the identity fast path and
+		// return the input dims exactly. A regression that ran the trig branch would shave a fraction off the
+		// AABB and the downstream fit-to-view / clamp math would over-shrink the cap at every double-tap.
+		float[] out = new float[2];
+		RotationMath.rotatedAabbDimensions(4000, 3000, 0.001f, out);
+		assertEquals(4000f, out[0], 0f);
+		assertEquals(3000f, out[1], 0f);
+	}
+
+	@Test
+	public void rotatedAabbDimensionsAtZeroReturnsInputDims()
+	{
+		// Zero rotation must return input dims exactly. Pin the identity case so a regression in the absCos
+		// / absSin handling doesn't silently change baseScale on every unrotated fit-to-view.
+		float[] out = new float[2];
+		RotationMath.rotatedAabbDimensions(4000, 3000, 0f, out);
+		assertEquals(4000f, out[0], 0f);
+		assertEquals(3000f, out[1], 0f);
+	}
+
+	@Test
+	public void rotatedAabbDimensionsGeneralAngleMatchesAbsCosSinFormula()
+	{
+		// 4000x3000 rotated 30°: rotatedW = 4000*cos30 + 3000*sin30 = 3464.10 + 1500 = 4964.10;
+		// rotatedH = 4000*sin30 + 3000*cos30 = 2000 + 2598.08 = 4598.08.
+		float[] out = new float[2];
+		RotationMath.rotatedAabbDimensions(4000, 3000, 30f, out);
+		float expectedW = (float) (4000 * Math.cos(Math.toRadians(30))
+			+ 3000 * Math.sin(Math.toRadians(30)));
+		float expectedH = (float) (4000 * Math.sin(Math.toRadians(30))
+			+ 3000 * Math.cos(Math.toRadians(30)));
+		assertEquals(expectedW, out[0], TOL);
+		assertEquals(expectedH, out[1], TOL);
+	}
+
+	@Test
+	public void rotatedAabbDimensionsNegativeAngleEqualsPositive()
+	{
+		// AABB is sign-invariant — the |cos| / |sin| absolute values flatten the sign.
+		float[] pos = new float[2];
+		float[] neg = new float[2];
+		RotationMath.rotatedAabbDimensions(4000, 3000, 37.5f, pos);
+		RotationMath.rotatedAabbDimensions(4000, 3000, -37.5f, neg);
+		assertEquals(pos[0], neg[0], 0f);
+		assertEquals(pos[1], neg[1], 0f);
 	}
 
 	@Test

@@ -33,9 +33,6 @@ public final class RotationRulerView extends View
 	 */
 	public interface OnRotationChangedListener
 	{
-		/**
-		 * @param degrees current rotation reading in degrees, clamped to [MIN_DEG, MAX_DEG]
-		 */
 		void onRotationChanged(float degrees);
 	}
 
@@ -296,6 +293,14 @@ public final class RotationRulerView extends View
 		}
 	}
 
+	/**
+	 * Register the listener that receives rotation-degree updates as the user drags / flings / pinches the
+	 * ruler. Single-listener semantics: setting a new one replaces any prior listener, and passing null
+	 * clears it. The listener fires on every degree change including momentum frames during a fling, so
+	 * its implementation must be cheap.
+	 *
+	 * @param listener new listener, or null to clear
+	 */
 	public void setOnRotationChangedListener(OnRotationChangedListener listener)
 	{
 		this.listener = listener;

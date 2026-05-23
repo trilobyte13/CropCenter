@@ -21,9 +21,11 @@ import com.cropcenter.util.AiRegionDetector.AiMask;
 public record Graft(byte[] bytes, String displayName, AiMask aiMask)
 {
 	/**
-	 * True when the graft carries a non-empty AI-region mask that GainMapInpainter should act on. False for grafts
-	 * with no detected AI fill (the splice still needs a canvas-encode pass for spatial alignment, but the inpaint
-	 * step is skipped).
+	 * Check whether the graft carries a non-empty AI-region mask that GainMapInpainter should act on.
+	 *
+	 * @return true when aiMask is present AND reports at least one masked pixel; false when no mask was
+	 *         detected (the splice still needs a canvas-encode pass for spatial alignment, but the
+	 *         inpaint step is skipped)
 	 */
 	public boolean hasAiMask()
 	{

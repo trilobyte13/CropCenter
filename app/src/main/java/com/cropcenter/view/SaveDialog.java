@@ -16,9 +16,10 @@ import com.cropcenter.util.DpToPx;
 import com.cropcenter.util.ThemeColors;
 
 /**
- * Pre-save dialog: output format (JPEG/PNG) and grid-bake toggle. The filename and target directory are chosen by the
- * SAF picker that follows — this dialog is just the format/options step. Matches the Settings dialog visual style
- * (Catppuccin Mocha cards).
+ * Legacy (pre-MES) save options dialog — the primary Save flow uses FolderPickerDialog when
+ * MANAGE_EXTERNAL_STORAGE is granted; this dialog is the fallback when it isn't. Output format
+ * (JPEG/PNG) and grid-bake toggle live here; the filename and target directory are chosen by the SAF
+ * picker that follows. Matches the Settings dialog visual style (Catppuccin Mocha cards).
  */
 public final class SaveDialog
 {
@@ -29,9 +30,6 @@ public final class SaveDialog
 	 */
 	public interface OnSaveListener
 	{
-		/**
-		 * Invoked once when the user confirms the save dialog.
-		 */
 		void onSave();
 	}
 
@@ -52,8 +50,9 @@ public final class SaveDialog
 	 * state.reset() runs, otherwise applySettings's CropState mutations on Continue would commit the
 	 * user's choices for image A onto image B.
 	 *
-	 * The onCancel callback fires on every cancel path — Cancel button (which now calls dialog.cancel()
-	 * to route through OnCancelListener), back-press, outside-touch, and forced dismissTransientDialogs.
+	 * The onCancel callback fires on every cancel path — Cancel button (which routes through
+	 * dialog.cancel() so OnCancelListener is the single source of truth), back-press, outside-touch,
+	 * and forced dismissTransientDialogs.
 	 * SaveController uses it to clear priorSnapshot so an abandoned dialog doesn't pin the source bitmap
 	 * via a snapshot that no rollback path will consume. It does NOT fire on the
 	 * Continue path — applySettings + onSave have committed user choices, and the SAF flow's own abort

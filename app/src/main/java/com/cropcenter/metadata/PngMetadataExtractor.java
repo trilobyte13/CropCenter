@@ -51,8 +51,8 @@ public final class PngMetadataExtractor
 	/**
 	 * Walk a PNG file's chunks and return any metadata segments worth preserving. Currently returns at most one
 	 * entry — a synthetic APP1 EXIF segment built from the eXIf chunk's TIFF payload, wrapped in the canonical
-	 * `FF E1 LL LL "Exif\0\0" [TIFF...]` layout that JpegSegment.isExif and CropExporter.injectPngExif both
-	 * already understand.
+	 * `FF E1 LL LL "Exif\0\0" [TIFF...]` layout that `JpegSegment.isExif` and the JPEG inject path
+	 * (`JpegMetadataInjector.injectFileToFile`) both already understand.
 	 *
 	 * Returns an empty list when the input isn't a valid PNG, when no eXIf chunk is present, or when a chunk
 	 * fails structural validation (length past EOF, length sign-overflow), or when the eXIf payload exceeds the

@@ -8,9 +8,13 @@ import android.provider.Settings;
 import android.util.Log;
 
 /**
- * Wraps the MANAGE_EXTERNAL_STORAGE check and the deep-link to its Settings page. The permission is only needed for
- * reliable file-I/O Replace; the prompt is offered from ReplaceStrategy.showReplaceFailureDialog when an actual
- * collision-overwrite hits an SAF-permission failure, never up-front at app start or save-dialog open.
+ * Wraps the MANAGE_EXTERNAL_STORAGE check and the deep-link to its Settings page. MES gates the
+ * in-app FolderPickerDialog flow (direct File I/O save bypassing Samsung's SAF picker) and the
+ * file-I/O Replace fallback. Surfaced from three call sites: MainActivity.showAllFilesAccessPrompt
+ * (up-front first-launch prompt when MES isn't granted, gated on savedInstanceState == null so it
+ * doesn't reappear on every recreate), SettingsDialog's Permissions card (user-discoverable grant
+ * affordance), and ReplaceStrategy.showReplaceFailureDialog (recovery path after a Replace-on-
+ * collision SAF-permission failure).
  */
 public final class StoragePermissionHelper
 {
@@ -18,11 +22,24 @@ public final class StoragePermissionHelper
 
 	private final Activity activity;
 
+	/**
+	 * Bind the helper to an Activity. The Activity is captured for `openStoragePermissionSettings`'s
+	 * `startActivity` call; the helper does NOT retain extra strong references beyond this field.
+	 *
+	 * @param activity hosting Activity, used for the Settings-page deep link
+	 */
 	public StoragePermissionHelper(Activity activity)
 	{
 		this.activity = activity;
 	}
 
+	/**
+	 * Query whether the app currently holds the MANAGE_EXTERNAL_STORAGE permission. Returns the live OS
+	 * verdict every call — no caching — so a grant/revoke that happens while the app is foregrounded
+	 * surfaces immediately on next check.
+	 *
+	 * @return true when Environment.isExternalStorageManager() reports the permission is granted
+	 */
 	public boolean hasStoragePermission()
 	{
 		return Environment.isExternalStorageManager();
@@ -30,12 +47,10 @@ public final class StoragePermissionHelper
 
 	/**
 	 * Launch the system Settings page where the user can grant MANAGE_EXTERNAL_STORAGE for this app.
-	 * Used by ReplaceStrategy.showReplaceFailureDialog as the recovery path when a collision-overwrite
-	 * Replace hits an SAF-permission failure and the file-I/O fallback is the only remaining strategy.
-	 *
-	 * Catches any Intent dispatch failure (no Settings app on the device, ActivityNotFoundException
-	 * on heavily-skinned OEMs) so the caller's UX flow doesn't crash — failure is logged and the
-	 * Replace dialog stays open so the user can pick a different name instead.
+	 * Callers documented at the class level. Catches any Intent dispatch failure (no Settings app on
+	 * the device, ActivityNotFoundException on heavily-skinned OEMs) so the caller's UX flow doesn't
+	 * crash — failure is logged and the calling dialog stays open so the user can either retry the
+	 * tap or back out and pick a different action.
 	 */
 	public void openStoragePermissionSettings()
 	{

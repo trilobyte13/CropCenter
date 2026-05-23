@@ -93,7 +93,9 @@ public final class CropRender
 	}
 
 	/**
-	 * @return crop-origin X (top-left of the crop rect in source image coords) — `centerX − cropW / 2f`
+	 * Crop-origin X (top-left of the crop rect in source image coords) derived from the stored center and width.
+	 *
+	 * @return centerX − cropW / 2f
 	 */
 	public float srcX()
 	{
@@ -101,7 +103,9 @@ public final class CropRender
 	}
 
 	/**
-	 * @return crop-origin Y — `centerY − cropH / 2f`
+	 * Crop-origin Y derived from the stored center and height.
+	 *
+	 * @return centerY − cropH / 2f
 	 */
 	public float srcY()
 	{

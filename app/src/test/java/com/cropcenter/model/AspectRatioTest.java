@@ -97,6 +97,27 @@ public final class AspectRatioTest
 	}
 
 	@Test
+	public void snapAtMaxIntDimensionsDoesNotOverflow()
+	{
+		// The snap()'s optimal-k formula computes `(long) wInt * cropW + (long) hInt * cropH` and
+		// `(long) wInt * wInt + (long) hInt * hInt`. Without the explicit `(long)` casts on those
+		// products, a 16:9 AR with cropW / cropH near Integer.MAX_VALUE would overflow the multiply
+		// before the addition (16 × 2^30 ≈ 2^34, past int range). Pin both num and den paths by driving
+		// inputs near Integer.MAX_VALUE and asserting the snap returns sane positive output, not a
+		// sign-flipped or zero degenerate. The 16:9 AR is the canonical worst case (largest wInt²).
+		int huge = Integer.MAX_VALUE / 32; // ≈ 6.7 × 10^7, far above realistic image dims but well
+		                                   // within the long-arithmetic budget for the num formula
+		int[] snapped = AspectRatio.R16_9.snap(huge, huge * 9 / 16, huge, huge);
+		assertTrue("snap output W must be positive (no overflow / wrap)", snapped[0] > 0);
+		assertTrue("snap output H must be positive (no overflow / wrap)", snapped[1] > 0);
+		assertTrue("snap output W must not exceed maxW bound", snapped[0] <= huge);
+		assertTrue("snap output H must not exceed maxH bound", snapped[1] <= huge);
+		// AR check: snapped result must be exactly 16:9 (the snap's whole purpose).
+		assertEquals("snapped AR must equal 16:9 exact",
+			16.0 / 9.0, (double) snapped[0] / snapped[1], 1e-9);
+	}
+
+	@Test
 	public void snapBailsWhenArCannotFitMaxBounds()
 	{
 		// 16:9 lock on a 8×8 image: kMax = min(8/16, 8/9) = 0; AR can't physically realise inside the
@@ -123,10 +144,20 @@ public final class AspectRatioTest
 	public void snapFractionalArReturnsInputUnchanged()
 	{
 		// Non-integer dims (Custom AR with 4.5 / 5) can't yield exact-integer-pixel snapping — fall back
-		// to the caller's per-axis round, which is the best available match.
-		AspectRatio fractional = new AspectRatio(4.5f, 5f);
-		assertArrayEquals(new int[] { 2990, 3738 },
-			fractional.snap(2990, 3738, 3000, 4000));
+		// to the caller's per-axis round, which is the best available match. Cover BOTH-axes-fractional,
+		// width-only-fractional, and height-only-fractional cases so a regression that swaps the OR in
+		// `width != round(width) || height != round(height)` for an AND (only short-circuits when BOTH
+		// are fractional) gets caught: (4.5, 5) passes either way, but (4, 5.5) and (5.5, 4) would only
+		// short-circuit under the OR.
+		AspectRatio bothFractional = new AspectRatio(4.5f, 5f);
+		assertArrayEquals("both-fractional must short-circuit",
+			new int[] { 2990, 3738 }, bothFractional.snap(2990, 3738, 3000, 4000));
+		AspectRatio heightFractional = new AspectRatio(4f, 5.5f);
+		assertArrayEquals("height-only-fractional must short-circuit (OR predicate)",
+			new int[] { 2990, 3738 }, heightFractional.snap(2990, 3738, 3000, 4000));
+		AspectRatio widthFractional = new AspectRatio(5.5f, 4f);
+		assertArrayEquals("width-only-fractional must short-circuit (OR predicate)",
+			new int[] { 2990, 3738 }, widthFractional.snap(2990, 3738, 3000, 4000));
 	}
 
 	@Test

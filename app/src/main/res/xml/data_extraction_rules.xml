@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Data extraction rules (Android 12+). Same exclusions as backup_rules.xml: external storage holds
+  the streaming-pipeline cache (partial mid-save HDR / JPEG / PNG tempfiles that could include
+  in-progress user image bytes), and the two per-install SharedPreferences files store device-local
+  nicety pointers (last save folder, grid/list toggle) that shouldn't flow to a different install via
+  cloud restore / device transfer. Internal cache (getCacheDir()) is excluded by default and the
+  lint-accepted domain set doesn't include "cache" / "external_cache" anyway, so we don't list it.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="external" path="." />
+        <exclude domain="sharedpref" path="cropcenter_save.xml" />
+        <exclude domain="sharedpref" path="cropcenter_picker_view.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="external" path="." />
+        <exclude domain="sharedpref" path="cropcenter_save.xml" />
+        <exclude domain="sharedpref" path="cropcenter_picker_view.xml" />
+    </device-transfer>
+</data-extraction-rules>

@@ -36,9 +36,6 @@ public final class ColorPickerDialog
 	 */
 	public interface OnColorSelectedListener
 	{
-		/**
-		 * @param color the chosen color as a packed ARGB int
-		 */
 		void onColorSelected(int color);
 	}
 

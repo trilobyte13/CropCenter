@@ -146,14 +146,17 @@ final class GraftController
 	}
 
 	/**
-	 * Edit-picker callback. Claims busy on the UI thread BEFORE dispatching the bg work so a Save / Open tap during
-	 * the read/align/detect/graft window can't preempt and cause applyGraftedBytes to silently drop the prepared
-	 * graft. On any failure path busy is released here; on success the held busy is handed off to applyGraftedBytes
-	 * which releases it after the apply completes.
+	 * Edit-picker callback. Claims busy on the UI thread BEFORE dispatching the bg work so a Save / Open
+	 * tap during the read/align/detect/graft window can't preempt and cause applyGraftedBytes to
+	 * silently drop the prepared graft. On any failure path busy is released here; on success the held
+	 * busy is handed off to applyGraftedBytes which releases it after the apply completes.
 	 *
-	 * Reads the picked edit on a bg thread, validates dimensions and EXIF orientation against the loaded original,
-	 * computes the graft, and dispatches the result to onGraftReady on the UI thread. All failure paths clear
-	 * graftPending so a fresh long-press can start over.
+	 * Reads the picked edit on a bg thread, validates dimensions and EXIF orientation against the loaded
+	 * original, computes the graft, and dispatches the result to onGraftReady on the UI thread. All
+	 * failure paths clear graftPending so a fresh long-press can start over.
+	 *
+	 * @param editUri SAF URI of the user-picked external edit (PhotoShop/Lightroom output); ignored
+	 *                when graftPending is false (spurious picker result with no active session)
 	 */
 	void onEditPicked(Uri editUri)
 	{
@@ -214,16 +217,18 @@ final class GraftController
 	}
 
 	/**
-	 * Long-press entry point. Called from MainActivity's btnOpen long-click handler. Returns true when the
-	 * long-press is consumed (regardless of whether the graft session actually started — busy-rejected attempts
-	 * also consume the gesture so the user gets feedback), false when no image is loaded so the gesture can fall
-	 * through.
+	 * Long-press entry point. Called from MainActivity's btnOpen long-click handler.
 	 *
-	 * The recommended source editor is Photoshop with Camera Raw set to NOT auto-open JPEGs (Edit → Preferences →
-	 * Camera Raw → File Handling → JPEG → Disabled). Photoshop in pixel-space mode preserves source pixel values
-	 * everywhere except the AI-edited region, leaving only ICC-encoding-level differences after canvas P3
-	 * conversion. Lightroom HDR exports apply a global tone curve that produces a visible seam at the fill
-	 * boundary; not recommended.
+	 * The recommended source editor is Photoshop with Camera Raw set to NOT auto-open JPEGs (Edit →
+	 * Preferences → Camera Raw → File Handling → JPEG → Disabled). Photoshop in pixel-space mode
+	 * preserves source pixel values everywhere except the AI-edited region, leaving only ICC-encoding-
+	 * level differences after canvas P3 conversion. Lightroom HDR exports apply a global tone curve
+	 * that produces a visible seam at the fill boundary; not recommended.
+	 *
+	 * @param graftPickerLauncher launcher used to open the SAF picker for the external edit document
+	 * @return true when the long-press is consumed (regardless of whether the graft session actually
+	 *         started — busy-rejected attempts also consume the gesture so the user gets feedback);
+	 *         false when no image is loaded so the gesture can fall through
 	 */
 	boolean start(ActivityResultLauncher<String[]> graftPickerLauncher)
 	{

@@ -192,18 +192,38 @@ stays load-bearing:
   tick marks invisible. The Self-audit grep below catches any new `(int) (N * density)` regression.
 - **`util/RotationMath.rotate / inverse`** — every 2D rotation around the image center. Sub-epsilon residual handling
   lives here.
-- **`util/BitmapUtils.getMaxDecodePixels()` + `BitmapUtils.computeInSampleSize` + `BitmapUtils.initialize(Context)`** —
-  device-adaptive decode-pixel cap. The trio is the chokepoint for every consistent-subsampling `BitmapFactory` site
-  (load in `ImageLoadController.applyBytes`, HDR re-decode in `UltraHdrCompat.decodeHdrBitmap`).
-  `EditAligner.reorientEdit` deliberately bypasses it — the graft splice needs full-resolution edit primary. See
-  `BitmapUtils.computeMaxDecodePixels` Javadoc for the math + device-class examples, and `BitmapUtils.computeInSampleSize`
-  for the power-of-2 sampleSize contract.
+- **`util/BitmapUtils.MAX_DECODE_PIXELS` + `BitmapUtils.computeInSampleSize`** — static decode-pixel cap (256 MP,
+  handles 200 MP Samsung captures at sampleSize=1 with headroom for future sensor generations). The pair is the
+  chokepoint for every consistent-subsampling `BitmapFactory` site (load in `ImageLoadController.applyBytes`, HDR
+  re-decode in `UltraHdrCompat.decodeHdrBitmap`). `EditAligner.reorientEdit` deliberately bypasses it — the graft
+  splice needs full-resolution edit primary. See `BitmapUtils.computeInSampleSize` Javadoc for the power-of-2
+  sampleSize contract.
+- **`util/BitmapUtils.MAX_DISPLAY_PIXELS` + `BitmapUtils.createDisplayProxy`** — display-proxy cap (16 MP) and
+  factory. `ImageLoadController.applyBytes` derives a HARDWARE-config proxy from each loaded source on the bg
+  thread; `EditorRenderer` and `AutoRotateBinder` then render / detect against the proxy at zoom < 4 for smooth
+  GPU-resident gestures, while save paths (`CropExporter`, `UltraHdrCompat`) keep reading `getSourceImage()` so
+  output resolution stays at source. `CropState.setSourceImage(source, display)` is the only legal way to install
+  both bitmaps in lockstep. Companion caps `BitmapUtils.MAX_SOURCE_RENDER_PIXELS` (64 MP) and
+  `BitmapUtils.MAX_SOURCE_RENDER_AXIS` (16384 px) gate `EditorRenderer`'s zoom-≥-4 switch from proxy to source —
+  past either cap the renderer keeps drawing the proxy (soft pixels at high zoom) rather than ask the GPU to
+  upload an unaddressable texture.
 - **`metadata/JpegMarker`** — every JPEG marker byte (`SOI` / `EOI` / `SOS` / `RST_FIRST` / `RST_LAST` / `STUFFING` /
   `TEM`). Don't repeat the hex literal with an explanatory comment.
 - **`metadata/JpegMarkerWalker.findPrimaryEoi(file, endBound)`** — every walk to find the byte just past the primary
   JPEG's EOI. Consolidates the SOS / EOI / RST / segment-length / overflow-guard logic that previously lived as three
   near-identical implementations across `CropExporter`, `GraftWriter`, and `GainMapExtractor`. Hardened against `segLen
   < 2`, `off + 2 + segLen` wrap-overflow, and truncated SOS headers.
+- **`metadata/JpegMetadataInjector.STREAM_CHUNK_SIZE`** (64 KB) — every streaming file-to-file copy in the save
+  pipeline. Used by `JpegMetadataInjector.injectFileToFile`, `GainMapComposer.composeFileToFile`,
+  `CropExporter.appendSeftFileToFile`, `CropExporter.injectPngExifFromTiffFileToFile`, and
+  `ExportPipeline.writePayloadToStream`. Single canonical value so future tuning (FileChannel.transferTo migration)
+  lands in one place.
+- **`metadata/JpegMetadataInjector.skipExactly(FileInputStream, long)`** — every disk-backed tail-position skip in the
+  streaming pipeline. Forces progress via a single-byte `read()` when `FileInputStream.skip` transiently returns 0
+  (observed intermittently on Samsung's FUSE-backed scoped storage); only treats `read() < 0` as true EOF. The naive
+  `skip()`-loop-with-`break-on-zero` idiom silently truncates the stream, producing SOI + segments + (some random
+  middle of the file). Used by `GainMapComposer.composeFileToFile`, `JpegMetadataInjector.injectFileToFile`, and
+  `CropExporter.injectPngExifFromTiffFileToFile`.
 - **`metadata/JpegSegment.XMP_HEADER`** — the canonical `"http://ns.adobe.com/xap/1.0/\0"` namespace identifier consumed
   by `isXmp()`, `HorizonDetector`, and `XmpItemLengthPatcher`.
 - **`model/Format`** — JPEG / PNG enum carrying `extension()` and `mimeType()`. Never re-derive `".jpg"` /

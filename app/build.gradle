@@ -18,9 +18,11 @@ android {
         versionName = "1.0"
 
         // Expose the build timestamp so the Settings dialog can show which APK is installed.
-        // Uses a human-readable form; wrapping in escaped quotes since buildConfigField
-        // takes the literal Java expression.
-        def buildTime = new Date().format("yyyy-MM-dd HH:mm:ss", TimeZone.getDefault())
+        // UTC (not system default) so CI builds in different zones produce identical strings for the
+        // same source state — otherwise a build from US-Pacific and a build from Europe/London would
+        // ship different BUILD_TIME values for the same commit, defeating the dialog's "which APK
+        // is this" purpose. Trailing "Z" suffix marks the timezone unambiguously in the UI.
+        def buildTime = new Date().format("yyyy-MM-dd HH:mm:ss'Z'", TimeZone.getTimeZone("UTC"))
         buildConfigField "String", "BUILD_TIME", "\"${buildTime}\""
     }
 
@@ -63,6 +65,9 @@ dependencies {
     implementation 'com.google.android.material:material:1.12.0'
     implementation 'androidx.core:core:1.16.0'
     implementation 'androidx.activity:activity:1.9.0'
+    // androidx ExifInterface — lint flags android.media.ExifInterface for known security bugs.
+    // Used by FolderPickerDialog.decodeThumbnail to read EXIF orientation + the embedded thumbnail.
+    implementation 'androidx.exifinterface:exifinterface:1.4.1'
 
     testImplementation 'junit:junit:4.13.2'
 }

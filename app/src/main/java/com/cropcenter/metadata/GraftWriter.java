@@ -91,8 +91,12 @@ public final class GraftWriter
 
 		List<JpegSegment> origSegments = JpegMetadataExtractor.extract(original);
 		// Skip the edit-segment scan entirely when no segment swap is enabled — saves a parse pass on the edit
-		// file's APP block in the default-minimal case.
-		List<JpegSegment> editSegments = (SWAP_EXIF || SWAP_HDR_MPF || SWAP_ICC || SWAP_XMP)
+		// file's APP block in the default-minimal case. SWAP_HDR_GAINMAP is included even though the gain map
+		// itself sits in the file trailer (not in the APP-block segment list): editHasMpf / editIsHdr below
+		// gate GainMapExtractor.extract on the edit's MPF + XMP-hdrgm signature, both of which are read from
+		// editSegments. Without this clause, flipping SWAP_HDR_GAINMAP alone silently no-ops — editSegments
+		// stays empty, hasMpf returns false, editIsHdr stays false, and editGainMap is always null.
+		List<JpegSegment> editSegments = (SWAP_EXIF || SWAP_HDR_GAINMAP || SWAP_HDR_MPF || SWAP_ICC || SWAP_XMP)
 			? JpegMetadataExtractor.extract(edit)
 			: Collections.emptyList();
 		// HDR gate: MPF AND XMP-hdrgm — see HdrSignature.hasHdrgmInXmp for the rationale. hasMpf is the

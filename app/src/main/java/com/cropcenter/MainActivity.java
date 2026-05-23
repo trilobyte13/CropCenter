@@ -6,10 +6,12 @@ import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
 import android.graphics.Bitmap;
+import android.graphics.Insets;
 import android.net.Uri;
 import android.os.Bundle;
 import android.util.Log;
 import android.view.View;
+import android.view.WindowInsets;
 import android.widget.CheckBox;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -17,9 +19,6 @@ import android.widget.Toast;
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.appcompat.app.AppCompatActivity;
-import androidx.core.graphics.Insets;
-import androidx.core.view.ViewCompat;
-import androidx.core.view.WindowInsetsCompat;
 
 import com.cropcenter.crop.CropEngine;
 import com.cropcenter.model.CenterMode;
@@ -27,9 +26,9 @@ import com.cropcenter.model.CropState;
 import com.cropcenter.model.EditorMode;
 import com.cropcenter.model.Format;
 import com.cropcenter.model.Graft;
-import com.cropcenter.util.BitmapUtils;
 import com.cropcenter.util.SafFileHelper;
 import com.cropcenter.util.StoragePermissionHelper;
+import com.cropcenter.util.UltraHdrCompat;
 import com.cropcenter.view.CropEditorView;
 import com.cropcenter.view.RotationRulerView;
 import com.cropcenter.view.SettingsDialog;
@@ -74,10 +73,13 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 	private ActivityResultLauncher<String[]> graftPickerLauncher;
 	private ActivityResultLauncher<String[]> openLauncher;
 	private ActivityResultLauncher<String> saveAsLauncher;
-	// Currently-open state-mutating dialog (SettingsDialog) tracked so an inbound load can dismiss it
-	// before its own bg dispatch starts. Cleared via the dialog's OnDismissListener so the field doesn't
-	// outlive the dialog. Touched only from the UI thread (showSettingsDialog, OnDismissListener,
-	// dismissTransientDialogs are all on UI).
+	// Currently-open state-mutating transient dialog (Settings, merged save, in-app collision / rename /
+	// overwrite-confirm, Replace, Custom AR, Precise Rotation, All-files-access prompt, extension-
+	// mismatch — every producer that calls registerTransientDialog or setActiveTransientDialog) tracked
+	// so an inbound load can dismiss it before its own bg dispatch starts. Cleared via the dialog's
+	// OnDismissListener so the field doesn't outlive the dialog. Touched only from the UI thread — see
+	// registerTransientDialog / setActiveTransientDialog / clearTransientDialog / dismissTransientDialogs
+	// and their callers.
 	private AlertDialog activeTransientDialog;
 	private CenterMode moveLockPref = CenterMode.VERTICAL;
 	private CenterMode selectLockPref = CenterMode.BOTH;
@@ -112,6 +114,12 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 			dialog.cancel();
 		}
 		activeTransientDialog = null;
+	}
+
+	@Override
+	public void clearTransientDialog(DialogInterface dialog)
+	{
+		clearActiveTransientDialogIfMatches(dialog);
 	}
 
 	@Override
@@ -206,20 +214,28 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 	}
 
 	@Override
-	public void installImageOnUi(Bitmap bmp, String sizeInfo, String metaInfo)
+	public void installImageOnUi(Bitmap source, Bitmap display, String sizeInfo, String metaInfo)
 	{
 		// Activity-destroyed guard: bg load tasks dispatched via runInBackground can outlive the Activity
 		// (rotation, app backgrounded then killed). findViewById on a destroyed Activity returns null, and the
 		// immediate CheckBox cast below would NPE the main thread, taking down the app. state.setListener(null)
 		// in onDestroy suppresses listener-driven UI updates but not these inline findViewByIds, so the guard
 		// has to live here. ImageLoadController.applyBytes flips its handedOff flag BEFORE posting this UI
-		// runnable so the bg-side cleanup won't recycle bmp on its way out — without an explicit recycle
-		// here, the native pixel buffer would only be reclaimed by the GC finalizer once the destroyed
-		// Activity itself was GC'd, which on a config-change with a multi-MB source means a real (if
-		// short-lived) memory pressure spike.
+		// runnable so the bg-side cleanup won't recycle the bitmaps on its way out — without an explicit
+		// recycle here, the native pixel buffer would only be reclaimed by the GC finalizer once the
+		// destroyed Activity itself was GC'd, which on a config-change with a multi-MB source means a real
+		// (if short-lived) memory pressure spike. display may alias source — recycle source first, then
+		// only recycle display if it's a separate allocation (Bitmap.recycle is idempotent but the identity
+		// check makes the intent explicit).
 		if (isDestroyed())
 		{
-			bmp.recycle();
+			// state.reset() runs FIRST so any state field still holding a Bitmap reference (today only the
+			// previous load's sourceImage / displayImage, which the bg-side reset() at applyBytes already
+			// nulled before this post — but a future field that pins a Bitmap would land here too) is
+			// nulled out before the recycle frees the underlying native pixel buffer. Reset-then-recycle
+			// is also the cleaner teardown order: tear down state references first, then free the
+			// resources they were referencing.
+			//
 			// ImageLoadController.applyBytes committed originalFileBytes (~5-50 MB on a multi-MP JPEG),
 			// gainMap (~1-10 MB on HDR), jpegMeta, pngExifTiff, and seftTrailer to state BEFORE posting
 			// this UI runnable. Without an explicit reset here, those heavy fields stay reachable through
@@ -229,6 +245,11 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 			// runnable is only posted after the bg-side commits complete) and the busy gate prevents
 			// another bg load from racing this UI-thread reset.
 			state.reset();
+			source.recycle();
+			if (display != null && display != source)
+			{
+				display.recycle();
+			}
 			return;
 		}
 		// CropState.reset() restored editorMode and centerMode to defaults (Select + Both) and cleared
@@ -239,25 +260,55 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 		// selectLockPref and overwrite reset()'s BOTH, contradicting the documented "new loads start
 		// Select+Both" invariant. Then call applyLockMode() to propagate the unchecked Pan into centerMode
 		// (now genuinely a no-op since both reset() and the pref reset agree on BOTH).
-		((CheckBox) findViewById(R.id.chkPan)).setChecked(false);
-		((CheckBox) findViewById(R.id.chkLockCenter)).setChecked(false);
-		selectLockPref = CenterMode.BOTH;
-		moveLockPref = CenterMode.VERTICAL;
-		applyLockMode();
-		ui.updateModeHighlight();
-		ui.updateLockHighlight();
-		// Exit horizon paint mode if it was active when this load started. Auto-rotate paint mode never
-		// holds the busy flag (it's acquired later, after the user commits the stroke), so Open remains
-		// reachable while paint mode is up — without this reset, the new image's first touch would route
-		// to horizon painting instead of the expected Select / Move behavior, AND the Auto button would
-		// stay stuck on its "Cancel" label / red color from the previous load.
-		toolbar.cancelHorizonPaintMode();
+		// Wrap the UI-side commit in try/catch so a throw between here and `setSourceImage` (any
+		// findViewById returning null on an unusually-laid-out view tree, applyLockMode hitting a
+		// stale listener that throws, ui.updateModeHighlight reaching a recycled view) recycles the
+		// orphan bitmaps. Without the catch the source / display bitmaps would only be reclaimed
+		// when the GC finalizer ran on the orphan references — on a 200 MP source that's ~800 MB
+		// of native pixel buffer stranded for an indeterminate window. ImageLoadController's bg-side
+		// finally has already flipped `handedOff = true` by the time we run, so it won't recycle on
+		// our throw; ownership transfer is complete and the UI side now owns the cleanup contract.
+		try
+		{
+			((CheckBox) findViewById(R.id.chkPan)).setChecked(false);
+			((CheckBox) findViewById(R.id.chkLockCenter)).setChecked(false);
+			selectLockPref = CenterMode.BOTH;
+			moveLockPref = CenterMode.VERTICAL;
+			applyLockMode();
+			ui.updateModeHighlight();
+			ui.updateLockHighlight();
+			// Exit horizon paint mode if it was active when this load started. Auto-rotate paint mode
+			// never holds the busy flag (it's acquired later, after the user commits the stroke), so
+			// Open remains reachable while paint mode is up — without this reset, the new image's
+			// first touch would route to horizon painting instead of the expected Select / Move
+			// behavior, AND the Auto button would stay stuck on its "Cancel" label / red color from
+			// the previous load.
+			toolbar.cancelHorizonPaintMode();
 
-		state.setSourceImage(bmp);
-		editorView.setState(state);
-		editorView.clearUndoHistory();
-		txtImageInfo.setText(sizeInfo);
-		txtImageFormats.setText(metaInfo);
+			state.setSourceImage(source, display);
+			editorView.setState(state);
+			editorView.clearUndoHistory();
+			txtImageInfo.setText(sizeInfo);
+			txtImageFormats.setText(metaInfo);
+		}
+		catch (RuntimeException e)
+		{
+			Log.e(TAG, "installImageOnUi UI commit threw; recycling orphaned bitmaps", e);
+			// state.reset() unconditionally: the bg-side applyBytes already committed originalFileBytes,
+			// jpegMeta, gainMap, seftTrailer, pngExifTiff, and sourceFormat to state BEFORE this UI
+			// runnable posts. A throw BEFORE setSourceImage (e.g. findViewById null, ClassCastException
+			// on a checkbox lookup) would otherwise leave those metadata fields set without a matching
+			// sourceImage — inconsistent state that the next save / settings dialog could misread.
+			// reset() unwires everything atomically, matching the next-load contract.
+			state.reset();
+			source.recycle();
+			if (display != null && display != source)
+			{
+				display.recycle();
+			}
+			// Don't propagate — the user is left with no image; a thrown exception out of the UI
+			// thread would crash the Activity.
+		}
 	}
 
 	@Override
@@ -295,13 +346,17 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 			points, state.getImageWidth(), state.getImageHeight(), state.getRotationDegrees());
 		state.setCropSizeDirty(false);
 		state.setCenter(mid[0], mid[1]);
-		// Move mode: user just moved the crop to the selection midpoint. Update the rotation anchor so
-		// subsequent rotations start from here.
-		state.setAnchor(mid[0], mid[1]);
 		// Snap the display center to the pixel grid — in Move mode the crop borders must land on whole-pixel
 		// boundaries, but a half-integer selection midpoint paired with even cropW (or vice versa) would
 		// otherwise leave them mid-pixel.
 		CropEngine.recomputeCrop(state);
+		// Sync the rotation/drag anchor to the POST-clamp/post-recompute center, not the raw pre-clamp
+		// selection midpoint. setCenter clamps when the requested point is near an image/rotation edge
+		// or when the current crop dims can't fit there; recomputeCrop may further adjust. Without this
+		// post-sync, a later Move-mode rotation or AR change reads the stale anchor (the unreachable
+		// pre-clamp midpoint) via findCropCenter's non-Select path and pulls / shrinks the crop back
+		// toward an off-image center. Mirrors CropEngine.autoComputeFromPoints' anchor sync.
+		state.setAnchor(state.getCenterX(), state.getCenterY());
 	}
 
 	@Override
@@ -339,8 +394,17 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 		backgroundExecutor.execute(task);
 	}
 
+	@Override
+	public void setActiveTransientDialog(AlertDialog dialog)
+	{
+		activeTransientDialog = dialog;
+	}
+
 	/**
 	 * Disable Save/Open while busy so rapid taps can't stack up. UI thread only.
+	 *
+	 * @param isBusy true to disable Save/Open while a background task is running; false to restore
+	 *               their normal enabled state (Save additionally requires a loaded image)
 	 */
 	@Override
 	public void setBusyUi(boolean isBusy)
@@ -397,6 +461,9 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 
 	/**
 	 * UI-thread-safe toast helper — noop if Activity is destroyed.
+	 *
+	 * @param msg    user-facing toast text
+	 * @param length Toast duration constant (e.g. Toast.LENGTH_SHORT, Toast.LENGTH_LONG)
 	 */
 	@Override
 	public void toastIfAlive(String msg, int length)
@@ -411,20 +478,23 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 	protected void onCreate(Bundle savedInstanceState)
 	{
 		super.onCreate(savedInstanceState);
-		// Bind the device-adaptive decode-pixel cap from ActivityManager.MemoryInfo.totalMem ONCE per
-		// process. Every subsequent ImageLoadController / UltraHdrCompat decode site reads via
-		// BitmapUtils.getMaxDecodePixels(), so 12 GB-RAM phones lift the cap to ~187 MP (handling 200 MP
-		// captures at inSampleSize=1) while 4 GB phones land at ~64 MP. Must run before installImageOnUi
-		// / runLoadBg / any save path can fire — placed first in onCreate so even an onNewIntent-driven
-		// SEND/VIEW image load picks up the right cap.
-		BitmapUtils.initialize(this);
 		setContentView(R.layout.activity_main);
 
-		// Handle edge-to-edge: apply system bar insets as padding to root layout
+		// Reclaim cache space from any prior session whose HDR re-decode was interrupted by a process
+		// kill (OOM killer, force-stop, low-memory eviction). Each abandoned `hdr_src_<pid>_<nanos>.jpg`
+		// can be 5-50 MB on Samsung HDR captures (200+ MB on 200 MP HDR); without a sweep they'd
+		// accumulate across launches until scoped storage filled. Cheap call (single directory listing).
+		UltraHdrCompat.sweepStaleCacheFiles(getCacheDir());
+
+		// Handle edge-to-edge: apply system bar insets as padding to root layout. Direct framework calls
+		// — `View.setOnApplyWindowInsetsListener` (API 21+) and `WindowInsets.Type.systemBars()` (API 30+)
+		// — are available unconditionally at our minSdk=35 floor, so we don't route through ViewCompat /
+		// WindowInsetsCompat. The listener returns `insets` unmodified so child views still see the
+		// unconsumed insets for their own dispatch.
 		View root = findViewById(android.R.id.content);
-		ViewCompat.setOnApplyWindowInsetsListener(root, (view, insets) ->
+		root.setOnApplyWindowInsetsListener((view, insets) ->
 		{
-			Insets sys = insets.getInsets(WindowInsetsCompat.Type.systemBars());
+			Insets sys = insets.getInsets(WindowInsets.Type.systemBars());
 			view.setPadding(sys.left, sys.top, sys.right, sys.bottom);
 			return insets;
 		});
@@ -443,6 +513,11 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 		editorView.setOnPointsChangedListener(ui::updatePointButtonStates);
 		state.setListener(() -> runOnUiThread(this::applyStateToUi));
 
+		// Plain SAF DocumentsUI contracts for Open, Save As, and Graft. The Save As CreateDocument
+		// override only swaps JPEG → PNG mime type when the pre-filled filename ends in .png so the
+		// picker shows the right extension. No EXTRA_INITIAL_URI seeding — SAF DocumentsUI tracks the
+		// user's last-navigated location across launches itself, so the picker naturally resumes
+		// wherever they were last.
 		openLauncher = registerForActivityResult(new ActivityResultContracts.OpenDocument(), uri ->
 		{
 			if (uri != null)
@@ -463,6 +538,10 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 					{
 						intent.setType(Format.PNG.mimeType());
 					}
+					// Undocumented DocumentsUI "advanced" storage extra (device-internal volumes,
+					// USB, hidden providers). AOSP honors it; Samsung One UI sometimes does.
+					// Harmless when ignored.
+					intent.putExtra("android.provider.extra.SHOW_ADVANCED", true);
 					return intent;
 				}
 			}, this::onSaveAsLauncherResult);
@@ -471,8 +550,14 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 			this::onGraftPickerResult);
 
 		View btnOpen = findViewById(R.id.btnOpen);
+		// Broad "image/*" filter so SAF DocumentsUI shows every folder containing any image (HEIC, WebP,
+		// camera RAW, etc.) — Samsung's One UI applies the EXTRA_MIME_TYPES filter recursively to folder
+		// listings, so the previous narrow ["image/jpeg", "image/png"] filter hid folders that contained
+		// only other image types. ImageLoadController.applyBytes still rejects non-JPEG / non-PNG bytes
+		// with the "Unsupported image format" toast, so picking a HEIC fails loudly rather than silently
+		// loading garbage.
 		btnOpen.setOnClickListener(view ->
-			openLauncher.launch(new String[] { Format.JPEG.mimeType(), Format.PNG.mimeType() }));
+			openLauncher.launch(new String[] { "image/*" }));
 		btnOpen.setOnLongClickListener(view -> graftController.start(graftPickerLauncher));
 		findViewById(R.id.btnSave).setOnClickListener(view -> saveController.showSaveDialog());
 		setBusyUi(false); // Save stays disabled until an image is loaded
@@ -488,9 +573,19 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 
 		ui.updateModeHighlight();
 		ui.updateLockHighlight();
-		// MANAGE_EXTERNAL_STORAGE is no longer requested at startup — Replace's failure dialog
-		// (showReplaceFailureDialog) offers the grant prompt only when an overwrite actually hits a
-		// permission-bound failure. Most Save As flows never need this permission.
+		// MANAGE_EXTERNAL_STORAGE proactive prompt. The Replace-on-save flow needs MES to overwrite a
+		// colliding file in public storage (without it, the SAF rename refuses to rename-to-existing
+		// on strict providers and the user sees auto-renamed "(N)" files accumulate). Samsung's
+		// "Special access → All files access" Settings page is buried three levels deep and many
+		// users won't find it from a generic "needs permission" toast. Prompt at startup with the
+		// canonical deep-link Intent so the grant flow is one tap away. Suppressed when MES is
+		// already granted; suppressed across config-change recreate by gating on savedInstanceState
+		// so a rotation / dark-mode toggle doesn't re-prompt. The prompt is dismissable — users who
+		// don't want Replace-on-save can skip and continue using auto-rename behavior.
+		if (savedInstanceState == null && !permissions.hasStoragePermission())
+		{
+			showAllFilesAccessPrompt();
+		}
 		imageLoader.handleIncomingIntent(getIntent());
 	}
 
@@ -500,6 +595,11 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 		// Clear the state listener FIRST so any in-flight notifyChanged() from a background task doesn't fire
 		// an Activity-destroyed callback.
 		state.setListener(null);
+		// Cancel any open ColorPicker tracked via SettingsDialog's static field. The field is process-wide
+		// so a config-change destroy that fires while the picker is open would otherwise pin the destroyed
+		// Activity's window through the AlertDialog → Context chain until the next SettingsDialog.show()
+		// dismisses the stale picker on entry (which may never happen if the user never reopens Settings).
+		SettingsDialog.cancelActivePicker();
 		// Shut down the executor gracefully (NOT shutdownNow): in-flight tasks finish, no new tasks accepted,
 		// the daemon worker thread exits cleanly when the queue drains. Without this, configuration changes
 		// (rotation) accumulate orphaned executors — each new MainActivity creates a fresh executor while the
@@ -535,6 +635,10 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 	 * Post-apply state writes flow through state.installGraft, which encapsulates the "graftApplied AND aiMask,
 	 * both AFTER reset" invariant. Skipping the call would let canBypassEncode short-circuit the canvas pass and
 	 * ship source's gain map verbatim over the spliced primary, plus leave the gain-map inpaint silent.
+	 *
+	 * @param graft pre-baked splice from GraftController (bytes + displayName + aiMask); applyBytes
+	 *              treats `bytes` as a freshly-loaded JPEG, installGraft persists `aiMask` for the HDR
+	 *              re-encode's inpaint step
 	 */
 	private void applyGraftedBytes(Graft graft)
 	{
@@ -545,9 +649,9 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 		//   - runInBackground itself throws (RejectedExecutionException after executor shutdown) → the throw
 		//     propagates synchronously to GraftController.applyConfirmedGraft.catch, which runs releaseBusy
 		//     and rethrows.
-		// Dismiss any open state-mutating dialog (SettingsDialog) BEFORE the bg dispatch — applyBytes runs
-		// state.reset() on bg, and an open Settings dialog would race the reset with its in-dialog
-		// updateGridConfig commits.
+		// Dismiss any open transient dialog BEFORE the bg dispatch — applyBytes runs state.reset() on bg,
+		// and an open dialog with in-flight commits to CropState (e.g. a SettingsDialog updateGridConfig)
+		// would race the reset.
 		dismissTransientDialogs();
 		runInBackground(() -> applyGraftedBytesOnBg(graft));
 	}
@@ -667,10 +771,11 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 	}
 
 	/**
-	 * Dismiss-listener callback for SettingsDialog.show — clears `activeTransientDialog` only if it
-	 * still references the dialog that just dismissed. The reference-equality guard prevents a stale
-	 * dismiss from a now-superseded dialog from clearing a tracking handle that already points at a
-	 * different dialog.
+	 * Dismiss-listener callback for dialogs that install their own composite OnDismissListener — currently
+	 * SettingsDialog.show (cancelActivePicker + this) and FolderPickerDialog (executor shutdown + this).
+	 * Clears `activeTransientDialog` only if it still references the dialog that just dismissed. The
+	 * reference-equality guard prevents a stale dismiss from a now-superseded dialog from clearing a
+	 * tracking handle that already points at a different dialog.
 	 *
 	 * @param dismissed the dialog reporting its dismiss; cleared from tracking only when it still
 	 *                  matches activeTransientDialog (reference equality, not value equality —
@@ -741,6 +846,38 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 	}
 
 	/**
+	 * One-time-per-launch dialog that offers a direct deep-link to the system "All files access"
+	 * Settings page when MANAGE_EXTERNAL_STORAGE isn't granted. Without this, users have to dig
+	 * three levels deep into Settings (Apps → Special access → All files access → CropCenter) to
+	 * find the toggle — most won't.
+	 *
+	 * Registered as a transient dialog so a Share/View intent arriving mid-prompt dismisses it
+	 * cleanly. BadTokenException guard around .show() covers the config-change race window between
+	 * onCreate and the first frame.
+	 */
+	private void showAllFilesAccessPrompt()
+	{
+		String message = "CropCenter saves edits over the original file when you pick \"Replace\"."
+			+ " Granting \"All files access\" lets the app do that directly; without it, every"
+			+ " Replace falls back to an auto-renamed copy (\"foo (1).jpg\")."
+			+ "\n\nYou can grant or revoke this anytime from Settings.";
+		try
+		{
+			registerTransientDialog(new AlertDialog.Builder(this)
+				.setTitle("Allow All files access?")
+				.setMessage(message)
+				.setPositiveButton("Grant access",
+					(dialog, which) -> permissions.openStoragePermissionSettings())
+				.setNegativeButton("Skip", null)
+				.show());
+		}
+		catch (RuntimeException e)
+		{
+			Log.w(TAG, "All-files-access prompt failed to show", e);
+		}
+	}
+
+	/**
 	 * UI-thread body of showProgress. Extracted to keep the runOnUiThread call-site lambda within the
 	 * 3-line cap. Same isDestroyed-guard pattern as hideProgressOnUi / installImageOnUi.
 	 *
@@ -790,8 +927,8 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 			// with `setOnDismissListener` which REPLACES SettingsDialog's own cancelActivePicker
 			// cleanup. Pass the activity-tracking clear as SettingsDialog.show's hostDismissListener
 			// parameter so the dialog installs ONE composed listener that runs both cleanups.
-			activeTransientDialog = SettingsDialog.show(this, state,
-				this::clearActiveTransientDialogIfMatches);
+			activeTransientDialog = SettingsDialog.show(this, state, permissions,
+				this::clearTransientDialog);
 		}
 		catch (RuntimeException e)
 		{

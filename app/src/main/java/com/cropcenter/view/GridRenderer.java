@@ -27,10 +27,18 @@ import com.cropcenter.model.GridConfig;
 public final class GridRenderer
 {
 	/**
-	 * Functional interface for coordinate mapping.
+	 * Single-axis image → screen coordinate mapper. Callers supply one instance for the X axis and one
+	 * for the Y axis when invoking draw(); the mapper applies the viewport's pan + zoom so an image
+	 * pixel maps to a canvas pixel. Pure function — no per-call allocation, no internal state.
 	 */
 	public interface CoordMapper
 	{
+		/**
+		 * Project an image-pixel coordinate onto its corresponding screen coordinate along one axis.
+		 *
+		 * @param imageCoord coordinate in image-pixel space (one axis only)
+		 * @return the corresponding canvas-pixel coordinate
+		 */
 		float map(float imageCoord);
 	}
 
@@ -102,6 +110,16 @@ public final class GridRenderer
 	 * Package-private so GridRendererTest can pin the preview-matches-export contract without a Canvas — the
 	 * draw() method itself needs an Android Canvas + Paint, but the line-position math is where the
 	 * preview/export alignment is enforced.
+	 *
+	 * @param i          grid line index in [1, count - 1] (the inner lines; edges are the crop boundary)
+	 * @param count      total grid intervals (so the grid draws count - 1 inner lines along this axis)
+	 * @param cropOrigin axis origin of the crop in image-pixel space (cropImageX or cropImageY); can be
+	 *                   fractional when the crop sits at a non-integer pan offset
+	 * @param cropExtent total dimension of the crop in pixels along this axis (cropImageW or cropImageH)
+	 * @param cropCenter axis coord of the crop center in image-pixel space; only consulted on the middle
+	 *                   line so single-point selection markers sit on the intersection
+	 * @return image-space coordinate where line i sits along this axis; the (i, count - i) pair satisfies
+	 *         linePos(i) + linePos(count - i) - 2 * cropOrigin == cropExtent up to half-pixel rounding
 	 */
 	static float linePos(int i, int count, float cropOrigin, int cropExtent, float cropCenter)
 	{

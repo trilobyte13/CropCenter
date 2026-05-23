@@ -1,12 +1,11 @@
 package com.cropcenter.util;
 
-import android.app.ActivityManager;
-import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Matrix;
 import android.graphics.Paint;
 import android.graphics.Rect;
+import android.util.Log;
 
 import com.cropcenter.metadata.JpegMarker;
 import com.cropcenter.metadata.JpegMarkerWalker;
@@ -18,6 +17,7 @@ import com.cropcenter.metadata.TiffTag;
  */
 public final class BitmapUtils
 {
+	private static final String TAG = "BitmapUtils";
 	// Rotation values with magnitude below this threshold (degrees) are treated as 0 for rendering purposes. The
 	// ruler exposes 0.01° as its finest tick step (and the horizon detector / precise-rotation dialog round to
 	// 0.01° too), so the threshold sits a half-step below that — anything ≥ 0.005° is honored end-to-end (renderer
@@ -26,23 +26,61 @@ public final class BitmapUtils
 	// ~0.7 px, which is observable on fine vertical/horizontal lines.
 	public static final float ROTATION_EPSILON = 0.005f;
 
-	// Safe floor for the decode-pixel cap on devices we haven't queried yet (or on test runs where no
-	// Context is available). 32 MP (~33.5M pixels) keeps the decoded bitmap under ~128 MB ARGB which fits
-	// comfortably on the ~256-512 MB heap a low-end Android device gives an app. The device-adaptive
-	// path raises this for high-RAM devices via initialize(Context) — see computeMaxDecodePixels.
-	private static final int DECODE_PIXELS_FLOOR = 32 * 1024 * 1024;
+	// Decode-pixel cap for the consistent-subsampling BitmapFactory sites (ImageLoadController.applyBytes
+	// at load and UltraHdrCompat.decodeHdrBitmap at HDR-save re-decode). 256 MP (= 1 GB ARGB) handles
+	// Samsung's "200 MP" max-resolution mode (real pixel count 16384×12288 = 192 mebipixels = 201 million
+	// pixels) at inSampleSize=1 with comfortable headroom for future 256 MP sensors. Peak HDR-save working
+	// set is ~2.5× the source bitmap (source + UltraHdrCompat.decodeHdrBitmap re-decode + gainmap at 1/4
+	// resolution + Bitmap.compress encoder buffer), so peak ≈ 2.5 GB at this cap — fits in ~31% of the
+	// 8 GB minimum-spec device's RAM, ~21% on 12 GB (current S25 Ultra), ~16% on 16 GB (future S26).
+	// Min-spec is 8 GB RAM: pre-8 GB devices (the 4 GB tier was common pre-2022) are not supported because
+	// the peak working set during HDR save at the lower cap would still crowd the OS into the low-memory
+	// killer. minSdk=35 (Android 15) already requires post-2021 hardware in practice, so this cap is
+	// codifying what the OS version cutoff implies.
+	public static final int MAX_DECODE_PIXELS = 256 * 1024 * 1024;
 
-	// Hard ceiling on the device-adaptive cap. 512 MP × 4 bytes ARGB ≈ 2 GB; even on a 16 GB Samsung
-	// flagship with native bitmap memory, holding more than this in a single bitmap risks crowding out
-	// other apps and pushing CropCenter into the low-memory-killer's kill list. The current Samsung
-	// max-resolution mode is 200 MP (16384×12288 ≈ 201M pixels), so 512 MP leaves room for one round of
-	// future sensor upgrades.
-	private static final int DECODE_PIXELS_CEILING = 512 * 1024 * 1024;
+	// Display-proxy cap. Used by createDisplayProxy to derive a downsampled bitmap from the full source for
+	// the editor's render path AND for HorizonDetector.detectFromPaintedRegion's edge-map compute. 16 MP
+	// (4096×4096 class = ~64 MB ARGB) is sized to roughly match the highest current phone screen
+	// resolution (Samsung S25 Ultra: 3120×1440 = 4.5 MP; hypothetical 4K phone: 3840×2160 = 8.3 MP) with
+	// 2-4× headroom for editor zoom. Larger proxies waste GPU upload bandwidth + texture memory without
+	// visible quality benefit at typical zoom levels since the mipmap chain samples a level matched to
+	// the on-screen render size anyway. At zoom ≥ 4 the renderer switches to the full source for
+	// pixel-grid accuracy. HorizonDetector at 16 MP allocates ~192 MB of float[] working set (vs 2.3 GB
+	// at 192 MP source) — ~12× faster Hough vote. Save paths (CropExporter, UltraHdrCompat) bypass the
+	// proxy entirely and read state.getSourceImage() directly, so output resolution stays at source res
+	// regardless of display subsampling.
+	public static final int MAX_DISPLAY_PIXELS = 16 * 1024 * 1024;
 
-	// Cached cap. Defaults to the floor so callers running before initialize(Context) (e.g., a background-thread
-	// bg-init race, a JUnit test) get the safe value. Set once at MainActivity.onCreate time via initialize;
-	// reads are unsynchronised (volatile) since the value is set-once per process.
-	private static volatile int cachedMaxDecodePixels = DECODE_PIXELS_FLOOR;
+	// Pixel-count ceiling above which the renderer keeps using the display proxy even at zoom ≥ 4.
+	// Background: at zoom ≥ 4 EditorRenderer normally switches from the proxy to the full source so the
+	// pixel-grid overlay (scale ≥ 6) lands on true source-pixel boundaries. For sub-cap sources this is a
+	// one-shot GPU texture upload that the renderer can absorb. For 200 MP class sources the upload would
+	// be ~800 MB ARGB — past most phone GPUs' addressable texture memory and certain to thrash the texture
+	// cache (visible as a multi-second freeze when crossing zoom = 4) or fail allocation outright. At
+	// 64 MP (~256 MB ARGB) the upload still costs but is recoverable on every supported device. Above the
+	// cap the user sees the 16 MP proxy interpolated at very high zoom — soft pixels rather than the
+	// crisp pixel grid, but a working app rather than a freeze + OOM. The pixel grid path itself reads
+	// source.getWidth/getHeight unconditionally so the grid line spacing always matches source coords;
+	// only the bitmap-render path is gated by this cap.
+	public static final int MAX_SOURCE_RENDER_PIXELS = 64 * 1024 * 1024;
+
+	// Companion per-axis cap. A panorama like 32767×1000 sits under MAX_SOURCE_RENDER_PIXELS (32 MP < 64
+	// MP) but its width is past every supported GPU's GL_MAX_TEXTURE_SIZE (typically 8192–16384). Without
+	// this guard the source-switch would hand Skia a bitmap whose texture upload silently fails or
+	// allocates a fallback path and stalls. Numerically equal to MAX_PROXY_AXIS — the proxy is sized so
+	// its dimensions fit in this axis cap by construction, but the SOURCE is not pre-shrunk and must be
+	// gated explicitly before the renderer asks the GPU to bind it.
+	public static final int MAX_SOURCE_RENDER_AXIS = 16384;
+
+	// Per-axis dimension cap on the display proxy. Independent of MAX_DISPLAY_PIXELS — guards against
+	// pathological aspect ratios (1×100M attacker input) that would otherwise produce a 1×16M proxy.
+	// Bitmap.createBitmap throws IllegalArgumentException at dim ≥ 32768 (Android's internal limit),
+	// and even before that, Skia's HARDWARE-config copy rejects dims past the device's GL_MAX_TEXTURE_SIZE
+	// (8192-16384 on modern Android). 16384 picks the wider end of that range — fits flagship-class GPUs
+	// (Adreno 730+, Mali-G77+) and is power-of-2-clean. For real camera aspect ratios (4:3, 16:9, 3:2,
+	// 1:1) at MAX_DISPLAY_PIXELS = 16 MP, neither axis comes close to this cap (~4096-5000 px max).
+	static final int MAX_PROXY_AXIS = 16384;
 
 	private BitmapUtils() {}
 
@@ -78,13 +116,12 @@ public final class BitmapUtils
 	 * maxPixels`. Returns 1 when the un-subsampled image already fits; doubles until the constraint holds.
 	 *
 	 * Used by ImageLoadController.applyBytes and UltraHdrCompat.decodeHdrBitmap to bound peak decode memory
-	 * on very-large sources (Samsung's 200 MP mode produces 16384×12288 captures ≈ 200M pixels = ~800 MB
-	 * ARGB). On a 12 GB-RAM flagship the device-adaptive cap (`getMaxDecodePixels`) returns ~187 MP
-	 * (raw math is 192 MP; real devices report ~5% less totalMem after kernel / firmware reservations),
-	 * so those sources decode at `inSampleSize=1` (no quality loss). On a 4 GB-RAM device the cap lands
-	 * at ~64 MP (the 32 MP floor only applies to lower-RAM devices or pre-`initialize` reads) and
-	 * subsampling kicks in. The trade-off when sampleSize > 1 is that the saved crop uses the
-	 * subsampled bitmap as its source, so output resolution scales down — preferable to instant OOM.
+	 * on very-large sources (Samsung's "200 MP" mode produces 16384×12288 captures ≈ 192 mebipixels =
+	 * ~800 MB ARGB). The cap is the `MAX_DECODE_PIXELS` constant (256 MP, ~1 GB ARGB), comfortably above
+	 * a 200 MP capture so those sources decode at `inSampleSize=1` (no quality loss); subsampling only
+	 * kicks in for hypothetical > 256 MP sources (future sensor generations). The trade-off when
+	 * sampleSize > 1 is that the saved crop uses the subsampled bitmap as its source, so output
+	 * resolution scales down — preferable to instant OOM.
 	 *
 	 * Android's BitmapFactory.Options.inSampleSize requires a power of 2 (any other value is rounded down
 	 * to the nearest power of 2 internally), so this helper produces 1, 2, 4, 8, ... rather than the exact
@@ -92,7 +129,7 @@ public final class BitmapUtils
 	 *
 	 * @param outWidth  decoded image width before subsampling (from BitmapFactory bounds pre-pass)
 	 * @param outHeight decoded image height before subsampling
-	 * @param maxPixels total subsampled-pixel budget (e.g., 32_000_000 for ~32 MP)
+	 * @param maxPixels total subsampled-pixel budget (e.g., MAX_DECODE_PIXELS = 256_000_000)
 	 * @return power-of-2 sample size such that the subsampled bitmap fits within maxPixels
 	 */
 	public static int computeInSampleSize(int outWidth, int outHeight, int maxPixels)
@@ -112,29 +149,173 @@ public final class BitmapUtils
 	}
 
 	/**
-	 * Compute the device-adaptive decode-pixel cap from total device RAM
-	 * (`ActivityManager.getMemoryInfo().totalMem`). Budgets 1/16 of total system RAM for the largest single
-	 * bitmap, clamped to `[DECODE_PIXELS_FLOOR, DECODE_PIXELS_CEILING]` so a 4 GB-RAM phone gets a sensible cap
-	 * (~64 MP) and a 12 GB Samsung flagship gets a much higher cap (~187 MP, enough to handle a 200 MP capture
-	 * at `inSampleSize=1`). The 1/16 fraction leaves room for the export pipeline's working bitmaps
-	 * (primary canvas + gain-map render + EXIF-rotation temporary + Bitmap.compress encoder buffer)
-	 * — peak HDR-save allocation is roughly 4× the source bitmap, so 1/16 keeps all 4 within 1/4 of RAM
-	 * even before the kernel's bitmap-native-memory headroom kicks in.
+	 * Compute the proxy's (width, height) for a source of the given dimensions, landing the resulting pixel
+	 * count at-or-below MAX_DISPLAY_PIXELS while keeping each axis ≥ 1. Returns null when the source already
+	 * fits (caller should alias the source in that case rather than allocating). Separated from
+	 * createDisplayProxy so the pure-math piece is unit-testable without an Android Bitmap (the createBitmap
+	 * call in createDisplayProxy is a JNI hop that fails outside the Android runtime).
 	 *
-	 * Separate from `initialize(Context)` so the pure-math piece is testable without an Android Context.
+	 * Scale factor is `sqrt(MAX_DISPLAY_PIXELS / sourcePixels)` so the cap is treated as a pixel-count budget
+	 * (not a per-axis budget). For a 16384×12288 (192 MP) source at MAX_DISPLAY_PIXELS = 16 MP, the per-axis
+	 * scale is ~0.289 giving dims ~4738×3553 (~16 MP, just under the cap). For typical camera aspect ratios
+	 * (4:3, 16:9, 3:2, square) the per-axis Math.round biases within ±1 px of the pixel-count-optimal
+	 * dimensions, preserving aspect ratio to within ~0.1% — the editor renders via one width-derived
+	 * proxyToSource scale, so aspect-ratio drift translates directly to vertical/horizontal pixel stretch.
 	 *
-	 * @param totalMemBytes device's total RAM in bytes (from ActivityManager.MemoryInfo.totalMem)
-	 * @return pixel-count cap, clamped to [DECODE_PIXELS_FLOOR, DECODE_PIXELS_CEILING]
+	 * Pathological aspect-ratio guard: for sources where one axis scales to less than 0.5 pixels (e.g.,
+	 * 1×100M attacker input), the Math.max(1, ...) floor bumps that axis up from 0 to 1 and leaves the
+	 * other axis at its scaled value — which would push the product past MAX_DISPLAY_PIXELS (a 1×100M
+	 * source would give 1×40M = 40 MP, blowing the 16 MP cap by 2.5×). The product re-check below shrinks
+	 * the dominant axis until the cap holds. The resulting proxy's aspect ratio diverges from the source
+	 * for such pathological inputs, which is acceptable — no real camera produces 1×100M images, and the
+	 * cap is the harder guarantee than aspect preservation.
+	 *
+	 * @param srcW source bitmap width in pixels (must be positive)
+	 * @param srcH source bitmap height in pixels (must be positive)
+	 * @return 2-element int array {dstW, dstH} when downscaling is needed (guaranteed dstW*dstH ≤
+	 *         MAX_DISPLAY_PIXELS and dstW ≥ 1 and dstH ≥ 1), OR null when the source already fits within
+	 *         MAX_DISPLAY_PIXELS (caller must alias the source rather than allocate)
 	 */
-	public static int computeMaxDecodePixels(long totalMemBytes)
+	public static int[] computeProxyDims(int srcW, int srcH)
 	{
-		// Long arithmetic: totalMemBytes can be 16 GB+ on flagship devices (16 * 1024^3 = 17.2 billion bytes,
-		// far past int range). Divide by 16 to get the bitmap budget in bytes, then by 4 to convert bytes to
-		// ARGB pixels. Math.clamp(long, int, int) is a Java 21 overload that returns int directly; the cast
-		// on the result is structural (the compiler picks the right overload from the int bounds) and the
-		// returned int is guaranteed to fit because the ceiling is < Integer.MAX_VALUE.
-		long pixelBudget = totalMemBytes / 16L / 4L;
-		return Math.clamp(pixelBudget, DECODE_PIXELS_FLOOR, DECODE_PIXELS_CEILING);
+		long srcPixels = (long) srcW * srcH;
+		if (srcPixels <= MAX_DISPLAY_PIXELS)
+		{
+			return null;
+		}
+		double scale = Math.sqrt((double) MAX_DISPLAY_PIXELS / (double) srcPixels);
+		int dstW = Math.max(1, (int) Math.round(srcW * scale));
+		int dstH = Math.max(1, (int) Math.round(srcH * scale));
+		// Re-check the product after the Math.max-with-1 floor: for very high-aspect-ratio sources the
+		// floor bumps one axis up from 0 and leaves the other unchanged, pushing the product past the
+		// cap. Shrink the dominant axis until the product fits. Long arithmetic — dstW*dstH can be ~40 MP
+		// (well within int) but the multiply uses long to mirror the srcPixels computation pattern.
+		long proxyPixels = (long) dstW * dstH;
+		if (proxyPixels > MAX_DISPLAY_PIXELS)
+		{
+			if (dstW >= dstH)
+			{
+				dstW = Math.max(1, (int) (MAX_DISPLAY_PIXELS / dstH));
+			}
+			else
+			{
+				dstH = Math.max(1, (int) (MAX_DISPLAY_PIXELS / dstW));
+			}
+		}
+		// Per-axis dimension cap, applied as a SECOND uniform downscale to both axes so the proxy
+		// stays geometrically similar to the source. Independent per-axis clamping would distort:
+		// a 32767×1000 source (just under Bitmap's 32768 max-dim) computes to dstW = 23428,
+		// dstH = 715 after the uniform downscale (aspect 32.77:1 preserved); independent clamp
+		// would give 16384×715 (aspect 22.91:1) which the renderer's width-derived proxyToSource
+		// (= source.getWidth() / proxy.getWidth()) would then stretch vertically by ~1.43× when
+		// drawing the proxy — overlays + crop geometry computed in source coords would misalign
+		// with the visible bitmap. EditorRenderer and AutoRotateBinder both rely on this single
+		// width-derived ratio being correct for the Y axis too, so the proxy must remain a uniform
+		// scale of the source. For pathological aspect ratios where the source's minor axis already
+		// rounded to 1 in the pixel-budget step, the resulting proxy aspect inevitably diverges
+		// from the source's (the 1×100M case produces a 1×16384 proxy, aspect 1:16384 vs source
+		// 1:100M) — but such inputs aren't allocatable as Bitmaps in the first place (the source
+		// would exceed Bitmap.createBitmap's 32768 max-dim during decode), so the "wrong" aspect
+		// here only matters as a non-crash defense, not for visible rendering.
+		int maxAxis = Math.max(dstW, dstH);
+		if (maxAxis > MAX_PROXY_AXIS)
+		{
+			double axisScale = (double) MAX_PROXY_AXIS / maxAxis;
+			dstW = Math.max(1, (int) (dstW * axisScale));
+			dstH = Math.max(1, (int) (dstH * axisScale));
+		}
+		return new int[] { dstW, dstH };
+	}
+
+	/**
+	 * Derive a display-proxy bitmap downsampled to fit within MAX_DISPLAY_PIXELS, preserving aspect ratio. When
+	 * the source already fits, returns the source reference directly (no allocation, no copy) — the caller
+	 * treats source and proxy as interchangeable and must NOT recycle the proxy independently in that case.
+	 * Used by ImageLoadController on the bg thread immediately after the EXIF-rotation pass; the resulting
+	 * proxy is installed alongside the source via CropState.setSourceImage(source, display) so
+	 * EditorRenderer can render the smaller buffer per frame while save paths still pull the full source.
+	 *
+	 * For sources requiring downscale, the result is a Bitmap.Config.HARDWARE bitmap: pixel data lives in
+	 * GPU memory permanently and per-frame canvas.drawBitmap is a zero-upload texture-bind + draw. Without
+	 * HARDWARE the Skia renderer must re-upload the ARGB pixel data from native heap to the GPU on any
+	 * texture-cache eviction (driven by other apps' memory pressure or even our own source bitmap's
+	 * cache footprint), causing per-frame upload spikes that read as gesture lag. With HARDWARE, the
+	 * texture is uploaded once and bound for the lifetime of the bitmap. Tradeoff: HARDWARE bitmaps are
+	 * immutable and getPixels() returns null on them — AutoRotateBinder must copy the proxy back to
+	 * ARGB_8888 before passing it to HorizonDetector.detectFromPaintedRegion. That one-shot GPU→CPU
+	 * readback (a few hundred ms on a 16 MP HARDWARE bitmap) only fires when the user invokes auto-rotate,
+	 * not per render frame. If the HARDWARE copy fails (rare — typically GPU memory exhausted), the
+	 * fallback is the ARGB scaled bitmap with mipmaps (slower per frame but functional).
+	 *
+	 * Enables `setHasMipMap(true)` on the result so the Skia renderer maintains a mipmap chain (1, 1/4,
+	 * 1/16, ... pixel counts) — at typical fit-to-view editor zoom the GPU samples the appropriate ~2-8 MP
+	 * mip level via HW-accelerated trilinear filtering instead of supersampling. Memory overhead: +33%
+	 * from the geometric series of mip levels. Then prepareToDraw() to hint the renderer to start the GPU
+	 * upload + mipmap generation immediately on a worker thread, so the first frame after load doesn't
+	 * pay the upload latency on the UI thread. Both hints are valid on HARDWARE bitmaps (the underlying
+	 * GPU-texture renderer honors them).
+	 *
+	 * Alias case (source already fits MAX_DISPLAY_PIXELS): returns the source unchanged, ARGB_8888 mutable.
+	 * Save paths use the source via CPU drawCropped (no GPU sampling), so leaving it ARGB costs nothing on
+	 * the save side. HorizonDetector reads pixels from the aliased source directly — no readback needed.
+	 *
+	 * Side effects on aliased source: `setHasMipMap(true)` and `prepareToDraw()` are invoked on the proxy
+	 * unconditionally — in the alias case the proxy IS the source, so the source bitmap's mipmap flag is
+	 * flipped to true and its texture upload is hinted. Both are harmless for save-path consumers (which
+	 * draw via CPU canvas and ignore the GPU-side flags) but documented because callers passing in a source
+	 * expecting an unmutated reference must understand the contract: the source after this call is the same
+	 * object with mipmaps enabled and a GPU upload pending, not a pristine pre-call copy.
+	 *
+	 * @param source full-resolution bitmap to be downsampled; never null. Mutated in-place when aliased (see
+	 *               "Side effects on aliased source" above)
+	 * @return display proxy bitmap (HARDWARE config when downscaled; ARGB_8888 source reference when
+	 *         aliased), with setHasMipMap(true) and prepareToDraw() invoked
+	 */
+	public static Bitmap createDisplayProxy(Bitmap source)
+	{
+		int[] dims = computeProxyDims(source.getWidth(), source.getHeight());
+		Bitmap proxy;
+		if (dims == null)
+		{
+			// Already fits — aliasing source as the proxy avoids a fresh allocation on the common case of
+			// a sub-16-MP capture (every phone camera at default resolution).
+			proxy = source;
+		}
+		else
+		{
+			// Two-step: first downscale to ARGB via createScaledBitmap (bilinear, smooth), then copy that
+			// to HARDWARE config for GPU-resident rendering. The intermediate ARGB is recycled — it served
+			// only as the source of pixel data for the HARDWARE copy. If HARDWARE allocation fails (the
+			// copy returns null OR throws — Skia / driver faults on GPU memory pressure surface as
+			// unchecked RuntimeException, and a 16 MP ARGB allocation can hit native-heap OOM), fall back
+			// to keeping the ARGB scaled bitmap: still benefits from mipmaps + prepareToDraw, just pays
+			// texture-upload cost on cache misses. Mirrors AutoRotateBinder.tryReadbackArgb's
+			// RuntimeException + OutOfMemoryError catch — Throwable would also catch LinkageError /
+			// ThreadDeath which we want to propagate.
+			Bitmap scaledArgb = Bitmap.createScaledBitmap(source, dims[0], dims[1], true);
+			Bitmap proxyHardware;
+			try
+			{
+				proxyHardware = scaledArgb.copy(Bitmap.Config.HARDWARE, false);
+			}
+			catch (RuntimeException | OutOfMemoryError e)
+			{
+				Log.w(TAG, "createDisplayProxy: HARDWARE copy threw — using ARGB scaled bitmap", e);
+				proxyHardware = null;
+			}
+			if (proxyHardware != null)
+			{
+				scaledArgb.recycle();
+				proxy = proxyHardware;
+			}
+			else
+			{
+				proxy = scaledArgb;
+			}
+		}
+		proxy.setHasMipMap(true);
+		proxy.prepareToDraw();
+		return proxy;
 	}
 
 	/**
@@ -209,49 +390,6 @@ public final class BitmapUtils
 			// at sub-pixel positions.
 			canvas.drawBitmap(src, drawX, drawY, paint);
 		}
-	}
-
-	/**
-	 * Current decoded-bitmap pixel-count cap. Returned value is the device-adaptive cap set by
-	 * `initialize(Context)` at app startup, or `DECODE_PIXELS_FLOOR` (32 MP) when initialize hasn't run yet
-	 * (test runs, early bg-thread decode before the Activity's onCreate completed).
-	 *
-	 * Used by `ImageLoadController.applyBytes` and `UltraHdrCompat.decodeHdrBitmap` as the budget threshold for
-	 * the inSampleSize pre-pass — anything larger gets subsampled at the smallest power-of-2 that fits the
-	 * pixel count under the cap. `EditAligner.reorientEdit` deliberately does NOT route through this cap because
-	 * `GraftWriter.graft` splices the edit's primary scan into the original's full-resolution EXIF / MPF / gainmap
-	 * / SEFT package — a downsampled edit primary would disagree with the full-resolution metadata describing
-	 * dimensions and gainmap offsets, silently corrupting Samsung Revert chains and HDR alignment. For graft
-	 * inputs that genuinely don't fit, `reorientEdit` catches `OutOfMemoryError` and returns null, surfacing
-	 * a clean "Couldn't decode the edit during reorientation" toast instead of a stale-metadata graft.
-	 *
-	 * @return current decoded-bitmap pixel-count cap (always in [DECODE_PIXELS_FLOOR, DECODE_PIXELS_CEILING])
-	 */
-	public static int getMaxDecodePixels()
-	{
-		return cachedMaxDecodePixels;
-	}
-
-	/**
-	 * Set the decoded-bitmap pixel-count cap based on the device's total RAM. Idempotent — calling more than once
-	 * with the same Context produces the same cap (totalMem is constant per device boot). Designed to be called
-	 * once from `MainActivity.onCreate` so every subsequent decode site picks up the device-adaptive value.
-	 *
-	 * @param ctx any Context; only used to obtain ActivityManager.MemoryInfo (no reference is retained)
-	 */
-	public static void initialize(Context ctx)
-	{
-		ActivityManager am = (ActivityManager) ctx.getSystemService(Context.ACTIVITY_SERVICE);
-		if (am == null)
-		{
-			// Robolectric / unit-test contexts can return null for ACTIVITY_SERVICE on minimal stub
-			// configurations. Fall back to the floor — safer than running with no cap, and the same
-			// outcome as if initialize was never called.
-			return;
-		}
-		ActivityManager.MemoryInfo info = new ActivityManager.MemoryInfo();
-		am.getMemoryInfo(info);
-		cachedMaxDecodePixels = computeMaxDecodePixels(info.totalMem);
 	}
 
 	/**

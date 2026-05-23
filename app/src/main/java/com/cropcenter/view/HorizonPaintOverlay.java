@@ -20,6 +20,7 @@ final class HorizonPaintOverlay
 	private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
 	private final Path screenPath = new Path();
 
+	private Runnable onCancel; // host-side cleanup callback fired when paint mode exits via CANCEL
 	private Runnable onDrawn;
 	private boolean active;    // listening for paint input
 	private boolean drawing;   // actively mid-stroke
@@ -33,6 +34,10 @@ final class HorizonPaintOverlay
 	/**
 	 * Record the first touch of a stroke. screenX/screenY go into the displayed path; imagePoint is the
 	 * already-un-rotated image-pixel coordinate for the detector.
+	 *
+	 * @param screenX    horizontal screen coordinate of the touch (used for path rendering)
+	 * @param screenY    vertical screen coordinate of the touch (used for path rendering)
+	 * @param imagePoint two-element image-pixel coordinate {x, y} consumed by the detector
 	 */
 	void begin(float screenX, float screenY, float[] imagePoint)
 	{
@@ -44,19 +49,32 @@ final class HorizonPaintOverlay
 	}
 
 	/**
-	 * Discard the in-progress stroke without exiting paint mode and without invoking the detection callback.
-	 * Used for `MotionEvent.ACTION_CANCEL` — Android dispatches that when the OS or a parent view claims
-	 * the gesture (e.g. system back, multi-touch disambiguation, scroll container intercept), which is
-	 * NOT a user-initiated stroke completion. Treating ACTION_CANCEL as if it were ACTION_UP would feed a
-	 * truncated point list into `HorizonDetector.detectFromPaintedRegion` and produce a wrong-angle
-	 * auto-rotate the user never asked for. Active stays true so the user can try painting again without
-	 * re-tapping Auto.
+	 * Discard the in-progress stroke AND exit paint mode. Used for `MotionEvent.ACTION_CANCEL` — Android
+	 * dispatches that when the OS or a parent view claims the gesture (e.g. system back, multi-touch
+	 * disambiguation, scroll container intercept), which is NOT a user-initiated stroke completion.
+	 * Treating ACTION_CANCEL as if it were ACTION_UP would feed a truncated point list into
+	 * `HorizonDetector.detectFromPaintedRegion` and produce a wrong-angle auto-rotate the user never
+	 * asked for, so the detection callback is NOT invoked.
+	 *
+	 * Paint mode is exited (`active=false`) and the caller's `onCancel` runnable is fired so it can
+	 * reset external UI (e.g. AutoRotateBinder's "Cancel" → "Auto" button label). Earlier behaviour kept
+	 * `active=true` "so the user can try painting again without re-tapping Auto" — that left every
+	 * subsequent touch consumed by `HorizonPaintOverlay`, stranding the user in a stuck-paint-mode
+	 * state until they noticed the Cancel button. Exiting cleanly on CANCEL is the safer default;
+	 * the user can re-tap Auto if they want to retry.
 	 */
 	void cancelStroke()
 	{
 		drawing = false;
+		active = false;
 		imagePoints.clear();
 		screenPath.reset();
+		if (onCancel != null)
+		{
+			Runnable callback = onCancel;
+			onCancel = null;
+			callback.run();
+		}
 	}
 
 	/**
@@ -100,9 +118,11 @@ final class HorizonPaintOverlay
 	}
 
 	/**
-	 * Record the final touch (image-space only; the screen-space path isn't extended for the ACTION_UP point) and
-	 * exit paint mode. The caller's onDrawn callback runs; the overlay stays non-active until the next
-	 * setActive(true, ...) call.
+	 * Record the final touch (image-space only; the screen-space path isn't extended for the ACTION_UP
+	 * point) and exit paint mode. The caller's onDrawn callback runs; the overlay stays non-active
+	 * until the next setActive(true, ...) call.
+	 *
+	 * @param imagePoint two-element image-pixel coordinate {x, y} for the ACTION_UP point
 	 */
 	void end(float[] imagePoint)
 	{
@@ -116,7 +136,12 @@ final class HorizonPaintOverlay
 	}
 
 	/**
-	 * Append a mid-stroke touch — updates the displayed path and appends another image coordinate for the detector.
+	 * Append a mid-stroke touch — updates the displayed path and appends another image coordinate for
+	 * the detector.
+	 *
+	 * @param screenX    horizontal screen coordinate of the touch
+	 * @param screenY    vertical screen coordinate of the touch
+	 * @param imagePoint two-element image-pixel coordinate {x, y} consumed by the detector
 	 */
 	void extend(float screenX, float screenY, float[] imagePoint)
 	{
@@ -124,39 +149,50 @@ final class HorizonPaintOverlay
 		imagePoints.add(imagePoint);
 	}
 
-	/**
-	 * Image-space points collected during the stroke, consumed by the horizon detector.
-	 */
 	List<float[]> getPoints()
 	{
 		return imagePoints;
 	}
 
-	/**
-	 * True while the overlay is listening for paint input (set by setActive(true, ...)).
-	 */
 	boolean isActive()
 	{
 		return active;
 	}
 
-	/**
-	 * True during an in-progress stroke (between ACTION_DOWN and ACTION_UP).
-	 */
 	boolean isDrawing()
 	{
 		return drawing;
 	}
 
 	/**
-	 * Enter or exit paint mode. Entering clears any previous stroke. Exiting (on=false) also clears; the caller's
-	 * previous onDrawn is replaced.
+	 * Enter or exit paint mode without a cancellation callback. Forwards to the three-arg overload with
+	 * onCancelCallback=null; see that overload's Javadoc for the lifecycle contract.
+	 *
+	 * @param on              true to enter paint mode, false to exit
+	 * @param onDrawnCallback invoked from `end` when the user completes a stroke
 	 */
 	void setActive(boolean on, Runnable onDrawnCallback)
+	{
+		setActive(on, onDrawnCallback, null);
+	}
+
+	/**
+	 * Enter paint mode with both completion and cancellation callbacks. `onCancelCallback` fires from
+	 * `cancelStroke` (ACTION_CANCEL) so the host can reset any UI tied to paint mode (e.g.
+	 * AutoRotateBinder's "Cancel" → "Auto" button label). The cancel callback runs ONCE then clears
+	 * itself, so a subsequent stroke completion via `end` doesn't double-fire it.
+	 *
+	 * @param on               true to enter paint mode, false to exit
+	 * @param onDrawnCallback  invoked from `end` when the user completes a stroke
+	 * @param onCancelCallback invoked from `cancelStroke` when the OS / parent view interrupts the stroke,
+	 *                         or when a future caller-side cancel path needs the same cleanup
+	 */
+	void setActive(boolean on, Runnable onDrawnCallback, Runnable onCancelCallback)
 	{
 		this.active = on;
 		this.drawing = false;
 		this.onDrawn = onDrawnCallback;
+		this.onCancel = onCancelCallback;
 		imagePoints.clear();
 		screenPath.reset();
 	}

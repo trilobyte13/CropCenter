@@ -19,9 +19,10 @@ import java.util.List;
  * PNG sources and CropExporter.exportPng has nothing to inject back into the saved file.
  *
  * Pinned contract: a valid PNG with one eXIf chunk → exactly one synthetic APP1 EXIF segment with the canonical
- * `FF E1 LL LL "Exif\0\0" [TIFF...]` layout that JpegSegment.isExif accepts and CropExporter.injectPngExif can
- * unwrap. PNGs without eXIf return an empty list. Malformed inputs (truncated, wrong signature, oversize chunk
- * length) return an empty list rather than throwing.
+ * `FF E1 LL LL "Exif\0\0" [TIFF...]` layout that JpegSegment.isExif accepts and the JPEG-source PNG export path
+ * in CropExporter.exportPng can unwrap inline (the 10-byte APP1 prefix is stripped to recover raw TIFF for the
+ * eXIf chunk). PNGs without eXIf return an empty list. Malformed inputs (truncated, wrong signature, oversize
+ * chunk length) return an empty list rather than throwing.
  *
  * Chunk-builder helpers (PNG signature, length+CRC envelope, minimal IHDR) live in PngFixtures so the same
  * fixture surface is shared with ImageLoadControllerExtractMetadataTest.

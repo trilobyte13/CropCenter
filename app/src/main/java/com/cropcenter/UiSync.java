@@ -1,12 +1,12 @@
 package com.cropcenter;
 
 import android.view.View;
+import android.widget.Button;
 
 import com.cropcenter.model.CenterMode;
 import com.cropcenter.model.EditorMode;
 import com.cropcenter.util.BitmapUtils;
 import com.cropcenter.util.TextFormat;
-import com.google.android.material.button.MaterialButton;
 
 import java.util.Locale;
 
@@ -92,9 +92,9 @@ final class UiSync
 		CenterMode pref = host.getCurrentPref();
 		int active = host.getActivity().getResources().getColor(R.color.mauve, null);
 		int inactive = host.getActivity().getResources().getColor(R.color.surface2, null);
-		MaterialButton btnLockBoth = host.findViewById(R.id.btnLockBoth);
-		MaterialButton btnLockH = host.findViewById(R.id.btnLockH);
-		MaterialButton btnLockV = host.findViewById(R.id.btnLockV);
+		Button btnLockBoth = host.findViewById(R.id.btnLockBoth);
+		Button btnLockH = host.findViewById(R.id.btnLockH);
+		Button btnLockV = host.findViewById(R.id.btnLockV);
 		btnLockBoth.setTextColor(pref == CenterMode.BOTH ? active : inactive);
 		btnLockH.setTextColor(pref == CenterMode.HORIZONTAL ? active : inactive);
 		btnLockV.setTextColor(pref == CenterMode.VERTICAL ? active : inactive);
@@ -110,8 +110,8 @@ final class UiSync
 		EditorMode mode = host.getState().getEditorMode();
 		int active = host.getActivity().getResources().getColor(R.color.mauve, null);
 		int inactive = host.getActivity().getResources().getColor(R.color.surface2, null);
-		MaterialButton btnModeMove = host.findViewById(R.id.btnModeMove);
-		MaterialButton btnModeSelect = host.findViewById(R.id.btnModeSelect);
+		Button btnModeMove = host.findViewById(R.id.btnModeMove);
+		Button btnModeSelect = host.findViewById(R.id.btnModeSelect);
 		btnModeMove.setTextColor(mode == EditorMode.MOVE ? active : inactive);
 		btnModeSelect.setTextColor(mode == EditorMode.SELECT_FEATURE ? active : inactive);
 
@@ -144,9 +144,9 @@ final class UiSync
 		int enabledColor = host.getActivity().getResources().getColor(R.color.subtext0, null);
 		int disabledColor = host.getActivity().getResources().getColor(R.color.surface1, null);
 
-		MaterialButton btnUndo = host.findViewById(R.id.btnUndo);
-		MaterialButton btnRedo = host.findViewById(R.id.btnRedo);
-		MaterialButton btnClear = host.findViewById(R.id.btnClearPoints);
+		Button btnUndo = host.findViewById(R.id.btnUndo);
+		Button btnRedo = host.findViewById(R.id.btnRedo);
+		Button btnClear = host.findViewById(R.id.btnClearPoints);
 
 		btnUndo.setEnabled(canUndo);
 		btnUndo.setTextColor(canUndo ? enabledColor : disabledColor);

@@ -95,6 +95,9 @@ public final class ImageLoadControllerApplyBytesTest
 		int dismissTransientDialogsCount;
 
 		@Override
+		public void clearTransientDialog(android.content.DialogInterface dialog) {}
+
+		@Override
 		public void dismissTransientDialogs()
 		{
 			dismissTransientDialogsCount++;
@@ -122,7 +125,7 @@ public final class ImageLoadControllerApplyBytesTest
 		public void hideProgress() {}
 
 		@Override
-		public void installImageOnUi(Bitmap bmp, String sizeInfo, String metaInfo)
+		public void installImageOnUi(Bitmap source, Bitmap display, String sizeInfo, String metaInfo)
 		{
 			throw new UnsupportedOperationException();
 		}
@@ -138,6 +141,9 @@ public final class ImageLoadControllerApplyBytesTest
 
 		@Override
 		public void runOnUiThread(Runnable r) { r.run(); }
+
+		@Override
+		public void setActiveTransientDialog(AlertDialog dialog) {}
 
 		@Override
 		public void setBusyUi(boolean busyUi) {}

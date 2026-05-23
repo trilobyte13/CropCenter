@@ -50,17 +50,11 @@ public enum Format
 		return null;
 	}
 
-	/**
-	 * @return file extension including the leading dot, e.g. ".jpg"
-	 */
 	public String extension()
 	{
 		return extension;
 	}
 
-	/**
-	 * @return canonical MIME type, e.g. "image/jpeg"
-	 */
 	public String mimeType()
 	{
 		return mimeType;

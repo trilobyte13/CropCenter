@@ -19,59 +19,54 @@ interface UiHost extends EditorHost
 	void applyLockMode();
 
 	/**
-	 * @return active lock-mode preference. Select vs move modes track their own preferences; this returns whichever
-	 *         the current editor mode uses.
+	 * Active lock-mode preference for the current editor mode. Select vs Move each track their own preference; this
+	 * returns whichever the current editor mode uses.
+	 *
+	 * @return the active lock-mode preference for whichever editor mode is current
 	 */
 	CenterMode getCurrentPref();
 
 	CropEditorView getEditorView();
 
 	/**
-	 * @return move-mode lock preference (BOTH / HORIZONTAL / VERTICAL). Exposed separately from getCurrentPref so
-	 *         UiSync's mode-switch can demote BOTH → VERTICAL when leaving Select mode (BOTH is Select-only).
+	 * Move-mode lock preference, exposed separately from getCurrentPref so UiSync's mode-switch can demote
+	 * Move + BOTH → Move + VERTICAL when leaving Select mode (BOTH is Select-only).
+	 *
+	 * @return the user's persisted Move-mode lock-axis preference (BOTH / HORIZONTAL / VERTICAL)
 	 */
 	CenterMode getMoveLockPref();
 
-	/**
-	 * Cached reference to the rotation-degrees readout TextView.
-	 */
 	TextView getRotDegreesTextView();
 
-	/**
-	 * Cached reference to the rotation ruler resolved at onCreate.
-	 */
 	RotationRulerView getRotationRuler();
 
-	/**
-	 * Sidebar TextView showing "WIDTH × HEIGHT" of the current crop rectangle.
-	 */
 	TextView getSidebarCropSizeTextView();
 
-	/**
-	 * Arrow between the "image size" and "crop size" info-bar readouts; hidden when no image is loaded.
-	 */
 	TextView getTransformArrowTextView();
 
-	/**
-	 * Zoom-factor badge shown in the editor view when zoom is above 1x.
-	 */
 	TextView getZoomBadgeTextView();
 
 	/**
-	 * @return true while UiSync.syncRotationUi is mid-update of the rotation ruler, gating the ruler's own change
-	 *         listener from re-entering CropState.setRotationDegrees.
+	 * Re-entrancy guard for syncRotationUi: true while the helper is mid-write of the rotation ruler so the
+	 * ruler's own change listener doesn't bounce back into CropState.setRotationDegrees.
+	 *
+	 * @return true while a programmatic ruler write is in progress
 	 */
 	boolean isRulerUpdating();
 
 	/**
-	 * @param pref new move-mode lock preference. Used by UiSync to demote Move + BOTH → Move + VERTICAL when
-	 *             leaving Select mode.
+	 * Persist the user's Move-mode lock-axis preference. Called by UiSync's mode-switch to demote Move + BOTH →
+	 * Move + VERTICAL when leaving Select mode.
+	 *
+	 * @param pref new Move-mode lock preference (BOTH / HORIZONTAL / VERTICAL)
 	 */
 	void setMoveLockPref(CenterMode pref);
 
 	/**
-	 * @param updating true around a programmatic ruler write so the ruler's own change listener doesn't fire on the
-	 *                 round-trip.
+	 * Flip the re-entrancy guard that gates the ruler's own change listener.
+	 *
+	 * @param updating true around a programmatic ruler write so the ruler's listener doesn't fire on the
+	 *                 round-trip
 	 */
 	void setRulerUpdating(boolean updating);
 }

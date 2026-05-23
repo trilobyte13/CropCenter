@@ -35,8 +35,10 @@ public final class EditAligner
 	public record Result(byte[] alignedBytes, String errorMessage)
 	{
 		/**
-		 * @param message user-facing error text
-		 * @return a failure Result; caller surfaces message as a toast and aborts
+		 * Factory for a failure Result. Caller surfaces the message as a toast and aborts the graft.
+		 *
+		 * @param message user-facing error text; must be non-null
+		 * @return a failure Result with alignedBytes = null and errorMessage = message
 		 */
 		public static Result error(String message)
 		{
@@ -44,8 +46,10 @@ public final class EditAligner
 		}
 
 		/**
-		 * @param bytes edit bytes whose stored layout matches the original's
-		 * @return a success Result wrapping the bytes
+		 * Factory for a success Result. Caller hands alignedBytes to GraftWriter for the splice.
+		 *
+		 * @param bytes edit bytes whose stored layout matches the original's; must be non-null
+		 * @return a success Result with alignedBytes = bytes and errorMessage = null
 		 */
 		public static Result ok(byte[] bytes)
 		{

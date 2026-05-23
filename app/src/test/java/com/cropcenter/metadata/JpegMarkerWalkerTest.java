@@ -40,6 +40,20 @@ public final class JpegMarkerWalkerTest
 	}
 
 	@Test
+	public void findEoiRejectsStartOffNearMaxIntWithoutOverflowing() throws IOException
+	{
+		// Adversarial input: caller passes startOff = Integer.MAX_VALUE - 1 with a file of length 4. The
+		// walker computes `off = startOff + 2` internally to skip SOI; without the long-arithmetic
+		// guard, that addition would wrap negative and silently pass the `off < endBound` check. Result
+		// would either be a wraparound array read (AIOOBE) or — worse — a returned offset pointing into
+		// the wrapped negative range that downstream consumers treat as a valid index. Pin: the walker
+		// must return -1 (not found) rather than throw or return a wrapped index.
+		byte[] tiny = new byte[] { (byte) 0xFF, (byte) 0xD8, (byte) 0xFF, (byte) 0xD9 };
+		int eoi = JpegMarkerWalker.findEoi(tiny, Integer.MAX_VALUE - 1, tiny.length);
+		assertEquals("MAX_VALUE-1 startOff must return -1 (overflow guard)", -1, eoi);
+	}
+
+	@Test
 	public void findEoiWalksFromNonZeroStartOff() throws IOException
 	{
 		// The 3-parameter findEoi(file, startOff, endBound) overload is what GainMapExtractor +

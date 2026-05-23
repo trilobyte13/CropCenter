@@ -1,9 +1,15 @@
 package com.cropcenter;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
+
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
 
 /**
  * Tests for SaveController's auto-rename pattern detection. The user-facing flow this gates: SAF returned a different
@@ -120,5 +126,122 @@ public final class SaveControllerTest
 		// single-space test (autoRenameBaseNameDetectsClassicalCollision). A regression that switched
 		// stripTrailing for a single-char trim would still pass the canonical test but fail this one.
 		assertEquals("crop.jpg", SaveController.autoRenameBaseName("crop   (1).jpg"));
+	}
+
+	@Test
+	public void nextAvailableNumberedNameHandlesExtensionlessOriginal() throws IOException
+	{
+		// No extension in the original — suggestion appends "(N)" with no extension.
+		File dir = Files.createTempDirectory("cc-test").toFile();
+		try
+		{
+			new File(dir, "README").createNewFile();
+			assertEquals("README (1)", SaveController.nextAvailableNumberedName(dir, "README"));
+		}
+		finally
+		{
+			deleteRecursively(dir);
+		}
+	}
+
+	@Test
+	public void nextAvailableNumberedNameReturnsCandidateWhenNothingExists() throws IOException
+	{
+		// Empty folder — suggestion is (1) even though the "original" doesn't actually collide. The
+		// caller (showInAppRenameDialog) only invokes this AFTER detecting a collision, so the "no
+		// collision actually exists" case shouldn't fire in production — but the method's contract is
+		// "first available (N)", which is (1) in an empty dir.
+		File dir = Files.createTempDirectory("cc-test").toFile();
+		try
+		{
+			String result = SaveController.nextAvailableNumberedName(dir, "foo.jpg");
+			assertNotNull(result);
+			assertEquals("foo (1).jpg", result);
+		}
+		finally
+		{
+			deleteRecursively(dir);
+		}
+	}
+
+	@Test
+	public void nextAvailableNumberedNameSkipsExistingSuffixedFiles() throws IOException
+	{
+		// foo.jpg AND foo (1).jpg both taken — first available is (2).
+		File dir = Files.createTempDirectory("cc-test").toFile();
+		try
+		{
+			new File(dir, "foo.jpg").createNewFile();
+			new File(dir, "foo (1).jpg").createNewFile();
+			assertEquals("foo (2).jpg", SaveController.nextAvailableNumberedName(dir, "foo.jpg"));
+		}
+		finally
+		{
+			deleteRecursively(dir);
+		}
+	}
+
+	@Test
+	public void nextAvailableNumberedNameStripsExistingSuffixBeforeProbing() throws IOException
+	{
+		// Renaming "foo (1).jpg" must suggest "foo (2).jpg" NOT "foo (1) (1).jpg" — the existing "(1)"
+		// is stripped by autoRenameBaseName so the loop probes against "foo.jpg" as the stem.
+		File dir = Files.createTempDirectory("cc-test").toFile();
+		try
+		{
+			new File(dir, "foo.jpg").createNewFile();
+			new File(dir, "foo (1).jpg").createNewFile();
+			assertEquals("foo (2).jpg", SaveController.nextAvailableNumberedName(dir, "foo (1).jpg"));
+		}
+		finally
+		{
+			deleteRecursively(dir);
+		}
+	}
+
+	@Test
+	public void nextAvailableNumberedNameSuggestsFirstSuffixWhenStemIsFree() throws IOException
+	{
+		// Base case: "foo.jpg" exists, "(1)..(N)" don't — suggestion is "foo (1).jpg".
+		File dir = Files.createTempDirectory("cc-test").toFile();
+		try
+		{
+			new File(dir, "foo.jpg").createNewFile();
+			assertEquals("foo (1).jpg", SaveController.nextAvailableNumberedName(dir, "foo.jpg"));
+		}
+		finally
+		{
+			deleteRecursively(dir);
+		}
+	}
+
+	/**
+	 * Recursively delete a temp directory. JUnit 4 doesn't have @TempDir; explicit cleanup keeps the
+	 * test side-effect-free.
+	 *
+	 * @param dir directory to remove; safe to call on a non-existent path
+	 */
+	private static void deleteRecursively(File dir)
+	{
+		if (dir == null || !dir.exists())
+		{
+			return;
+		}
+		File[] kids = dir.listFiles();
+		if (kids != null)
+		{
+			for (File f : kids)
+			{
+				if (f.isDirectory())
+				{
+					deleteRecursively(f);
+				}
+				else
+				{
+					assertTrue("failed to delete " + f, f.delete() || !f.exists());
+				}
+			}
+		}
+		assertTrue("failed to delete " + dir, dir.delete() || !dir.exists());
 	}
 }

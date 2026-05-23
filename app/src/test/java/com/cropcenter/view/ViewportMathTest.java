@@ -73,6 +73,38 @@ public final class ViewportMathTest
 	}
 
 	@Test
+	public void clampViewportPinsToRotatedAabbBoundsWhenRotated()
+	{
+		// At 30° rotation on a 1000×2000 image, the rotated AABB is roughly 1866×2732 — it extends past the
+		// un-rotated [0, 1000] × [0, 2000] rectangle on both axes. The legacy clamp (against the un-rotated
+		// bitmap) would pin viewportX into [visibleW/2, imgW - visibleW/2] = [250, 750], making the rotated
+		// corners (which sit at screen-aligned X far outside [0, 1000]) unreachable at zoom > 1. The
+		// rotation-aware clamp must permit viewportX inside [midX - rotatedW/2 + visibleW/2,
+		// midX + rotatedW/2 - visibleW/2] ≈ [-183, 1183]. Pin both the left- and right-pan extremes.
+		FixedViewSize size = new FixedViewSize(400, 800);
+		ViewportMath math = new ViewportMath(size);
+		math.fitToView(1000, 2000, 30f);
+		math.zoomAt(2f, 200f, 400f, 1000, 2000, 30f);
+		// scale after fit+2x zoom: baseScale × 2. visibleW = size.width() / scale. The exact lower
+		// bound is midX - rotatedW/2 + visibleW/2; compute it from the same formula the clamp uses to
+		// pin the contract regardless of the float rounding.
+		float baseScale = math.getBaseScale();
+		float scale = baseScale * 2f;
+		float visibleW = 400f / scale;
+		float rotatedW = (float) (1000 * Math.cos(Math.toRadians(30)) + 2000 * Math.sin(Math.toRadians(30)));
+		float expectedLeftPin = 500f - rotatedW / 2f + visibleW / 2f;
+		float expectedRightPin = 500f + rotatedW / 2f - visibleW / 2f;
+		math.panViewport(100000f, 0f, 1000, 2000, 30f);
+		assertEquals("rotated clamp must allow viewportX below 0 at the left pin",
+			expectedLeftPin, math.screenToImageX(200f), TOL);
+		math.fitToView(1000, 2000, 30f);
+		math.zoomAt(2f, 200f, 400f, 1000, 2000, 30f);
+		math.panViewport(-100000f, 0f, 1000, 2000, 30f);
+		assertEquals("rotated clamp must allow viewportX above imgW at the right pin",
+			expectedRightPin, math.screenToImageX(200f), TOL);
+	}
+
+	@Test
 	public void clampViewportPureOverloadDelegatesFromCropStateOverloadWithNullImage()
 	{
 		// State-bound overload short-circuits on null state — verify by capturing the viewport state
@@ -99,6 +131,88 @@ public final class ViewportMathTest
 		assertEquals(500f, bigMath.imageToScreenX(0f), TOL);
 		assertEquals(200f, smallMath.imageToScreenY(0f), TOL);
 		assertEquals(1000f, bigMath.imageToScreenY(0f), TOL);
+	}
+
+	@Test
+	public void effectiveMinZoomAtRotationDropsBelowOneWhenBaseScaleSetForUnrotatedImage()
+	{
+		// User fit-to-view at rotation=0 (baseScale = view/imgDim), then rotated 30°. The rotated AABB now
+		// extends past the un-rotated bitmap rectangle, so a pinch-out gesture at static MIN_ZOOM=1 would NOT
+		// fit the rotated image. effectiveMinZoom should drop below 1 so the user can pinch further down to
+		// where the rotated AABB fits inside the view. Pin the specific ratio: minZoom = (view/rotatedDim) /
+		// baseScale = (view/rotatedDim) / (view/imgDim) = imgDim/rotatedDim.
+		FixedViewSize size = new FixedViewSize(1000, 1000);
+		ViewportMath math = new ViewportMath(size);
+		math.fitToView(1000, 1000);                 // rotation=0 fit → baseScale = 1
+		float minZoom30 = math.effectiveMinZoom(1000, 1000, 30f);
+		// Square 1000x1000 at 30°: rotatedDim = 1000*(cos30 + sin30) = 1366.025.
+		// expected min zoom = 1000 / 1366.025 ≈ 0.7321
+		float expected = (float) (1.0 / (Math.cos(Math.toRadians(30)) + Math.sin(Math.toRadians(30))));
+		assertEquals("rotated min zoom drops below 1 to fit the rotated AABB",
+			expected, minZoom30, TOL);
+	}
+
+	@Test
+	public void effectiveMinZoomAtZeroRotationReturnsStaticMinZoom()
+	{
+		// Zero rotation collapses to the static MIN_ZOOM = 1, so user behavior at the common unrotated
+		// case is unchanged. A regression that introduced a baseScale-relative formula at rotation=0 would
+		// shift the zoom-out floor in the user's default workflow.
+		FixedViewSize size = new FixedViewSize(400, 800);
+		ViewportMath math = new ViewportMath(size);
+		math.fitToView(1000, 2000);
+		assertEquals(1f, math.effectiveMinZoom(1000, 2000, 0f), TOL);
+		// Sub-epsilon rotation matches zero exactly (no float drift).
+		assertEquals(1f, math.effectiveMinZoom(1000, 2000, 0.001f), TOL);
+	}
+
+	@Test
+	public void effectiveMinZoomNeverExceedsOne()
+	{
+		// Contract: minZoom = min(1, rotatedRatio). A rotation back to 0° (or to a smaller-AABB angle than
+		// baseScale was fit to) shouldn't raise minZoom above 1 — that would prevent the user from zooming
+		// in past the fit-to-rotated baseScale. Pin the upper-bound enforcement directly.
+		FixedViewSize size = new FixedViewSize(400, 800);
+		ViewportMath math = new ViewportMath(size);
+		// fit-to-view at rotation=45° produces baseScale = view / (imgDim * sqrt(2)) — smaller than the
+		// unrotated baseScale. Then querying minZoom at rotation=0 (no rotation, AABB smaller than rotated)
+		// would compute ratio > 1; the static min must cap it.
+		math.fitToView(1000, 2000, 45f);
+		float minAtZero = math.effectiveMinZoom(1000, 2000, 0f);
+		assertTrue("minZoom must not exceed 1", minAtZero <= 1f + TOL);
+	}
+
+	@Test
+	public void effectiveMinZoomShortCircuitsOnDefaultState()
+	{
+		// At construction (before any fitToView call) baseScale = 1 (the documented default). The
+		// short-circuit at the top of effectiveMinZoom is gated on `baseScale <= 0 || imgW <= 0 ||
+		// imgH <= 0 || view dim == 0`. Pin each sub-clause:
+		//   1. zero imgW → MIN_ZOOM
+		//   2. zero imgH → MIN_ZOOM
+		//   3. negative imgW → MIN_ZOOM (we don't trust caller-supplied negatives)
+		//   4. zero view dim → MIN_ZOOM (view not measured yet)
+		// A regression that dropped any sub-clause would yield NaN / Infinity from the division on the
+		// next branch and silently propagate through the zoom clamp.
+		ViewportMath math = new ViewportMath(new FixedViewSize(400, 800));
+		math.fitToView(1000, 2000);  // baseScale > 0 so we exercise the dim short-circuits below
+		assertEquals("zero imgW → MIN_ZOOM", 1f, math.effectiveMinZoom(0, 2000, 30f), 0f);
+		assertEquals("zero imgH → MIN_ZOOM", 1f, math.effectiveMinZoom(1000, 0, 30f), 0f);
+		assertEquals("negative imgW → MIN_ZOOM", 1f, math.effectiveMinZoom(-1, 2000, 30f), 0f);
+		// Zero-view check: a fresh ViewportMath against a 0x0 ViewSize hits the size.width()==0 branch.
+		ViewportMath zeroView = new ViewportMath(new FixedViewSize(0, 0));
+		zeroView.fitToView(1000, 2000);
+		assertEquals("zero view → MIN_ZOOM", 1f, zeroView.effectiveMinZoom(1000, 2000, 30f), 0f);
+	}
+
+	@Test
+	public void effectiveMinZoomStateOverloadReturnsMinZoomOnNullState()
+	{
+		// CropState overload's null-state branch returns MIN_ZOOM directly without touching baseScale —
+		// pin so the production callers (zoomAt with state) don't have to re-check null.
+		ViewportMath math = new ViewportMath(new FixedViewSize(400, 800));
+		math.fitToView(1000, 2000);
+		assertEquals(1f, math.effectiveMinZoom((com.cropcenter.model.CropState) null), 0f);
 	}
 
 	@Test
@@ -140,6 +254,68 @@ public final class ViewportMathTest
 		math.fitToView((com.cropcenter.model.CropState) null);
 		assertEquals("null state must not change baseScale", baseScaleBefore, math.getBaseScale(), 0f);
 		assertEquals("null state must not change zoom", zoomBefore, math.getZoom(), 0f);
+	}
+
+	@Test
+	public void fitToViewWith45DegreeSquareImageFitsRotatedBoundingBox()
+	{
+		// 1000x1000 square image rotated 45° has axis-aligned bounding box 1000*sqrt(2) on each side
+		// (~= 1414.21). Fitting that into a 1000x1000 view should pick baseScale = 1000 / (1000*sqrt(2))
+		// = 1/sqrt(2) ≈ 0.7071. A regression that uses the unrotated dims (baseScale = 1.0) lets the
+		// rotated image extend past the view's edges — the literal bug fixed by adding rotation
+		// awareness to the fit math.
+		FixedViewSize size = new FixedViewSize(1000, 1000);
+		ViewportMath math = new ViewportMath(size);
+		math.fitToView(1000, 1000, 45f);
+		float expected = (float) (1.0 / Math.sqrt(2));
+		assertEquals("baseScale fits the 45°-rotated bounding box", expected, math.getBaseScale(), TOL);
+		assertEquals("zoom resets to 1", 1f, math.getZoom(), 0f);
+	}
+
+	@Test
+	public void fitToViewWithRotationFitsRotatedBoundingBoxWithinViewBounds()
+	{
+		// General contract: for any rotation, the rotated bounding box (widthForFit, heightForFit) must
+		// fit inside the view dims after scaling by baseScale. Tests several non-trivial angles on a
+		// non-square image to catch axis-swap bugs.
+		int imgW = 4000;
+		int imgH = 3000;
+		FixedViewSize size = new FixedViewSize(800, 600);
+		ViewportMath math = new ViewportMath(size);
+		float[] anglesDegrees = { 15f, 30f, 60f, 75f, 90f, 135f, 200f, -45f };
+		for (float deg : anglesDegrees)
+		{
+			math.fitToView(imgW, imgH, deg);
+			double rad = Math.toRadians(deg);
+			double absCos = Math.abs(Math.cos(rad));
+			double absSin = Math.abs(Math.sin(rad));
+			double rotatedW = imgW * absCos + imgH * absSin;
+			double rotatedH = imgW * absSin + imgH * absCos;
+			float scale = math.getBaseScale();
+			double scaledRotatedW = scale * rotatedW;
+			double scaledRotatedH = scale * rotatedH;
+			assertTrue("scaled rotated W fits view at " + deg + "°: " + scaledRotatedW
+				+ " <= " + size.width(), scaledRotatedW <= size.width() + TOL);
+			assertTrue("scaled rotated H fits view at " + deg + "°: " + scaledRotatedH
+				+ " <= " + size.height(), scaledRotatedH <= size.height() + TOL);
+		}
+	}
+
+	@Test
+	public void fitToViewWithSubEpsilonRotationCollapsesToUnrotatedFormula()
+	{
+		// Sub-epsilon rotation (< BitmapUtils.ROTATION_EPSILON = 0.005°) is treated as zero by the rest
+		// of the render pipeline, so the fit math collapses to the unrotated branch — produces the same
+		// baseScale as the 2-arg overload exactly. Without the collapse a 0.001° rotation would shave a
+		// negligible-but-nonzero fraction off baseScale, causing visible-but-inexplicable zoom drift on
+		// every double-tap.
+		FixedViewSize size = new FixedViewSize(400, 800);
+		ViewportMath rotMath = new ViewportMath(size);
+		ViewportMath plainMath = new ViewportMath(size);
+		rotMath.fitToView(1000, 2000, 0.001f);
+		plainMath.fitToView(1000, 2000);
+		assertEquals("sub-epsilon rotation matches unrotated baseScale",
+			plainMath.getBaseScale(), rotMath.getBaseScale(), 0f);
 	}
 
 	@Test
@@ -471,6 +647,21 @@ public final class ViewportMathTest
 		assertEquals("zero-view, default scale = 1: 0 + (100 - 0) * 1 = 100", 100f, result, TOL);
 		// Inverse: viewportX + (sx - viewW/2) / scale = 0 + (100 - 0) / 1 = 100.
 		assertEquals(100f, math.screenToImageX(100f), TOL);
+	}
+
+	@Test
+	public void zoomAtAllowsPinchOutBelowOneWhenRotationRequires()
+	{
+		// End-to-end: user fits at rotation=0, rotates 30°, pinches out. Without the fix, zoom clamps to 1
+		// (hardcoded MIN_ZOOM) and the rotated image extends past the view. With the fix, the clamp's lower
+		// bound drops so a sufficiently-large scaleFactor < 1 reduces zoom below 1.
+		FixedViewSize size = new FixedViewSize(1000, 1000);
+		ViewportMath math = new ViewportMath(size);
+		math.fitToView(1000, 1000);                 // baseScale = 1, zoom = 1
+		math.zoomAt(0.5f, 500f, 500f, 1000, 1000, 30f);
+		float expected = (float) (1.0 / (Math.cos(Math.toRadians(30)) + Math.sin(Math.toRadians(30))));
+		assertEquals("pinch-out at rotation clamps to the rotated-AABB min zoom",
+			expected, math.getZoom(), TOL);
 	}
 
 	@Test

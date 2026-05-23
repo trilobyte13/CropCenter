@@ -3,6 +3,8 @@ package com.cropcenter.crop;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertNotSame;
 
 import com.cropcenter.metadata.ExifPatcher;
 import com.cropcenter.util.ByteBufferUtils;
@@ -26,6 +28,49 @@ import java.io.IOException;
  */
 public final class CropExporterPngExifTest
 {
+	@Test
+	public void forceTiffOrientationToUprightOverwritesNonUprightTag() throws IOException
+	{
+		// buildTiffWithThumbnail emits IFD0 orientation=6 (Rotate 90 CW). The verbatim PNG-eXIf path
+		// for >64 KB TIFFs ships source TIFF bytes as-is, so without this force-upright pass the saved
+		// PNG would carry orientation=6 onto already-upright pixels (BitmapUtils.applyOrientation rotated
+		// them at load) — and EXIF-aware viewers would double-rotate. Verify the patcher returns a NEW
+		// byte[] (not the input ref) with orientation overwritten to 1 in IFD0.
+		byte[] tiff = buildTiffWithThumbnail(100);
+		// Pre-condition: source TIFF carries orientation 6 at IFD0's value slot (entry index 0 in IFD0).
+		// IFD0 starts at offset 8; entry count at 8; first entry starts at 10. Value field at entry + 8.
+		int preValue = ByteBufferUtils.readU16(tiff, 10 + 8, true);
+		assertEquals("test fixture must seed orientation=6", 6, preValue);
+		byte[] patched = CropExporter.forceTiffOrientationToUpright(tiff);
+		assertNotSame("non-upright orientation must produce a NEW byte[] (not in-place mutation of input)",
+			tiff, patched);
+		int postValue = ByteBufferUtils.readU16(patched, 10 + 8, true);
+		assertEquals("post-patch IFD0 orientation must be 1 (upright)", 1, postValue);
+	}
+
+	@Test
+	public void forceTiffOrientationToUprightReturnsInputWhenAlreadyUpright() throws IOException
+	{
+		// When orientation is already 1, the patcher returns the input reference unchanged so callers
+		// don't pay for a defensive copy. Build a TIFF, manually overwrite IFD0's orientation value to 1,
+		// then assert the patcher returns the same reference.
+		byte[] tiff = buildTiffWithThumbnail(100);
+		ByteBufferUtils.writeU16(tiff, 10 + 8, 1, true);
+		byte[] result = CropExporter.forceTiffOrientationToUpright(tiff);
+		assertSame("already-upright TIFF must return the input ref (no allocation)", tiff, result);
+	}
+
+	@Test
+	public void forceTiffOrientationToUprightReturnsInputWhenMagicMalformed()
+	{
+		// Malformed byte order header → patcher can't walk IFD0, must return input ref unchanged.
+		// The verbatim-preserve contract documents this fallback: metadata survives even when
+		// orientation can't be force-corrected (the pixels themselves are still upright on disk).
+		byte[] malformed = new byte[] { 'X', 'Y', 0, 0, 8, 0, 0, 0, 0, 0 };
+		byte[] result = CropExporter.forceTiffOrientationToUpright(malformed);
+		assertSame("malformed magic must return input ref unchanged", malformed, result);
+	}
+
 	@Test
 	public void patchPngExifTiffSplicesWhenOldThumbnailRemovalFreesEnoughBudget() throws IOException
 	{

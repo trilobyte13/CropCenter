@@ -15,11 +15,15 @@ import org.junit.Test;
 public final class HorizonPaintOverlayTest
 {
 	@Test
-	public void cancelStrokeKeepsActiveAndDoesNotInvokeOnDrawn()
+	public void cancelStrokeExitsPaintModeAndDoesNotInvokeOnDrawn()
 	{
-		// Contract: ACTION_CANCEL must NOT fire the detection callback. Active stays true so
-		// the user can re-paint without re-tapping Auto. Pin both invariants so a regression that swaps
-		// cancelStroke for setActive(false, ...) or for end(...) gets caught here.
+		// Contract (updated): ACTION_CANCEL must NOT fire the detection callback (preserved invariant),
+		// AND it MUST exit paint mode by clearing active=false. The earlier "active stays true so user
+		// can re-paint" contract stranded the overlay consuming touches when a pre-stroke CANCEL fired
+		// (system gesture, multi-touch race), leaving the user unable to escape until they noticed the
+		// still-Cancel-labelled Auto button. The fix makes CANCEL a clean exit; the user re-taps Auto
+		// to retry. Pin onDrawn-NOT-fired AND active-cleared so a regression in either direction
+		// surfaces.
 		HorizonPaintOverlay overlay = new HorizonPaintOverlay();
 		boolean[] onDrawnFired = { false };
 		overlay.setActive(true, () -> onDrawnFired[0] = true);
@@ -29,9 +33,28 @@ public final class HorizonPaintOverlayTest
 		overlay.cancelStroke();
 
 		assertFalse("onDrawn must NOT fire on ACTION_CANCEL", onDrawnFired[0]);
-		assertTrue("paint mode stays active so user can re-paint", overlay.isActive());
+		assertFalse("paint mode exits on CANCEL (was stranding user before this fix)",
+			overlay.isActive());
 		assertFalse("drawing flag clears so the in-progress stroke is gone", overlay.isDrawing());
 		assertEquals("imagePoints must be empty after cancel", 0, overlay.getPoints().size());
+	}
+
+	@Test
+	public void cancelStrokeFiresOnCancelCallbackForHostCleanup()
+	{
+		// New contract: cancelStroke fires the onCancel callback so the host can reset external UI
+		// (e.g. AutoRotateBinder resets the "Cancel" → "Auto" button label). The callback is one-shot
+		// (cleared after fire) so a subsequent end() doesn't double-fire it. Pin firing AND
+		// one-shot semantics.
+		HorizonPaintOverlay overlay = new HorizonPaintOverlay();
+		int[] cancelCount = { 0 };
+		overlay.setActive(true, () -> { }, () -> cancelCount[0]++);
+		overlay.cancelStroke();
+		assertEquals("onCancel must fire exactly once on CANCEL", 1, cancelCount[0]);
+		// Re-enter paint mode without a cancel callback; a second cancelStroke must not throw / re-fire
+		overlay.setActive(true, () -> { });
+		overlay.cancelStroke();
+		assertEquals("onCancel from prior entry must not persist across setActive", 1, cancelCount[0]);
 	}
 
 	@Test

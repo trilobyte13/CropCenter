@@ -7,12 +7,14 @@ import android.provider.DocumentsContract;
 import android.util.Log;
 import android.widget.Toast;
 
+import com.cropcenter.crop.ExportResult;
 import com.cropcenter.util.SafFileHelper;
 import com.cropcenter.util.StoragePermissionHelper;
 import com.cropcenter.view.DialogStrings;
 
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
 
@@ -133,6 +135,11 @@ final class ReplaceStrategy
 	 * could accidentally destroy the just-written target if we ran them unconditionally. So File I/O short-circuits
 	 * the rest of the flow on a fully-successful outcome; SAF paths only run when File I/O couldn't touch the
 	 * target. verifyReplace runs in both branches to catch partial states.
+	 *
+	 * @param newUri        SAF placeholder URI (auto-renamed "(N)" suffix) holding the freshly-written bytes
+	 * @param requestedName the user-typed filename the placeholder should land at after the swap
+	 * @param wasOverwrite  true when the call was triggered by a confirmed-overwrite path (drives the
+	 *                      success toast wording: "Replaced X" vs "Saved X")
 	 */
 	void replaceColliding(Uri newUri, String requestedName, boolean wasOverwrite)
 	{
@@ -143,7 +150,7 @@ final class ReplaceStrategy
 		// verifyReplace's follow-up query MUST use the fresh URI or it hits a stale ID.
 		final Uri[] verifyUriBox = { newUri };
 		exportPipeline.exportTo(newUri,
-			data -> writeReplacementPayload(newUri, requestedName, wasOverwrite, verifyUriBox, data));
+			result -> writeReplacementPayload(newUri, requestedName, wasOverwrite, verifyUriBox, result));
 	}
 
 	// ── VerifyFailure factory methods ── one per failure case so wording lives in one place.
@@ -323,7 +330,12 @@ final class ReplaceStrategy
 			return false;
 		}
 		File target = new File(parent, requestedName);
-		File tempFile = new File(parent, "." + requestedName + ".cropcenter-tmp-" + System.currentTimeMillis());
+		// nanoTime (not millis) for the temp suffix so two Replace attempts within the same millisecond
+		// can't collide on the path — rapid retap surviving the savePending gate (or a test harness driving
+		// the flow twice quickly) would build the identical tempFile, and the second FileOutputStream would
+		// truncate the first writer's temp mid-flight. Mirrors ExportPipeline.tryDirectAtomicWrite's choice;
+		// the two write paths now use a consistent uniqueness source.
+		File tempFile = new File(parent, "." + requestedName + ".cropcenter-tmp-" + System.nanoTime());
 		try (FileOutputStream out = new FileOutputStream(tempFile))
 		{
 			out.write(data);
@@ -494,11 +506,43 @@ final class ReplaceStrategy
 	 *                      unknown-size target (toast says "Saved")
 	 * @param verifyUriBox  single-element box mutated to the post-rename URI when strategy C succeeds — see
 	 *                      replaceColliding for why we use a box rather than a local
-	 * @param data          the exported bytes that ExportPipeline already verified against the placeholder
+	 * @param encoded       the exported payload that ExportPipeline already verified against the placeholder.
+	 *                      May be tempfile-mode (PNG streaming) — readbackByteCount and replaceViaFileIo need
+	 *                      bytes, so we materialise the tempfile here. The PNG streaming path was added to avoid
+	 *                      a 400-600 MB heap allocation during Save; the Replace + 200 MP PNG combination is
+	 *                      rare enough that we accept the OOM risk and abort the Replace cleanly when the
+	 *                      materialisation throws (the placeholder save is already verified, so the user has a
+	 *                      copy at the auto-suffixed name and `verifyReplace`'s "two files" dialog surfaces the
+	 *                      partial state).
 	 */
 	private void writeReplacementPayload(Uri newUri, String requestedName, boolean wasOverwrite,
-		Uri[] verifyUriBox, byte[] data)
+		Uri[] verifyUriBox, ExportResult encoded)
 	{
+		byte[] data;
+		if (encoded.bytes() != null)
+		{
+			data = encoded.bytes();
+		}
+		else
+		{
+			try
+			{
+				data = Files.readAllBytes(encoded.tempfile().toPath());
+			}
+			catch (IOException | OutOfMemoryError e)
+			{
+				Log.w(TAG, "Replace flow couldn't materialise encode tempfile bytes ("
+					+ e.getMessage() + "); placeholder save is intact, aborting Replace");
+				// Defer to verifyReplace which will see one file at the auto-suffixed placeholder
+				// path and surface the "two files" / "couldn't replace" dialog. The placeholder is
+				// the user's verified save; the colliding original is untouched. Cast size() to int
+				// is safe because ExportResult already enforces size fits a JVM byte[] (≤ INT_MAX)
+				// for the bytes-mode case; tempfile-mode sizes pass through the same int check at
+				// the encode pipeline's final tempfile.length() guard.
+				verifyReplace(verifyUriBox[0], requestedName, (int) encoded.size());
+				return;
+			}
+		}
 		boolean targetWrittenViaFile = replaceViaFileIo(newUri, requestedName, data);
 		// Set to true when strategy B's byte-for-byte readback has already confirmed the colliding target holds
 		// the exported bytes. verifyReplace's placeholder-URI-only fallback would otherwise falsely report
@@ -596,11 +640,17 @@ final class ReplaceStrategy
 		// Verify + announce. verifyReplace shows a failure dialog internally when the end state isn't clean; on
 		// clean replace we issue the one and only "Replaced" toast (doExport's "Saved" toast was suppressed for
 		// this exact reason). The expected length is passed so existence + zero-byte files aren't mistaken for
-		// success. Strategy B's short-circuit: if the colliding URI has already been size-verified through SAF,
-		// skip the placeholder-based verify (which needs fileFromSafUri to resolve and the placeholder still
-		// present — neither is true here). This avoids a false "Couldn't verify replace" dialog on opaque-ID
-		// providers.
-		boolean verified = collidingSafVerified || verifyReplace(verifyUriBox[0], requestedName, data.length);
+		// success. Two short-circuits skip the placeholder-based verifyReplace:
+		//   - Strategy A success (`targetWrittenViaFile`): replaceViaFileIo already verified the target's
+		//     on-disk length matches data.length AND deleted the placeholder. Re-running verifyReplace
+		//     would call fileFromSafUri(placeholderUri) which now resolves via /proc/self/fd readlink
+		//     (resolveViaProcFd) — that opens the URI, which fails with ENOENT because the placeholder
+		//     was just deleted, classifyVerifyOutcome falls through to its SAF-fallback path, and the
+		//     user sees a false "Couldn't verify replace" dialog on a Replace that actually succeeded.
+		//   - Strategy B success (`collidingSafVerified`): the colliding URI was byte-for-byte verified
+		//     against the data, and the placeholder was deleted — same logic as Strategy A.
+		boolean verified = targetWrittenViaFile || collidingSafVerified
+			|| verifyReplace(verifyUriBox[0], requestedName, data.length);
 		if (verified)
 		{
 			// "Replaced X" only when we actually overwrote an existing file. When the caller routed through

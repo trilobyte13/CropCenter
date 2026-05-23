@@ -1,6 +1,7 @@
 package com.cropcenter;
 
 import android.app.AlertDialog;
+import android.content.DialogInterface;
 
 import androidx.activity.result.ActivityResultLauncher;
 
@@ -12,6 +13,17 @@ import java.util.concurrent.atomic.AtomicBoolean;
  */
 interface SaveHost extends EditorHost
 {
+	/**
+	 * Clear the active-transient-dialog tracking when the supplied dialog matches the currently tracked
+	 * reference. Used by dialogs that install their own composite OnDismissListener (because
+	 * registerTransientDialog would overwrite the listener and break the dialog's own cleanup) — the
+	 * dialog includes this callback in its composite listener so the host's tracking still releases
+	 * when the dialog dismisses.
+	 *
+	 * @param dialog dialog that just dismissed; no-op when it doesn't match the tracked reference
+	 */
+	void clearTransientDialog(DialogInterface dialog);
+
 	/**
 	 * @return shared busy flag gating Save and Load so rapid taps can't stack two background threads that both
 	 *         mutate CropState.
@@ -41,6 +53,16 @@ interface SaveHost extends EditorHost
 	 * @return same dialog, returned so callers can chain or assign in one line
 	 */
 	AlertDialog registerTransientDialog(AlertDialog newDialog);
+
+	/**
+	 * Track an AlertDialog as the active transient dialog WITHOUT wrapping its OnDismissListener. Companion to
+	 * registerTransientDialog for dialogs that install their own composite OnDismissListener which already
+	 * includes clearTransientDialog as one of its callbacks. Calling registerTransientDialog instead would
+	 * overwrite the composite listener and break the dialog's own cleanup paths.
+	 *
+	 * @param dialog dialog to track; must already have an OnDismissListener that invokes clearTransientDialog
+	 */
+	void setActiveTransientDialog(AlertDialog dialog);
 
 	/**
 	 * Toggle Save / Open button enabled state while a background task is running.

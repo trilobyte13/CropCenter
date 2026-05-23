@@ -244,14 +244,13 @@ final class ImageLoadController
 			return false;
 		}
 		// Two-pass decode for memory bounds. Pass 1 reads only the SOF dimensions (no pixel allocation) so
-		// we can pick an inSampleSize that fits the decoded bitmap within BitmapUtils.getMaxDecodePixels()
-		// — the device-adaptive cap set at MainActivity.onCreate via BitmapUtils.initialize. On a 12 GB-RAM
-		// flagship the cap reaches ~187 MP so 200 MP sources decode at inSampleSize=1 (no quality loss).
-		// On a 4 GB device the cap lands at ~64 MP and subsampling protects against OOM. Pass 2 does the
-		// real decode at that subsampling. BitmapFactory's bounds pre-pass is essentially free — header
-		// walk only, no entropy decode — so the overhead is negligible for sources that don't need to
-		// subsample.
-		int maxPixels = BitmapUtils.getMaxDecodePixels();
+		// we can pick an inSampleSize that fits the decoded bitmap within BitmapUtils.MAX_DECODE_PIXELS
+		// (256 MP / ~1 GB ARGB). 200 MP Samsung captures (real 192 mebipixels) decode at inSampleSize=1
+		// with comfortable headroom; subsampling only kicks in for hypothetical > 256 MP sources. Pass 2
+		// does the real decode at that subsampling. BitmapFactory's bounds pre-pass is essentially free —
+		// header walk only, no entropy decode — so the overhead is negligible for sources that don't need
+		// to subsample.
+		int maxPixels = BitmapUtils.MAX_DECODE_PIXELS;
 		BitmapFactory.Options boundsOpts = new BitmapFactory.Options();
 		boundsOpts.inJustDecodeBounds = true;
 		BitmapFactory.decodeByteArray(fileBytes, 0, fileBytes.length, boundsOpts);
@@ -262,7 +261,7 @@ final class ImageLoadController
 		{
 			Log.d(TAG, "Large source " + boundsOpts.outWidth + "x" + boundsOpts.outHeight
 				+ " — subsampling at inSampleSize=" + decodeOpts.inSampleSize
-				+ " to fit device-adaptive cap=" + maxPixels);
+				+ " to fit MAX_DECODE_PIXELS=" + maxPixels);
 		}
 		Bitmap raw = BitmapFactory.decodeByteArray(fileBytes, 0, fileBytes.length, decodeOpts);
 		if (raw == null || raw.getWidth() <= 0 || raw.getHeight() <= 0)
@@ -316,6 +315,10 @@ final class ImageLoadController
 		// after the snapshot is built do we call state.reset() and apply the snapshot. A throw inside any
 		// extractor leaves the previous load intact — no half-populated state, no destroyed prior image.
 		boolean handedOff = false;
+		// Declared outside the try so the finally's recycle path can see it. Assigned inside the try only
+		// AFTER createDisplayProxy returns; an earlier throw (extractMetadata, reset, setter cascade) leaves
+		// it null and the finally's null-check + identity-check skip the recycle.
+		Bitmap displayImage = null;
 		try
 		{
 			// extractMetadata is read-only — builds a MetadataExtraction record without touching state.
@@ -325,11 +328,23 @@ final class ImageLoadController
 			int height = bmp.getHeight();
 
 			String sizeInfo = width + "×" + height;
+			String metaInfo = extracted.displayString();
 
-			// All extraction succeeded — now commit to state atomically. The bg executor is single-threaded
-			// so these writes are serialized; UI-thread reads see them via the Handler.post happens-before
-			// edge below. EditorRenderer / tap paths null-check getSourceImage so a null-during-load
-			// snapshot is handled as "no image loaded".
+			// Derive the display proxy on the bg thread so the bilinear-downscale pass (~200 ms for a
+			// 192 MP source going to ~16 MP) doesn't block the UI thread. createDisplayProxy aliases
+			// (returns the source reference) when the source already fits within MAX_DISPLAY_PIXELS — the
+			// common case for any sub-16-MP capture. Done BEFORE the state.reset() + setter cascade
+			// below so a proxy-creation throw (OOM allocating the scaled ARGB or HARDWARE bitmap, Skia
+			// driver failure) doesn't half-commit: the previous image's CropState stays intact and the
+			// caller's catch handler can surface a clean failure toast. handedOff covers both bitmaps:
+			// when the proxy is a separate allocation, the !handedOff branch recycles it alongside bmp;
+			// when it aliases bmp, the identity check prevents double-recycle of the same native buffer.
+			displayImage = BitmapUtils.createDisplayProxy(bmp);
+
+			// All extraction + proxy creation succeeded — now commit to state atomically. The bg
+			// executor is single-threaded so these writes are serialized; UI-thread reads see them via
+			// the Handler.post happens-before edge below. EditorRenderer / tap paths null-check
+			// getSourceImage so a null-during-load snapshot is handled as "no image loaded".
 			CropState state = host.getState();
 			state.reset();
 			state.setOriginalFileBytes(fileBytes);
@@ -339,12 +354,14 @@ final class ImageLoadController
 			state.setPngExifTiff(extracted.pngExifTiff());
 			state.setGainMap(extracted.gainMap());
 			state.setSeftTrailer(extracted.seftTrailer());
-			String metaInfo = extracted.displayString();
 
 			// `handedOff = true` flips ONLY AFTER runOnUiThread successfully posts the runnable. A
 			// throw from the post (RejectedExecutionException on a quitting looper) leaves handedOff
-			// false, so the finally's bmp.recycle() reclaims the native pixel buffer promptly.
-			host.runOnUiThread(() -> host.installImageOnUi(bmp, sizeInfo, metaInfo));
+			// false, so the finally's recycle reclaims both native pixel buffers promptly. `displayForUi`
+			// is a final-by-name alias so the lambda captures it cleanly — `displayImage` is reassigned
+			// above and fails the lambda's effectively-final requirement.
+			Bitmap displayForUi = displayImage;
+			host.runOnUiThread(() -> host.installImageOnUi(bmp, displayForUi, sizeInfo, metaInfo));
 			handedOff = true;
 			return true;
 		}
@@ -353,6 +370,13 @@ final class ImageLoadController
 			if (!handedOff)
 			{
 				bmp.recycle();
+				// displayImage may alias bmp when the source fit MAX_DISPLAY_PIXELS — Bitmap.recycle is
+				// idempotent on Android (NPE-safe second call on an already-recycled buffer), but the
+				// identity check makes the intent explicit and saves a no-op JNI hop.
+				if (displayImage != null && displayImage != bmp)
+				{
+					displayImage.recycle();
+				}
 			}
 		}
 	}
@@ -382,6 +406,19 @@ final class ImageLoadController
 		{
 			return;
 		}
+		// Scheme gate: only accept "content://" URIs from share/view intents. Android N+ blocks senders
+		// from using "file://" via FileUriExposedException, but a privileged sender or pre-N device
+		// could feed a file:// URI pointing at app-internal paths the app has read access to. We have
+		// MANAGE_EXTERNAL_STORAGE granted for the save flow, which gives ContentResolver.openInputStream
+		// broad read access on file:// URIs — without this gate, an attacker-controlled VIEW intent
+		// could exfiltrate file content via our load path. "android.resource://" is allowed for legitimate
+		// app-resource shares.
+		String scheme = uri.getScheme();
+		if (!"content".equals(scheme) && !"android.resource".equals(scheme))
+		{
+			Log.w(TAG, "handleIncomingIntent: rejecting non-content URI scheme=" + scheme);
+			return;
+		}
 		// Share/View intents routinely don't carry persistable permission — log at debug, not warn, since this
 		// is expected for external intents.
 		tryTakePersistable(uri, "(share)", false);
@@ -389,16 +426,17 @@ final class ImageLoadController
 	}
 
 	/**
-	 * Copies URI to a cache file first to guarantee raw byte access. Some ContentProviders (Samsung MediaStore)
-	 * strip post-EOI data from JPEGs, which would lose the HDR gain map. Copying to local file bypasses this.
+	 * Hands the SAF URI to SafFileHelper.readUriBytes, which prefers a direct filesystem read (bypasses
+	 * Samsung MediaStore's EXIF mangling and post-EOI gain-map stripping) and falls back to a cache-file
+	 * copy for cloud / SAF-only URIs that don't resolve to a readable path.
 	 *
 	 * @param uri SAF URI to load
 	 */
 	void load(Uri uri)
 	{
-		// Dismiss any open state-mutating dialog (SettingsDialog) BEFORE busy.compareAndSet — once we
-		// dispatch to bg, state.reset() runs and would race the dialog's still-active UI commits to
-		// state.gridConfig. Done synchronously on the UI thread so by the time runInBackground is called,
+		// Dismiss whatever state-mutating dialog is open BEFORE busy.compareAndSet — once we
+		// dispatch to bg, state.reset() runs and would race any open dialog's still-active widget
+		// commits to CropState. Done synchronously on the UI thread so by the time runInBackground is called,
 		// no widget inside the dialog can fire another updateGridConfig.
 		host.dismissTransientDialogs();
 		if (!host.getBusy().compareAndSet(false, true))
@@ -489,10 +527,11 @@ final class ImageLoadController
 	}
 
 	/**
-	 * Background-thread body of load: reads the URI's bytes via the disk-cache copy path (so post-EOI HDR data
-	 * survives provider quirks), then hands off to applyBytes for decode + metadata extract. Releases the busy flag
-	 * in finally so a thrown read / decode doesn't strand subsequent Open / Save attempts behind a permanent "Busy"
-	 * toast. Failure surfaces as a toast on the UI thread.
+	 * Background-thread body of load: reads the URI's bytes via SafFileHelper.readUriBytes (direct
+	 * filesystem read when resolvable, cache-file copy fallback so post-EOI HDR data survives provider
+	 * quirks), then hands off to applyBytes for decode + metadata extract. Releases the busy flag in
+	 * finally so a thrown read / decode doesn't strand subsequent Open / Save attempts behind a permanent
+	 * "Busy" toast. Failure surfaces as a toast on the UI thread.
 	 *
 	 * @param uri SAF URI to load
 	 */
@@ -501,7 +540,7 @@ final class ImageLoadController
 		try
 		{
 			byte[] fileBytes = safFiles.readUriBytes(uri);
-			Log.d(TAG, "Loaded " + fileBytes.length + " raw bytes (via cache)");
+			Log.d(TAG, "Loaded " + fileBytes.length + " raw bytes");
 			applyBytes(fileBytes, safFiles.getDisplayName(uri));
 		}
 		catch (Exception | OutOfMemoryError e)

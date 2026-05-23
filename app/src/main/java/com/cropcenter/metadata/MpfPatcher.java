@@ -36,6 +36,31 @@ public final class MpfPatcher
 	 */
 	public static boolean patch(byte[] jpeg, int primarySize)
 	{
+		// Backward-compatible entry point for callers (in-memory `compose`, tests) that pass the full
+		// `[primary][gainMap]` buffer. The buffer's length precisely encodes the gain-map size, so we
+		// can derive it here. The streaming entry point below takes gainMapSize explicitly because its
+		// `jpeg` buffer is only the primary's APP-marker HEAD — `jpeg.length - primarySize` would be
+		// negative when patchedHead.length < primarySize, writing a garbage u32 into the MPF size slot.
+		return patch(jpeg, primarySize, jpeg.length - primarySize);
+	}
+
+	/**
+	 * Patch MPF offsets when the caller knows the gain-map size independently of `jpeg.length`. Used by
+	 * `GainMapComposer.composeFileToFile` where `jpeg` is the primary's APP-marker head (not the full
+	 * primary + gain map) and `gainMapSize` is the gain-map JPEG's byte count.
+	 *
+	 * @param jpeg         a byte array containing at least the MPF APP2 segment; need not be the full
+	 *                     primary, but must include all APP segments before SOS so the segment walk
+	 *                     finds the MPF marker
+	 * @param primarySize  byte offset where the gain map will start after the primary (= full primary
+	 *                     JPEG size); written into the MPF entry[0] size field and into the gain-map
+	 *                     entry's relative-offset field as `primarySize - mpfStart`
+	 * @param gainMapSize  byte count of the gain-map JPEG to be appended after the primary; written
+	 *                     into the gain-map entry's size field
+	 * @return true if MPF was found and patched, false otherwise
+	 */
+	public static boolean patch(byte[] jpeg, int primarySize, int gainMapSize)
+	{
 		int off = 2; // skip SOI
 		while (off < jpeg.length - 8)
 		{
@@ -129,8 +154,8 @@ public final class MpfPatcher
 
 					if (tag == TiffTag.MP_ENTRY)
 					{
-						return patchMpEntry(jpeg, primarySize, mpfStart, mpfSegmentEnd,
-							entryOffset, isLittleEndian);
+						return patchMpEntry(jpeg, primarySize, gainMapSize, mpfStart,
+							mpfSegmentEnd, entryOffset, isLittleEndian);
 					}
 				}
 				return false;
@@ -164,8 +189,8 @@ public final class MpfPatcher
 		}
 	}
 
-	private static boolean patchMpEntry(byte[] jpeg, int primarySize, int mpfStart, int mpfSegmentEnd,
-		int entryTagOff, boolean isLittleEndian)
+	private static boolean patchMpEntry(byte[] jpeg, int primarySize, int gainMapSize, int mpfStart,
+		int mpfSegmentEnd, int entryTagOff, boolean isLittleEndian)
 	{
 		long byteCount = ByteBufferUtils.readU32(jpeg, entryTagOff + 4, isLittleEndian);
 		// Guard against a malformed table claiming thousands of entries. byteCount is an unsigned u32
@@ -199,7 +224,6 @@ public final class MpfPatcher
 		}
 		int entryOff = (int) entryOffAbs;
 
-		int gainMapSize = jpeg.length - primarySize;
 		int relativeOffset = primarySize - mpfStart;
 		// On a malformed MPF where the segment is positioned later in the file than the gain map start,
 		// relativeOffset is negative and writeU32 reinterprets it as a huge u32 — emitting a corrupt MP entry

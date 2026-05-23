@@ -7,17 +7,17 @@ package com.cropcenter.model;
 public record ExportConfig(Format format)
 {
 	/**
-	 * Default export config applied when a fresh image loads — JPEG. Users override via the SaveDialog format
-	 * toggle before each export.
+	 * Default export config applied when a fresh image loads — JPEG. Users override via the save dialog
+	 * format toggle before each export (FolderPickerDialog when MANAGE_EXTERNAL_STORAGE is granted,
+	 * SaveDialog on the legacy SAF path).
+	 *
+	 * @return a new ExportConfig with the default JPEG format
 	 */
 	public static ExportConfig defaults()
 	{
 		return new ExportConfig(Format.JPEG);
 	}
 
-	/**
-	 * Replace the format. Returns a new ExportConfig with the supplied format; the receiver is unchanged.
-	 */
 	public ExportConfig withFormat(Format format)
 	{
 		return new ExportConfig(format);

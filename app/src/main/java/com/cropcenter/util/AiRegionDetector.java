@@ -57,9 +57,12 @@ public final class AiRegionDetector
 		}
 
 		/**
-		 * True when at least one pixel is flagged as AI-modified. Callers use this to skip the inpaint step
-		 * entirely when the edit didn't change anything (the inpaint would be a no-op but the JPEG re-encode of
-		 * the gain map would still burn cycles + add minor quantization noise to the saved file).
+		 * Check whether the mask flagged any pixel as AI-modified. Callers use this to skip the inpaint
+		 * step entirely when the edit didn't change anything (the inpaint would be a no-op but the JPEG
+		 * re-encode of the gain map would still burn cycles + add minor quantization noise to the saved
+		 * file).
+		 *
+		 * @return true when at least one pixel was flagged AI-modified during detection
 		 */
 		public boolean hasMaskedPixels()
 		{

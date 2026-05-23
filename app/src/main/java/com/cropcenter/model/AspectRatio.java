@@ -33,7 +33,10 @@ public record AspectRatio(float width, float height)
 	}
 
 	/**
-	 * width / height, or 0 when free. Callers must check isFree() before dividing by the return value.
+	 * Compute the bound aspect ratio. Callers must check isFree() before dividing by the return value —
+	 * a free ratio returns the sentinel 0 rather than width / height (which would be NaN for free).
+	 *
+	 * @return width / height when bound; 0 when free (isFree() returns true)
 	 */
 	public float ratio()
 	{

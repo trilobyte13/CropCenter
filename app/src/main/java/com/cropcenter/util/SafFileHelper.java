@@ -4,9 +4,11 @@ import android.content.Context;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.Environment;
+import android.os.ParcelFileDescriptor;
 import android.provider.DocumentsContract;
 import android.provider.MediaStore;
 import android.provider.OpenableColumns;
+import android.system.Os;
 import android.util.Log;
 
 import java.io.File;
@@ -36,10 +38,44 @@ public final class SafFileHelper
 	}
 
 	/**
-	 * Stream the contents of `src` into `dst`, truncating whatever was at `dst`. Returns true on a fully successful
-	 * copy, false on any error (permission denied, provider doesn't grant sibling write access, etc.). Used by the
-	 * Replace flow to overwrite the original file's URI directly — skipping the delete/rename dance that some
-	 * providers silently fail.
+	 * Build a SAF document URI on the external-storage DocumentsProvider for a file at the given absolute
+	 * path on primary external storage. Used by the in-app folder picker (Save flow workaround for Samsung's
+	 * broken One UI CreateDocument picker) to construct a SAF URI that the existing handleSaveAsResult +
+	 * ExportPipeline path can route through unchanged. The pipeline resolves the URI back to the same File
+	 * via fileFromSafUri's primary: branch — pure string parsing, no file-system access — so the round-trip
+	 * is deterministic and works whether or not the target file currently exists. Returns null for paths
+	 * outside primary external storage (secondary SD cards, USB drives) since the docId format differs and
+	 * MES doesn't auto-grant access to those volumes.
+	 *
+	 * @param targetFile target file on primary external storage; absolute path must start with
+	 *                   Environment.getExternalStorageDirectory()
+	 * @return SAF document URI suitable for the existing save pipeline, or null when targetFile lies
+	 *         outside primary external storage
+	 */
+	public static Uri buildExternalStorageDocumentUri(File targetFile)
+	{
+		if (targetFile == null)
+		{
+			return null;
+		}
+		String docId = buildExternalStorageDocId(targetFile.getAbsolutePath(),
+			Environment.getExternalStorageDirectory().getAbsolutePath());
+		if (docId == null)
+		{
+			return null;
+		}
+		return DocumentsContract.buildDocumentUri("com.android.externalstorage.documents", docId);
+	}
+
+	/**
+	 * Stream the contents of `src` into `dst`, truncating whatever was at `dst`. Used by the Replace flow
+	 * to overwrite the original file's URI directly — skipping the delete/rename dance that some providers
+	 * silently fail.
+	 *
+	 * @param src source URI to read from
+	 * @param dst destination URI to overwrite (opened with "w" mode — truncates on open)
+	 * @return true on a fully successful copy; false on any error (provider rejects open, permission
+	 *         denied, transferTo throws, etc.)
 	 */
 	public boolean copyUriContents(Uri src, Uri dst)
 	{
@@ -61,18 +97,23 @@ public final class SafFileHelper
 	}
 
 	/**
-	 * Programmatically create a new SAF document in the same directory as `docUri`, with `placeholderName` and
-	 * `mimeType`. Used by the Save flow to turn a provider-confirmed overwrite (SAF ACTION_CREATE_DOCUMENT that
-	 * returned an existing document rather than auto-renaming) into the crash-safe Replace pattern: write+verify
-	 * the placeholder, then swap onto the target.
+	 * Programmatically create a new SAF document in the same directory as `docUri`. Used by the Save flow
+	 * to turn a provider-confirmed overwrite (SAF ACTION_CREATE_DOCUMENT that returned an existing
+	 * document rather than auto-renaming) into the crash-safe Replace pattern: write+verify the
+	 * placeholder, then swap onto the target.
 	 *
-	 * Derives the parent document URI from `docUri`'s document ID. For path-addressed providers like
-	 * ExternalStorageProvider, the parent is the prefix up to the last `/` ("primary:Pictures/foo.jpg" →
-	 * "primary:Pictures"); when the file lives at the provider root the volume `:` separator stands in
-	 * ("primary:foo.jpg" → "primary:") so root-level documents still get the crash-safe sibling-replace path
-	 * instead of falling onto the in-place fallback. Returns null when `docUri` has no document ID, an opaque ID
-	 * without either separator, or when the provider rejects createDocument (doesn't support
-	 * FLAG_DIR_SUPPORTS_CREATE). The caller must have a fallback plan for null.
+	 * Derives the parent document URI from docUri's document ID. For path-addressed providers like
+	 * ExternalStorageProvider, the parent is the prefix up to the last "/" ("primary:Pictures/foo.jpg" →
+	 * "primary:Pictures"); when the file lives at the provider root the volume ":" separator stands in
+	 * ("primary:foo.jpg" → "primary:") so root-level documents still get the crash-safe sibling-replace
+	 * path instead of falling onto the in-place fallback.
+	 *
+	 * @param docUri          sibling document whose parent the new document lands in
+	 * @param mimeType        MIME type of the new document (drives provider extension handling)
+	 * @param placeholderName display name for the new document
+	 * @return newly-created document URI, or null when docUri has no document ID, an opaque ID without
+	 *         either separator, or when the provider rejects createDocument (doesn't support
+	 *         FLAG_DIR_SUPPORTS_CREATE). The caller must have a fallback plan for null.
 	 */
 	public Uri createSiblingPlaceholder(Uri docUri, String mimeType, String placeholderName)
 	{
@@ -100,11 +141,16 @@ public final class SafFileHelper
 	}
 
 	/**
-	 * Build a sibling document URI by swapping the last segment of src's document ID for siblingName. Works on
-	 * providers that encode paths in their document IDs (notably ExternalStorageProvider). Handles files at the
-	 * provider root by treating the volume `:` as the segment separator ("primary:foo.jpg" → "primary:siblingName")
-	 * so root-level documents get the same sibling-derivation as nested ones. Returns null for opaque-ID providers
-	 * or providers that don't expose a document ID.
+	 * Build a sibling document URI by swapping the last segment of src's document ID for siblingName.
+	 * Works on providers that encode paths in their document IDs (notably ExternalStorageProvider).
+	 * Handles files at the provider root by treating the volume ":" as the segment separator
+	 * ("primary:foo.jpg" → "primary:siblingName") so root-level documents get the same sibling-derivation
+	 * as nested ones.
+	 *
+	 * @param src         source document URI whose parent the sibling lives in
+	 * @param siblingName name to substitute for src's last segment
+	 * @return derived sibling URI, or null for opaque-ID providers / providers that don't expose a
+	 *         document ID / docIds without a parent separator
 	 */
 	public Uri deriveSiblingUri(Uri src, String siblingName)
 	{
@@ -131,16 +177,17 @@ public final class SafFileHelper
 	}
 
 	/**
-	 * Translate a SAF or MediaStore URI to a java.io.File in shared storage. Returns null when
-	 * the URI isn't path-addressable. Supported docId formats:
+	 * Translate a SAF or MediaStore URI to a java.io.File in shared storage. Supported docId formats:
 	 *   - "primary:relative/path/file.ext"  — ExternalStorageProvider (DCIM, Pictures, …)
-	 *   - "raw:/absolute/filesystem/path"   — DownloadStorageProvider when the file lives on
-	 *                                         the real filesystem (Download/...). The "raw"
-	 *                                         prefix is literal — the rest is an absolute path.
-	 * Plus a MediaStore _data column fallback. getFilePathAndId can throw SecurityException for
-	 * URIs the app doesn't have active read permission on (common post-uninstall/reinstall for
-	 * non-app-owned documents) — that's expected, we just return null and let the SAF paths
-	 * try their luck.
+	 *   - "raw:/absolute/filesystem/path"   — DownloadStorageProvider when the file lives on the real
+	 *                                         filesystem (Download/...). The "raw" prefix is literal —
+	 *                                         the rest is an absolute path.
+	 * Plus a MediaStore _data column fallback. getFilePathAndId can throw SecurityException for URIs
+	 * the app doesn't have active read permission on (common post-uninstall/reinstall for non-app-owned
+	 * documents) — that's expected, we just return null and let the SAF paths try their luck.
+	 *
+	 * @param uri SAF or MediaStore URI to resolve
+	 * @return File for the resolved filesystem path, or null when the URI isn't path-addressable
 	 */
 	public File fileFromSafUri(Uri uri)
 	{
@@ -156,6 +203,8 @@ public final class SafFileHelper
 		{
 			// DocumentsContract misbehaved — fall through to the MediaStore fallback.
 		}
+		Log.d(TAG, "fileFromSafUri uri=" + uri + " authority=" + (uri == null ? null : uri.getAuthority())
+			+ " docId=" + docId);
 		int colon = (docId == null) ? -1 : docId.indexOf(':');
 		if (colon > 0)
 		{
@@ -190,12 +239,48 @@ public final class SafFileHelper
 				}
 				return new File(tail);
 			}
+			// DownloadStorageProvider "msf:NNN" → MediaStore Files numeric ID. Resolve via
+			// MediaStore.Files.getContentUri("external") to recover the on-disk path. Without this branch
+			// the Replace flow's File-I/O path returns null on Downloads-backed pickers (the user just
+			// saved to ~/Download with MANAGE_EXTERNAL_STORAGE granted but our app couldn't translate the
+			// SAF URI to a writable path), strategies B/C then fail, and verifyReplace falsely surfaces
+			// "Grant All files access" — which the user has already granted.
+			if ("msf".equalsIgnoreCase(volume))
+			{
+				File resolved = lookupMediaStoreFilesPath(tail);
+				if (resolved != null)
+				{
+					return resolved;
+				}
+			}
+		}
+		// Pure-numeric docId on Downloads provider — legacy form for the same MediaStore.Files lookup as
+		// "msf:NNN" above. Try the lookup before falling through to getFilePathAndId.
+		if (docId != null && !docId.isEmpty() && docId.chars().allMatch(Character::isDigit))
+		{
+			File resolved = lookupMediaStoreFilesPath(docId);
+			if (resolved != null)
+			{
+				return resolved;
+			}
 		}
 		// Fall back to MediaStore _data column.
 		String[] pathAndId = getFilePathAndId(uri);
 		if (pathAndId != null && pathAndId[0] != null)
 		{
 			return new File(pathAndId[0]);
+		}
+		// Last-resort: open the URI for read and readlink /proc/self/fd to recover the path. Works for
+		// any provider whose URI backs to a real file on disk — including Samsung's modified
+		// DownloadStorageProvider (`com.android.providers.downloads.documents` with `qb:NNN` or other
+		// vendor-specific opaque doc IDs) where neither the MediaStore Files row lookup nor the direct
+		// `_data` query succeeds. This is the standard Android trick for resolving an arbitrary content
+		// URI to its filesystem path. Requires MANAGE_EXTERNAL_STORAGE OR a granted SAF read permission
+		// for the URI (the picker just gave us one, so the open succeeds).
+		File resolved = resolveViaProcFd(uri);
+		if (resolved != null)
+		{
+			return resolved;
 		}
 		return null;
 	}
@@ -236,7 +321,11 @@ public final class SafFileHelper
 	}
 
 	/**
-	 * Query MediaStore for file path and _ID. Returns [path, id] or null.
+	 * Query MediaStore for the underlying file path and _ID column.
+	 *
+	 * @param uri MediaStore URI to query
+	 * @return two-element array [path, id], or null when the URI isn't a MediaStore content URI / the
+	 *         query failed / the row is missing either column
 	 */
 	public String[] getFilePathAndId(Uri uri)
 	{
@@ -381,14 +470,17 @@ public final class SafFileHelper
 	}
 
 	/**
-	 * Copy the URI to a cache file, then slurp raw bytes. The two-step routing (stream → cache file
-	 * → in-memory byte[]) is deliberate: some ContentProviders (notably Samsung MediaStore) strip
-	 * post-EOI bytes from JPEGs when streaming, which would lose the HDR gain map. Materialising
-	 * to a local file first bypasses that.
+	 * Read the URI's bytes into memory. Tries a direct filesystem read first via tryReadDirectlyFromPath —
+	 * that path bypasses Samsung MediaStore's EXIF mangling and post-EOI gain-map stripping that the
+	 * provider stream applies. Falls back to a stream → cache-file → byte[] copy for URIs that don't
+	 * resolve to a readable path (cloud / SAF-only providers).
 	 *
-	 * Throws IOException when the input exceeds MAX_READ_BYTES — the byte[] allocation in the second phase would
-	 * otherwise risk OutOfMemoryError on mid-range devices and a negative-size allocation if fileLen exceeded
-	 * Integer.MAX_VALUE.
+	 * @param uri SAF URI to read
+	 * @return the file's raw bytes
+	 * @throws IOException when the input exceeds MAX_READ_BYTES (the byte[] allocation in the cache-copy
+	 *                     phase would otherwise risk OutOfMemoryError on mid-range devices and a
+	 *                     negative-size allocation if fileLen exceeded Integer.MAX_VALUE), or when the
+	 *                     provider stream fails to open, or when the cached file reads empty / short
 	 */
 	public byte[] readUriBytes(Uri uri) throws IOException
 	{
@@ -457,17 +549,20 @@ public final class SafFileHelper
 	}
 
 	/**
-	 * Byte-for-byte verify the file at `uri` matches `expected`. Ground-truth content verification — used when a
-	 * write path threw a harmless EPIPE/IOException on close yet persisted the full payload, or when a cheap
-	 * size-only check isn't enough to prove the bytes on disk are really the ones we intended to write.
+	 * Byte-for-byte verify the file at uri matches expected. Ground-truth content verification — used
+	 * when a write path threw a harmless EPIPE/IOException on close yet persisted the full payload, or
+	 * when a cheap size-only check isn't enough to prove the bytes on disk are really the ones we
+	 * intended to write.
 	 *
-	 * Returns:
-	 *   full bytes verified equal  → expected.length (save ok)
-	 *   any mismatch or short file → number of bytes read before divergence/EOF (save failed)
-	 *   trailing bytes (provider didn't truncate) → expected.length + trailing (save failed)
-	 *   provider can't serve file, or EOF check threw before confirming no trailing bytes → -1
-	 * Callers MUST use strict equality against expected.length — any other result means
-	 * the save is unverified, regardless of whether the numeric value is higher or lower.
+	 * Callers MUST use strict equality against expected.length — any other result means the save is
+	 * unverified, regardless of whether the numeric value is higher or lower.
+	 *
+	 * @param uri      URI to read back
+	 * @param expected bytes we tried to write — compared byte-for-byte against the provider's stream
+	 * @return expected.length when the full byte sequence matched (save ok); the number of bytes read
+	 *         before divergence / EOF on mismatch or short file; expected.length + trailing when the
+	 *         provider didn't truncate; -1 when the provider can't serve the URI, or when the EOF check
+	 *         threw before confirming no trailing bytes
 	 */
 	public long readbackByteCount(Uri uri, byte[] expected)
 	{
@@ -494,13 +589,16 @@ public final class SafFileHelper
 	}
 
 	/**
-	 * Best-effort delete of a SAF document URI. Returns true when a provider explicitly confirmed the deletion
-	 * (DocumentsContract.deleteDocument returned true, or the ContentResolver delete reported > 0 rows affected);
-	 * false when both paths failed OR silently reported ambiguous results. Callers that NEED the document gone
-	 * before proceeding (e.g. Replace flow's placeholder cleanup after a direct SAF overwrite) must check the
-	 * return value — a false here means the file may still be on disk, and short-circuiting the follow-up verifier
-	 * would claim success while leaving a duplicate. Callers that only want best-effort cleanup (e.g. post-failure
-	 * placeholder sweep) can ignore the result.
+	 * Best-effort delete of a SAF document URI. Callers that NEED the document gone before proceeding
+	 * (e.g. Replace flow's placeholder cleanup after a direct SAF overwrite) must check the return value
+	 * — a false here means the file may still be on disk, and short-circuiting the follow-up verifier
+	 * would claim success while leaving a duplicate. Callers that only want best-effort cleanup (e.g.
+	 * post-failure placeholder sweep) can ignore the result.
+	 *
+	 * @param uri SAF document URI to delete
+	 * @return true when a provider explicitly confirmed the deletion (DocumentsContract.deleteDocument
+	 *         returned true, or the ContentResolver delete reported > 0 rows affected); false when both
+	 *         paths failed OR silently reported ambiguous results
 	 */
 	public boolean tryDeleteSafDocument(Uri uri)
 	{
@@ -528,6 +626,44 @@ public final class SafFileHelper
 			Log.d(TAG, "ContentResolver.delete fallback path: " + e.getClass().getSimpleName());
 		}
 		return false;
+	}
+
+	/**
+	 * Pure-string helper that produces the `primary:<relative-path>` document ID for a file on
+	 * primary external storage. Takes absolute path strings (not File objects) so the test suite
+	 * can pin POSIX-style paths even when running on Windows — `new File("/storage/emulated/0/...")
+	 * .getAbsolutePath()` resolves to a Windows drive path on a Windows JVM, which would fail the
+	 * prefix check against a POSIX rootPath. Returns null on any branch that
+	 * `buildExternalStorageDocumentUri` would reject (null inputs, path outside rootPath, ".."
+	 * traversal segment).
+	 *
+	 * @param absPath  absolute file path (e.g. "/storage/emulated/0/Pictures/foo.jpg")
+	 * @param rootPath primary external storage root (e.g. "/storage/emulated/0"); typically
+	 *                 `Environment.getExternalStorageDirectory().getAbsolutePath()`
+	 * @return `primary:<relative>` doc ID, or null when absPath lies outside rootPath
+	 */
+	static String buildExternalStorageDocId(String absPath, String rootPath)
+	{
+		if (absPath == null || rootPath == null)
+		{
+			return null;
+		}
+		if (!absPath.startsWith(rootPath + "/"))
+		{
+			return null;
+		}
+		String relativePath = absPath.substring(rootPath.length() + 1);
+		// Defense in depth: getAbsolutePath does NOT normalize ".." segments — a caller passing
+		// `new File(rootPath, "../../data/data/.../foo")` could produce an absPath that prefix-matches
+		// rootPath while the relative path walks out of primary storage.
+		// SafPaths.hasParentTraversalSegment is the segment-aware ".." check used by fileFromSafUri's
+		// primary: branch; mirror it here so the downstream URI can never resolve outside the volume
+		// regardless of caller hygiene.
+		if (SafPaths.hasParentTraversalSegment(relativePath))
+		{
+			return null;
+		}
+		return "primary:" + relativePath;
 	}
 
 	/**
@@ -600,6 +736,94 @@ public final class SafFileHelper
 			}
 		}
 		return total;
+	}
+
+	/**
+	 * Resolve a MediaStore Files numeric ID to its on-disk `_data` path. Used by `fileFromSafUri` for
+	 * Downloads-provider `msf:NNN` and bare-numeric doc IDs that don't carry a path-encoded volume.
+	 *
+	 * Returns null when the lookup fails (no row, SecurityException, missing _data column, or empty
+	 * string). Caller treats null as "URI not path-resolvable" and falls through to remaining probes.
+	 *
+	 * @param id numeric MediaStore Files _id (string form, as docIds carry it)
+	 * @return File pointing at the on-disk path, or null when the row can't be resolved
+	 */
+	private File lookupMediaStoreFilesPath(String id)
+	{
+		try
+		{
+			Uri msUri = android.provider.MediaStore.Files.getContentUri("external");
+			try (Cursor cursor = ctx.getContentResolver().query(msUri,
+				new String[] { "_data" }, "_id=?", new String[] { id }, null))
+			{
+				if (cursor != null && cursor.moveToFirst())
+				{
+					int dataIdx = cursor.getColumnIndex("_data");
+					if (dataIdx >= 0)
+					{
+						String path = cursor.getString(dataIdx);
+						if (path != null && !path.isEmpty())
+						{
+							Log.d(TAG, "MediaStore.Files lookup id=" + id + " → " + path);
+							return new File(path);
+						}
+					}
+				}
+			}
+		}
+		catch (Exception e)
+		{
+			Log.w(TAG, "MediaStore.Files lookup failed for id=" + id + ": " + e.getMessage());
+		}
+		return null;
+	}
+
+	/**
+	 * Open the URI for read and readlink `/proc/self/fd/N` to recover the underlying filesystem path.
+	 * The standard Android workaround for resolving an arbitrary content URI when neither the
+	 * provider's `_data` column query nor the docId-based MediaStore lookup works — common on
+	 * Samsung's modified DownloadStorageProvider where the docId carries an opaque
+	 * vendor-specific form (`qb:NNN` and similar) that isn't a valid MediaStore Files _id.
+	 *
+	 * Returns null when the URI can't be opened (no read permission, provider unavailable, file
+	 * doesn't exist), when readlink fails (path on FUSE-only mount with no underlying inode), or
+	 * when the resolved path doesn't pass the same volume-traversal guard `fileFromSafUri` applies
+	 * to docId-based paths. Caller falls through to its own null-handling.
+	 *
+	 * @param uri content URI to resolve
+	 * @return File pointing at the on-disk path, or null when readlink can't recover one
+	 */
+	private File resolveViaProcFd(Uri uri)
+	{
+		try (ParcelFileDescriptor pfd = ctx.getContentResolver().openFileDescriptor(uri, "r"))
+		{
+			if (pfd == null)
+			{
+				return null;
+			}
+			String fdLink = "/proc/self/fd/" + pfd.getFd();
+			String resolved = Os.readlink(fdLink);
+			if (resolved == null || resolved.isEmpty())
+			{
+				return null;
+			}
+			// Reject anything that doesn't look like a user-accessible filesystem path. Some providers
+			// back URIs with pipes / sockets / cgroup paths that wouldn't survive a rename — caller
+			// would then leak the placeholder. Same /storage/emulated/0 root we accept on the
+			// primary-volume docId branch.
+			if (!resolved.startsWith("/storage/") && !resolved.startsWith("/mnt/"))
+			{
+				Log.d(TAG, "resolveViaProcFd rejected non-storage path: " + resolved);
+				return null;
+			}
+			Log.d(TAG, "resolveViaProcFd uri=" + uri + " → " + resolved);
+			return new File(resolved);
+		}
+		catch (Exception e)
+		{
+			Log.d(TAG, "resolveViaProcFd failed for " + uri + ": " + e.getMessage());
+			return null;
+		}
 	}
 
 	/**

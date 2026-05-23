@@ -301,6 +301,12 @@ public final class GainMapInpainter
 	 * GainMapInpainterTest can pin the long-arithmetic contract and the same-dimensions clone fast-path
 	 * directly — the Bitmap-bound callers (inpaintAlpha8 / inpaintArgb) need Android infrastructure, but this
 	 * pure-boolean-array helper does not.
+	 *
+	 * @param aiMask       source AI-region mask carrying width / height and a width * height boolean array
+	 * @param targetWidth  destination width in pixels (≥ 1)
+	 * @param targetHeight destination height in pixels (≥ 1)
+	 * @return fresh boolean[targetWidth * targetHeight] — independent of the source array even on the
+	 *         same-dimensions fast path (always a clone, never aliased) so callers can mutate freely
 	 */
 	static boolean[] scaleMask(AiMask aiMask, int targetWidth, int targetHeight)
 	{

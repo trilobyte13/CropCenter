@@ -113,6 +113,35 @@ public final class SelectionHistoryTest
 	}
 
 	@Test
+	public void redoSnapshotsCallerCurrentBeforeReturningPriorFrame()
+	{
+		// Symmetric to pushSnapshotsCallerListSubsequentMutationsDoNotLeak: redo() pushes the caller's
+		// `current` onto the undo stack so a subsequent undo can return TO it. The push must take a
+		// SNAPSHOT, not a reference; otherwise caller mutations after redo() corrupt the saved frame.
+		// A regression that swaps `snapshot(current)` for direct list reuse would silently let
+		// caller mutations leak into the just-pushed undo frame.
+		SelectionHistory history = new SelectionHistory();
+		history.push(Arrays.asList(pt(1, 1)));        // frame A on undo stack
+		List<SelectionPoint> currentB = new ArrayList<>();
+		currentB.add(pt(2, 2));
+		history.undo(currentB);                       // currentB now on redo stack; live = A
+		List<SelectionPoint> currentA = new ArrayList<>();
+		currentA.add(pt(1, 1));
+		// redo: currentA goes onto undoStack as a snapshot; redo returns frame-B snapshot
+		List<SelectionPoint> redone = history.redo(currentA);
+		assertEquals("redo must return frame-B contents", 1, redone.size());
+		assertEquals(2f, redone.get(0).x(), 0f);
+		// Mutate caller's currentA — must NOT leak into the just-snapshotted undo frame
+		currentA.clear();
+		currentA.add(pt(99, 99));
+		List<SelectionPoint> undone = history.undo(redone);
+		assertEquals("undo'd frame must reflect pre-mutation currentA snapshot",
+			1, undone.size());
+		assertEquals("undo'd frame x must be 1 (pre-mutation), not 99 (post-mutation)",
+			1f, undone.get(0).x(), 0f);
+	}
+
+	@Test
 	public void stackSizesNeverExceedMaxDepthAcrossArbitraryOperationMix()
 	{
 		// Invariant: undoStack and redoStack are both bounded by MAX_DEPTH = 50 under ANY operation
@@ -179,6 +208,31 @@ public final class SelectionHistoryTest
 	{
 		SelectionHistory history = new SelectionHistory();
 		assertNull(history.undo(Arrays.asList(pt(1, 1))));
+	}
+
+	@Test
+	public void undoSnapshotsCallerCurrentBeforeReturningPriorFrame()
+	{
+		// Mirror of redoSnapshotsCallerCurrentBeforeReturningPriorFrame: undo() pushes the caller's
+		// `current` onto the redo stack as a snapshot before popping the undo frame. Caller mutations
+		// to `current` after undo() must not bleed into the saved redo frame. A regression that drops
+		// the snapshot call would let undo-then-mutate-current-then-redo return a corrupted frame.
+		SelectionHistory history = new SelectionHistory();
+		history.push(Arrays.asList(pt(1, 1)));        // frame A on undo stack
+		List<SelectionPoint> currentB = new ArrayList<>();
+		currentB.add(pt(2, 2));
+		// undo: currentB goes onto redoStack as a snapshot; undo returns frame-A snapshot
+		List<SelectionPoint> undone = history.undo(currentB);
+		assertEquals("undo must return frame-A contents", 1, undone.size());
+		assertEquals(1f, undone.get(0).x(), 0f);
+		// Mutate caller's currentB — must NOT leak into the just-snapshotted redo frame
+		currentB.clear();
+		currentB.add(pt(99, 99));
+		List<SelectionPoint> redone = history.redo(undone);
+		assertEquals("redo'd frame must reflect pre-mutation currentB snapshot",
+			1, redone.size());
+		assertEquals("redo'd frame x must be 2 (pre-mutation), not 99 (post-mutation)",
+			2f, redone.get(0).x(), 0f);
 	}
 
 	/**

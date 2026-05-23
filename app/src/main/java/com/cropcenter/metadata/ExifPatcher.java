@@ -636,6 +636,28 @@ public final class ExifPatcher
 				// to overwrite). Otherwise replaceThumbnail falls through to append.
 				if (hasFormatTag && hasLengthTag && oldThumbOff != 0)
 				{
+					// Two splice sub-paths set different effective max-thumb constraints. When the
+					// thumbnail is followed by trailing data (Samsung HDR EXIF has ~7 KB of
+					// MakerNote value blocks past the IFD1 thumbnail — `afterLen > 0` in
+					// spliceExistingThumbnail), the splice can only ACCEPT new thumbnails ≤
+					// oldThumbLen because anything larger would shift the trailing bytes (corrupt
+					// offsets elsewhere in the EXIF) and the padding fix can't widen the slot. To
+					// make the caller's budget math (`thumbBudget = CAP - predicted`) clamp at
+					// oldThumbLen, return CAP - oldThumbLen here — predicted is conservatively
+					// larger than the actual non-thumb byte count, but the goal of this method is
+					// "tell the caller the budget they should reserve", and `CAP - predicted =
+					// oldThumbLen` is the correct budget for the splice path that succeeds. Without
+					// this cap, the cascade could pick a thumbnail larger than oldThumbLen, splice
+					// would bail to appendFresh, appendFresh would reject for APP1-cap overflow
+					// (the segment is already near 65535 on Samsung sources), and the final
+					// fallback would strip the thumbnail — exactly the regression the padding fix
+					// was supposed to close.
+					int afterStart = TIFF_HEADER_OFFSET + oldThumbOff + oldThumbLen;
+					boolean hasTrailingBytes = afterStart < data.length;
+					if (hasTrailingBytes)
+					{
+						return JpegSegment.MAX_SEGMENT_BYTES - oldThumbLen;
+					}
 					return data.length - oldThumbLen;
 				}
 				return data.length + freshIfd1HeaderSize;
@@ -1002,30 +1024,43 @@ public final class ExifPatcher
 			return data;
 		}
 
-		// Splice: [...before...][newThumb][...after (usually empty)...]
+		// Splice: [...before...][newThumb][zero-pad if shrinking][...after (usually empty)...]
 		int afterStart = absOldOff + oldThumbLen;
 		int afterLen = data.length - afterStart;
-		// When the thumbnail is followed by non-empty trailing data AND the new
-		// thumbnail length differs from the old, the splice shifts every byte after the thumbnail by
-		// (newThumb.length - oldThumbLen) bytes. Any TIFF offset stored elsewhere in the EXIF that
-		// references those trailing bytes (a MakerNote value block, SubIFD value data, GPS offset-
-		// referenced data, etc.) would still point at the OLD position, corrupting the reference. The
-		// typical Samsung layout has the thumbnail at EOF (afterLen=0) so the splice is safe — same
-		// length is also safe because no shift occurs. For any other case fall back to appendFresh,
-		// which orphans the old IFD1 in place and leaves all offset-referenced data stable; the
-		// caller (replaceThumbnail) detects `rebuilt == data` and routes through appendFresh.
-		if (afterLen > 0 && newThumb.length != oldThumbLen)
+		// When the thumbnail is followed by non-empty trailing data, the splice can't widen the
+		// thumbnail slot without shifting every byte after it by (newThumb.length - oldThumbLen)
+		// bytes — any TIFF offset stored elsewhere in the EXIF that references those trailing bytes
+		// (a MakerNote value block, SubIFD value data, GPS offset-referenced data, etc.) would still
+		// point at the OLD position, corrupting the reference. Two cases the splice handles cleanly:
+		//   afterLen == 0 — no trailing data, the segment grows or shrinks freely.
+		//   newThumb.length <= oldThumbLen — fits in the existing slot. When the new thumbnail is
+		//     SMALLER than the old one, pad the gap with zero bytes so the trailing data stays at
+		//     its original absolute offset. The JPEGInterchangeFormatLength tag (updated below)
+		//     tells EXIF decoders to read only newThumb.length bytes; the padding sits between the
+		//     new thumbnail's EOI and the trailing data, unreached through any spec-compliant parse.
+		// Only newThumb.length > oldThumbLen with afterLen > 0 needs the appendFresh fallback —
+		// there's no way to widen the slot without shifting. Samsung HDR captures fall into the
+		// "shrink with trailing data" case (afterLen ≈ 7 KB of MakerNote value data after the
+		// thumbnail); without this padding branch, every Samsung HDR save would strip the
+		// thumbnail because appendFresh's APP1-cap check also rejects on already-full segments.
+		if (afterLen > 0 && newThumb.length > oldThumbLen)
 		{
 			Log.d(TAG, "Splice would shift " + afterLen + " trailing bytes (oldLen=" + oldThumbLen
 				+ " newLen=" + newThumb.length + "); falling back to appendFresh to preserve offsets");
 			return data;
 		}
-		byte[] newData = new byte[absOldOff + newThumb.length + afterLen];
+		// Pad length is non-negative: zero when newThumb.length == oldThumbLen (same-size splice,
+		// no padding) and positive when newThumb.length < oldThumbLen (zero-fill the residual slot).
+		// Negative-pad can't occur because the > oldThumbLen branch above already returned.
+		int padLen = (afterLen > 0) ? oldThumbLen - newThumb.length : 0;
+		byte[] newData = new byte[absOldOff + newThumb.length + padLen + afterLen];
 		System.arraycopy(data, 0, newData, 0, absOldOff);
 		System.arraycopy(newThumb, 0, newData, absOldOff, newThumb.length);
+		// Pad bytes are zero-initialized by `new byte[...]` — no explicit fill needed.
 		if (afterLen > 0)
 		{
-			System.arraycopy(data, afterStart, newData, absOldOff + newThumb.length, afterLen);
+			System.arraycopy(data, afterStart, newData, absOldOff + newThumb.length + padLen,
+				afterLen);
 		}
 
 		// newSegLen is the value written into the 2-byte length field, which per JPEG spec includes the 2

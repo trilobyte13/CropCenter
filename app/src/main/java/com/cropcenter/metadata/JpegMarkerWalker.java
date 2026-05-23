@@ -60,6 +60,15 @@ public final class JpegMarkerWalker
 	 */
 	public static int findEoi(byte[] file, int startOff, int endBound)
 	{
+		// Long-arithmetic overflow guard. An adversarial startOff near Integer.MAX_VALUE would let
+		// `startOff + 2` wrap into Integer.MIN_VALUE + 0 (signed-overflow), passing the `off < endBound`
+		// check with a negative value that then indexes the byte array negatively → AIOOBE. Symmetric
+		// to the `next < off` guard further down the walk; placing it up front avoids the unchecked
+		// add altogether.
+		if (startOff < 0 || startOff > Integer.MAX_VALUE - 2)
+		{
+			return -1;
+		}
 		int off = startOff + 2; // skip SOI
 		while (off < endBound - 1)
 		{

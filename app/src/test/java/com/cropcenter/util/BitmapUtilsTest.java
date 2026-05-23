@@ -21,11 +21,25 @@ public final class BitmapUtilsTest
 	private static final float EPS = BitmapUtils.ROTATION_EPSILON;
 
 	@Test
+	public void computeInSampleSizeAtProductionCapAllowsTwoHundredMpAtSampleOne()
+	{
+		// Pin the production behavior end-to-end: a 200 MP Samsung capture (16384×12288 = 201 megapixels)
+		// passed through `computeInSampleSize` with the real `MAX_DECODE_PIXELS = 256 MP` returns 1 — no
+		// subsampling, full source resolution preserved for the save path. A future cap downgrade that
+		// drops MAX_DECODE_PIXELS below 200 MP would surface here. Companion case `8192×8192 = 67 MP`
+		// also fits well under the production cap and confirms sampleSize=1 across realistic captures.
+		assertEquals(1, BitmapUtils.computeInSampleSize(16384, 12288, BitmapUtils.MAX_DECODE_PIXELS));
+		assertEquals(1, BitmapUtils.computeInSampleSize(8192, 8192, BitmapUtils.MAX_DECODE_PIXELS));
+	}
+
+	@Test
 	public void computeInSampleSizeDoublesUntilFits()
 	{
-		// 200 MP source (16384×12288 = 201,326,592 pixels). At 32 MP cap, sampleSize=2 → 50 MP (still over).
+		// Hypothetical cap below the source size (32 MP cap) to exercise the doubling loop. Production uses
+		// `MAX_DECODE_PIXELS = 256 MP`, but the helper is parameter-driven so the doubling logic itself
+		// must be correct against any cap. 200 MP source at 32 MP cap: sampleSize=2 → 50 MP (still over);
 		// sampleSize=4 → 12.6 MP (fits). Pin the exact result so a regression that uses a non-power-of-2
-		// stepping or stops too early is caught.
+		// stepping or stops too early is caught regardless of the production cap value.
 		assertEquals(4, BitmapUtils.computeInSampleSize(16384, 12288, 32 * 1024 * 1024));
 		// 8192×8192 = 67 MP. sampleSize=2 → 16 MP (fits at 32 MP cap).
 		assertEquals(2, BitmapUtils.computeInSampleSize(8192, 8192, 32 * 1024 * 1024));
@@ -36,8 +50,10 @@ public final class BitmapUtilsTest
 	{
 		// Android's BitmapFactory.Options.inSampleSize must be a power of 2 (other values round DOWN
 		// internally — a sampleSize=3 would decode at sampleSize=2, blowing the memory budget). Sweep across
-		// pixel counts and assert the result is always 1, 2, 4, 8, ... A regression that returned 3 or 5
-		// would silently re-introduce the OOM the helper exists to prevent.
+		// pixel counts at an arbitrary (sub-production) cap to exercise the doubling loop, and assert the
+		// result is always 1, 2, 4, 8, ... A regression that returned 3 or 5 would silently re-introduce
+		// the OOM the helper exists to prevent. Cap value is arbitrary — see
+		// computeInSampleSizeAtProductionCapAllowsTwoHundredMpAtSampleOne for the real-production case.
 		int[][] cases =
 		{
 			{ 100, 100 }, { 1000, 1000 }, { 5000, 5000 }, { 10000, 10000 },
@@ -69,52 +85,101 @@ public final class BitmapUtilsTest
 	@Test
 	public void computeInSampleSizeReturnsOneWhenAlreadyUnderCap()
 	{
-		// Source already fits within maxPixels → no subsampling needed. 4000×3000 = 12 MP, well under 32 MP.
+		// Source already fits within maxPixels → no subsampling needed. Sub-cap inputs pinned at an
+		// arbitrary 32 MP cap (production uses 256 MP, see the production-cap test above; this case is
+		// about the comparator branch, not the production value): 4000×3000 = 12 MP fits, 5000×6000 =
+		// 30 MP fits.
 		assertEquals(1, BitmapUtils.computeInSampleSize(4000, 3000, 32 * 1024 * 1024));
-		// Exact-match at cap: 5000×6000 = 30M pixels, under 32 MP.
 		assertEquals(1, BitmapUtils.computeInSampleSize(5000, 6000, 32 * 1024 * 1024));
 	}
 
 	@Test
-	public void computeMaxDecodePixelsClampsHighRamDownToCeiling()
+	public void computeProxyDimsDownsamples200MpSourceUnderCap()
 	{
-		// 64 GB RAM (hypothetical workstation-class Android device, or someone running CropCenter on a
-		// Pixel Tablet variant). 64 GB / 16 / 4 = 1 GP, which would let us decode a 1-gigapixel bitmap if we
-		// trusted the formula blindly. Clamp at 512 MP so a single bitmap doesn't push the app into
-		// low-memory-killer territory even on devices that nominally could afford it.
-		assertEquals(512 * 1024 * 1024, BitmapUtils.computeMaxDecodePixels(64L * 1024 * 1024 * 1024));
+		// 16384×12288 = 192 mebipixels source ("200 MP" Samsung capture). Must downsample to ≤ 16 MP cap.
+		// sqrt(16/192) ≈ 0.289 → expected ~4738×3553 = ~16 MP. Pin the rounded result to catch a
+		// regression in the Math.round biasing that would either undersize the proxy (visible quality
+		// loss) or oversize past the cap (texture-cache / GPU-budget concerns). The product check uses
+		// strict ≤ rather than a tolerance band — the pathological-aspect-ratio guard in computeProxyDims
+		// is documented to keep this invariant tight.
+		int[] dims = BitmapUtils.computeProxyDims(16384, 12288);
+		assertTrue("Source > cap must produce non-null dims", dims != null);
+		long proxyPixels = (long) dims[0] * dims[1];
+		assertTrue("Proxy " + proxyPixels + " px must be <= MAX_DISPLAY_PIXELS ("
+			+ BitmapUtils.MAX_DISPLAY_PIXELS + ")",
+			proxyPixels <= BitmapUtils.MAX_DISPLAY_PIXELS);
+		// Aspect-ratio preservation: 16384/12288 = 4:3. proxy width/height should also = 4:3 ± rounding.
+		float srcAspect = 16384f / 12288f;
+		float proxyAspect = (float) dims[0] / dims[1];
+		assertEquals("Aspect ratio must be preserved within rounding", srcAspect, proxyAspect, 0.001f);
 	}
 
 	@Test
-	public void computeMaxDecodePixelsClampsLowRamDownToFloor()
+	public void computeProxyDimsPreservesAspectRatioForHighAspectSources()
 	{
-		// 2 GB RAM (e.g., an old budget Android device). 2 * 1024^3 / 16 / 4 = 32M pixels exactly — the floor.
-		// 1 GB RAM (a pathological ancient device): would compute to 16M, below the floor. Both clamp UP to
-		// the 32 MP floor so the cap never drops below what the audit + REQUIREMENTS contract documents.
-		assertEquals(32 * 1024 * 1024, BitmapUtils.computeMaxDecodePixels(2L * 1024 * 1024 * 1024));
-		assertEquals(32 * 1024 * 1024, BitmapUtils.computeMaxDecodePixels(1L * 1024 * 1024 * 1024));
-		// Zero / negative RAM (defensive against an ActivityManager that returns garbage on a misconfigured
-		// emulator) — still clamp to the floor, never below.
-		assertEquals(32 * 1024 * 1024, BitmapUtils.computeMaxDecodePixels(0L));
-		assertEquals(32 * 1024 * 1024, BitmapUtils.computeMaxDecodePixels(-1L));
+		// 32767×1000 — width just under Bitmap.createBitmap's 32768 max-dim. The uniform pixel-budget
+		// downscale gives dstW = 23428, dstH = 715 (aspect 32.77:1 preserved within rounding). Width still
+		// exceeds MAX_PROXY_AXIS = 16384, so the per-axis cap fires — must apply as a uniform SECOND
+		// downscale to both axes (not independent clamping) or the renderer's width-derived proxyToSource
+		// would distort the Y axis. Pin both invariants: product <= cap AND aspect ratio preserved within
+		// ~0.5%.
+		int[] dims = BitmapUtils.computeProxyDims(32767, 1000);
+		assertTrue("High-aspect source must produce non-null dims", dims != null);
+		long proxyPixels = (long) dims[0] * dims[1];
+		assertTrue("Proxy " + proxyPixels + " px must be <= MAX_DISPLAY_PIXELS ("
+			+ BitmapUtils.MAX_DISPLAY_PIXELS + ")",
+			proxyPixels <= BitmapUtils.MAX_DISPLAY_PIXELS);
+		assertTrue("Both axes must be <= MAX_PROXY_AXIS; got " + dims[0] + "x" + dims[1],
+			dims[0] <= BitmapUtils.MAX_PROXY_AXIS && dims[1] <= BitmapUtils.MAX_PROXY_AXIS);
+		float srcAspect = 32767f / 1000f;
+		float proxyAspect = (float) dims[0] / dims[1];
+		assertEquals("Aspect ratio must be preserved (uniform axis-cap rescale, not independent)",
+			srcAspect, proxyAspect, srcAspect * 0.005f);
 	}
 
 	@Test
-	public void computeMaxDecodePixelsScalesLinearlyInTheMiddle()
+	public void computeProxyDimsRespectsCapForPathologicalAspectRatios()
 	{
-		// 12 GB RAM (Samsung S23 Ultra / S24 Ultra / similar flagship). 12 * 1024^3 / 16 / 4 = 201_326_592
-		// pixels (~192 MP). Comfortably above 200 MP captures, so 200 MP sources decode at inSampleSize=1.
-		long twelveGb = 12L * 1024 * 1024 * 1024;
-		int expected = (int) (twelveGb / 16L / 4L);
-		assertEquals(expected, BitmapUtils.computeMaxDecodePixels(twelveGb));
-		// 8 GB RAM (a Pixel 8 / older flagship). 8 * 1024^3 / 16 / 4 = 134_217_728 pixels (~128 MP). A 200 MP
-		// source would still need inSampleSize=2 at this cap.
-		long eightGb = 8L * 1024 * 1024 * 1024;
-		assertEquals((int) (eightGb / 16L / 4L), BitmapUtils.computeMaxDecodePixels(eightGb));
-		// 4 GB RAM (a mid-range device). 4 * 1024^3 / 16 / 4 = 67_108_864 pixels (~64 MP). 200 MP needs
-		// inSampleSize=2 (decode at 50 MP, which fits the 64 MP cap).
-		long fourGb = 4L * 1024 * 1024 * 1024;
-		assertEquals((int) (fourGb / 16L / 4L), BitmapUtils.computeMaxDecodePixels(fourGb));
+		// 1×100M attacker input: scale = sqrt(16/100) = 0.4. Naive per-axis rounding gives dstW = max(1,
+		// round(0.4)) = 1 (bumped from 0) and dstH = round(40M) = 40M. Product = 40M, blowing the 16 MP
+		// cap by 2.5×. The pathological-aspect-ratio guard must (a) shrink the dominant axis until the
+		// pixel-count cap holds AND (b) clamp each axis to MAX_PROXY_AXIS so the result is allocatable on
+		// every supported device. Aspect ratio of the proxy will diverge from the source — acceptable
+		// trade-off since no real camera produces 1×100M images.
+		int[] dims = BitmapUtils.computeProxyDims(1, 100_000_000);
+		assertTrue("Pathological source must still produce non-null dims", dims != null);
+		long proxyPixels = (long) dims[0] * dims[1];
+		assertTrue("Proxy " + proxyPixels + " px must be <= MAX_DISPLAY_PIXELS ("
+			+ BitmapUtils.MAX_DISPLAY_PIXELS + ") even for 1x100M input",
+			proxyPixels <= BitmapUtils.MAX_DISPLAY_PIXELS);
+		assertTrue("Both axes must be >= 1", dims[0] >= 1 && dims[1] >= 1);
+		assertTrue("Both axes must be <= MAX_PROXY_AXIS (allocatable on every device); got "
+			+ dims[0] + "x" + dims[1],
+			dims[0] <= BitmapUtils.MAX_PROXY_AXIS && dims[1] <= BitmapUtils.MAX_PROXY_AXIS);
+		// Symmetric: 100M×1 input should also stay under both caps.
+		int[] dimsTransposed = BitmapUtils.computeProxyDims(100_000_000, 1);
+		long proxyPixelsTransposed = (long) dimsTransposed[0] * dimsTransposed[1];
+		assertTrue("Transposed pathological source must also stay <= cap",
+			proxyPixelsTransposed <= BitmapUtils.MAX_DISPLAY_PIXELS);
+		assertTrue("Both axes must be >= 1 (transposed)",
+			dimsTransposed[0] >= 1 && dimsTransposed[1] >= 1);
+		assertTrue("Both axes must be <= MAX_PROXY_AXIS (transposed); got "
+			+ dimsTransposed[0] + "x" + dimsTransposed[1],
+			dimsTransposed[0] <= BitmapUtils.MAX_PROXY_AXIS
+				&& dimsTransposed[1] <= BitmapUtils.MAX_PROXY_AXIS);
+	}
+
+	@Test
+	public void computeProxyDimsReturnsNullWhenSourceAlreadyFits()
+	{
+		// 3000×2000 = 6 MP source, well under MAX_DISPLAY_PIXELS (16 MP). Null return signals the caller
+		// to alias the source rather than allocate — saves the 64 MB-class bitmap copy that would
+		// otherwise run on every load for the common sub-16-MP camera capture. Boundary: a source at
+		// exactly MAX_DISPLAY_PIXELS pixel count is "already fits" (<=), not "needs downsample".
+		assertTrue("Sub-cap source must return null (caller aliases)",
+			BitmapUtils.computeProxyDims(3000, 2000) == null);
+		// 4096×4096 = exactly 16 MP. Equals the cap -> null (no downsample needed).
+		assertTrue("At-cap source must return null", BitmapUtils.computeProxyDims(4096, 4096) == null);
 	}
 
 	@Test

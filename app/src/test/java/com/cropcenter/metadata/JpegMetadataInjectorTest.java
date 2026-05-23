@@ -5,8 +5,13 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
 
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.util.Collections;
 import java.util.List;
@@ -21,6 +26,9 @@ import java.util.List;
  */
 public final class JpegMetadataInjectorTest
 {
+	@Rule
+	public final TemporaryFolder tmp = new TemporaryFolder();
+
 	@Test
 	public void injectAcceptsValidReencodedJpegAndPreservesSegmentBytes() throws IOException
 	{
@@ -160,6 +168,50 @@ public final class JpegMetadataInjectorTest
 		{
 			assertTrue("message should mention claims length: " + e.getMessage(),
 				e.getMessage().contains("claims length"));
+		}
+	}
+
+	@Test
+	public void skipExactlyAdvancesPastCountAndStreamStartsAtCorrectByte() throws IOException
+	{
+		// Pin the helper's success-path contract: after `skipExactly(fis, count)`, the next read()
+		// returns the byte at position `count` in the file. The naive `skip()` loop with a break-on-
+		// zero idiom this helper replaces silently truncated streams when FileInputStream.skip()
+		// transiently returned 0 — the call returned without advancing, the caller's next read()
+		// landed mid-file, and the output bytes were SOI + segments + (some random middle of file).
+		byte[] payload = new byte[256];
+		for (int i = 0; i < payload.length; i++)
+		{
+			payload[i] = (byte) (i & 0xFF);
+		}
+		File f = tmp.newFile("skip.bin");
+		try (FileOutputStream fos = new FileOutputStream(f))
+		{
+			fos.write(payload);
+		}
+		try (FileInputStream fis = new FileInputStream(f))
+		{
+			JpegMetadataInjector.skipExactly(fis, 100);
+			int next = fis.read();
+			assertEquals("next byte after skipExactly(100) must be payload[100]", 100, next);
+		}
+	}
+
+	@Test
+	public void skipExactlyHandlesZeroCountAsNoOp() throws IOException
+	{
+		// Boundary case: count == 0 should be a no-op; the next read returns the first byte of the
+		// file. Defensive check against a future regression that conflates "skip 0" with EOF.
+		byte[] payload = { 0x42, 0x43, 0x44 };
+		File f = tmp.newFile("zero.bin");
+		try (FileOutputStream fos = new FileOutputStream(f))
+		{
+			fos.write(payload);
+		}
+		try (FileInputStream fis = new FileInputStream(f))
+		{
+			JpegMetadataInjector.skipExactly(fis, 0);
+			assertEquals("skipExactly(0) advances zero bytes", 0x42, fis.read());
 		}
 	}
 }

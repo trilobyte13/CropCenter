@@ -68,6 +68,54 @@ final class AutoRotateBinder
 	}
 
 	/**
+	 * Read back a HARDWARE-config bitmap to an ARGB_8888 copy so HorizonDetector.buildEdgeMap (which relies on
+	 * getPixels() — null on HARDWARE) can walk the data. Returns src unchanged when it's already an in-memory
+	 * config (the aliased-source case where createDisplayProxy returned the source itself because it already fit
+	 * MAX_DISPLAY_PIXELS), so the caller pays for the ~64 MB readback only when the proxy is GPU-resident.
+	 *
+	 * The caller must use identity comparison against src to decide ownership of the returned reference: a
+	 * reference identical to src must NOT be recycled (would tear down the live display proxy in CropState); a
+	 * reference distinct from src is a fresh ARGB copy that the caller owns and should recycle once detection
+	 * completes. A null return signals the GPU readback failed (driver bug / GPU memory exhausted) and the
+	 * caller should surface a clean detection-failure toast rather than crash on getPixels() inside the detector.
+	 *
+	 * @param src the bitmap to read back from; must be non-null
+	 * @return src itself for non-HARDWARE configs, a fresh ARGB_8888 copy for HARDWARE configs, or null when the
+	 *         GPU readback failed (a warning is logged at this point so the caller doesn't need to). Failure
+	 *         includes Bitmap.copy returning null (driver-rejection path) and the copy throwing — the catch
+	 *         covers Exception + OutOfMemoryError because a 16 MP HARDWARE→ARGB readback may exhaust the
+	 *         native heap on a device already under memory pressure, and a Skia HARDWARE-readback fault can
+	 *         surface as an unchecked RuntimeException rather than a null return
+	 */
+	private static Bitmap tryReadbackArgb(Bitmap src)
+	{
+		if (src.getConfig() != Bitmap.Config.HARDWARE)
+		{
+			return src;
+		}
+		Bitmap argbCopy;
+		try
+		{
+			argbCopy = src.copy(Bitmap.Config.ARGB_8888, false);
+		}
+		catch (RuntimeException | OutOfMemoryError e)
+		{
+			// Narrow catch: RuntimeException + OOM specifically. OOM is the realistic failure on a 16 MP
+			// readback when system memory is tight; RuntimeException covers any Skia / driver fault that
+			// surfaces as a thrown unchecked rather than a null return. NOT catching Throwable so other
+			// Error subclasses (LinkageError, ThreadDeath) propagate as the JVM intended.
+			Log.w(TAG, "horizon detection: HARDWARE->ARGB readback threw", e);
+			return null;
+		}
+		if (argbCopy == null)
+		{
+			Log.w(TAG, "horizon detection: HARDWARE->ARGB readback returned null");
+			return null;
+		}
+		return argbCopy;
+	}
+
+	/**
 	 * Apply a detected rotation and zoom the ruler so the user can fine-tune within ~0.01° immediately. Shared
 	 * between the metadata-fast path and the painted-horizon background path.
 	 *
@@ -120,7 +168,15 @@ final class AutoRotateBinder
 
 		btn.setText(DialogStrings.CANCEL);
 		btn.setTextColor(host.getActivity().getResources().getColor(R.color.red, null));
-		host.getEditorView().setHorizonMode(true, () -> onHorizonPaintComplete(btn));
+		// Pass both callbacks: onDrawn fires on ACTION_UP (user committed the stroke); onCancel fires on
+		// ACTION_CANCEL (OS / parent view interrupted before commit, OR user never started a stroke and
+		// a CANCEL fired pre-DOWN). Without the onCancel, an interrupted paint left the overlay in a
+		// stuck-active state that consumed all subsequent touches — observed as a "frozen editor" until
+		// the user noticed the still-Cancel-labelled Auto button. resetAutoRotateButton restores the
+		// "Auto" label so the user has a clear "you're back in normal mode" cue.
+		host.getEditorView().setHorizonMode(true,
+			() -> onHorizonPaintComplete(btn),
+			() -> resetAutoRotateButton(btn));
 	}
 
 	/**
@@ -186,15 +242,44 @@ final class AutoRotateBinder
 		// path that bypasses busy) would clear imagePoints while the bg detector is iterating it — CME on bg.
 		// The copy is small (typically a few hundred 2-element float arrays) and is the only correct fix
 		// because the bg detector deliberately reads outside the busy-held UI thread.
-		List<float[]> points = new ArrayList<>(host.getEditorView().getHorizonPoints());
+		List<float[]> rawPoints = new ArrayList<>(host.getEditorView().getHorizonPoints());
 		float brushRadius = host.getEditorView().getHorizonBrushRadius();
-		Bitmap src = host.getState().getSourceImage();
+		Bitmap source = host.getState().getSourceImage();
+		Bitmap display = host.getState().getDisplayImage();
 
-		if (points.size() < 2 || src == null)
+		if (rawPoints.size() < 2 || source == null || display == null)
 		{
 			host.toastIfAlive("Paint was too short", Toast.LENGTH_SHORT);
 			return;
 		}
+		// Zero-dimension guard. proxyScale = display.getWidth() / source.getWidth() below would divide
+		// by zero (Infinity / NaN) on a 0-width source — real Bitmaps from BitmapFactory always have
+		// positive dims, but a recycled-mid-snapshot race produces a zero-width bitmap whose NaN
+		// proxyScale would propagate into the points passed to HorizonDetector. Mirror
+		// EditorRenderer.draw's matching guard so the failure surfaces as a clean toast rather than as
+		// a silently NaN-poisoned detect.
+		if (source.getWidth() <= 0 || source.getHeight() <= 0
+			|| display.getWidth() <= 0 || display.getHeight() <= 0)
+		{
+			host.toastIfAlive("Source image unavailable", Toast.LENGTH_SHORT);
+			return;
+		}
+		// Route detection through the display proxy: buildEdgeMap allocates 3 float[] arrays at width × height,
+		// which at 192 MP source = 2.3 GB working set (multi-second compute) but at 16 MP proxy = ~192 MB
+		// (~12× faster Hough vote). Painted points are stored in source-coordinate space; rescale them to
+		// proxy-coordinate space so the bitmap passed to HorizonDetector and the points/brushRadius it
+		// consumes share a consistent coordinate frame. proxyScale = 1 in the aliased case (display ==
+		// source when the source already fit MAX_DISPLAY_PIXELS), making the rescale a no-op copy.
+		// The returned angle is scale-invariant (line slopes don't change under uniform scaling), so no
+		// post-detection rescale is needed when applying the result to source-coordinate rotation state.
+		float proxyScale = (float) display.getWidth() / source.getWidth();
+		List<float[]> points = new ArrayList<>(rawPoints.size());
+		for (float[] point : rawPoints)
+		{
+			points.add(new float[] { point[0] * proxyScale, point[1] * proxyScale });
+		}
+		float scaledBrushRadius = brushRadius * proxyScale;
+		Bitmap src = display;
 
 		if (!host.getBusy().compareAndSet(false, true))
 		{
@@ -207,7 +292,7 @@ final class AutoRotateBinder
 		{
 			host.setBusyUi(true);
 			host.showProgress("Detecting horizon…");
-			host.runInBackground(() -> runHorizonDetectionInBackground(src, points, brushRadius));
+			host.runInBackground(() -> runHorizonDetectionInBackground(src, points, scaledBrushRadius));
 		}
 		catch (RuntimeException e)
 		{
@@ -245,10 +330,32 @@ final class AutoRotateBinder
 	 */
 	private void runHorizonDetectionInBackground(Bitmap src, List<float[]> points, float brushRadius)
 	{
+		// HARDWARE-config bitmaps are GPU-resident and return null from getPixels() — the path
+		// HorizonDetector.buildEdgeMap relies on. BitmapUtils.createDisplayProxy returns a HARDWARE
+		// bitmap whenever the source needed downscaling (the common large-source case) because keeping
+		// the proxy on the GPU eliminates per-frame texture re-uploads during pan/zoom gestures. The
+		// trade-off lands here: readback the HARDWARE pixels to a fresh ARGB_8888 bitmap once per
+		// detection so HorizonDetector can walk them. The readback is ~50-200 ms on a 16 MP bitmap —
+		// only fires when the user invokes auto-rotate, not per render frame. When the proxy is the
+		// aliased source (sub-cap source), getConfig() is ARGB_8888 and we skip the copy.
+		Bitmap detectBitmap = tryReadbackArgb(src);
+		if (detectBitmap == null)
+		{
+			// HARDWARE→ARGB readback failed (GPU memory exhausted or driver bug). Surface a clean
+			// detection-failure toast rather than crashing on src.getPixels() inside the detector.
+			host.getBusy().set(false);
+			host.runOnUiThread(() ->
+			{
+				host.setBusyUi(false);
+				host.hideProgress();
+				host.toastIfAlive("Horizon detection failed", Toast.LENGTH_SHORT);
+			});
+			return;
+		}
 		float angle;
 		try
 		{
-			angle = HorizonDetector.detectFromPaintedRegion(src, points, brushRadius);
+			angle = HorizonDetector.detectFromPaintedRegion(detectBitmap, points, brushRadius);
 		}
 		catch (Exception | StackOverflowError e)
 		{
@@ -265,6 +372,17 @@ final class AutoRotateBinder
 				host.toastIfAlive("Horizon detection failed", Toast.LENGTH_SHORT);
 			});
 			return;
+		}
+		finally
+		{
+			if (detectBitmap != src)
+			{
+				// Identity check separates the readback copy (recycle to release the ~64 MB native
+				// buffer promptly) from the aliased-source case (live display proxy in CropState —
+				// must not be recycled). tryReadbackArgb returns src itself for non-HARDWARE inputs;
+				// only the HARDWARE branch produces a distinct reference.
+				detectBitmap.recycle();
+			}
 		}
 		final float detected = angle;
 		host.runOnUiThread(() -> onHorizonDetectionResult(detected));

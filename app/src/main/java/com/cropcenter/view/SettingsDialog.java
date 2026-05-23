@@ -20,6 +20,7 @@ import com.cropcenter.BuildConfig;
 import com.cropcenter.model.CropState;
 import com.cropcenter.model.GridConfig;
 import com.cropcenter.util.DpToPx;
+import com.cropcenter.util.StoragePermissionHelper;
 import com.cropcenter.util.ThemeColors;
 
 /**
@@ -35,6 +36,31 @@ public final class SettingsDialog
 	// the open picker too, and a user picking a new swatch dismisses the prior picker first. UI-thread
 	// only — cleared by the picker's OnDismissListener.
 	private static AlertDialog activePicker;
+
+	/**
+	 * Dismiss any open ColorPickerDialog and clear the tracker. Called by the parent SettingsDialog's
+	 * OnCancelListener so the picker's OK button can't mutate gridConfig after the parent is gone, and
+	 * by MainActivity.onDestroy so a config-change destroy that races a still-showing picker doesn't
+	 * pin the destroyed Activity's window via the static field. Snapshot the field before clearing so a
+	 * re-entrant cancel from picker.cancel()'s own OnCancelListener doesn't see a half-cleared state.
+	 */
+	public static void cancelActivePicker()
+	{
+		AlertDialog picker = activePicker;
+		activePicker = null;
+		if (picker != null && picker.isShowing())
+		{
+			try
+			{
+				picker.cancel();
+			}
+			catch (RuntimeException ignored)
+			{
+				// Picker's window was already destroyed (Activity-destroyed-mid-cancel race); the field
+				// is already cleared above, nothing more to do.
+			}
+		}
+	}
 
 	/**
 	 * Build and show the settings dialog. Card-style layout: Grid (cols/rows + line color/width), Pixel Grid
@@ -56,11 +82,15 @@ public final class SettingsDialog
 	 *
 	 * @param ctx                 Activity context for inflation
 	 * @param state               CropState whose gridConfig is mutated as the user interacts
+	 * @param permissions         storage-permission helper — used to render the "All files access"
+	 *                            row that lets the user grant MANAGE_EXTERNAL_STORAGE without first
+	 *                            triggering a save-time collision. Pass null to omit the row (host
+	 *                            doesn't expose the permission surface)
 	 * @param hostDismissListener additional cleanup composed with cancelActivePicker on dismiss; may
 	 *                            be null
 	 * @return the shown AlertDialog (caller tracks it for cross-load dismissal)
 	 */
-	public static AlertDialog show(Context ctx, CropState state,
+	public static AlertDialog show(Context ctx, CropState state, StoragePermissionHelper permissions,
 		DialogInterface.OnDismissListener hostDismissListener)
 	{
 		// Dismiss any prior picker before resetting the tracker. A stale activePicker can outlive its
@@ -97,6 +127,10 @@ public final class SettingsDialog
 		root.addView(buildGridCard(ctx, state, cfg, density, dimensionInputs), DialogCards.topMargin(dp4));
 		root.addView(buildPixelGridCard(ctx, state, cfg, density), DialogCards.topMargin(dp8));
 		root.addView(buildSelectionCard(ctx, state, cfg, density), DialogCards.topMargin(dp8));
+		if (permissions != null)
+		{
+			root.addView(buildPermissionsCard(ctx, permissions, density), DialogCards.topMargin(dp8));
+		}
 		root.addView(buildInfoCard(ctx, density), DialogCards.topMargin(dp8));
 
 		Runnable applyDimensions = () -> applyDimensionInputs(state, dimensionInputs[0], dimensionInputs[1]);
@@ -145,8 +179,21 @@ public final class SettingsDialog
 	{
 		try
 		{
-			int newCols = Math.clamp(Integer.parseInt(editCols.getText().toString().trim()), 1, 50);
-			int newRows = Math.clamp(Integer.parseInt(editRows.getText().toString().trim()), 1, 50);
+			int rawCols = Integer.parseInt(editCols.getText().toString().trim());
+			int rawRows = Integer.parseInt(editRows.getText().toString().trim());
+			int newCols = Math.clamp(rawCols, 1, 50);
+			int newRows = Math.clamp(rawRows, 1, 50);
+			// Write back the clamped values so the user sees what actually got saved — without this,
+			// a "0" silently clamps to 1 with no on-screen acknowledgment, leaving the user thinking
+			// they got 0 columns (and confused when the grid renders with 1).
+			if (rawCols != newCols)
+			{
+				editCols.setText(String.valueOf(newCols));
+			}
+			if (rawRows != newRows)
+			{
+				editRows.setText(String.valueOf(newRows));
+			}
 			state.updateGridConfig(g -> g.withColumns(newCols).withRows(newRows));
 		}
 		catch (NumberFormatException ignored)
@@ -243,6 +290,45 @@ public final class SettingsDialog
 		buildTime.setTextColor(ThemeColors.SUBTEXT0);
 		buildTime.setTypeface(Typeface.MONOSPACE);
 		card.addView(buildTime, DialogCards.topMargin(dp4));
+		return card;
+	}
+
+	/**
+	 * Build the "Permissions" card — surfaces the MANAGE_EXTERNAL_STORAGE grant state plus a tap target to
+	 * open the system Settings page where the user actually grants it. Without this card the only path to
+	 * grant the permission was via the Replace-failure dialog, which requires the user to first hit a
+	 * collision-overwrite save failure — a path many users never reach. Mirrors the wording in
+	 * ReplaceStrategy.showReplaceFailureDialog so the user sees the same "All files access" label across
+	 * both surfaces.
+	 *
+	 * @param ctx         Activity context for view inflation
+	 * @param permissions storage-permission helper used to query current grant state + open Settings
+	 * @param density     display density used by DpToPx for sizing
+	 * @return the assembled card LinearLayout
+	 */
+	private static LinearLayout buildPermissionsCard(Context ctx, StoragePermissionHelper permissions,
+		float density)
+	{
+		int dp4 = DpToPx.toPx(4, density);
+		LinearLayout card = DialogCards.newCard(ctx, density);
+		DialogCards.addCardTitle(card, "Permissions");
+
+		boolean granted = permissions.hasStoragePermission();
+		TextView row = new TextView(ctx);
+		row.setText(granted
+			? "All files access: granted (tap to manage)"
+			: "All files access: not granted (tap to grant)");
+		row.setTextSize(13);
+		row.setTextColor(granted ? ThemeColors.SUBTEXT0 : ThemeColors.MAUVE);
+		row.setOnClickListener(view -> permissions.openStoragePermissionSettings());
+		card.addView(row, DialogCards.topMargin(dp4));
+
+		TextView hint = new TextView(ctx);
+		hint.setText("Required for Replace-mode saves over existing files. Plain Save-As uses SAF and "
+			+ "works without this permission.");
+		hint.setTextSize(11);
+		hint.setTextColor(ThemeColors.SUBTEXT0);
+		card.addView(hint, DialogCards.topMargin(dp4));
 		return card;
 	}
 
@@ -351,8 +437,10 @@ public final class SettingsDialog
 	}
 
 	/**
-	 * Build the "Width" seek-bar row — user drags to pick a grid stroke width (1-20 image pixels). The zero
-	 * position clamps up to 1 so the grid is never invisible.
+	 * Build the "Width" seek-bar row — user drags to pick a grid stroke width (1-20 image pixels).
+	 * The seek bar is configured with `setMin(1)` so the thumb cannot land on a 0 position; the
+	 * progress-changed handler also clamps defensively to [1, 20] as a belt-and-braces guard
+	 * against any future tampering with the bar's range.
 	 *
 	 * @param ctx     Activity context for inflation
 	 * @param state   CropState whose gridConfig.lineWidth is mutated as the seek-bar drags
@@ -367,6 +455,12 @@ public final class SettingsDialog
 		addLabel(widthRow, "Width");
 
 		SeekBar widthSeekBar = new SeekBar(ctx);
+		// min=1 so the slider thumb can't show a position that doesn't correspond to the model. The
+		// onProgressChanged handler below clamps to [1, 20] before writing GridConfig anyway, but
+		// without setMin the thumb at the left edge would render at position 0 while the label and
+		// state both read 1 — a UI lie. Android API 26+ supports SeekBar.setMin (CropCenter's minSdk
+		// is 35, well above).
+		widthSeekBar.setMin(1);
 		widthSeekBar.setMax(20);
 		widthSeekBar.setProgress((int) cfg.lineWidth());
 		TextView widthValueText = valueChip(ctx, String.valueOf((int) cfg.lineWidth()), density);
@@ -393,22 +487,6 @@ public final class SettingsDialog
 		widthRow.addView(widthSeekBar, seekBarLayoutParams);
 		widthRow.addView(widthValueText);
 		return widthRow;
-	}
-
-	/**
-	 * Dismiss any open ColorPickerDialog and clear the tracker. Called by the parent SettingsDialog's
-	 * OnCancelListener so the picker's OK button can't mutate gridConfig after the parent is gone. Snapshot
-	 * the field before clearing so a re-entrant cancel from picker.cancel()'s own OnCancelListener doesn't
-	 * see a half-cleared state.
-	 */
-	private static void cancelActivePicker()
-	{
-		AlertDialog picker = activePicker;
-		activePicker = null;
-		if (picker != null && picker.isShowing())
-		{
-			picker.cancel();
-		}
 	}
 
 	/**

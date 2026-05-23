@@ -1,6 +1,7 @@
 package com.cropcenter.util;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNull;
 
 import org.junit.Test;
 
@@ -17,6 +18,56 @@ import java.io.InputStream;
  */
 public final class SafFileHelperTest
 {
+	@Test
+	public void buildExternalStorageDocIdRejectsTraversalSegment()
+	{
+		// SafPaths.hasParentTraversalSegment must reject ".." anywhere in the relative path; a caller
+		// passing new File(root, "subdir/../../escape.jpg") could otherwise produce a docId that
+		// resolves outside the volume.
+		assertNull(SafFileHelper.buildExternalStorageDocId(
+			"/storage/emulated/0/subdir/../../escape.jpg", "/storage/emulated/0"));
+	}
+
+	@Test
+	public void buildExternalStorageDocIdReturnsNullForNullPath()
+	{
+		assertNull(SafFileHelper.buildExternalStorageDocId(null, "/storage/emulated/0"));
+	}
+
+	@Test
+	public void buildExternalStorageDocIdReturnsNullForNullRoot()
+	{
+		assertNull(SafFileHelper.buildExternalStorageDocId(
+			"/storage/emulated/0/Pictures/foo.jpg", null));
+	}
+
+	@Test
+	public void buildExternalStorageDocIdReturnsNullForPathOutsideRoot()
+	{
+		// Secondary volume / SD card path — must reject so the merged save dialog falls back to SAF.
+		assertNull(SafFileHelper.buildExternalStorageDocId(
+			"/storage/AAAA-BBBB/Pictures/foo.jpg", "/storage/emulated/0"));
+	}
+
+	@Test
+	public void buildExternalStorageDocIdReturnsNullForRootItself()
+	{
+		// rootPath alone doesn't end in "/" so startsWith(rootPath + "/") fails — rejection is correct
+		// (the root volume isn't a valid save target; the picker UI shouldn't allow it but the helper
+		// must reject defensively).
+		assertNull(SafFileHelper.buildExternalStorageDocId(
+			"/storage/emulated/0", "/storage/emulated/0"));
+	}
+
+	@Test
+	public void buildExternalStorageDocIdReturnsPrimaryDocIdForNestedFile()
+	{
+		// Happy path — path /storage/emulated/0/Pictures/foo.jpg → "primary:Pictures/foo.jpg".
+		assertEquals("primary:Pictures/foo.jpg",
+			SafFileHelper.buildExternalStorageDocId(
+				"/storage/emulated/0/Pictures/foo.jpg", "/storage/emulated/0"));
+	}
+
 	@Test
 	public void readbackFromStreamEofCheckThrowReturnsMinusOne() throws IOException
 	{

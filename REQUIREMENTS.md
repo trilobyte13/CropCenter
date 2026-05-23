@@ -11,7 +11,7 @@ a Gallery-edited file keeps its Revert chain across CropCenter re-edits).
 **Target/Compile SDK**: 36
 **Language**: Java 21
 **Build**: AGP 9.1.1, Gradle 9.3.1
-**LSLOC**: 15,307 total (7,842 main + 7,465 test) — UCC-style logical SLOC via `scripts/audit.py lsloc` (counts
+**LSLOC**: 17,549 total (9,341 main + 8,208 test) — UCC-style logical SLOC via `scripts/audit.py lsloc` (counts
 `;`-terminated statements, control-flow openers, type declarations, and method signatures; excludes blanks, comments,
 and bare-brace-only lines). **Numbers must be exact** — every change that adds, removes, or restructures Java code must
 refresh this line via `python scripts/audit.py lsloc` in the same commit. No tolerance band; the spec matches the
@@ -48,17 +48,75 @@ of mode. The `Lock` checkbox suppresses the selection-point auto-recompute in Se
 removed without the crop relocating. `Settings` opens the combined Settings dialog (see §11 for the full card layout —
 Grid, Pixel Grid toggle + color, Selection & Paint color, Build).
 
-**Permissions**: `MANAGE_EXTERNAL_STORAGE` only. Required for the File-I/O strategy in collision-overwrite Replace
-(`ReplaceStrategy` strategy A) and for the Samsung MediaStore EXIF workaround (`SafFileHelper.tryReadDirectlyFromPath`).
-The grant prompt is offered from the Replace failure dialog when the permission is missing rather than at app start —
-ordinary Save As flows don't require it. `ACCESS_MEDIA_LOCATION` is NOT declared (would only matter for
-`MediaStore.setRequireOriginal`, which the codebase doesn't use — it reads via SAF directly).
+**Permissions**: `MANAGE_EXTERNAL_STORAGE` only. Gates three save-flow capabilities:
+- **Merged in-app save dialog (primary path)** — `SaveController.showSaveDialog` checks the grant first;
+  if held, routes to `FolderPickerDialog` (browses the filesystem via `java.io.File`, writes through
+  externalstorage SAF document URIs that `SafFileHelper.fileFromSafUri` resolves to the same `File`).
+  Without MES, falls back to the legacy `SaveDialog` → `ACTION_CREATE_DOCUMENT` SAF picker which on
+  Samsung One UI hides every subfolder inside internal storage.
+- **File-I/O Replace** — `ReplaceStrategy` strategy A's direct `FileOutputStream` write + atomic rename
+  bypasses the SAF stream path that some Samsung providers silently corrupt.
+- **Samsung MediaStore EXIF workaround** — `SafFileHelper.tryReadDirectlyFromPath`.
+
+The grant prompt is offered at first launch via `MainActivity.showAllFilesAccessPrompt` (a one-time
+in-app dialog with a direct deep-link to the system "All files access" page), and from the Settings
+dialog's Permissions card whenever the permission is missing. `ACCESS_MEDIA_LOCATION` is NOT declared
+(would only matter for `MediaStore.setRequireOriginal`, which the codebase doesn't use — it reads via
+SAF directly).
+
+**Java heap**: `android:largeHeap="true"` is declared in the manifest. `CropExporter.exportJpeg` runs a fully streaming
+disk-backed pipeline for 200 MP-class q=100 saves — `encodeJpegToTempfile` (Bitmap.compress straight to a FileOutputStream),
+then `JpegMetadataInjector.injectFileToFile` (head-scan + chunk-copy tail), then `GainMapComposer.composeFileToFile`
+(16 MB head for XMP/MPF patch + chunk-copy tail + gain-map append), then `appendSeftFileToFile` (chunk-copy + SEFT
+append), and finally a single sized `Files.readAllBytes` on the last tempfile once all upstream byte[]s have been freed.
+Peak Java heap during the entire encode → inject → compose → SEFT chain is ~64 KB (the streaming chunk buffer) plus the
+metadata segments (a few MB at most); the only large byte[] alive at any point is the final readback (~100-150 MB on a
+200 MP save). `MainActivity.sweepStaleCacheFiles` reclaims pipeline tempfiles from hard process kills. The complete set
+of pipeline tempfile prefixes the sweep matches: `hdr_src_jpeg_encode_` (JPEG encode stage), `hdr_src_inject_`
+(JPEG metadata inject), `hdr_src_compose_` (JPEG gain-map compose), `hdr_src_reinject_` (JPEG HDR-drop re-inject),
+`hdr_src_seft_` (JPEG SEFT append), `hdr_src_png_encode_` (PNG encode stage), `hdr_src_png_inject_` (PNG eXIf inject) —
+all match the `hdr_src_*` prefix filter `UltraHdrCompat.sweepStaleCacheFiles` uses. Without
+`largeHeap`, the per-app Java heap cap (~256 MB on stock Android, varies by OEM) can't satisfy the final readback even
+on a clean heap; `largeHeap` typically lifts the cap to 512 MB+ (768 MB or higher on Samsung flagships), enough headroom
+for the readback plus the GC slack the runtime needs to actually grow the heap into that budget. Native bitmaps
+(sourceImage, displayImage, outBmp) live in native heap and don't compete for this cap — only the byte[] arrays do.
+
+**Native heap (HDR re-encode)**: `exportJpeg`'s stage ordering recycles the cropped primary bitmap (`bmp`, up to ~800 MB
+of native pixel buffer on a lightly-cropped 200 MP capture) BEFORE calling `buildCroppedGainMap`. The HDR re-decode path
+(`UltraHdrCompat.compressWithGainmap`) allocates its own 200 MP HDR-decoded bitmap + a cropped HDR primary + a cropped
+gain-map surface — up to ~2 GB of native heap at peak. With `bmp` still alive AND `state.getSourceImage()` (another
+~800 MB) still alive across the save, native heap can't satisfy the HDR re-decode allocations and `compressWithGainmap`
+silently catches the failure, returns null, and HDR drops from the saved file. The stage order is: build thumbnail
+(needs `bmp`) → encode `bmp` to tempfile (needs `bmp`) → recycle `bmp` → build cropped gain map (no `bmp` reference,
+~800 MB of native heap freed for the HDR intermediates).
+
+**PNG streaming pipeline**: `CropExporter.exportPng` runs a disk-backed pattern that NEVER materialises the encoded
+PNG as a single byte[] — `encodePngToTempfile` (Bitmap.compress(PNG, 100) straight to a FileOutputStream) →
+`injectPngExifFromTiffFileToFile` (stream-copy with eXIf chunk spliced after IHDR) → return a tempfile-mode
+`ExportResult`. `ExportPipeline.writePhase` then `writePayloadToStream`s the tempfile in 64 KB chunks to the SAF
+output stream or direct-file FileOutputStream; no `Files.readAllBytes` ever runs. PNG-lossless on a 200 MP ARGB bitmap
+(800 MB raw) compresses to roughly 400-600 MB; the previous in-memory path's `BAOS.toByteArray()` peak was ~1 GB live
+(BAOS internal buffer at the next power of 2 above the final size plus the toByteArray copy), and even after that
+refactor a single `Files.readAllBytes(tempfile)` at the end of `exportPng` allocated a 400-600 MB byte[] that OOM'd on
+top of the ~390 MB of resident Java state (originalFileBytes, jpegMeta) sitting in heap at save time. Peak Java heap
+during the full streaming pipeline (encode + inject + write) is the chunk buffer + the resident state — no large byte[]
+ever exists for the PNG payload.
+
+**`ExportResult` dual-mode**: the record carries EITHER `bytes` (JPEG streaming pipeline's final readback ~100-150 MB,
+plus the bypass-encode path where `state.originalFileBytes` is already in heap) OR `tempfile` (PNG streaming pipeline,
+where the payload is too large to safely materialise). Exactly one is non-null; the size() accessor returns the
+appropriate metric without loading the file. `ExportPipeline.writePhase` and `tryDirectAtomicWrite` route through
+`writePayloadToStream(ExportResult, OutputStream)` which picks `os.write(bytes)` for bytes-mode and chunked
+FileInputStream copy for tempfile-mode. `verifyPhase` uses `encoded.size()` instead of `data.length`; only the
+fallback content-verify path materialises bytes (rare — fires when the clean-write checks fail). The Replace flow
+(`ReplaceStrategy.writeReplacementPayload`) materialises bytes at entry — Replace + 200 MP PNG could OOM here, but
+that combo is uncommon and the failure aborts cleanly with the placeholder save intact.
 
 ### Key Components
 
 | Component | Class | Purpose |
 |-----------|-------|---------|
-| State | `model/CropState` | Central state: crop params, metadata, rotation anchor (stable intent center for no-selection rotations). Cross-thread fields are volatile so the bg load/graft/save executor can publish to the UI thread without a lock: `sourceImage`, `selectionPoints`, `jpegMeta`, `aiMask`, `graftApplied` (read by `ExportPipeline.canBypassEncode` on the UI thread, written by `installGraft` on bg). `sourceImage` is volatile because UI-thread `EditorRenderer.draw` reads it on every frame while bg-thread `reset()` writes it during load; the per-frame snapshot in EditorRenderer is necessary but not sufficient without the happens-before. `pngExifTiff` (raw TIFF for PNG → PNG export) is volatile but currently bg-only — set by `extractMetadata` on bg, consumed by `exportPng` on bg via the same single-thread executor; the volatile is preventive insurance against a future UI-thread reader. |
+| State | `model/CropState` | Central state: crop params, metadata, rotation anchor (stable intent center for no-selection rotations). Cross-thread fields are volatile so the bg load/graft/save executor can publish to the UI thread without a lock. Volatile fields: `sourceImage`, `displayImage` (display proxy installed in lockstep with sourceImage via `setSourceImage(source, display)`), `selectionPoints`, `jpegMeta`, `aiMask`, `graftApplied` (read by `ExportPipeline.canBypassEncode` on the UI thread, written by `installGraft` on bg), `exportConfig` + `gridConfig` (read by `ExportPipeline.canBypassEncode` and `SaveController.openSaveOptionsDialog` on UI; mutated via `setSourceFormat` / `updateGridConfig` from either thread), `gainMap` + `seftTrailer` (committed on bg by `applyBytes`, read by save paths on bg via the same single-thread executor — preventive insurance against a future UI-thread reader), and `pngExifTiff`. `sourceImage` is volatile because UI-thread `EditorRenderer.draw` reads it on every frame while bg-thread `reset()` writes it during load; the per-frame snapshot in EditorRenderer is necessary but not sufficient without the happens-before. |
 | State Dispatch | `model/StateBus` | Listener-dispatch + batch-suppression protocol extracted from CropState. `bus.beginBatch / endBatch` lets the Activity wrap recomputeCrop + UI updates so inner setter calls coalesce into one listener invocation |
 | Output Format | `model/Format` | Enum (`JPEG` / `PNG`) carrying MIME type + file extension. Gives compile-time exhaustiveness on the export-pipeline switch |
 | Crop Math | `crop/CropEngine` | Computes crop from center + AR + lock + rotation; keeps cropX continuous mid-rotation, with parity-snap applied at drag-release in `CropEditorView.onPanRelease` |
@@ -73,8 +131,9 @@ ordinary Save As flows don't require it. `ACCESS_MEDIA_LOCATION` is NOT declared
 | Rotation | `view/RotationRulerView` | Galaxy-style scrollable ruler with snap-to-detent and pinch-to-zoom scale |
 | Color Picker | `view/ColorPickerDialog` | Tap-to-select grid + alpha + hex input |
 | Settings | `view/SettingsDialog` | Combined dialog: grid config (cols, rows, presets 2x2–8x8, color, width), pixel-grid toggle/color, selection/paint color, Build (build-time version) |
-| Save Dialog | `view/SaveDialog` | Format (JPEG / PNG) + export-grid bake-in toggle. Filename / target directory are picked separately by the SAF `ACTION_CREATE_DOCUMENT` picker that follows |
-| Save Flow | `SaveController` + `ReplaceStrategy` + `ExportPipeline` | SAF picker routing, collision detection (auto-rename + sibling-create), crash-safe write-then-swap |
+| Save Dialog (legacy / no-MES) | `view/SaveDialog` | Format (JPEG / PNG) + export-grid bake-in toggle. Filename / target directory are picked separately by the SAF `ACTION_CREATE_DOCUMENT` picker that follows. Used as the fallback when MES isn't granted. |
+| Merged Save Dialog (MES path) | `view/FolderPickerDialog` | Format + Export Grid + folder navigator + thumbnail grid/list (toggle persists) + editable `Save as` filename field. Browses the filesystem via `java.io.File`, returns a `SaveChoices` record (folder, filename, format, bakeGrid), writes through externalstorage SAF document URIs that the existing Replace flow resolves back to the same `File`. |
+| Save Flow | `SaveController` + `ReplaceStrategy` + `ExportPipeline` | Dual-path routing (merged-in-app vs SAF) gated on MES, collision detection (auto-rename + sibling-create, in-app Replace/Rename/Cancel), crash-safe write-then-swap |
 | Load Flow | `ImageLoadController` | Bg-thread decode + EXIF orientation + metadata extract for SAF URIs (`load(Uri)`), Share/View intents (`handleIncomingIntent`), and in-memory graft bytes (`applyBytes(byte[], String)`). Owns the busy-release-in-finally + progress-overlay-hide contract |
 | Apply-Edit Flow | `GraftController` + `graft/EditAligner` + `metadata/GraftWriter` | Long-press-Open → SAF picker → validation (display-dim match) → optional re-orient → AI-region detect → byte splice → in-memory apply. Owns its own state machine (`graftPending`, `pendingSource` snapshot) |
 | Toolbar / AR Spinner | `ToolbarBinder` | AR spinner population, custom-AR dialog, mode/lock-axis row wiring, precise-rotation dialog. Extracted from MainActivity to keep the Activity focused on lifecycle and host-interface implementations |
@@ -87,11 +146,11 @@ ordinary Save As flows don't require it. `ACCESS_MEDIA_LOCATION` is NOT declared
 | Class | Purpose |
 |-------|---------|
 | `metadata/JpegMetadataExtractor` | Extract all APP/COM segments from JPEG header |
-| `metadata/JpegMetadataInjector` | Replace re-encoder's APP markers with originals |
+| `metadata/JpegMetadataInjector` | Replace re-encoder's APP markers with originals. Two entry points: `inject(byte[], segments)` (in-memory; allocates one sized output byte[]) and `injectFileToFile(inFile, segments, outFile)` (fully streaming — reads bounded head from disk to locate scanStart, then chunk-copies the image-data tail). The file-to-file variant keeps peak Java heap at ~2 MB independent of input size and is the path `CropExporter.exportJpeg` takes for 200 MP saves so the re-encoded primary never materialises as a single byte[]. Also hosts the shared streaming primitives `STREAM_CHUNK_SIZE` (64 KB chunk buffer) and `skipExactly(FileInputStream, long)` (skip-then-read-fallback for the FUSE skip()-returns-0 corner case) — consumed by `GainMapComposer.composeFileToFile`, `CropExporter.appendSeftFileToFile`, and `CropExporter.injectPngExifFromTiffFileToFile` |
 | `metadata/ExifPatcher` | Update orientation, dimensions, and IFD1 thumbnail in EXIF. See §10 EXIF for the four-state thumbnail contract on `patch(...)`, the splice / append / strip fallback chain, IFD0 sanitisation, the `hasIfd1Thumbnail` predicate, and the two budget-prediction methods (`patchedNonThumbBytes` for byte-exact JPEG export; `maxThumbnailBytes` for the PNG eXIf splice-vs-strip decision). |
 | `metadata/GainMapExtractor` | Extract HDR gain map from between primary EOI and SEFT |
-| `metadata/GainMapComposer` | Append gain map + trigger MPF patch |
-| `metadata/MpfPatcher` | Fix MPF APP2 offsets after primary size changes |
+| `metadata/GainMapComposer` | Append gain map + trigger MPF patch. Two entry points: `compose(byte[], gainMap)` (in-memory) and `composeFileToFile(inFile, gainMap, outFile)` (streaming — loads up to 16 MB head for XMP+MPF patching since APP segments cluster before SOS, then chunk-copies the tail and appends the gain map). The file-to-file variant is what `CropExporter.exportJpeg` calls so the metadata-injected primary stays on disk through HDR composition |
+| `metadata/MpfPatcher` | Fix MPF APP2 offsets after primary size changes. Two entry points: `patch(jpeg, primarySize)` derives `gainMapSize = jpeg.length - primarySize` for the in-memory `GainMapComposer.compose` path (where `jpeg` is the full `[primary][gainMap]` concatenation); `patch(jpeg, primarySize, gainMapSize)` takes the gain-map size explicitly for the streaming `composeFileToFile` path where `jpeg` is only the primary's APP-marker head (a buffer-length-derived size would go negative when head.length < primarySize and write a garbage u32 into the MPF size slot) |
 | `metadata/SeftExtractor` | Extract existing SEFT trailer (re-appended verbatim by CropExporter) |
 | `metadata/JpegSegment` | Data class for a single JPEG marker segment. Carries the canonical XMP namespace identifier (`XMP_HEADER`) consumed by `isXmp()`, `HorizonDetector.detectFromMetadata`, and `XmpItemLengthPatcher` |
 | `metadata/JpegMarker` | Constants for the JPEG marker bytes (`SOI` / `EOI` / `SOS` / `RST_FIRST..RST_LAST` / `STUFFING` / `TEM`) used directly by `JpegMarkerWalker`, `JpegMetadataExtractor`, `MpfPatcher`, `GraftWriter`, `XmpItemLengthPatcher`, and indirectly (via the walker) by `CropExporter` and `GainMapExtractor` |
@@ -197,12 +256,22 @@ future audit can pattern-match.
 the moment a Share/View intent fires would race the bg `state.reset()` with the user's still-active in-dialog commits,
 or (after the load completes) silently apply image A's typed values to image B's freshly-reset state.
 
-Five dialogs are tracked:
+Tracked dialogs (every state-mutating dialog or any dialog whose abandonment must release a lifecycle flag
+like `savePending`):
 - `SettingsDialog` — gridConfig color / width / presets
-- `SaveDialog` — exportConfig format + gridConfig includeInExport
+- `SaveDialog` — exportConfig format + gridConfig includeInExport (legacy fallback when MES is not granted)
+- `FolderPickerDialog` — the merged in-app save dialog when MES is granted; commits format + grid + folder
+  on Save here. Uses `setActiveTransientDialog` (not `registerTransientDialog`) because it installs its own
+  composite `OnDismissListener` that owns thumbnail-executor shutdown + savePending release; the host's
+  `clearTransientDialog` callback is composed into that listener.
+- `SaveController.showInAppCollisionDialog` — Replace / Rename / Cancel for the in-app save flow
+- `SaveController.showInAppRenameDialog` — filename input with auto-numbered "(N)" suggestion
+- `SaveController.showOverwriteConfirmDialog` — Cases A/C overwrite confirmation for the SAF flow
+- `SaveController.showReplaceDialog` — Case B Replace / Keep / Cancel for SAF auto-rename collisions
 - `ToolbarBinder.showCustomArDialog` — aspectRatio + customArLabel / customArActive UI flags
 - `ToolbarBinder.showPreciseRotationDialog` — rotationDegrees
-- `SaveController.showReplaceDialog` — writes to the SAF target on Replace/Keep
+- `GraftController` sanity-check dialog — large-edit warning before applying a graft
+- `MainActivity.showAllFilesAccessPrompt` — first-launch MES grant prompt
 
 Dialog producers register through `host.registerTransientDialog(dialog)`, which installs an `OnDismissListener` that
 clears the tracked reference on normal dismissal. `dismissTransientDialogs` calls `dialog.cancel()` (not
@@ -433,17 +502,41 @@ Viewport clamped to prevent panning image off screen. Bitmap filtering disabled 
 
 ### 9. Export
 
-**Pre-save dialog**: Tapping Save opens `SaveDialog` first — title `"Save Image"`, positive button `"Continue"`,
-negative button `"Cancel"`. The dialog hosts the format toggle (JPEG / PNG) and the `Export Grid` checkbox. The
-`ACTION_CREATE_DOCUMENT` picker only opens after the user taps Continue, so the format choice and grid-bake preference
-are already committed to `CropState` before the picker locks in the document's MIME.
+**Save dialog**: Two code paths gated by the MANAGE_EXTERNAL_STORAGE grant probed at Save-tap time.
 
-**Save flow**: Always `ACTION_CREATE_DOCUMENT` with format-aware MIME type (image/jpeg or image/png). Collisions inside
-the user's chosen directory route through `ReplaceStrategy`'s crash-safe write-then-swap (Strategy A: File-I/O atomic
-move; B: SAF direct overwrite with byte-for-byte verify; C: SAF rename-with-fallback). Same-name results from
+- **MES granted (primary path)** — `SaveController.showMergedInAppDialog` opens `view/FolderPickerDialog`, a
+  merged in-app dialog that hosts the format toggle (JPEG / PNG), the `Export Grid` checkbox, the folder
+  navigator, an editable `Save as` filename field, AND a thumbnail browser of the current folder's
+  existing images all in one place. The thumbnail browser toggles between a 3-column grid and a list
+  view; the choice persists across launches via SharedPreferences (`cropcenter_picker_view` /
+  `grid_mode`). The breadcrumb above the folder name is clickable per-segment (each segment a
+  `ClickableSpan` that jumps to that level) and ellipsizes at START so the current segment stays visible
+  on deep paths. On "Save here", the picked folder is mapped to an externalstorage SAF document URI via
+  `SafFileHelper.buildExternalStorageDocumentUri` (primary-external-storage only; secondary volumes fall
+  back to the legacy SAF path), and the write dispatches through `routeCrashSafeSave` with the same
+  Replace / Rename / Cancel collision handling the SAF flow uses. The Rename input pre-fills with
+  `nextAvailableNumberedName`'s "(N)" suffix per Samsung / Android Files-app convention. The merged
+  dialog commits format / grid-include selections to `CropState` once at "Save here";
+  `SaveController.onMergedSaveConfirmed` captures a `priorSnapshot` BEFORE the commit, so an in-app
+  collision-dialog Cancel rolls the format / grid back (matching the SAF path's rollback contract).
+  The last-picked folder persists across launches via SharedPreferences (`cropcenter_save` /
+  `last_save_folder`) so subsequent Saves resume there.
+
+- **MES not granted (legacy path)** — `SaveController.openSaveOptionsDialog` opens the original
+  `view/SaveDialog` (title `"Save Image"`, positive button `"Continue"`, negative button `"Cancel"`) with
+  the format toggle + Export Grid checkbox; on Continue, `ACTION_CREATE_DOCUMENT` opens with the
+  format-aware MIME type. SaveDialog mutates `CropState` directly on Continue; `priorSnapshot` captures
+  the pre-mutation state so a SAF cancel rolls back format / grid-include before the next Save attempt.
+
+**Save flow**: Collisions inside the user's chosen directory route through `ReplaceStrategy`'s crash-safe
+write-then-swap (Strategy A: File-I/O atomic move; B: SAF direct overwrite with byte-for-byte verify; C:
+SAF rename-with-fallback) on the SAF path. The in-app path uses the same routing once the folder is
+mapped to its externalstorage URI — collision detection (`File.exists()` on the target) fires the
+in-app Replace / Rename / Cancel dialog before the write dispatches. Same-name SAF results from
 `ACTION_CREATE_DOCUMENT` (provider-confirmed overwrites) get a sibling placeholder via
-`DocumentsContract.createDocument` and route through the same Replace flow; opaque-ID providers fall back to
-`exportToOverwrite` (direct write to the target with preserve-on-failure, "Replaced <name>" toast on success).
+`DocumentsContract.createDocument` and route through the same Replace flow; opaque-ID providers fall back
+to `exportToOverwrite` (direct write to the target with preserve-on-failure, "Replaced <name>" toast on
+success).
 
 **No-edit bypass**: when the user has applied no transformations (no crop, no rotation, no grid bake-in, JPEG-to-JPEG
 round-trip) AND the in-memory image is not a graft (`!state.isGraftApplied()`) AND the source carries a pre-computed
@@ -477,6 +570,17 @@ disagree. The guard rejects when `chosen` has a non-empty extension AND that ext
 `requested`'s Format. Both known-format mismatches (`.jpg → .png`) and unknown-extension typos (`.jpg → .webp` where
 `Format.fromExtension("foo.webp") == null`) are caught; extension-less filenames are allowed through (SAF MIME stays
 valid, encoder bytes match).
+
+**Overwrite-confirm dialog** (`SaveController.showOverwriteConfirmDialog`): SAF's `ACTION_CREATE_DOCUMENT` picker can
+return a URI to pre-existing content without surfacing a Replace prompt — observed on recent Samsung Files / Google
+Files where the picker silently hands back the colliding document. Without an in-app confirmation, the save would
+silently overwrite a file the user might not have meant to destroy. The save flow's Case A (chosen == requested) and
+Case C (user-typed name, no auto-rename pattern) both probe the SAF URI via `probeWasOverwrite(newUri)` —
+`priorSize > 0` OR `priorSize == -1 && hasExistingContent(newUri)` — before dispatching to `routeCrashSafeSave`. When
+the probe returns true, the user sees a Replace / Cancel dialog. Replace dispatches through the same crash-safe
+sibling-placeholder path; Cancel preserves the file. Distinct from Case B's three-option Replace / Keep / Cancel
+dialog (`showReplaceDialog`), which fires only when SAF auto-renamed to a "X (N).ext" pattern — that case has a
+meaningful Keep option (commit the auto-renamed URI as-is); Cases A and C don't.
 
 **HDR Export Pipeline** (all cases use canvas rendering for primary):
 ```
@@ -540,7 +644,7 @@ Canvas-rendered bitmap -> generate fresh JPEG-compressed IFD1 thumbnail of the c
 PNG export generates a fresh IFD1 thumbnail (JPEG-compressed, per EXIF spec) of the cropped pixels — without this,
 passing a `null` thumbnail to `ExifPatcher.patch` would PRESERVE the source's pre-edit IFD1 thumbnail, leaking pre-crop
 content via any EXIF-thumbnail-aware viewer. When fresh thumbnail generation fails (every cascade rung exhausted — both
-512 and 256 maxDims at every quality 95..50 — OR OOM during render / compress, OR the budget itself is ≤ 0 because the
+512 and 256 maxDims at every quality 90..50 — OR OOM during render / compress, OR the budget itself is ≤ 0 because the
 source EXIF already overflows the APP1 cap), `buildEmbeddedThumbnail` returns `ExifPatcher.STRIP_IFD1_THUMBNAIL` (the
 byte[0] sentinel), routing ExifPatcher through the strip path that zeros IFD0's next-IFD pointer — the saved file has no
 embedded preview rather than the source's stale one.
@@ -556,11 +660,15 @@ PNG export pulls EXIF from one of two sources, depending on the source format:
   segment) and force-routes to `STRIP_IFD1_THUMBNAIL` so the saved PNG carries no IFD1 rather than the source's pre-edit
   preview. PNG eXIf keeps using `maxThumbnailBytes` (20 KB conservative fallback) rather than the JPEG path's byte-exact
   `patchedNonThumbBytes` — its u31 cap and uncapped-TIFF tolerance need the older estimation-with-margin semantics. When
-  `ExifPatcher` rejects a malformed source TIFF, the export falls through to the synthetic-APP1 path below rather than
-  silently dropping metadata.
-- **JPEG sources** (and the fallback path above) iterate `state.jpegMeta` through `ExifPatcher.patch` and hand the EXIF
-  segment to `injectPngExif`, which strips the JPEG APP1 wrapper before writing the eXIf chunk. JPEG-source EXIF is
-  always under the u16 cap by spec, so no special handling is needed.
+  `ExifPatcher` rejects a malformed source TIFF, the export branches by TIFF size: > 64 KB TIFFs ship VERBATIM through
+  `CropExporter.forceTiffOrientationToUpright` + `injectPngExifFromTiff` (preserves metadata that would otherwise be
+  truncated by the u16-capped synthetic-APP1 fallback; orientation is rewritten to 1 because the saved pixels are
+  already upright after BitmapUtils.applyOrientation ran at load — without the rewrite, EXIF-aware viewers would
+  double-rotate); ≤ 64 KB TIFFs fall through to the synthetic-APP1 path below.
+- **JPEG sources** (and the fallback path above) iterate `state.jpegMeta` through `ExifPatcher.patch`; the EXIF
+  segment's JPEG APP1 wrapper (`FF E1 LL LL "Exif\0\0"` — 10 bytes) is stripped inline in `exportPng` and the raw TIFF
+  body is streamed into the eXIf chunk via `injectPngExifFromTiffFileToFile`. JPEG-source EXIF is always under the u16
+  cap by spec, so no special handling is needed.
 
 The export canvas is **not** filled with `CANVAS_BG` for PNG — the bitmap stays on its default transparent background so
 source alpha round-trips and rotation corners stay see-through. JPEG keeps the dark-navy fill since the format can't
@@ -589,12 +697,12 @@ intact.
 
 **Encoder-return-value checks**. Every `Bitmap.compress(JPEG|PNG, q, bos)` callsite treats `false` as a failure. Without
 the check, the partial buffer in `bos` (Skia writes headers + entropy data before bailing) would ship onward to
-`injectExifMetadata` / `composeGainMap` / `appendSeft` and produce structurally invalid output (no primary EOI, no
-gainmap, no SEFT). Non-cascade sites (`CropExporter.exportJpeg`/`exportPng`, `UltraHdrCompat.compressWithGainmap`,
-`EditAligner.reorientEdit`) short-circuit to a null/exception that surfaces the existing failure toast.
-`CropExporter.generateThumbnail`'s 2-rung × 9-quality cascade (up to 18 attempts) is the one exception: false on any
-individual attempt advances to the next combo; only an all-combo-failure returns null and routes the caller through
-`STRIP_IFD1_THUMBNAIL` (no preview embedded, better than partial).
+`JpegMetadataInjector.injectFileToFile` / `GainMapComposer.composeFileToFile` / `appendSeftFileToFile` and produce
+structurally invalid output (no primary EOI, no gainmap, no SEFT). Non-cascade sites (`CropExporter.exportJpeg` /
+`exportPng`, `UltraHdrCompat.compressWithGainmap`, `EditAligner.reorientEdit`) short-circuit to a null/exception that
+surfaces the existing failure toast. `CropExporter.generateThumbnail`'s 2-rung × 8-quality cascade (up to 16 attempts)
+is the one exception: false on any individual attempt advances to the next combo; only an all-combo-failure returns
+null and routes the caller through `STRIP_IFD1_THUMBNAIL` (no preview embedded, better than partial).
 
 **Direct file-I/O write path**. `ExportPipeline.writePhase` tries `FileOutputStream` against the SAF URI's resolved
 filesystem path first, falling back to the SAF stream only when `SafFileHelper.fileFromSafUri` returns null (cloud /
@@ -638,13 +746,22 @@ path when applicable.
      pointer. Used as the fail-closed fallback when fresh thumbnail generation hits OOM or over-budget.
   3. `thumbnail.length > 0` — replace IFD1's thumbnail with the supplied JPEG bytes. Fallback chain inside
      `replaceThumbnail`: try `spliceExistingThumbnail` first; on reject (missing thumb tags, out-of-bounds offsets,
-     oversized cap) try `appendFreshIfd1WithThumbnail` against IFD0's existing next-IFD slot; strip-on-fail.
+     oversized cap, or new thumbnail BIGGER than the old one with non-empty trailing data) try
+     `appendFreshIfd1WithThumbnail` against IFD0's existing next-IFD slot; strip-on-fail. **Padded splice for
+     shrink-with-trailing-data**: Samsung HDR captures place ~7 KB of MakerNote / SubIFD value blocks AFTER the IFD1
+     thumbnail (afterLen > 0), and the cascade's fresh thumbnail is typically SMALLER than the source thumbnail. The
+     splice zero-fills the gap between the new thumbnail's EOI and the trailing data so the trailing bytes stay at their
+     original absolute offset (any TIFF offset stored elsewhere — MakerNote value blocks, SubIFD value data, GPS offset-
+     referenced data — remains valid); the IFD1 `JPEGInterchangeFormatLength` tag is rewritten to the actual new
+     thumbnail length so decoders read only the real thumbnail bytes and the padding is unreached. Without this, every
+     Samsung HDR save stripped the thumbnail because the splice bailed on length mismatch with trailing data and
+     `appendFresh`'s APP1-cap check also rejected on the already-near-full segment.
   4. Empty input segment list — `patch` synthesises a fresh APP1 EXIF via `buildMinimalExifSegment` so a
      freshly-generated thumbnail still lands in the saved file when the source carries no EXIF (screenshots, generated
      images, files re-encoded by minimal tools).
-- Thumbnail regenerated from cropped bitmap via a **two-rung dim cascade** with a **9-step quality bracket** at each
-  rung. Long-edge max-dim falls 512 → 256; at each rung, encode quality steps through `{ 95, 90, 80, 75, 70, 65, 60, 55,
-  50 }` and the first combo whose encoded size fits the APP1 budget wins. The 9-step bracket exhausts dim-preserving
+- Thumbnail regenerated from cropped bitmap via a **two-rung dim cascade** with an **8-step quality bracket** at each
+  rung. Long-edge max-dim falls 512 → 256; at each rung, encode quality steps through `{ 90, 80, 75, 70, 65, 60, 55,
+  50 }` and the first combo whose encoded size fits the APP1 budget wins. The 8-step bracket exhausts dim-preserving
   fallback at 512 before stepping down to 256 — viewers downscale thumbnails for grid / hover display (96-256 px), and
   downscaling masks per-pixel JPEG artifacts substantially, so keeping pixel count high beats keeping per-pixel quality
   high (matches Samsung's native preserve-dim-scale-quality design). No 1024-maxDim rung because typical 3-4 MP cropped
@@ -755,7 +872,8 @@ path when applicable.
   that scan for the `hdrgm` signature would render with the wrong offset; and the save's "[HDR OK]" / "[HDR dropped]"
   toast (driven by the structural `hdrAttached` flag plumbed through `ExportResult` — see below) would falsely announce
   success. A clean SDR JPEG is strictly safer than orphaned HDR.
-- **Structural HDR-OK signal**: `CropExporter.export` returns an `ExportResult(bytes, hdrAttached)` record;
+- **Structural HDR-OK signal**: `CropExporter.export` returns an `ExportResult(bytes, tempfile, hdrAttached)` record
+  (dual-mode — exactly one of bytes/tempfile is non-null; see §Architecture "ExportResult dual-mode");
   `hdrAttached` is sourced from `GainMapComposer.ComposeResult.hdrAttached()` — an explicit boolean set true ONLY when
   `GainMapComposer.compose` actually appended the gain map AND patched MPF offsets to point at it. False on every drop
   path: UltraHdrCompat failure, MPF-patch rejection, malformed source MPF, or the strip-and-re-inject branch (below).
@@ -858,10 +976,15 @@ semantically related — both load external files — so the gesture pairing is 
 7. `GraftWriter` splices the bytes in memory per the substitution rule below.
 8. `MainActivity.applyGraftedBytes` calls `imageLoader.applyBytes(grafted)` which installs the splice as the new
    in-memory image. **Only on a successful decode** (applyBytes returns true) does it then call
-   `state.installGraft(graft)` — installGraft atomically sets `graftApplied=true` (which gates the verbatim-write
-   bypass) and stashes the AI mask. A decode failure leaves the previously-loaded image intact and surfaces "Failed to
-   decode" to the user. The user's saved AR preference applies to the post-graft crop the same way it does on a normal
-   image load — if they want the full image, they pick "Full" in the spinner.
+   `state.installGraft(graft)` — installGraft writes the AI mask FIRST then sets `graftApplied=true` (which gates
+   the verbatim-write bypass). The setAiMask-before-setGraftApplied order mirrors `reset()`'s clear order
+   (aiMask=null FIRST, then graftApplied=false) so no observer can catch the inconsistent
+   `(graftApplied=true, aiMask=null)` transient pair on either side of the lifecycle —
+   `UltraHdrCompat.compressWithGainmap` reading the pair would otherwise skip the inpaint while
+   the verbatim-bypass gate was already firing, shipping a stale boost. A decode failure leaves the
+   previously-loaded image intact and surfaces "Failed to decode" to the user. The user's saved AR preference applies
+   to the post-graft crop the same way it does on a normal image load — if they want the full image, they pick "Full"
+   in the spinner.
 9. Toast "External edit applied" confirms a successful apply (fired only after `applyBytes` returns true, not when the
    splice is queued). Default save name = `<original-stem>-graft.jpg`, falling back to bare `"graft.jpg"` when the
    source has no display name available (typical of content URIs that don't expose `OpenableColumns.DISPLAY_NAME`).
@@ -995,8 +1118,12 @@ external tool (exiftool, ImageMagick `identify -verbose`) to confirm GPS coordin
 are preserved.
 
 **Out of scope**: PNG inputs (SEFT is JPEG-specific). HEIC inputs (different metadata system). Differing-dimension edits
-(would need re-encode; refused with toast). Per-region gain-map regeneration (would need a way to derive HDR data for
-AI-fill content; the current "use original's gain map verbatim" works for low-frequency fills). Mask-based selective
+(would need re-encode; refused with toast). Per-region gain-map *regeneration* — i.e. synthesizing fresh HDR boost
+values from the AI-fill pixel content. Per-region gain-map *inpaint* IS implemented: `AiRegionDetector` locates the
+AI-edited region (source vs aligned-edit diff at sampleSize=4) and `GainMapInpainter` fills that region of the source's
+gain map with the average of unmasked 8-neighbors at HDR re-encode time, so the AI region no longer reads through
+original's pre-fill HDR boost (which boosted features that the AI fill no longer contains). Regeneration would require
+a model that derives HDR ratios for arbitrary fill content — well outside the splice scope. Mask-based selective
 composite (preserve source bytes outside the AI region — useful for editors that produce larger tonal shifts than
 Photoshop, currently not needed because Photoshop is the recommended editor and produces minimal tonal shift).
 
@@ -1032,7 +1159,8 @@ lossless MCU-level transcoding (~500 LSLOC + libjpeg-turbo NDK) isn't implemente
   `metadata/XmpItemLengthPatcher.SegmentPatchResult`, `crop/CropFitContext`, `crop/ExportResult`,
   `util/AiRegionDetector.AiMask`, `view/RotationRulerView.TickConfig`, `graft/EditAligner.Result`,
   `GraftController.SourceSnapshot`, `ReplaceStrategy.VerifyFailure`, `ExportPipeline.WriteOutcome`,
-  `SaveController.PriorSaveSnapshot`, `ImageLoadController.MetadataExtraction` — immutable value types replace
+  `SaveController.PriorSaveSnapshot`, `ImageLoadController.MetadataExtraction`,
+  `view/FolderPickerDialog.SaveChoices` — immutable value types replace
   boilerplate POJOs. (`AspectRatio` is a record carrying named-constant instances for the preset ratios — not an enum,
   since custom AR values are first-class instances too.)
 - **Enums**: `model/Format` (JPEG / PNG with `extension()` and `mimeType()`), `model/CenterMode`, `model/EditorMode`
@@ -1067,9 +1195,23 @@ entities, etc.).
 3. **Single image**: Only one image can be open at a time.
 4. **Large files**: Files > 128MB are rejected (`SafFileHelper.MAX_READ_BYTES`). Entire file is read into memory via a
    per-call `createTempFile` cache file (so concurrent loads don't clobber each other). Sources whose decoded pixel
-   count exceeds the **device-adaptive cap** `BitmapUtils.getMaxDecodePixels()` are subsampled at decode time — see the
-   `BitmapUtils.computeMaxDecodePixels` Javadoc for the math, device-class examples, and the power-of-2 sampleSize
-   contract. Enforced at the consistent-subsampling decode sites (`ImageLoadController.applyBytes` at load,
+   count exceeds the **static cap** `BitmapUtils.MAX_DECODE_PIXELS` (256 MP, ~1 GB ARGB) are subsampled at decode
+   time — see the `BitmapUtils.computeInSampleSize` Javadoc for the power-of-2 sampleSize contract. The cap handles
+   Samsung's "200 MP" capture mode (16384×12288 = 192 mebipixels) at `inSampleSize=1` with comfortable headroom for
+   future 256 MP sensors. The bg-thread load ALSO derives a **display proxy** via `BitmapUtils.createDisplayProxy`
+   that caps the editor-render bitmap at `BitmapUtils.MAX_DISPLAY_PIXELS` (16 MP, HARDWARE config); the proxy
+   stays in GPU memory for zero-upload per-frame draws while the source feeds the save path. A per-axis cap
+   `BitmapUtils.MAX_PROXY_AXIS` (16384 px) sits alongside the pixel-count cap to defend against pathological
+   aspect ratios (e.g. 1×100M attacker input) that would otherwise produce a 1×16M proxy past the GPU's
+   `GL_MAX_TEXTURE_SIZE`. At zoom ≥ 4 the renderer switches to the full source for pixel-grid accuracy, but
+   only when the source fits a third cap `BitmapUtils.MAX_SOURCE_RENDER_PIXELS` (64 MP) AND each axis fits
+   `BitmapUtils.MAX_SOURCE_RENDER_AXIS` (16384) — past either, the renderer stays on the proxy at high zoom
+   (soft pixels rather than freeze+OOM on a 200 MP texture upload). Auto-rotate's painted-region detection
+   reads pixels via `AutoRotateBinder.tryReadbackArgb`, a HARDWARE→ARGB_8888 readback (HARDWARE bitmaps
+   return null from `getPixels()`) wrapped in `RuntimeException | OutOfMemoryError` so Skia / GPU readback
+   faults surface as clean "Horizon detection failed" toasts rather than escaping the bg job and stranding
+   busy/progress.
+   Enforced at the consistent-subsampling decode sites (`ImageLoadController.applyBytes` at load,
    `UltraHdrCompat.decodeHdrBitmap` at HDR-save re-decode); `EditAligner.reorientEdit` deliberately bypasses the cap
    because `GraftWriter.graft` splices the re-encoded edit's primary scan into the original's full-resolution EXIF / MPF
    / gainmap / SEFT package — a downsampled edit primary would disagree with the full-resolution metadata describing
@@ -1088,7 +1230,16 @@ entities, etc.).
 7. **EXIF thumbnail overflow**: If original EXIF metadata + new thumbnail would exceed the 65535-byte APP1 limit,
    thumbnail is reduced or dropped. `oldThumbLen` is sanity-clamped against `data.length` to prevent malformed source
    EXIF from inflating the budget calculation.
-8. **No saved instance state**: Configuration changes handled via `configChanges`; process death loses all crop state.
+8. **No saved instance state**: Activity declares `configChanges="orientation|screenSize|keyboardHidden"`,
+   which covers device rotation and software-keyboard show/hide without an Activity recreate. Other
+   configuration changes (`density`, `uiMode` dark/light, `locale`, `fontScale`, `layoutDirection`)
+   trigger a recreate and lose crop state — there is no `onSaveInstanceState` implementation. Process
+   death (force-stop, OOM eviction) likewise loses state.
 9. **Opaque-ID providers**: Providers without document-ID path encoding (some cloud / SD-card providers) lose the
    strongest collision-detection paths. The Save flow trusts SAF auto-rename as collision evidence on those providers —
    false positives surface as a Replace dialog the user can dismiss with Keep, never as silent data loss.
+10. **Merged in-app save dialog is primary-external-storage only**: `SafFileHelper.buildExternalStorageDocumentUri`
+    returns null for paths outside `Environment.getExternalStorageDirectory()` (secondary SD card, USB OTG, cloud
+    targets). The save dispatches `onSaveCancelled` with a "Picked folder isn't on primary storage" toast in that case;
+    users wanting to save to a secondary volume should revoke MES to fall back to the legacy SAF picker, which honors
+    SD-card / USB targets through `ACTION_CREATE_DOCUMENT`.

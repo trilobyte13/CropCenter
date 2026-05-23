@@ -15,6 +15,10 @@ import java.util.function.UnaryOperator;
 
 /**
  * Central state object for the crop editor. Holds all parameters, source image, and extracted metadata.
+ *
+ * Threading: all cross-thread state lives in `volatile` fields written on the bg load thread and read on
+ * the UI thread — see the volatile-field protocol block at the field declarations. Mutations dispatch
+ * through StateBus; beginBatch / endBatch collapse setter cascades into one listener fire.
  */
 public final class CropState
 {
@@ -39,47 +43,79 @@ public final class CropState
 	// the stale "boost the features that used to be there" artifact). Volatile is cheap insurance — both sides
 	// are bg-serialised today, but a future UI-thread read (graft preview badge) would need the happens-before.
 	private volatile AiMask aiMask;
-	private AspectRatio aspectRatio = AspectRatio.R4_5;
+	// Volatile because `reset()` and `setAspectRatio` run on the bg load thread while EditorRenderer +
+	// ToolbarBinder read on the UI thread. Without volatile, a mid-reset UI frame could see a torn /
+	// stale aspectRatio reference and render with the wrong crop dimensions.
+	private volatile AspectRatio aspectRatio = AspectRatio.R4_5;
+	// volatile + identical-publishing reasoning as sourceImage below — the proxy bitmap derived from the
+	// source for editor-render and HorizonDetector consumption. May be the same reference as sourceImage
+	// when the source fits within MAX_DISPLAY_PIXELS (BitmapUtils.createDisplayProxy aliases). Always set
+	// in lockstep with sourceImage via setSourceImage(Bitmap, Bitmap) — never written independently.
+	private volatile Bitmap displayImage;
 	private volatile Bitmap sourceImage;
-	private CenterMode centerMode = CenterMode.BOTH;
-	private EditorMode editorMode = EditorMode.SELECT_FEATURE;
+	// Volatile because `reset()` writes both on bg while EditorRenderer / gesture handlers read on UI.
+	private volatile CenterMode centerMode = CenterMode.BOTH;
+	private volatile EditorMode editorMode = EditorMode.SELECT_FEATURE;
 	// Mutated only via updateExportConfig / updateGridConfig — the record types are immutable, so observers see
-	// a consistent snapshot and notifyChanged fires exactly once per logical transition.
-	private ExportConfig exportConfig = ExportConfig.defaults();
-	private Format sourceFormat;
-	private GridConfig gridConfig = GridConfig.defaults();
+	// a consistent snapshot and notifyChanged fires exactly once per logical transition. Volatile because
+	// ImageLoadController.applyBytes (bg thread) calls setSourceFormat (which mutates exportConfig) and
+	// updateGridConfig is reachable from settings paths that may run before the UI re-reads; UI-thread
+	// readers (ExportPipeline.canBypassEncode, SaveController.openSaveOptionsDialog) need a happens-before
+	// edge to the bg-side write so they don't observe a stale record reference on weak-memory ARM.
+	private volatile ExportConfig exportConfig = ExportConfig.defaults();
+	// Volatile because `reset()` and `setSourceFormat` run on the bg load thread while the UI-thread
+	// save-flow paths (SaveController + SaveDialog / FolderPickerDialog) read `getSourceFormat()` to
+	// drive format-picker defaults and extension validation. Without volatile, a UI tap immediately
+	// after load could see a stale sourceFormat from the previous image — causing the format picker to
+	// default to the wrong format.
+	private volatile Format sourceFormat;
+	private volatile GridConfig gridConfig = GridConfig.defaults();
 	private volatile List<JpegSegment> jpegMeta = new ArrayList<>();
 	// Mutated only via addSelectionPoint / removeSelectionPoint* / replaceSelectionPoints / clearSelectionPoints
 	// (UI thread); getSelectionPoints returns an unmodifiable view.
 	private volatile List<SelectionPoint> selectionPoints = new ArrayList<>();
-	private String originalFilename;
-	private boolean centerLocked = false; // when true, auto-recompute from points is suppressed
-	private boolean cropSizeDirty = true;
+	// originalFilename / centerLocked / cropSizeDirty / hasCenter / anchorX-Y / centerX-Y /
+	// rotationDegrees / cropH / cropW are all written by `reset()` on the bg load thread (and by
+	// applyBytes via setOriginalFilename). UI-thread reads on every editor render frame, every tap /
+	// drag / pinch handler, and every save-flow dispatch (canBypassEncode reads hasCenter, cropW/H).
+	// Without volatile, a mid-load UI frame can see torn or stale primitive values — most visibly a
+	// `hasCenter = true` paired with `cropW = 0` produces a degenerate crop overlay; less visibly a
+	// stale `rotationDegrees` rotates the new image by the old image's angle for a frame or two.
+	private volatile String originalFilename;
+	private volatile boolean centerLocked = false; // when true, auto-recompute from points is suppressed
+	private volatile boolean cropSizeDirty = true;
 	// True when the in-memory image came from the Apply External Edit graft flow. Read by
 	// ExportPipeline.canBypassEncode to refuse the verbatim-write bypass for graft saves — bypassing would
 	// ship source's gain map verbatim over the spliced primary, so any user crop afterwards shifts the
 	// gain-map HDR boost off the features it's meant for. The full encode regenerates the gain map from the
 	// spliced primary.
 	private volatile boolean graftApplied;
-	private boolean hasCenter;
-	private byte[] gainMap;
-	private byte[] originalFileBytes;
+	private volatile boolean hasCenter;
+	private volatile byte[] gainMap;
+	// Volatile because GraftController.start (UI thread) reads `getOriginalFileBytes()` and
+	// ExportPipeline.canBypassEncode reads it from both UI and bg dispatch paths, while `reset()` and
+	// `setOriginalFileBytes()` run on the bg load thread. Without volatile, the UI can observe stale
+	// null after a successful load — breaking graft-start and forcing canBypassEncode to false.
+	private volatile byte[] originalFileBytes;
 	// Raw TIFF bytes from the source PNG's eXIf chunk (PNG 1.6 spec). Set by extractMetadata on PNG sources;
 	// CropExporter.exportPng prefers this over jpegMeta for PNG → PNG round-trips because the PNG eXIf chunk
 	// has a u31 length field (JPEG APP1's u16 cap doesn't apply), so a PNG with > 64KB of EXIF keeps its full
 	// metadata when re-saved as PNG. Null for JPEG sources or PNGs without eXIf.
 	private volatile byte[] pngExifTiff;
-	private byte[] seftTrailer; // Samsung SEFT trailer (appended after gain map)
-	private float anchorX; // stable "intent" center for no-selection rotations
-	private float anchorY;
-	private float centerX;
-	private float centerY;
-	private float rotationDegrees = 0f; // precise rotation applied to source image
-	private int cropH;
-	private int cropW;
+	private volatile byte[] seftTrailer; // Samsung SEFT trailer (appended after gain map)
+	// Cross-thread primitives — see the originalFilename block comment above for the rationale.
+	private volatile float anchorX; // stable "intent" center for no-selection rotations
+	private volatile float anchorY;
+	private volatile float centerX;
+	private volatile float centerY;
+	private volatile float rotationDegrees = 0f; // precise rotation applied to source image
+	private volatile int cropH;
+	private volatile int cropW;
 
 	/**
 	 * Append a selection point. Fires the state listener once.
+	 *
+	 * @param point selection point to append (consumed by reference; SelectionPoint is immutable)
 	 */
 	public void addSelectionPoint(SelectionPoint point)
 	{
@@ -130,41 +166,35 @@ public final class CropState
 		return aiMask;
 	}
 
-	/**
-	 * Stable rotation / drag anchor X — the user's intended (unclamped) crop center. See setAnchor for why this is
-	 * distinct from centerX.
-	 */
 	public float getAnchorX()
 	{
 		return anchorX;
 	}
 
-	/**
-	 * Stable rotation / drag anchor Y — see getAnchorX.
-	 */
 	public float getAnchorY()
 	{
 		return anchorY;
 	}
 
-	/**
-	 * Current aspect-ratio constraint for the crop box. FREE means no constraint.
-	 */
 	public AspectRatio getAspectRatio()
 	{
 		return aspectRatio;
 	}
 
-	/**
-	 * Which axes of the crop are locked symmetrically about the selection (or LOCKED).
-	 */
 	public CenterMode getCenterMode()
 	{
 		return centerMode;
 	}
 
 	/**
-	 * Crop center X in un-rotated image coords. Continuous float.
+	 * Crop center X in screen-aligned image coords — the same coord system the editor's crop overlay draws
+	 * into via `ViewportMath.imageToScreenX` (a linear, un-rotated map). At zero rotation this equals
+	 * un-rotated bitmap-pixel X. At non-zero rotation, the value can lie outside [0, imgW] because the
+	 * rotated bitmap's bounding box extends beyond the un-rotated bitmap rectangle. `CropEngine.recomputeCrop`
+	 * uses `RotationMath.rotatedAabbDimensions` to clamp this to the rotated AABB. Continuous float.
+	 *
+	 * @return crop center X as a continuous float in screen-aligned image coords (may lie outside
+	 *         [0, imgW] under non-zero rotation, clamped by CropEngine.recomputeCrop to the rotated AABB)
 	 */
 	public float getCenterX()
 	{
@@ -172,16 +202,16 @@ public final class CropState
 	}
 
 	/**
-	 * Crop center Y in un-rotated image coords. Continuous float.
+	 * Crop center Y in screen-aligned image coords — see getCenterX. Continuous float.
+	 *
+	 * @return crop center Y as a continuous float in screen-aligned image coords (same rotated-AABB
+	 *         contract as getCenterX)
 	 */
 	public float getCenterY()
 	{
 		return centerY;
 	}
 
-	/**
-	 * Crop height in integer image pixels.
-	 */
 	public int getCropH()
 	{
 		return cropH;
@@ -191,6 +221,8 @@ public final class CropState
 	 * Continuous-float crop left for the renderer: centerX − cropW / 2f. Sub-pixel precision so a smoothly rotating
 	 * selection midpoint produces smooth crop motion on screen. Returns 0 when no crop is placed. Callers that need
 	 * an integer pixel origin cast via Math.floor at the call site — the exporter absorbs the sub-pixel bias.
+	 *
+	 * @return continuous-float crop left (centerX − cropW / 2f); 0 when no crop is placed
 	 */
 	public float getCropImageXFloat()
 	{
@@ -203,6 +235,8 @@ public final class CropState
 
 	/**
 	 * Continuous-float crop top for the renderer — see getCropImageXFloat.
+	 *
+	 * @return continuous-float crop top (centerY − cropH / 2f); 0 when no crop is placed
 	 */
 	public float getCropImageYFloat()
 	{
@@ -213,26 +247,31 @@ public final class CropState
 		return centerY - cropH / 2f;
 	}
 
-	/**
-	 * Crop width in integer image pixels.
-	 */
 	public int getCropW()
 	{
 		return cropW;
 	}
 
 	/**
-	 * Current editor interaction mode (Move or Select-Feature).
+	 * Display-proxy bitmap downsampled from the source to fit within BitmapUtils.MAX_DISPLAY_PIXELS. Used by
+	 * EditorRenderer for per-frame rendering at zoom < 4 (above that, the renderer switches to
+	 * getSourceImage() for pixel-grid accuracy) and by AutoRotateBinder for painted-region horizon detection.
+	 * Returns null when no image is loaded; returns the same reference as getSourceImage() when the source
+	 * was small enough that BitmapUtils.createDisplayProxy aliased rather than allocating a copy. Save
+	 * paths must NOT route through this — they read getSourceImage() so output resolution matches source.
+	 *
+	 * @return display proxy (≤ MAX_DISPLAY_PIXELS), or null when no image is loaded
 	 */
+	public Bitmap getDisplayImage()
+	{
+		return displayImage;
+	}
+
 	public EditorMode getEditorMode()
 	{
 		return editorMode;
 	}
 
-	/**
-	 * Current ExportConfig snapshot. Immutable — writes go through updateExportConfig, which replaces this field
-	 * with a new instance and fires notifyChanged.
-	 */
 	public ExportConfig getExportConfig()
 	{
 		return exportConfig;
@@ -245,32 +284,24 @@ public final class CropState
 	 * Caller must not mutate the returned array. The reference is shared with all consumers and with internal
 	 * state — appending to or rewriting elements would silently corrupt the next save. A defensive clone is not
 	 * done because the array is potentially multi-MB and every consumer treats it as read-only.
+	 *
+	 * @return raw Ultra HDR gain-map bytes (read-only; do not mutate), or null for non-HDR sources
 	 */
 	public byte[] getGainMap()
 	{
 		return gainMap;
 	}
 
-	/**
-	 * Current GridConfig snapshot. Immutable — writes go through updateGridConfig, which replaces this field with a
-	 * new instance and fires notifyChanged.
-	 */
 	public GridConfig getGridConfig()
 	{
 		return gridConfig;
 	}
 
-	/**
-	 * Source bitmap height, or 0 before any image loads.
-	 */
 	public int getImageHeight()
 	{
 		return sourceImage != null ? sourceImage.getHeight() : 0;
 	}
 
-	/**
-	 * Source bitmap width, or 0 before any image loads.
-	 */
 	public int getImageWidth()
 	{
 		return sourceImage != null ? sourceImage.getWidth() : 0;
@@ -279,6 +310,8 @@ public final class CropState
 	/**
 	 * Read-only view of the loaded JPEG's segment list. Returns an empty list before any image is loaded. Populated
 	 * en-bloc by setJpegMeta during loadImage; the list is never mutated in place.
+	 *
+	 * @return unmodifiable view of the loaded JPEG's segment list; empty before any image is loaded
 	 */
 	public List<JpegSegment> getJpegMeta()
 	{
@@ -298,9 +331,6 @@ public final class CropState
 		return originalFileBytes;
 	}
 
-	/**
-	 * Display filename of the loaded image — used in Save-As default naming and info bar.
-	 */
 	public String getOriginalFilename()
 	{
 		return originalFilename;
@@ -309,15 +339,14 @@ public final class CropState
 	/**
 	 * Raw TIFF bytes from the source PNG's eXIf chunk, or null when the source was JPEG / had no eXIf chunk.
 	 * Used by CropExporter.exportPng for PNG → PNG round-trip where the JPEG APP1 u16 cap doesn't apply.
+	 *
+	 * @return raw TIFF bytes from the source PNG's eXIf chunk, or null for JPEG sources / PNGs without eXIf
 	 */
 	public byte[] getPngExifTiff()
 	{
 		return pngExifTiff;
 	}
 
-	/**
-	 * Precise rotation angle applied to the source at draw time. Clamped to [−180, 180].
-	 */
 	public float getRotationDegrees()
 	{
 		return rotationDegrees;
@@ -330,6 +359,8 @@ public final class CropState
 	 *
 	 * Caller must not mutate the returned array. The reference is shared and gets re-appended verbatim by the
 	 * exporter; mutation would silently corrupt the saved trailer.
+	 *
+	 * @return Samsung SEFT trailer bytes (read-only; do not mutate), or null for non-Samsung sources
 	 */
 	public byte[] getSeftTrailer()
 	{
@@ -341,6 +372,8 @@ public final class CropState
 	 * removeSelectionPoint / clearSelectionPoints / replaceSelectionPoints so each change fires notifyChanged
 	 * exactly once — previously callers mutated the backing list directly and had to remember to trigger recomputes
 	 * themselves.
+	 *
+	 * @return unmodifiable view of the selection points; mutation must go through the dedicated setters
 	 */
 	public List<SelectionPoint> getSelectionPoints()
 	{
@@ -350,6 +383,9 @@ public final class CropState
 	/**
 	 * Format of the loaded source — JPEG or PNG. Independent of export format. Null when no image is loaded or when
 	 * the source's signature doesn't match either supported format.
+	 *
+	 * @return detected source Format (JPEG or PNG), or null when no image is loaded or the signature is
+	 *         unrecognized
 	 */
 	public Format getSourceFormat()
 	{
@@ -359,15 +395,14 @@ public final class CropState
 	/**
 	 * The loaded bitmap in display orientation (EXIF orientation already applied), or null before any image loads.
 	 * Callers must null-check.
+	 *
+	 * @return source bitmap with EXIF orientation already applied, or null before any image loads
 	 */
 	public Bitmap getSourceImage()
 	{
 		return sourceImage;
 	}
 
-	/**
-	 * True once the crop center has been placed (via tap, drag, or auto-compute).
-	 */
 	public boolean hasCenter()
 	{
 		return hasCenter;
@@ -386,14 +421,25 @@ public final class CropState
 	 * flow can't silently skip one. Without graftApplied, canBypassEncode short-circuits the canvas pass and ships
 	 * source's gain map verbatim over the spliced primary (boost lands on the wrong features). Without aiMask, the
 	 * inpaint step is a no-op and the gain map's stale boost-the-removed-features artifact survives in the output.
+	 *
+	 * @param graft pre-baked splice from GraftController; aiMask is installed when present, graftApplied
+	 *              is unconditionally set true
 	 */
 	public void installGraft(Graft graft)
 	{
-		setGraftApplied(true);
+		// Order matters: setAiMask FIRST, then setGraftApplied. Mirrors reset()'s clear order
+		// (aiMask=null first, graftApplied=false second) so the same "no transient (graftApplied=true,
+		// aiMask=null) window" invariant the reset comment documents also holds on the install side.
+		// Without this order, a concurrent UltraHdrCompat.compressWithGainmap (e.g. Save tapped
+		// immediately after Apply External Edit completes) could catch graftApplied=true while aiMask
+		// is still null, skip the inpaint, and ship an HDR boost that still highlights the pre-graft
+		// features — exactly the bug installGraft exists to prevent. Reference reads are atomic per
+		// JLS §17.7 so aiMask is always either null or the new mask, never torn.
 		if (graft.hasAiMask())
 		{
 			setAiMask(graft.aiMask());
 		}
+		setGraftApplied(true);
 	}
 
 	/**
@@ -437,8 +483,11 @@ public final class CropState
 	}
 
 	/**
-	 * Remove a selection point by equality. Returns true if anything was removed. Fires the state listener only
-	 * when something was actually removed.
+	 * Remove a selection point by equality. Fires the state listener only when something was actually
+	 * removed.
+	 *
+	 * @param point selection point to remove (matched by equals)
+	 * @return true when a matching point was found and removed; false when no equal point existed
 	 */
 	public boolean removeSelectionPoint(SelectionPoint point)
 	{
@@ -451,8 +500,11 @@ public final class CropState
 	}
 
 	/**
-	 * Remove the selection point at the given index. Throws IndexOutOfBoundsException on an invalid index; always
-	 * fires the listener when it does return.
+	 * Remove the selection point at the given index. Always fires the listener when it does return.
+	 *
+	 * @param index position to remove from the selection-points list
+	 * @return the removed selection point
+	 * @throws IndexOutOfBoundsException when index is negative or beyond the list's size
 	 */
 	public SelectionPoint removeSelectionPointAt(int index)
 	{
@@ -462,10 +514,13 @@ public final class CropState
 	}
 
 	/**
-	 * Replace all selection points atomically (used for undo/redo snapshot restores). Swaps the volatile field
-	 * to a fresh list rather than mutating in place — a bg-thread caller (rare on this path, but the field's
-	 * volatile-swap contract documents the guarantee for ALL writers) could otherwise CME a UI-thread
-	 * iteration. Same pattern reset() uses on line below.
+	 * Replace all selection points atomically (used for undo/redo snapshot restores). Swaps the volatile
+	 * field to a fresh list rather than mutating in place — a bg-thread caller (rare on this path, but
+	 * the field's volatile-swap contract documents the guarantee for ALL writers) could otherwise CME a
+	 * UI-thread iteration. Same pattern reset() uses on line below.
+	 *
+	 * @param newPoints replacement selection points (copied into a new backing list; caller retains
+	 *                  ownership of the supplied collection)
 	 */
 	public void replaceSelectionPoints(Collection<SelectionPoint> newPoints)
 	{
@@ -479,6 +534,7 @@ public final class CropState
 	public void reset()
 	{
 		sourceImage = null;
+		displayImage = null;
 		originalFileBytes = null;
 		sourceFormat = null;
 		anchorX = 0;
@@ -532,23 +588,12 @@ public final class CropState
 		graftApplied = false;
 	}
 
-	/**
-	 * Stable rotation anchor for the no-selection case — setCenter's rotation clamp can pull centerX inward to keep
-	 * the crop inside the rotated image, so reading centerX back on the next recompute would accumulate inward
-	 * drift. The anchor holds the user's intended (unclamped) position. Callers that move the crop (user drag,
-	 * image load) also call setAnchor so the next recompute uses a fresh starting position; rotation and AR changes
-	 * leave the anchor alone.
-	 */
 	public void setAnchor(float x, float y)
 	{
 		this.anchorX = x;
 		this.anchorY = y;
 	}
 
-	/**
-	 * Replace the aspect-ratio constraint. Marks the crop size dirty so the next recompute resizes to fit, then
-	 * fires the listener.
-	 */
 	public void setAspectRatio(AspectRatio ar)
 	{
 		this.aspectRatio = ar;
@@ -560,6 +605,10 @@ public final class CropState
 	 * Set the crop center, clamping to keep the crop rectangle fully inside the (possibly rotated) image. Under
 	 * rotation the clamp does an independent per-axis binary search to avoid one axis's clamp influencing the
 	 * other. Fires the listener on every call, even if the clamp moves the target.
+	 *
+	 * @param x requested crop center X in screen-aligned image coords; clamped to keep the crop rect inside
+	 *          the (possibly rotated) image
+	 * @param y requested crop center Y; same clamp contract as x
 	 */
 	public void setCenter(float x, float y)
 	{
@@ -587,11 +636,6 @@ public final class CropState
 		notifyChanged();
 	}
 
-	/**
-	 * Lock / unlock the selection-point auto-recompute. Wired to the Lock-center checkbox in the toolbar
-	 * (chkLockCenter) — not to Pan mode, which is its own LOCKED CenterMode value via setCenterMode. Does
-	 * not fire the listener — caller controls redraw cadence.
-	 */
 	public void setCenterLocked(boolean locked)
 	{
 		this.centerLocked = locked;
@@ -601,6 +645,9 @@ public final class CropState
 	 * Replace the lock mode. Does NOT mark the crop size dirty (see comment below) — the button handler explicitly
 	 * calls recomputeForLockChange with the correct selection midpoint, avoiding a race between the listener-driven
 	 * recompute and the handler-driven one.
+	 *
+	 * @param mode new lock mode (BOTH / HORIZONTAL / VERTICAL / LOCKED); fires the state listener but does not
+	 *             mark the crop size dirty
 	 */
 	public void setCenterMode(CenterMode mode)
 	{
@@ -614,6 +661,9 @@ public final class CropState
 
 	/**
 	 * Set center without bounds clamping or notification — used before recomputeCrop.
+	 *
+	 * @param x crop center X in screen-aligned image coords; no clamp, no listener fire
+	 * @param y crop center Y; same contract as x
 	 */
 	public void setCenterUnclamped(float x, float y)
 	{
@@ -623,28 +673,17 @@ public final class CropState
 		// No notifyChanged — caller will trigger notify via recomputeCrop → setCenter
 	}
 
-	/**
-	 * Set the dirty flag explicitly. Primarily used to clear dirty AFTER recompute completes; setting dirty=true is
-	 * usually expressed via markCropSizeDirty.
-	 */
 	public void setCropSizeDirty(boolean dirty)
 	{
 		this.cropSizeDirty = dirty;
 	}
 
-	/**
-	 * Set crop size without triggering listener — used during batch updates in recomputeCrop.
-	 */
 	public void setCropSizeSilent(int width, int height)
 	{
 		this.cropW = width;
 		this.cropH = height;
 	}
 
-	/**
-	 * Switch between Move and Select-Feature mode. Fires the listener; does not mark crop size dirty (mode switches
-	 * preserve the crop rectangle).
-	 */
 	public void setEditorMode(EditorMode mode)
 	{
 		this.editorMode = mode;
@@ -655,6 +694,9 @@ public final class CropState
 	/**
 	 * Store the raw Ultra HDR gain-map bytes for later export. No listener fire — gain map never drives UI changes
 	 * directly.
+	 *
+	 * @param gainMap raw Ultra HDR gain-map bytes; ownership transfers to CropState (do not mutate after passing
+	 *                in). Null clears.
 	 */
 	public void setGainMap(byte[] gainMap)
 	{
@@ -664,6 +706,8 @@ public final class CropState
 	/**
 	 * Replace the JPEG segment list en-bloc. No listener fire — the segment list is consulted by the exporter, not
 	 * rendered.
+	 *
+	 * @param meta new segment list; reference is retained (do not mutate after passing in)
 	 */
 	public void setJpegMeta(List<JpegSegment> meta)
 	{
@@ -673,32 +717,24 @@ public final class CropState
 	/**
 	 * Register (or clear via null) the single state-change listener. MainActivity wires itself as the listener in
 	 * onCreate and unwires in onDestroy.
+	 *
+	 * @param listener state-change listener; null clears the registered listener
 	 */
 	public void setListener(OnStateChangedListener listener)
 	{
 		bus.setListener(listener);
 	}
 
-	/**
-	 * Record the original file bytes for in-memory backup use. No listener fire.
-	 */
 	public void setOriginalFileBytes(byte[] bytes)
 	{
 		this.originalFileBytes = bytes;
 	}
 
-	/**
-	 * Record the original file's display name (used in the Save-As default filename).
-	 */
 	public void setOriginalFilename(String name)
 	{
 		this.originalFilename = name;
 	}
 
-	/**
-	 * Record the raw TIFF bytes extracted from the source PNG's eXIf chunk. No listener fire — consulted by the
-	 * exporter, not rendered. Pass null to clear (matches reset() behavior).
-	 */
 	public void setPngExifTiff(byte[] tiff)
 	{
 		this.pngExifTiff = tiff;
@@ -717,6 +753,10 @@ public final class CropState
 	 * float-precision residue near zero from RotationMath, or a programmatic caller passing 1e-6° — that would
 	 * otherwise leave the model holding a non-zero value the renderer treats as zero (hidden readout + needless
 	 * re-encode).
+	 *
+	 * @param deg requested rotation in degrees; NaN / infinite collapse to 0, magnitudes are clamped to
+	 *            [−180, 180] and sub-ROTATION_EPSILON values snap to exactly 0. Marks the crop size dirty and
+	 *            fires the listener on every call.
 	 */
 	public void setRotationDegrees(float deg)
 	{
@@ -737,6 +777,9 @@ public final class CropState
 	/**
 	 * Store the Samsung Extended Format Trailer for later re-appending to the export. No listener fire — trailer
 	 * data doesn't drive UI.
+	 *
+	 * @param seft Samsung SEFT trailer bytes (re-appended verbatim on save); reference is retained — do not
+	 *             mutate after passing in. Null clears.
 	 */
 	public void setSeftTrailer(byte[] seft)
 	{
@@ -762,18 +805,32 @@ public final class CropState
 	}
 
 	/**
-	 * Set the source bitmap and fire the listener — triggers applyStateToUi which computes the initial crop center
-	 * and fits the view.
+	 * Set the source bitmap and its derived display-proxy in lockstep, then fire the listener — triggers
+	 * applyStateToUi which computes the initial crop center and fits the view. The proxy must be derived
+	 * via BitmapUtils.createDisplayProxy(source) by the caller (typically ImageLoadController on the bg
+	 * thread, so the proxy's bilinear-downscale pass doesn't block the UI thread). Passing display == source
+	 * when the source already fits within MAX_DISPLAY_PIXELS is the documented and expected aliasing case.
+	 *
+	 * Both arguments are nullable — calling with (null, null) clears the loaded image. Calling with one
+	 * null and one non-null is a contract violation (the EditorRenderer expects either both or neither to
+	 * be live) and the implementation does not guard against it; the caller is responsible.
+	 *
+	 * @param source  full-resolution bitmap; pixel source for CropExporter / UltraHdrCompat save paths
+	 * @param display display-proxy bitmap (≤ MAX_DISPLAY_PIXELS); EditorRenderer / HorizonDetector consumer
 	 */
-	public void setSourceImage(Bitmap bmp)
+	public void setSourceImage(Bitmap source, Bitmap display)
 	{
-		this.sourceImage = bmp;
+		this.sourceImage = source;
+		this.displayImage = display;
 		notifyChanged();
 	}
 
 	/**
-	 * Replace the export config with the result of the given transformer and fire notifyChanged exactly once.
-	 * Callers supply a withXxx chain on the current value.
+	 * Replace the export config with the result of the given transformer and fire notifyChanged
+	 * exactly once. Callers supply a withXxx chain on the current value.
+	 *
+	 * @param transformer applied to the current ExportConfig; the returned instance becomes the new
+	 *                    value. Must not be null and must not return null
 	 */
 	public void updateExportConfig(UnaryOperator<ExportConfig> transformer)
 	{
@@ -782,9 +839,12 @@ public final class CropState
 	}
 
 	/**
-	 * Replace the grid config with the result of the given transformer and fire notifyChanged exactly once. Callers
-	 * supply a withXxx chain on the current value — multi-field updates fold into one transformer so the listener
-	 * fires once.
+	 * Replace the grid config with the result of the given transformer and fire notifyChanged exactly
+	 * once. Callers supply a withXxx chain on the current value — multi-field updates fold into one
+	 * transformer so the listener fires once.
+	 *
+	 * @param transformer applied to the current GridConfig; the returned instance becomes the new
+	 *                    value. Must not be null and must not return null
 	 */
 	public void updateGridConfig(UnaryOperator<GridConfig> transformer)
 	{

@@ -9,17 +9,22 @@ import android.widget.Toast;
 import com.cropcenter.crop.CropExporter;
 import com.cropcenter.crop.ExportResult;
 import com.cropcenter.metadata.ExifPatcher;
+import com.cropcenter.metadata.JpegMetadataInjector;
 import com.cropcenter.model.CropState;
 import com.cropcenter.model.Format;
 import com.cropcenter.util.BitmapUtils;
 import com.cropcenter.util.SafFileHelper;
 
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
 import java.util.function.Consumer;
 
 /**
@@ -67,16 +72,22 @@ final class ExportPipeline
 	 *   - No grid bake-in.
 	 *   - Source bytes available.
 	 *   - Crop is either uninitialised (state.hasCenter() == false) OR is the trivial
-	 *     full-image crop (cropW/cropH match the source bitmap dimensions). The full-
-	 *     image case matters because applying a graft auto-initialises a centered crop
-	 *     during applyStateToUi → ensureCropCenter, even though the user has applied no
-	 *     real edit. Without the full-image carve-out, every graft save would fall into
-	 *     the canvas-encode path even when the user never touched the crop tool.
-	 *     (Now defensive — the graft-applied check above already excludes that case.)
+	 *     full-image crop (cropW/cropH match the source bitmap dimensions). Defensive:
+	 *     catches the full-image-crop case (cropW/cropH == source dims) so a re-encode
+	 *     isn't forced for a no-op edit. Currently unreachable in production because the
+	 *     graft-applied check above short-circuits before this branch, but harmless and
+	 *     survives future refactors that decouple hasCenter from graft-apply.
 	 *
 	 * If all hold, the canvas-encoded primary would be a re-encoded near-copy of state.originalFileBytes — close to
 	 * byte-identical but with different DCT/Huffman tables and a regenerated EXIF thumbnail. Writing the source
 	 * bytes verbatim preserves structure exactly.
+	 *
+	 * @param state current CropState snapshot — read for sourceFormat, graftApplied, rotationDegrees,
+	 *              gridConfig.includeInExport, originalFileBytes, hasCenter, cropW/cropH
+	 * @param isPng true when the requested output format is PNG (always returns false; PNG has its own
+	 *              encode path and never bypasses)
+	 * @return true when all bypass conditions hold and the caller should write originalFileBytes
+	 *         verbatim; false on any failed condition (the caller falls back to canvas-encode)
 	 */
 	static boolean canBypassEncode(CropState state, boolean isPng)
 	{
@@ -143,14 +154,19 @@ final class ExportPipeline
 	}
 
 	/**
-	 * Encode-and-write on a background thread.
+	 * Encode-and-write on a background thread. `onSavedBg` is optional and runs after the write
+	 * verifies. The callback receives the encode result so the Replace flow can drop the same bytes
+	 * onto the target file without re-reading the placeholder (FUSE/MediaStore caching makes that read
+	 * unreliable). When the result is tempfile-mode (PNG streaming path), the callback streams from
+	 * disk via ExportResult.tempfile(); when bytes-mode (JPEG / bypass), the callback reads bytes
+	 * directly. When onSavedBg is present, doExport's "Saved" toast is suppressed — the callback issues
+	 * its own final-outcome message (success or failure dialog).
 	 *
-	 * `onSavedBg` (optional): runs after the write verifies. The callback receives the exact bytes written so the
-	 * Replace flow can drop them onto the target file without re-reading the placeholder (FUSE/MediaStore caching
-	 * makes that read unreliable). When onSavedBg is present, doExport's "Saved" toast is suppressed — the callback
-	 * issues its own final-outcome message (success or failure dialog).
+	 * @param uri       SAF URI to write to (fresh document — delete-on-failure cleanup)
+	 * @param onSavedBg optional bg-thread callback invoked with the encode result after write+verify;
+	 *                  null suppresses the callback and lets doExport's own "Saved" toast fire
 	 */
-	void exportTo(Uri uri, Consumer<byte[]> onSavedBg)
+	void exportTo(Uri uri, Consumer<ExportResult> onSavedBg)
 	{
 		// Replace flow: the placeholder URI is known-fresh (auto-rename or programmatic createDocument) so
 		// delete-on-failure is the correct cleanup. If a future caller needs preserveOnFailure + onSavedBg
@@ -159,13 +175,16 @@ final class ExportPipeline
 	}
 
 	/**
-	 * Overwrite fallback for SaveController case A when the target is a confirmed existing file (priorSize > 0) AND
-	 * sibling placeholder creation wasn't available (opaque-ID provider). Direct-writes to `uri` with
-	 * preserveOnFailure=true so a verification failure doesn't destroy the original. `replacedName` is used for the
-	 * success toast ("Replaced <name>") so the user gets overwrite-specific confirmation that matches what this
-	 * path actually did — a generic "Saved N KB" would misrepresent a confirmed overwrite. Not as crash-safe as
-	 * Replace's write-then-swap — the destructive write is unavoidable on a provider that won't give us a sibling
-	 * placeholder.
+	 * Overwrite fallback for SaveController case A when the target is a confirmed existing file
+	 * (priorSize > 0) AND sibling placeholder creation wasn't available (opaque-ID provider). Direct-
+	 * writes to uri with preserveOnFailure=true so a verification failure doesn't destroy the original.
+	 * Not as crash-safe as Replace's write-then-swap — the destructive write is unavoidable on a
+	 * provider that won't give us a sibling placeholder.
+	 *
+	 * @param uri          SAF URI to overwrite (existing document; verify-failure preserves original)
+	 * @param replacedName user-facing name for the success toast ("Replaced X" — overwrite-specific
+	 *                     wording matching what this path actually did, instead of a generic "Saved
+	 *                     N KB" that would misrepresent a confirmed overwrite)
 	 */
 	void exportToOverwrite(Uri uri, String replacedName)
 	{
@@ -174,11 +193,15 @@ final class ExportPipeline
 
 	/**
 	 * Variant for the narrow fallback path in SaveController case A where the provider returned an
-	 * ACTION_CREATE_DOCUMENT URI that might point at an existing file and we couldn't create a sibling placeholder
-	 * to route through the crash-safe Replace flow. Verification failure MUST NOT delete the URI — it could destroy
-	 * the user's original. The residual cost is a partial-write file left on disk when the URI was actually a fresh
-	 * document on a provider that doesn't support createDocument; acceptable since both intersections (opaque-ID
-	 * provider + fresh-doc create + verify failure) are rare.
+	 * ACTION_CREATE_DOCUMENT URI that might point at an existing file and we couldn't create a sibling
+	 * placeholder to route through the crash-safe Replace flow. Verification failure MUST NOT delete
+	 * the URI — it could destroy the user's original. The residual cost is a partial-write file left on
+	 * disk when the URI was actually a fresh document on a provider that doesn't support createDocument;
+	 * acceptable since both intersections (opaque-ID provider + fresh-doc create + verify failure) are
+	 * rare.
+	 *
+	 * @param uri ambiguous-status SAF URI; verify-failure preserves whatever was at uri (could be the
+	 *            user's original document — never delete)
 	 */
 	void exportToPreserving(Uri uri)
 	{
@@ -186,43 +209,66 @@ final class ExportPipeline
 	}
 
 	/**
-	 * Export pipeline: encode → write → verify → report.
+	 * Read up to `wanted` bytes from `is` into `buf`, looping past short reads. Returns the actual
+	 * number of bytes read; less than `wanted` means EOF. Used by `streamCompareUriToFile` so the
+	 * per-chunk SAF + tempfile reads align even if either stream returns fewer bytes than requested.
 	 *
-	 * Success signal hierarchy (matched by verifyPhase):
-	 *   1. Direct file I/O branch (`WriteOutcome.directPath != null`, writeReturned=true) — kernel-level
-	 *      `File.length()` matches payload length. The fsync-before-close in `writePhase` /
-	 *      `tryDirectAtomicWrite` commits the inode, so length is ground truth.
-	 *   2. SAF stream branch, clean write — query `OpenableColumns.SIZE` via SafFileHelper. When the
-	 *      query returns the payload length, trust it. When it returns a different value or fails
-	 *      (provider omits SIZE), fall through to content readback.
-	 *   3. SAF stream branch, threw on close — many SAF providers throw harmless EPIPE / IOException
-	 *      on close yet persist the full payload, so route through byte-by-byte content readback
-	 *      (`SafFileHelper.readbackByteCount`) as the ground truth.
-	 *   4. None of the above → genuine failure; reportFailure deletes the partial file unless
-	 *      preserveOnFailure is set.
-	 * Returns the exact bytes written when the file on disk is verified to hold the full payload,
-	 * or null on failure. Callers that need to run a post-write step (e.g. Replace's File-I/O
-	 * swap) use the returned bytes so they don't have to re-read the placeholder from the
-	 * filesystem — that read can go through FUSE/MediaStore layers that aren't necessarily in
-	 * sync with the SAF write we just did. The contract is "verified by size + readback", not
-	 * "definitively saved" — the latter would falsely imply the kernel cache has flushed.
-	 *
-	 * `isReplaceSave` — true when this export is the placeholder write of a Replace flow. Suppresses doExport's
-	 * "Saved" toast because the Replace swap that follows fires its own outcome message.
-	 *
-	 * `preserveOnFailure` — when verifyPhase rejects the write, true leaves the partial file on disk; false deletes
-	 * it. Set by the caller based on whether the URI might point at user data (e.g. SaveController's case-A
-	 * fallback when we can't determine the URI is a fresh doc) vs. being a known-fresh placeholder (Replace flow,
-	 * plain Save As, etc.).
-	 *
-	 * `replacedName` — when non-null AND isReplaceSave is false, a successful save emits "Replaced <replacedName>"
-	 * instead of the generic "Saved N KB" toast. Used by the opaque-ID overwrite-fallback path (exportToOverwrite)
-	 * so a confirmed overwrite announces itself as an overwrite. Null for plain Save As and the fallback
-	 * preservation path.
-	 *
-	 * Failure toasts fire regardless of the flags.
+	 * @param is     stream to drain
+	 * @param buf    destination buffer
+	 * @param wanted upper bound on bytes to read (also bounds the loop)
+	 * @return bytes actually read; 0 indicates EOF at the first call
+	 * @throws IOException on read failure
 	 */
-	private byte[] doExport(Uri uri, boolean isReplaceSave, boolean preserveOnFailure, String replacedName)
+	private static int readFully(InputStream is, byte[] buf, int wanted) throws IOException
+	{
+		int total = 0;
+		while (total < wanted)
+		{
+			int n = is.read(buf, total, wanted - total);
+			if (n < 0)
+			{
+				break;
+			}
+			total += n;
+		}
+		return total;
+	}
+
+	/**
+	 * Write the encoded payload to `os` — either a single `write(bytes)` for bytes-mode results, or a
+	 * chunked stream-copy from the tempfile for tempfile-mode results. The tempfile path uses
+	 * `JpegMetadataInjector.STREAM_CHUNK_SIZE` (64 KB) chunks so peak Java heap during the write is
+	 * the chunk buffer only — no 400-600 MB byte[] materialised for the PNG streaming path. Returns
+	 * the byte count written so the caller can log it.
+	 *
+	 * @param encoded ExportResult holding either bytes or tempfile (exactly-one-non-null invariant)
+	 * @param os      output stream to write to; caller closes
+	 * @return byte count written (== encoded.size())
+	 * @throws IOException on read or write failure
+	 */
+	private static long writePayloadToStream(ExportResult encoded, OutputStream os) throws IOException
+	{
+		if (encoded.bytes() != null)
+		{
+			os.write(encoded.bytes());
+			return encoded.bytes().length;
+		}
+		long total = 0;
+		try (FileInputStream fis = new FileInputStream(encoded.tempfile()))
+		{
+			byte[] buf = new byte[JpegMetadataInjector.STREAM_CHUNK_SIZE];
+			int n;
+			while ((n = fis.read(buf)) > 0)
+			{
+				os.write(buf, 0, n);
+				total += n;
+			}
+		}
+		return total;
+	}
+
+	private ExportResult doExport(Uri uri, boolean isReplaceSave, boolean preserveOnFailure,
+		String replacedName)
 	{
 		boolean isPng = host.getState().getExportConfig().format() == Format.PNG;
 		boolean srcHadHdr = host.getState().getGainMap() != null && host.getState().getGainMap().length > 0;
@@ -232,25 +278,52 @@ final class ExportPipeline
 		{
 			return null;
 		}
-		byte[] data = encoded.bytes();
-		WriteOutcome write = writePhase(uri, data, preserveOnFailure);
-		if (!verifyPhase(uri, data, write))
+		// Tracks whether the verified-write succeeded — gates the Replace tempfile ownership transfer.
+		// Without it, a failed Replace (verifyPhase=false, doExport returns null) would skip cleanup
+		// in the finally block but never reach the onSavedBg callback that would otherwise own the
+		// tempfile, leaking multi-MB PNG cache files until next-startup sweepStaleCacheFiles.
+		boolean writeVerified = false;
+		try
 		{
-			reportFailure(uri, write.exception(), preserveOnFailure);
-			return null;
+			WriteOutcome write = writePhase(uri, encoded, preserveOnFailure);
+			if (!verifyPhase(uri, encoded, write))
+			{
+				reportFailure(uri, write.exception(), preserveOnFailure);
+				return null;
+			}
+			writeVerified = true;
+			if (!isReplaceSave)
+			{
+				if (replacedName != null)
+				{
+					reportReplaced(replacedName);
+				}
+				else
+				{
+					reportSuccess(encoded.size(), srcHadHdr, isPng, encoded.hdrAttached());
+				}
+			}
+			return encoded;
 		}
-		if (!isReplaceSave)
+		finally
 		{
-			if (replacedName != null)
+			// Tempfile cleanup: the PNG streaming path returns a tempfile-mode ExportResult, and
+			// CropExporter explicitly transfers ownership to us (does NOT delete the file in its own
+			// finally). On the Replace flow (isReplaceSave=true) the onSavedBg callback runs in
+			// runExportBg AFTER doExport returns successfully — that callback owns the tempfile for
+			// its lifetime, so we skip cleanup ONLY when both isReplaceSave AND writeVerified are
+			// true. On every other path (non-Replace OR failed verify), we delete it here so a
+			// failed Replace doesn't leak the tempfile. The bytes-mode ExportResult has no tempfile
+			// (encoded.tempfile() == null) so deletion is a no-op.
+			boolean replaceOwnsTempfile = isReplaceSave && writeVerified;
+			if (!replaceOwnsTempfile && encoded.tempfile() != null)
 			{
-				reportReplaced(replacedName);
-			}
-			else
-			{
-				reportSuccess(data, srcHadHdr, isPng, encoded.hdrAttached());
+				if (encoded.tempfile().exists() && !encoded.tempfile().delete())
+				{
+					Log.w(TAG, "Failed to delete encode tempfile " + encoded.tempfile());
+				}
 			}
 		}
-		return data;
 	}
 
 	/**
@@ -279,7 +352,10 @@ final class ExportPipeline
 				return new ExportResult(data, srcHadHdr);
 			}
 			ExportResult result = CropExporter.export(host.getState(), host.getActivity().getCacheDir());
-			Log.d(TAG, "Encoded " + result.bytes().length + " bytes (srcHdr=" + srcHadHdr
+			// Use size() instead of bytes().length — PNG returns tempfile-mode with bytes()==null,
+			// so the direct .length access NPEs. size() handles both modes (bytes.length for
+			// bytes-mode, tempfile.length() for tempfile-mode).
+			Log.d(TAG, "Encoded " + result.size() + " bytes (srcHdr=" + srcHadHdr
 				+ " isPng=" + isPng + " hdrAttached=" + result.hdrAttached() + ")");
 			return result;
 		}
@@ -290,13 +366,30 @@ final class ExportPipeline
 			// catch, runExportBg's finally would hide the progress overlay while the worker died with an
 			// uncaught Error, leaving the user staring at an unresponsive editor with no feedback.
 			Log.e(TAG, "Encode failed", e);
+			// Diagnostic heap snapshot logged on every failure — when a user reports "Export failed:
+			// Failed to allocate N bytes" we can correlate N against the actual heap cap and used
+			// bytes on their device. Runtime.maxMemory() is the Java heap cap (largeHeap-aware);
+			// totalMemory is currently-committed; freeMemory is free WITHIN the committed pool.
+			// Effective free heap = maxMemory - (totalMemory - freeMemory).
+			Runtime rt = Runtime.getRuntime();
+			long max = rt.maxMemory();
+			long total = rt.totalMemory();
+			long free = rt.freeMemory();
+			long effectiveFree = max - (total - free);
+			Log.e(TAG, "Java heap on failure: max=" + (max >> 20) + "MB committed="
+				+ (total >> 20) + "MB effectiveFree=" + (effectiveFree >> 20) + "MB");
+			// LENGTH_LONG because the message embeds the exception's own text (variable length —
+			// "Skia rejected JPEG encode", "Image too large to save — try a smaller crop", etc.)
+			// and Android 11+ truncates LENGTH_SHORT toasts past ~50 chars on portrait phones.
+			// The user needs to read the actionable suggestion at the end of these messages.
 			final String emsg = "Export failed: " + e.getMessage();
-			host.runOnUiThread(() -> host.toastIfAlive(emsg, Toast.LENGTH_SHORT));
+			host.runOnUiThread(() -> host.toastIfAlive(emsg, Toast.LENGTH_LONG));
 			return null;
 		}
 	}
 
-	private void exportTo(Uri uri, Consumer<byte[]> onSavedBg, boolean preserveOnFailure, String replacedName)
+	private void exportTo(Uri uri, Consumer<ExportResult> onSavedBg, boolean preserveOnFailure,
+		String replacedName)
 	{
 		if (host.getState().getSourceImage() == null)
 		{
@@ -342,10 +435,12 @@ final class ExportPipeline
 	 */
 	private void reportFailure(Uri uri, Exception writeException, boolean preserveOnFailure)
 	{
+		// LENGTH_LONG so the user can read the embedded exception message + suggested action ("try a
+		// smaller crop", "permission denied", etc.). The SHORT default would clip ~50 chars in.
 		final String emsg = writeException != null
 			? "Export failed: " + writeException.getMessage()
 			: "Export failed";
-		host.runOnUiThread(() -> host.toastIfAlive(emsg, Toast.LENGTH_SHORT));
+		host.runOnUiThread(() -> host.toastIfAlive(emsg, Toast.LENGTH_LONG));
 		if (preserveOnFailure)
 		{
 			Log.w(TAG, "preserving " + uri + " on failure (had prior content)");
@@ -377,13 +472,13 @@ final class ExportPipeline
 	 * substring scan for "hdrgm" that false-positive'd on preserved trailers, stale metadata, and
 	 * Extended-XMP segments.
 	 *
-	 * @param data         encoded output bytes (used for the size component of the toast)
+	 * @param size         encoded output size in bytes (used for the "Saved N KB" toast)
 	 * @param srcHadHdr    true when the source carried a gain map (gates whether to show any HDR suffix)
 	 * @param isPng        true for PNG output (no HDR suffix regardless — PNG can't carry gain maps)
 	 * @param hdrAttached  true when the output actually carries the Ultra HDR gain map (drives [HDR OK]
 	 *                     vs [HDR dropped])
 	 */
-	private void reportSuccess(byte[] data, boolean srcHadHdr, boolean isPng, boolean hdrAttached)
+	private void reportSuccess(long size, boolean srcHadHdr, boolean isPng, boolean hdrAttached)
 	{
 		String hdrSuffix;
 		if (!srcHadHdr || isPng)
@@ -398,7 +493,7 @@ final class ExportPipeline
 		{
 			hdrSuffix = " [HDR dropped]";
 		}
-		final String msg = "Saved " + data.length / 1024 + "KB" + hdrSuffix;
+		final String msg = "Saved " + size / 1024 + "KB" + hdrSuffix;
 		host.runOnUiThread(() -> host.toastIfAlive(msg, Toast.LENGTH_SHORT));
 	}
 
@@ -419,16 +514,17 @@ final class ExportPipeline
 	 * @param onSavedBg         optional post-write callback invoked with the verified bytes; null for plain saves
 	 */
 	private void runExportBg(Uri uri, boolean isReplaceSave, boolean preserveOnFailure, String replacedName,
-		Consumer<byte[]> onSavedBg)
+		Consumer<ExportResult> onSavedBg)
 	{
+		ExportResult result = null;
 		try
 		{
-			byte[] data = doExport(uri, isReplaceSave, preserveOnFailure, replacedName);
-			if (data != null && onSavedBg != null)
+			result = doExport(uri, isReplaceSave, preserveOnFailure, replacedName);
+			if (result != null && onSavedBg != null)
 			{
 				try
 				{
-					onSavedBg.accept(data);
+					onSavedBg.accept(result);
 				}
 				catch (Exception e)
 				{
@@ -440,9 +536,94 @@ final class ExportPipeline
 		}
 		finally
 		{
+			// Tempfile cleanup for the Replace flow (isReplaceSave=true). doExport's own finally
+			// skips deletion when isReplaceSave is true so the callback can stream from the tempfile;
+			// runExportBg deletes it here once the callback has returned. The bytes-mode result has
+			// tempfile() == null so deletion is a no-op.
+			if (isReplaceSave && result != null && result.tempfile() != null)
+			{
+				if (result.tempfile().exists() && !result.tempfile().delete())
+				{
+					Log.w(TAG, "Failed to delete encode tempfile post-callback "
+						+ result.tempfile());
+				}
+			}
 			host.getBusy().set(false);
 			host.runOnUiThread(() -> host.setBusyUi(false));
 			host.hideProgress();
+		}
+	}
+
+	/**
+	 * Stream-compare a SAF URI's content against a local tempfile, returning the verified byte count
+	 * (or a sentinel value indicating mismatch / trailing / short, matching `readbackByteCount`'s
+	 * contract). Reads both sides in 64 KB chunks so peak Java heap is the two chunk buffers (~128 KB)
+	 * — never materialises the 400-600 MB PNG tempfile as a single byte[].
+	 *
+	 * Mirrors `SafFileHelper.readbackByteCountFromStream`'s classification:
+	 *   - return `expected` exactly when both streams matched byte-for-byte AND both hit EOF together
+	 *   - return total + n when the SAF stream returned more bytes than the tempfile
+	 *   - return total + i when bytes diverged at offset (total + i)
+	 *   - return total (less than expected) when the SAF stream EOF'd before the tempfile
+	 *   - return -1 when an IOException disrupted the comparison
+	 *
+	 * @param uri      SAF URI to read back
+	 * @param tempfile local encoded payload on disk
+	 * @param expected total bytes the caller knows the encoded payload is
+	 * @return verified byte count, or a sentinel value per the contract above
+	 */
+	private long streamCompareUriToFile(Uri uri, File tempfile, long expected)
+	{
+		int chunk = JpegMetadataInjector.STREAM_CHUNK_SIZE;
+		byte[] uriBuf = new byte[chunk];
+		byte[] fileBuf = new byte[chunk];
+		long total = 0;
+		try (InputStream uriIn = host.getActivity().getContentResolver().openInputStream(uri);
+			FileInputStream fileIn = new FileInputStream(tempfile))
+		{
+			if (uriIn == null)
+			{
+				return -1;
+			}
+			while (true)
+			{
+				int uriN = readFully(uriIn, uriBuf, chunk);
+				if (uriN <= 0)
+				{
+					break;
+				}
+				int fileN = readFully(fileIn, fileBuf, uriN);
+				if (fileN < uriN)
+				{
+					// SAF stream returned more bytes than the tempfile holds — provider didn't
+					// truncate, OR the tempfile shrank mid-verify (shouldn't happen). Report as
+					// trailing.
+					Log.w(TAG, "stream-verify: SAF provider returned more bytes than tempfile");
+					return total + uriN;
+				}
+				for (int i = 0; i < uriN; i++)
+				{
+					if (uriBuf[i] != fileBuf[i])
+					{
+						Log.w(TAG, "stream-verify: byte mismatch at offset " + (total + i));
+						return total + i;
+					}
+				}
+				total += uriN;
+				if (total > expected)
+				{
+					// SAF stream is longer than expected (which is the tempfile's exact length per
+					// `expected = encoded.size()`). Bytes matched up to here but the stream keeps
+					// going — trailing data on the saved file.
+					return total;
+				}
+			}
+			return total;
+		}
+		catch (IOException e)
+		{
+			Log.w(TAG, "stream-verify failed: " + e.getMessage());
+			return -1;
 		}
 	}
 
@@ -463,18 +644,19 @@ final class ExportPipeline
 	 * writePhase takes the simpler truncate-mode direct write since the URI is a known-fresh
 	 * placeholder (Replace flow, plain Save As).
 	 */
-	private WriteOutcome tryDirectAtomicWrite(File target, byte[] data)
+	private WriteOutcome tryDirectAtomicWrite(File target, ExportResult encoded)
 	{
 		File parent = target.getParentFile();
 		if (parent == null)
 		{
 			return null;
 		}
+		long expected = encoded.size();
 		File tempFile = new File(parent,
 			"." + target.getName() + ".cropcenter-tmp-" + System.nanoTime());
 		try (FileOutputStream fos = new FileOutputStream(tempFile))
 		{
-			fos.write(data);
+			writePayloadToStream(encoded, fos);
 			fos.getFD().sync();
 		}
 		catch (Exception e)
@@ -487,9 +669,9 @@ final class ExportPipeline
 			return null;
 		}
 		long written = tempFile.length();
-		if (written != data.length)
+		if (written != expected)
 		{
-			Log.w(TAG, "Atomic write temp produced " + written + " bytes; expected " + data.length);
+			Log.w(TAG, "Atomic write temp produced " + written + " bytes; expected " + expected);
 			if (!tempFile.delete())
 			{
 				Log.w(TAG, "couldn't clean up short temp file " + tempFile);
@@ -511,7 +693,23 @@ final class ExportPipeline
 			}
 			return null;
 		}
-		Log.d(TAG, "Atomic direct write delivered " + data.length + " bytes to " + target);
+		// Sync parent directory metadata so the rename's directory-entry update reaches disk. POSIX
+		// guarantees `Files.move(ATOMIC_MOVE)` is atomic for visibility, but the dir-entry inode pointer
+		// only lives in the page cache until the parent's metadata is fsynced — a power loss in that
+		// window can revert the dir entry to the pre-write inode (target ships old content) or leave it
+		// unflushed (target appears empty to next-boot VFS walks). The fos.getFD().sync() upstream
+		// covered the FILE inode; this covers the DIRECTORY. Skip silently on failure — the rename
+		// already landed in the page cache, and parent-fsync failure on a normal filesystem is rare
+		// enough not to block the save success path.
+		try (FileChannel parentChannel = FileChannel.open(parent.toPath(), StandardOpenOption.READ))
+		{
+			parentChannel.force(true);
+		}
+		catch (Exception e)
+		{
+			Log.w(TAG, "Parent directory fsync failed for " + parent + ": " + e.getMessage());
+		}
+		Log.d(TAG, "Atomic direct write delivered " + expected + " bytes to " + target);
 		if (!target.setLastModified(System.currentTimeMillis()))
 		{
 			Log.w(TAG, "setLastModified failed on " + target);
@@ -553,16 +751,17 @@ final class ExportPipeline
 	 * SIZE-omitted / SIZE-mismatched / write-threw branch, which covers all real provider failure
 	 * modes we've seen in the wild.
 	 */
-	private boolean verifyPhase(Uri uri, byte[] data, WriteOutcome write)
+	private boolean verifyPhase(Uri uri, ExportResult encoded, WriteOutcome write)
 	{
+		long expected = encoded.size();
 		if (write.directPath() != null && write.writeReturned())
 		{
 			// Direct file I/O path: fos.getFD().sync() before close committed the bytes to the
 			// inode; trust the kernel-level length over the SAF provider's cached metadata.
 			long fileLen = write.directPath().length();
-			boolean directOk = fileLen == data.length;
+			boolean directOk = fileLen == expected;
 			Log.d(TAG, "Direct-path verify: file=" + write.directPath() + " length=" + fileLen
-				+ " expected=" + data.length + " → savedOk=" + directOk);
+				+ " expected=" + expected + " → savedOk=" + directOk);
 			return directOk;
 		}
 		boolean savedOk = write.writeReturned();
@@ -576,17 +775,29 @@ final class ExportPipeline
 				Log.d(TAG, "Clean write but provider omits SIZE; verifying content");
 				savedOk = false;
 			}
-			else if (sizeCheck != data.length)
+			else if (sizeCheck != expected)
 			{
 				Log.w(TAG, "Clean write but size " + sizeCheck + " != expected "
-					+ data.length + " — provider may not have truncated; verifying content");
+					+ expected + " — provider may not have truncated; verifying content");
 				savedOk = false;
 			}
 		}
 		if (!savedOk)
 		{
-			verifiedBytes = safFiles.readbackByteCount(uri, data);
-			savedOk = verifiedBytes == data.length;
+			// Content-verify path. For bytes-mode, readbackByteCount byte-walks the SAF URI against
+			// the in-heap byte[]. For tempfile-mode (PNG streaming, byte[] would OOM on 200 MP PNG
+			// where the payload is 400-600 MB), stream-compare the SAF URI against the tempfile in
+			// 64 KB chunks without ever materialising the encoded bytes — same byte-equality contract
+			// as `readbackByteCount`, just sourced from disk instead of heap.
+			if (encoded.bytes() != null)
+			{
+				verifiedBytes = safFiles.readbackByteCount(uri, encoded.bytes());
+			}
+			else
+			{
+				verifiedBytes = streamCompareUriToFile(uri, encoded.tempfile(), expected);
+			}
+			savedOk = verifiedBytes == expected;
 			if (savedOk)
 			{
 				Log.d(TAG, "Recovered via content-verified readback: " + verifiedBytes + " bytes");
@@ -594,7 +805,7 @@ final class ExportPipeline
 		}
 		Log.d(TAG, "Save result: writeReturned=" + write.writeReturned()
 			+ " sizeCheck=" + sizeCheck + " verifiedBytes=" + verifiedBytes
-			+ " expected=" + data.length + " → savedOk=" + savedOk);
+			+ " expected=" + expected + " → savedOk=" + savedOk);
 		return savedOk;
 	}
 
@@ -625,18 +836,22 @@ final class ExportPipeline
 	 * non-primary volumes the helper can't resolve) — those paths don't exhibit the silent corruption
 	 * pattern because they're not Samsung MediaStore.
 	 *
-	 * Uses try-with-resources so close() runs after writeReturned=true and a close-only failure can't
-	 * invalidate a successful write. Returns the outcome so phase 3 can decide whether to trust it or fall
-	 * through to a readback.
+	 * Close-only failures (body wrote cleanly, close threw): writeReturned is set AFTER the
+	 * try-with-resources block as (bodyWritten AND no writeException), so a close throw flips
+	 * writeReturned back to false even when the body returned cleanly. That forces verifyPhase to take
+	 * the content-readback path rather than trusting an OpenableColumns.SIZE match — some Samsung SAF
+	 * providers buffer the entire write and only flush in close(), so close-throw means the bytes never
+	 * reached disk even though writePayloadToStream returned. Returns the outcome so phase 3 can decide
+	 * whether to trust it or fall through to a readback.
 	 */
-	private WriteOutcome writePhase(Uri uri, byte[] data, boolean preserveOnFailure)
+	private WriteOutcome writePhase(Uri uri, ExportResult encoded, boolean preserveOnFailure)
 	{
 		File directPath = safFiles.fileFromSafUri(uri);
 		if (directPath != null)
 		{
 			if (preserveOnFailure)
 			{
-				WriteOutcome atomic = tryDirectAtomicWrite(directPath, data);
+				WriteOutcome atomic = tryDirectAtomicWrite(directPath, encoded);
 				if (atomic != null)
 				{
 					return atomic;
@@ -660,9 +875,9 @@ final class ExportPipeline
 			{
 				try (FileOutputStream fos = new FileOutputStream(directPath))
 				{
-					fos.write(data);
+					long written = writePayloadToStream(encoded, fos);
 					fos.getFD().sync();
-					Log.d(TAG, "Direct file I/O wrote " + data.length + " bytes to " + directPath);
+					Log.d(TAG, "Direct file I/O wrote " + written + " bytes to " + directPath);
 					// Force mtime update even when the new bytes match the old bytes. Samsung's
 					// FUSE-backed scoped storage skips mtime refresh on content-identical writes
 					// (likely dedup at the FUSE layer) — userspace observers see the old mtime,
@@ -692,20 +907,34 @@ final class ExportPipeline
 		}
 		boolean writeReturned = false;
 		Exception writeException = null;
+		// IMPORTANT: do NOT set writeReturned=true inside the try-with-resources block. Some SAF
+		// providers buffer the entire write and only flush in close(), so a close() throw means the
+		// bytes never reached disk even though `writePayloadToStream` returned cleanly. If we set
+		// the success flag before close, a close throw would still mark the write returned + clean,
+		// and verifyPhase would trust the OpenableColumns.SIZE size match (provider can report the
+		// expected size even though the bytes were never flushed) and skip the content readback.
+		// Tracking close success in a separate flag and ANDing it with the body-success flag forces
+		// the readback fallback in any close-throw case.
+		boolean bodyWritten = false;
 		try (OutputStream os = host.getActivity().getContentResolver().openOutputStream(uri, "w"))
 		{
 			if (os == null)
 			{
 				throw new IOException("openOutputStream returned null");
 			}
-			os.write(data);
-			writeReturned = true;
+			writePayloadToStream(encoded, os);
+			bodyWritten = true;
 		}
 		catch (Exception e)
 		{
 			writeException = e;
 			Log.w(TAG, "Write path threw (may still have persisted)", e);
 		}
+		// writeReturned reflects "the body wrote AND close did not throw". A close-only failure
+		// (bodyWritten=true && writeException!=null) flips writeReturned back to false so verifyPhase
+		// takes the content-readback path rather than trusting a possibly-stale size.
+		writeReturned = bodyWritten && writeException == null;
 		return new WriteOutcome(writeException, null, writeReturned);
 	}
+
 }

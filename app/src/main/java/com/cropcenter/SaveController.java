@@ -1,24 +1,43 @@
 package com.cropcenter;
 
 import android.app.AlertDialog;
+import android.content.Context;
+import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.net.Uri;
+import android.os.Environment;
 import android.util.Log;
+import android.widget.EditText;
 import android.widget.Toast;
 
 import com.cropcenter.model.Format;
 import com.cropcenter.util.SafFileHelper;
 import com.cropcenter.util.StoragePermissionHelper;
 import com.cropcenter.view.DialogStrings;
+import com.cropcenter.view.FolderPickerDialog;
 import com.cropcenter.view.SaveDialog;
 
 import java.io.File;
 
 /**
- * Top-level save flow router: permission prompt → SaveDialog (format/grid) → SAF picker → route result to
- * ExportPipeline (plain save) or ReplaceStrategy (collision). Holds the per-save state (pendingSaveName, savePending)
- * and owns the user-facing dialogs that guard the encode pipeline. Encode/write/verify itself lives in ExportPipeline;
- * collision policy in ReplaceStrategy.
+ * Top-level save flow router. Two code paths, gated by the MANAGE_EXTERNAL_STORAGE grant probed at Save-tap
+ * time:
+ *
+ *   MES granted (primary path) — showMergedInAppDialog opens FolderPickerDialog with format chips + Export
+ *     Grid + folder navigator + thumbnail grid all in one dialog; on Save here the picked folder is mapped
+ *     to an externalstorage SAF document URI via SafFileHelper.buildExternalStorageDocumentUri and the write
+ *     dispatches through dispatchInAppSave / routeCrashSafeSave with the same Replace / Rename / Cancel
+ *     collision handling that the SAF flow uses. Bypasses Samsung's One UI ACTION_CREATE_DOCUMENT picker
+ *     entirely (it hides every subfolder inside the internal-storage view).
+ *
+ *   MES not granted (legacy path) — openSaveOptionsDialog opens the legacy SaveDialog (format chips +
+ *     Export Grid), then on Continue launches the system ACTION_CREATE_DOCUMENT picker; the picker's
+ *     returned URI routes through handleSaveAsResult → Case A/B/C → routeCrashSafeSave or the Replace
+ *     dialog.
+ *
+ * Holds the per-save state (pendingSaveName, savePending, priorSnapshot) and owns the user-facing dialogs
+ * that guard the encode pipeline. Encode / write / verify itself lives in ExportPipeline; collision policy
+ * in ReplaceStrategy.
  */
 final class SaveController
 {
@@ -35,17 +54,21 @@ final class SaveController
 	 *
 	 * sourceImage pins the Bitmap reference that was loaded when the snapshot was taken. A Share/View
 	 * intent that arrives with the SaveDialog still open runs ImageLoadController.applyBytes →
-	 * state.reset() + state.setSourceImage(newBmp) on the bg executor; the snapshot's sourceImage field
-	 * still points at the OLD bitmap reference, so restorePriorSaveSettings can identify a stale snapshot
-	 * by bitmap-reference inequality and skip the rollback. Without this guard the rollback would
-	 * overwrite the new image's fresh exportConfig.format (set by setSourceFormat during the load) with
-	 * the old image's format, defaulting the next save to JPEG over a PNG source (or vice versa).
+	 * state.reset() + state.setSourceImage(newSource, newDisplay) on the bg executor; the snapshot's
+	 * sourceImage field still points at the OLD bitmap reference, so restorePriorSaveSettings can identify
+	 * a stale snapshot by bitmap-reference inequality and skip the rollback. Without this guard the
+	 * rollback would overwrite the new image's fresh exportConfig.format (set by setSourceFormat during
+	 * the load) with the old image's format, defaulting the next save to JPEG over a PNG source (or vice
+	 * versa).
 	 */
 	private record PriorSaveSnapshot(Bitmap sourceImage, Format format, boolean includeGrid) {}
 
+	private static final String KEY_LAST_SAVE_FOLDER = "last_save_folder";
+	private static final String PREFS_NAME = "cropcenter_save";
 	private static final String TAG = "SaveController";
 
 	private final ExportPipeline exportPipeline;
+	private final StoragePermissionHelper permissions;
 	private final ReplaceStrategy replaceStrategy;
 	private final SafFileHelper safFiles;
 	private final SaveHost host;
@@ -54,19 +77,18 @@ final class SaveController
 	// Filename we asked SAF to create. When SAF silently auto-renames to avoid a collision (e.g. "vacation.jpg" →
 	// "vacation (1).jpg"), the returned URI's display name won't match this — that's how we detect the rename.
 	private String pendingSaveName;
-	// Set when we launch the SAF picker and cleared when its result arrives (URI or cancel) or the Replace
-	// confirmation finishes. Gates rapid taps between launch and result, and also between the result and the
-	// Replace dialog response — host.getBusy().get() doesn't flip until exportTo actually runs, so it isn't
-	// sufficient on its own.
+	// Set when a save is committed to a target — SAF picker launch on the legacy path, or
+	// onMergedSaveConfirmed on the in-app (MES) path — and cleared on result / cancel / collision-dialog
+	// resolution. Gates rapid taps between commit and outcome; host.getBusy().get() doesn't flip until
+	// exportTo actually runs, so it isn't sufficient on its own.
 	private boolean savePending;
 
 	SaveController(SaveHost host, SafFileHelper safFiles, StoragePermissionHelper permissions)
 	{
 		this.host = host;
 		this.safFiles = safFiles;
+		this.permissions = permissions;
 		this.exportPipeline = new ExportPipeline(host, safFiles);
-		// permissions is forwarded to ReplaceStrategy and not retained on this — SaveController itself never
-		// prompts for permissions, so storing it would be dead state.
 		this.replaceStrategy = new ReplaceStrategy(host, exportPipeline, safFiles, permissions);
 	}
 
@@ -123,6 +145,40 @@ final class SaveController
 			return null;
 		}
 		return baseStem + choExt;
+	}
+
+	/**
+	 * Find the first available "stem (N).ext" filename in `folder` that doesn't collide. Strips any
+	 * existing "(N)" suffix from `original` first so renaming "foo (1).jpg" suggests "foo (2).jpg"
+	 * rather than "foo (1) (1).jpg". Used by showInAppRenameDialog to pre-populate the input with a
+	 * good default. Returns null when N=1..9999 are all taken — the caller pre-fills with the
+	 * colliding name as a fallback so the user has to type a unique name manually (returning
+	 * `original` here would silently re-suggest the same colliding name and the user-cycle Rename →
+	 * OK → collision-dialog would never terminate on the auto-suggestion alone).
+	 *
+	 * @param folder   target directory to probe
+	 * @param original colliding filename (e.g. "foo.jpg" or "foo (3).jpg")
+	 * @return first non-colliding name in the form "stem (N).ext", or null if N=1..9999 are all taken
+	 */
+	static String nextAvailableNumberedName(File folder, String original)
+	{
+		// Detect + strip existing "(N)" suffix via the shared parser. autoRenameBaseName returns the
+		// base ("foo.jpg" given "foo (1).jpg") or null if `original` doesn't match the pattern; we
+		// fall back to the original name in that case.
+		String base = autoRenameBaseName(original);
+		String startFrom = base != null ? base : original;
+		int dot = startFrom.lastIndexOf('.');
+		String stem = dot > 0 ? startFrom.substring(0, dot) : startFrom;
+		String ext = dot > 0 ? startFrom.substring(dot) : "";
+		for (int n = 1; n < 10000; n++)
+		{
+			String candidate = stem + " (" + n + ")" + ext;
+			if (!new File(folder, candidate).exists())
+			{
+				return candidate;
+			}
+		}
+		return null;
 	}
 
 	/**
@@ -205,10 +261,11 @@ final class SaveController
 	}
 
 	/**
-	 * Save button handler. Runs SaveDialog (format + grid-bake options); on its "Continue" the SAF picker opens
-	 * with the correct extension pre-filled. Replace/Keep confirmation is handled downstream in
-	 * handleSaveAsResult(); that's also where MANAGE_EXTERNAL_STORAGE is prompted if the user actually hits a
-	 * collision — ordinary Save As flows no longer carry the overwrite-oriented permission UX.
+	 * Save button handler. With MANAGE_EXTERNAL_STORAGE granted, runs the merged in-app FolderPickerDialog
+	 * directly — format chips + Export Grid checkbox live in the same dialog as the folder navigator and
+	 * thumbnail grid, so the user makes all choices in one place. Without MES, falls back to the legacy
+	 * two-step flow: SaveDialog (format + grid) then ACTION_CREATE_DOCUMENT SAF picker (because SAF can't
+	 * be navigated inside our app).
 	 */
 	void showSaveDialog()
 	{
@@ -221,11 +278,21 @@ final class SaveController
 			host.showBusyToast();
 			return;
 		}
-		openSaveOptionsDialog();
+		if (permissions.hasStoragePermission())
+		{
+			showMergedInAppDialog();
+		}
+		else
+		{
+			openSaveOptionsDialog();
+		}
 	}
 
 	/**
 	 * Pick encoder based on the extension the user typed in the SAF picker.
+	 *
+	 * @param name SAF-returned filename whose extension drives the format choice; null and unrecognised
+	 *             extensions are no-ops (state.exportConfig.format() retains whatever the dialog set)
 	 */
 	private void applyFormatFromFilename(String name)
 	{
@@ -256,6 +323,37 @@ final class SaveController
 	}
 
 	/**
+	 * Dispatch the actual write for an in-app folder picker save. Routes through routeCrashSafeSave
+	 * so the sibling-placeholder + atomic-rename crash-safe write path runs uniformly for both
+	 * new-file and overwrite cases. probeWasOverwrite inside routeCrashSafeSave re-checks file
+	 * existence — the in-app Rename/Replace dialog only filters whether we got here, not what
+	 * routeCrashSafeSave does once we arrive. savePending is cleared after the dispatch returns
+	 * (routeCrashSafeSave kicks off async work; the post-kick clear matches Case A/C's wrapper-
+	 * finally behaviour in handleSaveAsResult).
+	 *
+	 * @param folder folder the user picked
+	 * @param name   filename to save as (post-Rename if applicable)
+	 */
+	private void dispatchInAppSave(File folder, String name)
+	{
+		File target = new File(folder, name);
+		Uri uri = SafFileHelper.buildExternalStorageDocumentUri(target);
+		if (uri == null)
+		{
+			Log.w(TAG, "buildExternalStorageDocumentUri returned null for " + target);
+			host.toastIfAlive("Picked folder isn't on primary storage", Toast.LENGTH_LONG);
+			onSaveCancelled();
+			return;
+		}
+		// pendingSaveName is the LEGACY-SAF-path's collision-detection signal (handleSaveAsResultBody
+		// reads it to spot SAF auto-renames); the in-app path doesn't consult it. Clear savePending
+		// after the dispatch fires — routeCrashSafeSave kicks off async work, matching Case A/C's
+		// wrapper-finally behaviour in handleSaveAsResult.
+		routeCrashSafeSave(uri, name);
+		savePending = false;
+	}
+
+	/**
 	 * Body of handleSaveAsResult — extracted so the public wrapper can manage the savePending lifecycle in
 	 * try/finally. See the wrapper's comment for the ownership contract.
 	 *
@@ -268,10 +366,12 @@ final class SaveController
 	{
 		String requested = pendingSaveName;
 		pendingSaveName = null;
-		// SAF returned a URI — the user committed to this save. Discard the format / grid-include snapshot
-		// taken in openSaveOptionsDialog so a subsequent stray onSaveCancelled (e.g., a follow-up async
-		// callback after a config change) can't roll back the now-baked choices.
-		priorSnapshot = null;
+		// Do NOT clear `priorSnapshot` here. The save isn't actually committed yet — the user can still
+		// cancel from the Replace / Overwrite-Confirm dialog (Cases A, B, C). On those Cancel paths we
+		// want to restore the prior format / grid-include choices so a user who decided "no, don't
+		// overwrite" doesn't end up with the next image stuck on the PNG-with-grid settings they
+		// picked for the abandoned save. The snapshot stays until either the save actually starts
+		// (routeCrashSafeSave / replaceColliding) or the dialog's Cancel handler restores it.
 
 		String chosen = safFiles.getDisplayName(newUri);
 
@@ -307,14 +407,22 @@ final class SaveController
 
 		applyFormatFromFilename(chosen);
 
-		// Case (A): SAF accepted the requested name exactly. Always route through the
-		// crash-safe Replace flow — we can't rule out provider-confirmed overwrite from
-		// the URI alone (SIZE == 0 may be an empty existing file, SIZE == -1 is unknown).
-		// savePending cleared by the wrapper's finally — the placeholder/overwrite/preserve dispatches
-		// inside routeCrashSafeSave are async and the user must be able to start a new Save after they
-		// return.
+		// Case (A): SAF accepted the requested name exactly. Either the file didn't exist (new file) or
+		// SAF prompted "Replace?" and the user accepted OR (on providers that don't show their own
+		// prompt — Samsung's recent Files app behavior) the picker is silently returning a URI to
+		// pre-existing content. The user has no in-app confirmation that they're about to overwrite,
+		// which is data-loss-adjacent on a save flow. Probe for prior content here; on a confirmed
+		// overwrite, surface the Replace / Cancel dialog so the user explicitly confirms.
 		if (requested != null && chosen != null && requested.equalsIgnoreCase(chosen))
 		{
+			boolean wasOverwrite = probeWasOverwrite(newUri);
+			Log.d(TAG, "Save Case A: chosen=" + chosen + " requested=" + requested
+				+ " wasOverwrite=" + wasOverwrite);
+			if (wasOverwrite)
+			{
+				showOverwriteConfirmDialog(newUri, requested);
+				return true;
+			}
 			routeCrashSafeSave(newUri, requested);
 			return false;
 		}
@@ -327,10 +435,25 @@ final class SaveController
 		// "does this document exist" probe than querySafFileSize > 0 — it catches zero-byte files AND providers
 		// that don't expose OpenableColumns.SIZE.
 		String autoRenameBase = autoRenameBaseName(chosen);
+		Log.d(TAG, "Save Case B probe: chosen=" + chosen + " requested=" + requested
+			+ " autoRenameBase=" + autoRenameBase);
 		if (autoRenameBase != null)
 		{
+			// Sibling-collision probe. On providers where the docId encodes a path (Samsung primary
+			// storage's ExternalStorageProvider), `deriveSiblingUri` builds the un-suffixed sibling
+			// URI and `siblingLooksLikeCollision` confirms the original exists. On providers with
+			// opaque doc IDs (MediaStore-backed pickers — the user's recent Samsung Files behavior
+			// where docId is "document:12345" with no parseable path), `deriveSiblingUri` returns
+			// null and the probe can't run. In that case, fall back to trusting the auto-rename
+			// pattern alone — SAF only suffixes "(N)" on a real collision, so the false-positive
+			// risk (user intentionally typed "foo (3).jpg" without an existing "foo.jpg") is
+			// strictly less bad than the false-negative (silent overwrite without confirmation).
 			Uri baseUri = safFiles.deriveSiblingUri(newUri, autoRenameBase);
-			if (siblingLooksLikeCollision(baseUri))
+			boolean siblingCollision = baseUri != null
+				? siblingLooksLikeCollision(baseUri)
+				: true; // opaque-ID provider — trust the auto-rename pattern
+			Log.d(TAG, "Save Case B: baseUri=" + baseUri + " siblingCollision=" + siblingCollision);
+			if (siblingCollision)
 			{
 				// showReplaceDialog manages savePending across its button / cancel / BadTokenException
 				// handlers. Return true so the wrapper's finally does NOT clear it — the dialog needs
@@ -343,16 +466,160 @@ final class SaveController
 		// Case (C): user changed the name intentionally (no "(N)" suffix, or "(N)" stripped doesn't collide
 		// with anything in the picked directory). The user-typed name might still match a pre-existing file —
 		// many providers handle a user-typed collision with their own Replace prompt and return a URI pointing
-		// at existing content with `chosen` equal to the user-typed (colliding) name. Route through the same
-		// crash-safe save path as Case A so a write failure can't truncate that existing content on path-backed
-		// providers, and a successful overwrite toasts as "Replaced <chosen>" rather than the misleading
-		// "Saved <chosen>". The wrapper's finally clears savePending after routeCrashSafeSave's async dispatch.
+		// at existing content with `chosen` equal to the user-typed (colliding) name. Same overwrite-confirm
+		// gate as Case A — when wasOverwrite=true, show the Replace / Cancel dialog before destructive write.
 		// `requested` is the fallback name when chosen is null (rare opaque-name provider — chosen is null in
 		// practice only on providers that also refuse SIZE, so wasOverwrite resolves to false and the fallback
 		// preserving write is the safe choice).
 		String saveName = chosen != null ? chosen : requested;
+		boolean wasOverwriteC = probeWasOverwrite(newUri);
+		Log.d(TAG, "Save Case C: saveName=" + saveName + " wasOverwrite=" + wasOverwriteC);
+		if (wasOverwriteC)
+		{
+			showOverwriteConfirmDialog(newUri, saveName);
+			return true;
+		}
 		routeCrashSafeSave(newUri, saveName);
 		return false;
+	}
+
+	/**
+	 * @return last folder the user saved into, or primary external storage root when no prior save
+	 *         is persisted (first install) or the persisted folder no longer exists. The persisted
+	 *         path is sanity-checked for existence + directory-ness so a deleted folder doesn't
+	 *         strand the picker at a non-existent path.
+	 */
+	private File loadLastSaveFolder()
+	{
+		SharedPreferences prefs = host.getActivity().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+		String path = prefs.getString(KEY_LAST_SAVE_FOLDER, null);
+		if (path != null)
+		{
+			File f = new File(path);
+			if (f.exists() && f.isDirectory())
+			{
+				return f;
+			}
+		}
+		return Environment.getExternalStorageDirectory();
+	}
+
+	/**
+	 * Result handler for the merged in-app FolderPickerDialog (format + grid options + folder + thumbnails).
+	 * On Save here (choices non-null), applies the user's format / grid selections to CropState, computes
+	 * the filename from state.originalFilename + format extension, persists the picked folder as the next
+	 * launch's starting location, sets pendingSaveName + savePending, then dispatches to either the write
+	 * path or the Rename/Replace/Cancel collision dialog depending on existing-file presence. The merged
+	 * dialog commits state once at confirm (the picker doesn't mutate CropState mid-show), so a
+	 * priorSnapshot is captured BEFORE updateExportConfig / updateGridConfig fire — if the user cancels
+	 * at the in-app collision / rename dialog, onSaveCancelled → restorePriorSaveSettings rolls the
+	 * format / grid-include selections back. On null choices (Cancel / external dismiss from the picker
+	 * itself) nothing was mutated, so we just return.
+	 *
+	 * @param choices SaveChoices from the merged dialog; null on Cancel / back / external dismiss
+	 */
+	private void onMergedSaveConfirmed(FolderPickerDialog.SaveChoices choices)
+	{
+		if (choices == null)
+		{
+			// Cancel / external dismiss — savePending was never set, nothing to clear.
+			return;
+		}
+		// The picker validates the filename for path separators and empty/traversal segments before
+		// firing this callback, but defensively sanitise here too — a buggy/malicious test fake of the
+		// picker shouldn't be able to direct the save outside the picked folder via a crafted
+		// `choices.filename()`. Validate BEFORE the state mutations below so a bad name doesn't commit
+		// format / grid changes the user never had a chance to confirm.
+		String name = choices.filename();
+		if (name == null || name.isEmpty() || name.equals(".") || name.equals("..")
+			|| name.contains("/") || name.contains("\\"))
+		{
+			host.toastIfAlive("Invalid filename", Toast.LENGTH_SHORT);
+			return;
+		}
+		// Wrap the entire state-mutating section in try/catch so a thrown exception anywhere —
+		// updateExportConfig / updateGridConfig (StateBus listener throwing, OOM in lambda capture),
+		// saveLastSaveFolder (SharedPreferences disk-full), File.exists (rare SecurityException), or
+		// the dialog constructors (BadTokenException from a config-change race) — can't strand
+		// savePending=true forever or leave format/grid half-mutated. Snapshot capture is INSIDE the
+		// try so a snapshot followed by a thrown updateXxx still routes through onSaveCancelled →
+		// restorePriorSaveSettings for a clean rollback.
+		try
+		{
+			// Snapshot the export/grid state BEFORE mutating so an in-app collision-dialog Cancel
+			// can roll back. Without this, a user who picks PNG + Export Grid in the merged dialog,
+			// taps Save here on a colliding name, then taps Cancel in the collision dialog, would
+			// find PNG + Export Grid stuck as the next default — silently changing the next save's
+			// encoding based on a save they explicitly abandoned. routeCrashSafeSave clears the
+			// snapshot once the write actually commits.
+			priorSnapshot = new PriorSaveSnapshot(
+				host.getState().getSourceImage(),
+				host.getState().getExportConfig().format(),
+				host.getState().getGridConfig().includeInExport());
+			host.getState().updateExportConfig(c -> c.withFormat(choices.format()));
+			host.getState().updateGridConfig(g -> g.withIncludeInExport(choices.bakeGrid()));
+			pendingSaveName = name;
+			savePending = true;
+			saveLastSaveFolder(choices.folder());
+			if (new File(choices.folder(), name).exists())
+			{
+				showInAppCollisionDialog(choices.folder(), name);
+			}
+			else
+			{
+				dispatchInAppSave(choices.folder(), name);
+			}
+		}
+		catch (RuntimeException e)
+		{
+			Log.w(TAG, "onMergedSaveConfirmed dispatch failed", e);
+			onSaveCancelled();
+			host.toastIfAlive("Save failed — try again", Toast.LENGTH_SHORT);
+		}
+	}
+
+	/**
+	 * OK-button handler for showInAppRenameDialog. Validates the typed name (rejecting empty,
+	 * traversal segments, and path separators with an "Invalid filename" toast that keeps the dialog
+	 * open for correction), normalises the extension against the selected format so gallery / file-
+	 * manager type inference doesn't lie, then dispatches to either the save path or the recursive
+	 * collision dialog. Extracted from showInAppRenameDialog's OnShowListener override so the lambda
+	 * body stays under the 3-line cap.
+	 *
+	 * @param dialog the Rename dialog itself; dismissed only on the valid-name path
+	 * @param input  the user-facing EditText whose current text drives validation and dispatch
+	 * @param folder folder the picker landed in; the rename target is constructed as new File(folder,
+	 *               normalisedName)
+	 */
+	private void onRenameOkClicked(AlertDialog dialog, EditText input, File folder)
+	{
+		String typed = input.getText().toString().trim();
+		// Reject empty, traversal segments, and any path separator — must be a SINGLE filename in the
+		// folder the user just picked. Without this, "subdir/foo.jpg" or "../foo.jpg" would target a
+		// different folder than the picker landed in (or get rejected later by
+		// SafFileHelper.fileFromSafUri's docId traversal guard, producing a confusing failure).
+		// Mirrors the sanitisation onMergedSaveConfirmed applies to the provider-supplied stem.
+		if (typed.isEmpty() || typed.equals(".") || typed.equals("..")
+			|| typed.contains("/") || typed.contains("\\"))
+		{
+			host.toastIfAlive("Invalid filename", Toast.LENGTH_SHORT);
+			return;
+		}
+		// Normalise the extension to match the selected format — same rule the merged dialog's
+		// positive button applies. Without this, a user who renames "vacation.jpg" to "vacation.heic"
+		// in the in-app Rename dialog saves JPEG bytes under .heic, and gallery / file-manager type
+		// inference would misclassify the file.
+		String normalised = FolderPickerDialog.normaliseExtension(typed,
+			host.getState().getExportConfig().format());
+		dialog.dismiss();
+		if (new File(folder, normalised).exists())
+		{
+			showInAppCollisionDialog(folder, normalised);
+		}
+		else
+		{
+			dispatchInAppSave(folder, normalised);
+		}
 	}
 
 	/**
@@ -369,6 +636,7 @@ final class SaveController
 	private void onReplaceConfirmed(Uri newUri, String requested, Runnable cleanupPlaceholder)
 	{
 		savePending = false;
+		priorSnapshot = null;
 		if (host.getBusy().get())
 		{
 			cleanupPlaceholder.run();
@@ -391,6 +659,7 @@ final class SaveController
 	private void onReplaceKeep(Uri newUri, Runnable cleanupPlaceholder)
 	{
 		savePending = false;
+		priorSnapshot = null;
 		if (host.getBusy().get())
 		{
 			cleanupPlaceholder.run();
@@ -437,6 +706,9 @@ final class SaveController
 		String name = stem + ext;
 		pendingSaveName = name;
 		savePending = true;
+		// Legacy SAF path (MES not granted at Save-tap time → showSaveDialog routed here through
+		// openSaveOptionsDialog / SaveDialog). When MES IS granted, showSaveDialog routes directly to
+		// showMergedInAppDialog, skipping this method entirely.
 		try
 		{
 			host.getSaveAsLauncher().launch(name);
@@ -493,7 +765,7 @@ final class SaveController
 			// Register the dialog with the host's transient-dialog tracker so a Share/View intent or graft
 			// apply that arrives mid-dialog dismisses it before bg state.reset() — without this, the user's
 			// Continue tap would commit image A's format/grid choices onto image B's state.
-			// onClearPriorSnapshotOnCancel runs on every cancel path (user Cancel, back-press,
+			// clearPriorSnapshotOnCancel runs on every cancel path (user Cancel, back-press,
 			// outside-touch, forced dismissTransientDialogs) so the snapshot — which holds the source
 			// Bitmap reference — doesn't pin memory after an abandoned dialog.
 			host.registerTransientDialog(SaveDialog.show(host.getActivity(), host.getState(),
@@ -507,6 +779,48 @@ final class SaveController
 			Log.w(TAG, "save options dialog failed to show", e);
 			priorSnapshot = null;
 		}
+	}
+
+	/**
+	 * Probe whether the SAF-returned URI already points at pre-existing content. Same classification as
+	 * `routeCrashSafeSave` so the upstream overwrite-confirm dialog gate and the downstream save path
+	 * agree on what "overwrite" means:
+	 *   priorSize  >  0           → confirmed overwrite
+	 *   priorSize == 0            → ambiguous (treat as not-overwrite; nearly always an empty placeholder)
+	 *   priorSize == -1 (no-SIZE) → fall back to a content-stream probe (one byte served = real file)
+	 *
+	 * Used by `handleSaveAsResultBody` Cases A and C to decide whether to surface the
+	 * `showOverwriteConfirmDialog` before silently overwriting — Samsung's recent SAF Files-app behavior
+	 * returns the same-name URI to existing content without asking the user, so without this gate every
+	 * collision overwrite happens silently and the user has no in-app confirmation that data was about
+	 * to be destroyed.
+	 *
+	 * @param newUri SAF document URI returned by the picker
+	 * @return true when newUri points at content that an overwrite would destroy; false when newUri is
+	 *         a fresh / empty / unverifiable placeholder
+	 */
+	private boolean probeWasOverwrite(Uri newUri)
+	{
+		// Three independent probes; ANY positive signal counts as a confirmed-overwrite. The
+		// path-resolved File.exists() + length > 0 check (third probe) handles SAF providers that
+		// expose neither OpenableColumns.SIZE nor a readable stream over the URI — common for
+		// MediaStore-backed pickers on Samsung where the provider quirks around metadata visibility
+		// vs the filesystem layer. We deliberately require non-zero file length on the third probe:
+		// the SAF picker often pre-creates a 0-byte placeholder at the user's chosen name BEFORE
+		// returning the URI, and counting that empty placeholder as "overwrite" would surface the
+		// Replace dialog on every new-file save. Files with real content on disk pre-existing the
+		// SAF call are real overwrites. Diagnostic Log.d covers each probe's contribution so a user
+		// reporting "dialog didn't fire" can correlate the three signals against expected provider
+		// behaviour.
+		long priorSize = safFiles.querySafFileSize(newUri);
+		boolean sizePositive = priorSize > 0;
+		boolean hasContent = priorSize < 0 && safFiles.hasExistingContent(newUri);
+		File asFile = safFiles.fileFromSafUri(newUri);
+		boolean fileHasContent = asFile != null && asFile.exists() && asFile.length() > 0;
+		boolean result = sizePositive || hasContent || fileHasContent;
+		Log.d(TAG, "probeWasOverwrite priorSize=" + priorSize + " hasContent=" + hasContent
+			+ " fileHasContent=" + fileHasContent + " → " + result);
+		return result;
 	}
 
 	/**
@@ -557,10 +871,25 @@ final class SaveController
 	 */
 	private void routeCrashSafeSave(Uri newUri, String name)
 	{
-		long priorSize = safFiles.querySafFileSize(newUri);
-		boolean wasOverwrite = priorSize > 0 || (priorSize < 0 && safFiles.hasExistingContent(newUri));
+		// Save is actually committing now. Discard the format / grid-include snapshot so a subsequent
+		// stray onSaveCancelled (e.g., follow-up async callback after a config change) can't roll
+		// back the now-baked choices. Mirrors the equivalent commit point on the Replace flow
+		// (onReplaceConfirmed / onReplaceKeep both clear savePending before dispatching here).
+		priorSnapshot = null;
+		// Route the SAME `probeWasOverwrite` classification used by handleSaveAsResultBody's Case A/C
+		// gate so the dialog-shown branch (which dispatched here on Replace) doesn't get the answer
+		// reclassified to "not an overwrite" downstream. The 3-probe path (size + content-stream +
+		// path-resolved File.length > 0) catches Samsung Downloads-provider URIs where SIZE and
+		// hasExistingContent both refuse but `fileFromSafUri` resolves real content via the readlink
+		// fallback; a recompute that only ran the first two probes would route through
+		// `exportToPreserving` and toast "Saved" on a confirmed overwrite the user just chose to
+		// Replace — toast wording and write-strategy would then disagree with the dialog the user saw.
+		boolean wasOverwrite = probeWasOverwrite(newUri);
 		String mime = host.getState().getExportConfig().format().mimeType();
-		String placeholderName = ".cropcenter-tmp-" + System.currentTimeMillis() + "-" + name;
+		// nanoTime (not currentTimeMillis) for uniqueness to match ExportPipeline.tryDirectAtomicWrite +
+		// ReplaceStrategy.replaceViaFileIo — two saves within the same millisecond would otherwise collide
+		// here. savePending gates rapid taps in practice, but the lock isn't airtight across all paths.
+		String placeholderName = ".cropcenter-tmp-" + System.nanoTime() + "-" + name;
 		Uri placeholder = safFiles.createSiblingPlaceholder(newUri, mime, placeholderName);
 		if (placeholder != null)
 		{
@@ -579,6 +908,22 @@ final class SaveController
 			// so we don't destroy a file the user might own.
 			exportPipeline.exportToPreserving(newUri);
 		}
+	}
+
+	/**
+	 * Persist the folder the user just saved into as the next launch's starting location. Called from
+	 * the FolderPickerDialog callback on Save Here, before the collision check + write dispatch — so
+	 * even if the user cancels at the Rename/Replace/Cancel step, the folder they navigated to is
+	 * remembered for next time.
+	 *
+	 * @param folder folder to persist as the new starting location
+	 */
+	private void saveLastSaveFolder(File folder)
+	{
+		host.getActivity().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+			.edit()
+			.putString(KEY_LAST_SAVE_FOLDER, folder.getAbsolutePath())
+			.apply();
 	}
 
 	/**
@@ -617,6 +962,223 @@ final class SaveController
 		catch (RuntimeException e)
 		{
 			Log.w(TAG, "extension-mismatch dialog failed to show", e);
+		}
+	}
+
+	/**
+	 * Show the Rename / Replace / Cancel dialog for an in-app folder picker collision. Replace
+	 * dispatches the write directly (routeCrashSafeSave handles the actual overwrite via the
+	 * sibling-placeholder + atomic-rename path); Rename opens a filename input; Cancel rolls back.
+	 *
+	 * @param folder folder the user picked
+	 * @param name   filename that collides in `folder`
+	 */
+	private void showInAppCollisionDialog(File folder, String name)
+	{
+		if (host.isDestroyed())
+		{
+			onSaveCancelled();
+			return;
+		}
+		try
+		{
+			AlertDialog dialog = new AlertDialog.Builder(host.getActivity())
+				.setTitle("File already exists")
+				.setMessage("\"" + name + "\" already exists in this folder. What do you want to do?")
+				.setPositiveButton("Replace", (d, which) -> dispatchInAppSave(folder, name))
+				.setNeutralButton("Rename", (d, which) -> showInAppRenameDialog(folder, name))
+				.setNegativeButton("Cancel", (d, which) -> onSaveCancelled())
+				.setOnCancelListener(d -> onSaveCancelled())
+				.create();
+			host.registerTransientDialog(dialog);
+			dialog.show();
+		}
+		catch (RuntimeException e)
+		{
+			Log.w(TAG, "in-app collision dialog failed to show", e);
+			onSaveCancelled();
+		}
+	}
+
+	/**
+	 * Filename input dialog reached from the Rename branch of showInAppCollisionDialog. Pre-fills
+	 * with nextAvailableNumberedName's "(N)" suggestion (e.g. `foo (1).jpg` for a colliding `foo.jpg`,
+	 * or `foo (2).jpg` if `foo (1).jpg` is also taken), falling back to the colliding name itself if
+	 * the (N) loop overflows. selectAll lets the user replace or keep the suggestion in one tap.
+	 * Recurses through the collision check on confirm — a renamed-to-another-existing-file still
+	 * surfaces Rename/Replace/Cancel rather than silently overwriting. If the new name lacks an
+	 * extension, the current export format's extension is appended.
+	 *
+	 * @param folder   folder the picker landed in
+	 * @param original colliding filename — used as the suggestion-stem and as the overflow fallback
+	 */
+	private void showInAppRenameDialog(File folder, String original)
+	{
+		if (host.isDestroyed())
+		{
+			onSaveCancelled();
+			return;
+		}
+		try
+		{
+			EditText input = new EditText(host.getActivity());
+			// Pre-fill with the next available "(N)" suffix per Samsung / Android Files-app convention.
+			// Strips an existing "(N)" suffix first so renaming "foo (1).jpg" suggests "foo (2).jpg"
+			// rather than "foo (1) (1).jpg". selectAll lets the user replace the suggestion in one
+			// tap. Falls back to `original` on the unlikely N=1..9999-all-taken overflow so the input
+			// still shows something the user can edit, rather than a blank field.
+			String suggested = nextAvailableNumberedName(folder, original);
+			input.setText(suggested != null ? suggested : original);
+			input.selectAll();
+			// Install the positive button with a null handler so AlertDialog doesn't auto-dismiss after
+			// the click — the OnShowListener override below validates and dismisses only on a valid
+			// name, mirroring FolderPickerDialog.show(). Without this, a correctable typo (empty,
+			// traversal, separator) would auto-close the dialog and abort the whole save flow.
+			AlertDialog dialog = new AlertDialog.Builder(host.getActivity())
+				.setTitle("Save as")
+				.setView(input)
+				.setPositiveButton("OK", null)
+				.setNegativeButton("Cancel", (d, which) -> onSaveCancelled())
+				.setOnCancelListener(d -> onSaveCancelled())
+				.create();
+			dialog.setOnShowListener(d ->
+				dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view ->
+					onRenameOkClicked(dialog, input, folder)));
+			host.registerTransientDialog(dialog);
+			dialog.show();
+		}
+		catch (RuntimeException e)
+		{
+			Log.w(TAG, "rename dialog failed to show", e);
+			onSaveCancelled();
+		}
+	}
+
+	/**
+	 * Show the merged in-app save dialog (format + Export Grid + folder picker + thumbnail grid). Used as
+	 * the primary Save flow when MANAGE_EXTERNAL_STORAGE is granted — bypasses Samsung's broken One UI
+	 * ACTION_CREATE_DOCUMENT picker by browsing the filesystem via java.io.File and writing directly.
+	 * Initial folder is the last folder the user saved into (SharedPreferences) — falls back to primary
+	 * external storage root on first save / cleared app data / when the previously-used folder no longer
+	 * exists. Initial format + grid pre-populate from the current CropState's exportConfig / gridConfig.
+	 *
+	 * Tracking is done via host.setActiveTransientDialog (not registerTransientDialog) because the
+	 * FolderPickerDialog installs its own composite OnDismissListener — registerTransientDialog would
+	 * wrap that listener and break the savePending + executor-shutdown cleanup. The host clear callback
+	 * is passed through so the host's activeTransientDialog field still releases on dismiss.
+	 */
+	private void showMergedInAppDialog()
+	{
+		if (host.isDestroyed())
+		{
+			return;
+		}
+		File startDir = loadLastSaveFolder();
+		Format initialFormat = host.getState().getExportConfig().format();
+		boolean initialBakeGrid = host.getState().getGridConfig().includeInExport();
+		// Compute the source's display-stem + initial-format extension as the filename pre-fill.
+		// state.getOriginalFilename is provider-controlled so we strip any path-separator characters
+		// + reject "."/".." segments before letting the value flow into the picker's EditText (which
+		// then re-validates on Save here). Mirrors onMergedSaveConfirmed's defensive sanitisation
+		// path so the field never starts in a state the validator would reject.
+		String stem = host.getState().getOriginalFilename();
+		if (stem == null || stem.isEmpty())
+		{
+			stem = "crop";
+		}
+		int dot = stem.lastIndexOf('.');
+		if (dot > 0)
+		{
+			stem = stem.substring(0, dot);
+		}
+		stem = stem.replace('/', '_').replace('\\', '_');
+		if (stem.equals(".") || stem.equals("..") || stem.isEmpty())
+		{
+			stem = "crop";
+		}
+		String initialFilename = stem + initialFormat.extension();
+		try
+		{
+			AlertDialog dialog = new FolderPickerDialog(host.getActivity(), startDir,
+				initialFilename, initialFormat, initialBakeGrid,
+				this::onMergedSaveConfirmed,
+				host::clearTransientDialog).show();
+			host.setActiveTransientDialog(dialog);
+		}
+		catch (RuntimeException e)
+		{
+			Log.w(TAG, "merged save dialog failed to show", e);
+		}
+	}
+
+	/**
+	 * Build and show the Replace / Cancel dialog for cases (A) and (C) — the SAF picker returned a URI
+	 * pointing at pre-existing content (probeWasOverwrite returned true) but no auto-rename happened.
+	 * Two buttons only: Replace (commit the overwrite via routeCrashSafeSave's existing crash-safe path)
+	 * and Cancel (cleanup the placeholder if one exists). Unlike `showReplaceDialog`, there's no Keep
+	 * option — the URI's filename is exactly what the user asked for, so "keep as auto-renamed" doesn't
+	 * apply.
+	 *
+	 * On Cancel, we do NOT delete the SAF document: Case A's URI may point at the user's pre-existing
+	 * file (the SAF picker handed it back without auto-rename when the user picked Replace in the
+	 * provider's own prompt, OR when the provider silently overwrites). Deleting it on Cancel would
+	 * destroy the user's data. The same conservative reasoning as `showExtensionMismatchDialog` —
+	 * orphaned-fresh-placeholder fallout is acceptable; data-loss is not.
+	 *
+	 * Activity-destroyed and BadTokenException guards mirror `showReplaceDialog` so a config-change race
+	 * doesn't strand savePending or skip the cleanup logic.
+	 *
+	 * @param newUri SAF document URI returned by the picker — points at existing content per the
+	 *               probeWasOverwrite gate
+	 * @param name   user's intended filename — Case A: original `requested`; Case C: `chosen`
+	 */
+	private void showOverwriteConfirmDialog(Uri newUri, String name)
+	{
+		if (host.isDestroyed())
+		{
+			Log.w(TAG, "skipping overwrite-confirm dialog on destroyed activity");
+			savePending = false;
+			restorePriorSaveSettings();
+			return;
+		}
+		String message = "A file named \"" + name + "\" already exists.\n\n"
+			+ "Replace — overwrite it.\n"
+			+ "Cancel — don't save.";
+		try
+		{
+			host.registerTransientDialog(new AlertDialog.Builder(host.getActivity())
+				.setTitle("Replace " + name + "?")
+				.setMessage(message)
+				.setPositiveButton("Replace", (dialog, which) ->
+				{
+					savePending = false;
+					if (host.getBusy().get())
+					{
+						host.toastIfAlive("Replace failed — try again", Toast.LENGTH_SHORT);
+						return;
+					}
+					// Same crash-safe path the silent overwrite took before — routeCrashSafeSave's
+					// own wasOverwrite probe will re-confirm and pick the correct write strategy
+					// (sibling-placeholder vs direct-overwrite vs preserving-write).
+					routeCrashSafeSave(newUri, name);
+				})
+				.setNegativeButton(DialogStrings.CANCEL, (dialog, which) ->
+				{
+					savePending = false;
+					restorePriorSaveSettings();
+				})
+				.setOnCancelListener(dialog ->
+				{
+					savePending = false;
+					restorePriorSaveSettings();
+				})
+				.show());
+		}
+		catch (RuntimeException e)
+		{
+			Log.w(TAG, "overwrite-confirm dialog failed to show", e);
+			savePending = false;
+			restorePriorSaveSettings();
 		}
 	}
 

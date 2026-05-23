@@ -102,7 +102,10 @@ public final class XmpItemLengthPatcher
 		// later segments and ship stale data when Extended XMP doesn't carry the pattern. Each segment
 		// is independently passed through patchInSegment; the first
 		// patched result wins, any failClosed result short-circuits, and we only fall through to
-		// Extended XMP scanning when ALL standard segments report notPresent.
+		// Extended XMP scanning when ALL standard segments report notPresent. The "first patched wins"
+		// convention is deliberate: libUltraHdr reads the FIRST standard XMP packet only, so patching
+		// it is sufficient — see XmpItemLengthPatcherTest.patchOnFirstSegmentSkipsSecondSegment which
+		// pins this contract.
 		List<int[]> standardXmpRanges = findAllXmpApp1Segments(primary, XMP_HEADER_BYTES);
 		for (int[] xmpRange : standardXmpRanges)
 		{

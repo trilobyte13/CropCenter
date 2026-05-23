@@ -4,6 +4,7 @@ import static org.junit.Assert.assertEquals;
 
 import org.junit.Test;
 
+import com.cropcenter.model.CropState;
 import com.cropcenter.model.SelectionPoint;
 
 import java.util.Arrays;
@@ -73,6 +74,30 @@ public final class CropEngineTest
 	}
 
 	// ── rotatedSelectionMidpoint (the public wrapper that adds rotation + pixel snap) ──
+
+	@Test
+	public void autoComputeFromPointsSyncsAnchorToPostRecomputeCenter()
+	{
+		// Pin the round-3 fix: autoComputeFromPoints must call setAnchor(centerX, centerY) AFTER
+		// recomputeCrop completes, so a subsequent Move-mode rotation or AR change reads the
+		// just-placed center rather than a stale anchor from load time or a prior pan. A regression
+		// that drops the post-recompute setAnchor would silently snap the crop back toward the
+		// stale anchor on the first rotation after a selection-driven recenter.
+		CropState state = new CropState();
+		// Place an off-center selection so the recompute would visibly shift the anchor.
+		state.addSelectionPoint(new SelectionPoint(750f, 250f));
+		// Pre-condition: anchor starts at default (0, 0) — not at the selection point.
+		assertEquals("test fixture pre-condition: anchor X starts at 0", 0f, state.getAnchorX(), 0f);
+		assertEquals("test fixture pre-condition: anchor Y starts at 0", 0f, state.getAnchorY(), 0f);
+		CropEngine.autoComputeFromPoints(state);
+		// Post-condition: anchor matches the post-recompute center exactly, NOT the pre-recompute
+		// midpoint (rotatedSelectionMidpoint output). The setAnchor call reads state.getCenterX/Y
+		// directly so the assertion uses the same source.
+		assertEquals("anchor X must sync to post-recompute centerX",
+			state.getCenterX(), state.getAnchorX(), 0f);
+		assertEquals("anchor Y must sync to post-recompute centerY",
+			state.getCenterY(), state.getAnchorY(), 0f);
+	}
 
 	@Test
 	public void rotationAppliedBeforeBboxComputation()

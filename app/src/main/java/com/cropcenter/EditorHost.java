@@ -16,13 +16,18 @@ interface EditorHost
 	<T extends View> T findViewById(int id);
 
 	/**
-	 * @return the hosting Activity instance — used where a Context / Activity is needed for dialogs, toasts, SAF
-	 *         calls, and MediaScanner
+	 * Hosting Activity, surfaced so helpers can reach Context-shaped dialog / toast / SAF / MediaScanner APIs
+	 * without inheriting from Activity themselves.
+	 *
+	 * @return the hosting Activity instance — never null while the helper is alive
 	 */
 	Activity getActivity();
 
 	/**
-	 * @return the single CropState instance backing this editor session; never null, never reassigned
+	 * Single CropState instance backing this editor session. Always the same object across the helper's
+	 * lifetime; never reassigned (state mutation happens through CropState's own setters / reset).
+	 *
+	 * @return the CropState; never null
 	 */
 	CropState getState();
 

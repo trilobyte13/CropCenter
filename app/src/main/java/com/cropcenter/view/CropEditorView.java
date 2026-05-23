@@ -26,9 +26,10 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 	private final HorizonPaintOverlay horizon = new HorizonPaintOverlay();
 	private final SelectionHistory history = new SelectionHistory();
 	// `new ViewportMath(this)` here captures `this` before the constructor body runs, which Effective Java
-	// item 17 names as a leak hazard. Safe in practice — ViewportMath stores `this` as a field and only ever
-	// reads `getWidth()` / `getHeight()` on it, never registering it with a listener / executor / anything that
-	// could call back. None of those reads happen during the rest of the View constructor chain.
+	// item 17 names as a leak hazard. Safe in practice — ViewportMath's View-bound constructor wraps the
+	// reference in a ViewSize adapter that only ever calls `getWidth()` / `getHeight()` on it, never
+	// registering it with a listener / executor / anything that could call back. None of those reads
+	// happen during the rest of the View constructor chain.
 	private final ViewportMath viewport = new ViewportMath(this);
 
 	private CropState state;
@@ -37,27 +38,18 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 	private Runnable onZoomChanged;
 	private TouchGestureHandler gestureHandler;
 
-	/**
-	 * Standard code-instantiated constructor.
-	 */
 	public CropEditorView(Context context)
 	{
 		super(context);
 		init(context);
 	}
 
-	/**
-	 * Inflation-time constructor — called when the view is instantiated from XML.
-	 */
 	public CropEditorView(Context context, AttributeSet attrs)
 	{
 		super(context, attrs);
 		init(context);
 	}
 
-	/**
-	 * Inflation-time constructor with custom default style attribute.
-	 */
 	public CropEditorView(Context context, AttributeSet attrs, int defStyleAttr)
 	{
 		super(context, attrs, defStyleAttr);
@@ -65,8 +57,10 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 	}
 
 	/**
-	 * True when there is at least one selection-point edit on the redo stack — the toolbar uses this to enable /
-	 * disable the Redo button.
+	 * Check whether the redo stack has at least one selection-point edit available. The toolbar uses
+	 * this to enable / disable the Redo button.
+	 *
+	 * @return true when redo would pop an edit (the redo stack is non-empty)
 	 */
 	public boolean canRedo()
 	{
@@ -74,7 +68,10 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 	}
 
 	/**
-	 * True when there is at least one selection-point edit on the undo stack.
+	 * Check whether the undo stack has at least one selection-point edit available. The toolbar uses
+	 * this to enable / disable the Undo button.
+	 *
+	 * @return true when undo would pop an edit (the undo stack is non-empty)
 	 */
 	public boolean canUndo()
 	{
@@ -101,33 +98,21 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 		invalidate();
 	}
 
-	/**
-	 * Brush radius in image pixels for the painted region.
-	 */
 	public float getHorizonBrushRadius()
 	{
 		return TOUCH_THRESHOLD_PX / (viewport.getBaseScale() * viewport.getZoom());
 	}
 
-	/**
-	 * Get the painted region points in image coordinates.
-	 */
 	public List<float[]> getHorizonPoints()
 	{
 		return horizon.getPoints();
 	}
 
-	/**
-	 * Current zoom factor on top of fit-to-view's baseScale. 1 = fit-to-view, capped at 256.
-	 */
 	public float getZoom()
 	{
 		return viewport.getZoom();
 	}
 
-	/**
-	 * True while the user is painting a horizon region for auto-rotate detection.
-	 */
 	public boolean isHorizonMode()
 	{
 		return horizon.isActive();
@@ -191,6 +176,14 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 	public void onPan(float dx, float dy)
 	{
 		if (state == null)
+		{
+			return;
+		}
+		// Same race window as onTap — a bg-thread state.reset() (Share/View intent's load mid-drag) can
+		// null sourceImage between the state-non-null check and the downstream getImageWidth() reads
+		// inside dragCropCenter / viewport.panViewport. Snapshot here and bail so the geometry routines
+		// don't receive imgW=0 / imgH=0 and trip a Math.clamp(value, +0.5f, -0.5f) IllegalArgumentException.
+		if (state.getSourceImage() == null)
 		{
 			return;
 		}
@@ -287,7 +280,13 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 				if (Math.hypot(point.x() - imageX, point.y() - imageY) < threshold)
 				{
 					pushUndo();
-					state.removeSelectionPointAt(i);
+					// Remove by EQUALITY against the live list rather than by snapshot-index. The
+					// snapshot's iteration only protects the .size()/.get() loop; the live volatile
+					// selectionPoints field could have been swapped (bg-thread reset) between the
+					// matching iteration and the remove call. removeSelectionPointAt(i) would IOOBE
+					// on the fresh empty list; removeSelectionPoint(point) returns false cleanly
+					// (no-op) when the live list no longer contains the captured reference.
+					state.removeSelectionPoint(point);
 					if (state.getSelectionPoints().isEmpty())
 					{
 						resetCropToFullImage();
@@ -431,6 +430,24 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 	public void setHorizonMode(boolean on, Runnable onDrawn)
 	{
 		horizon.setActive(on, onDrawn);
+		invalidate();
+	}
+
+	/**
+	 * Enter paint mode with both completion AND cancellation callbacks. `onCancel` fires when the OS or a
+	 * parent view interrupts the stroke (ACTION_CANCEL) — host uses it to reset external UI (e.g.
+	 * AutoRotateBinder's button label) that's only synced via the entry path. Earlier code held paint
+	 * mode active across CANCEL "so the user could try again", which stranded touches in the horizon
+	 * handler when the cancel happened before any stroke began; the new contract exits paint mode and
+	 * lets the host clean up.
+	 *
+	 * @param on       true to enter paint mode; pass false to use the simpler two-arg setHorizonMode
+	 * @param onDrawn  callback invoked on ACTION_UP when on=true
+	 * @param onCancel callback invoked on ACTION_CANCEL when on=true; one-shot (cleared after fire)
+	 */
+	public void setHorizonMode(boolean on, Runnable onDrawn, Runnable onCancel)
+	{
+		horizon.setActive(on, onDrawn, onCancel);
 		invalidate();
 	}
 
@@ -588,7 +605,9 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 			// midpoint here so it always tracks the selection — recenterOnSelection (run on H/V toggle in
 			// the toolbar handler) only fires once on click; this catches every subsequent drag frame.
 			var points = state.getSelectionPoints();
-			if (!points.isEmpty() && (lock == CenterMode.HORIZONTAL || lock == CenterMode.VERTICAL))
+			boolean overrideActive = !points.isEmpty()
+				&& (lock == CenterMode.HORIZONTAL || lock == CenterMode.VERTICAL);
+			if (overrideActive)
 			{
 				float[] selectionMid = CropEngine.rotatedSelectionMidpoint(
 					points, state.getImageWidth(), state.getImageHeight(),
@@ -619,11 +638,19 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 
 			// setCenter clamps both axes jointly (binary search under rotation). On a locked axis we only
 			// want motion on the unlocked axis — reject moves that would drift the locked axis more than
-			// 0.5 px from its pre-drag position.
+			// 0.5 px from its pre-drag position. EXCEPTION: when the override block above set the locked
+			// axis to selectionMid, that's INTENTIONAL motion, not "drift" — drift-rejection would
+			// freeze the drag in place because the next frame would read the unchanged anchor and the
+			// override would re-fire identically (user-reported "moving the grid froze, had to make a
+			// selection to unfreeze" — adding/clearing a selection changed the override target enough
+			// to dodge the strict-equality preDrag comparison). When the override is active, advance the
+			// anchor unconditionally — the locked axis is following the selection by design.
 			state.setCropSizeDirty(false);
 			state.setCenter(newCenterX, newCenterY);
-			if (!crossAxisDrifted(lock, preDragCenterX, preDragCenterY,
-				state.getCenterX(), state.getCenterY()))
+			boolean shouldAdvanceAnchor = overrideActive
+				|| !crossAxisDrifted(lock, preDragCenterX, preDragCenterY,
+					state.getCenterX(), state.getCenterY());
+			if (shouldAdvanceAnchor)
 			{
 				// Advance the anchor to the clamped (still fractional) drag position so the next event
 				// continues accumulating from here.

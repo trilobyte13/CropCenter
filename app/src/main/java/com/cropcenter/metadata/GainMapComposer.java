@@ -2,6 +2,13 @@ package com.cropcenter.metadata;
 
 import android.util.Log;
 
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
+
 /**
  * Appends the HDR gain map JPEG after the primary image and updates MPF offsets.
  */
@@ -23,6 +30,13 @@ public final class GainMapComposer
 	public record ComposeResult(byte[] bytes, boolean hdrAttached) {}
 
 	private static final String TAG = "GainMapComposer";
+	// Upper bound on the byte[] we load off the primary's head for XMP / MPF patching when streaming
+	// compose. JPEG APP segments — including standard XMP (≤ 64 KB), Extended XMP chunks (≤ 64 KB
+	// each), MPF (~few hundred bytes), and EXIF with MakerNote (up to a few MB on Samsung captures)
+	// — cluster at the front of the file before SOS. 16 MB head comfortably covers every realistic
+	// shape while keeping the patch step's peak Java heap to ~32 MB (head + patcher's optional new
+	// allocation) rather than ~118 MB on a 200 MP-class primary.
+	private static final int HEAD_READ_LIMIT = 16 * 1024 * 1024;
 
 	private GainMapComposer() {}
 
@@ -107,5 +121,124 @@ public final class GainMapComposer
 		Log.d(TAG, "Composed: primary=" + primarySize + " + gainMap=" + gainMap.length
 			+ " = " + combined.length + " (MPF patched)");
 		return new ComposeResult(combined, true);
+	}
+
+	/**
+	 * Streaming compose: reads the primary JPEG from `inFile`, writes the composed output (patched
+	 * primary + gain map appended) to `outFile`. Avoids the ~120 MB `combined` byte[] allocation that
+	 * the byte[] variant requires by streaming the primary's image-data tail straight from disk.
+	 *
+	 * Peak Java heap during this operation: ~32 MB (HEAD_READ_LIMIT for the XMP/MPF patch plus the
+	 * patcher's optional new allocation) plus the caller's gainMap reference (~30 MB) — independent
+	 * of inFile size. The naive byte[] path allocates `primary` (~118 MB) + `patched` (~118 MB on XMP
+	 * digit-count change) + `combined` (~148 MB) for a ~384 MB peak.
+	 *
+	 * The patching strategy: load only the first HEAD_READ_LIMIT bytes of the primary into byte[]
+	 * (JPEG APP segments always cluster before SOS). XmpItemLengthPatcher and MpfPatcher both operate
+	 * exclusively within APP segments, so feeding them just the head is byte-identical to the byte[]
+	 * variant. The patched head is written first, then the tail is stream-copied from inFile starting
+	 * at the original head offset, then the gain map is appended. Result is byte-identical to
+	 * `compose(Files.readAllBytes(inFile), gainMap)` but without the full-primary byte[].
+	 *
+	 * Drop-path behaviour mirrors `compose`: when XmpItemLengthPatcher refuses (Extended XMP, malformed
+	 * segment, etc.), the input file is stream-copied verbatim to outFile and the return reports
+	 * hdrAttached=false. When MpfPatcher fails on the patched head, outFile gets the XMP-patched head
+	 * + tail (no gain map) and hdrAttached=false.
+	 *
+	 * @param inFile  primary JPEG on disk (typically the metadata-injected tempfile from
+	 *                JpegMetadataInjector.injectFileToFile); never null
+	 * @param gainMap gain map JPEG bytes to append; null / empty falls through to stream-copy with
+	 *                hdrAttached=false
+	 * @param outFile destination tempfile; truncated and overwritten on every call
+	 * @return true when the gain map was appended AND MPF offsets were patched; false on any drop
+	 *         path (no gain map, XmpItemLengthPatcher refused, MpfPatcher failed)
+	 * @throws IOException on read / write failure
+	 */
+	public static boolean composeFileToFile(File inFile, byte[] gainMap, File outFile) throws IOException
+	{
+		if (gainMap == null || gainMap.length == 0)
+		{
+			Log.d(TAG, "Streaming compose skipped: gain map absent — copying primary unchanged");
+			Files.copy(inFile.toPath(), outFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
+			return false;
+		}
+		long inFileSize = inFile.length();
+		int headTarget = (int) Math.min(inFileSize, HEAD_READ_LIMIT);
+		byte[] head = new byte[headTarget];
+		try (FileInputStream fis = new FileInputStream(inFile))
+		{
+			int read = 0;
+			while (read < headTarget)
+			{
+				int n = fis.read(head, read, headTarget - read);
+				if (n < 0)
+				{
+					break;
+				}
+				read += n;
+			}
+			if (read < headTarget)
+			{
+				byte[] truncated = new byte[read];
+				System.arraycopy(head, 0, truncated, 0, read);
+				head = truncated;
+			}
+		}
+		long originalHeadSize = head.length;
+		byte[] patchedHead = XmpItemLengthPatcher.patch(head, gainMap.length);
+		if (patchedHead == null)
+		{
+			Log.w(TAG, "Streaming compose: XmpItemLengthPatcher refused — copying primary unchanged");
+			Files.copy(inFile.toPath(), outFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
+			return false;
+		}
+		long tailSize = inFileSize - originalHeadSize;
+		long fullPrimarySize = (long) patchedHead.length + tailSize;
+		if (fullPrimarySize > Integer.MAX_VALUE)
+		{
+			throw new IOException("Primary size exceeds int range after XMP patch: " + fullPrimarySize);
+		}
+		// Pass gainMap.length EXPLICITLY: patchedHead is only the primary's APP-marker head (a few KB to
+		// a few MB), so the `jpeg.length - primarySize` derivation used by the 2-arg overload would be
+		// negative when patchedHead.length < primarySize and write a garbage u32 into the MPF entry's
+		// size field. Lenient decoders fall back to the XMP hdrgm marker so HDR still renders, but the
+		// MPF table itself ships corrupt — strict decoders that trust MPF would reject the gain map.
+		boolean mpfPatched = MpfPatcher.patch(patchedHead, (int) fullPrimarySize, gainMap.length);
+		try (FileOutputStream fos = new FileOutputStream(outFile))
+		{
+			fos.write(patchedHead);
+			if (tailSize > 0)
+			{
+				try (FileInputStream tailFis = new FileInputStream(inFile))
+				{
+					// JpegMetadataInjector.skipExactly handles FileInputStream.skip() transiently
+					// returning 0 — the previous loop-and-break-on-zero idiom silently truncated
+					// the stream and shipped corrupted bytes when skip stalled. See helper Javadoc.
+					JpegMetadataInjector.skipExactly(tailFis, originalHeadSize);
+					byte[] buf = new byte[JpegMetadataInjector.STREAM_CHUNK_SIZE];
+					int n;
+					while ((n = tailFis.read(buf)) > 0)
+					{
+						fos.write(buf, 0, n);
+					}
+				}
+			}
+			if (mpfPatched)
+			{
+				fos.write(gainMap);
+			}
+			else
+			{
+				Log.w(TAG, "Streaming compose: MpfPatcher failed — shipping XMP-patched primary "
+					+ "without gain map (hdrAttached=false)");
+			}
+			fos.getFD().sync();
+		}
+		if (mpfPatched)
+		{
+			Log.d(TAG, "Streaming composed: primary=" + fullPrimarySize + " + gainMap=" + gainMap.length
+				+ " (MPF patched)");
+		}
+		return mpfPatched;
 	}
 }
