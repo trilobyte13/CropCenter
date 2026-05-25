@@ -1,6 +1,8 @@
 package com.cropcenter;
 
 import android.app.AlertDialog;
+import android.content.Context;
+import android.content.SharedPreferences;
 import android.graphics.Paint;
 import android.text.InputType;
 import android.util.Log;
@@ -36,13 +38,20 @@ final class ToolbarBinder
 {
 	private static final String TAG = "ToolbarBinder";
 
+	// Spinner order: widest-landscape → square → tallest-portrait. The CropState aspect-ratio default
+	// (R4_5) still wins on a fresh image — this array only drives the spinner's display order.
 	private static final AspectRatio[] AR_VALUES = {
-		AspectRatio.R4_5, AspectRatio.FREE, AspectRatio.R16_9, AspectRatio.R3_2,
-		AspectRatio.R4_3, AspectRatio.R5_4, AspectRatio.R1_1, AspectRatio.R3_4,
+		AspectRatio.FREE, AspectRatio.R16_9, AspectRatio.R3_2, AspectRatio.R4_3,
+		AspectRatio.R5_4, AspectRatio.R1_1, AspectRatio.R4_5, AspectRatio.R3_4,
 		AspectRatio.R2_3, AspectRatio.R9_16, null
 	};
+
+	private static final String KEY_LAST_CUSTOM_AR_H = "last_custom_ar_h";
+	private static final String KEY_LAST_CUSTOM_AR_W = "last_custom_ar_w";
+	private static final String PREFS_NAME_CUSTOM_AR = "cropcenter_custom_ar";
+
 	private static final String[] AR_LABELS = {
-		"4:5", "Full", "16:9", "3:2", "4:3", "5:4", "1:1", "3:4", "2:3", "9:16", "Custom"
+		"Full", "16:9", "3:2", "4:3", "5:4", "1:1", "4:5", "3:4", "2:3", "9:16", "Custom"
 	};
 
 	private final AutoRotateBinder autoRotate;
@@ -50,14 +59,17 @@ final class ToolbarBinder
 	private final UiSync ui;
 	// AR spinner adapter, cached so applyAndResetSpinner can call notifyDataSetChanged after updating
 	// customArLabel — the closed-spinner view re-reads the (overridden) selected-position text from the
-	// adapter, and the dropdown's Custom row picks up the new label on next open.
+	// adapter. The dropdown's Custom row always reads the literal "Custom" string from AR_LABELS (only
+	// the head-view's getView override substitutes customArLabel; getDropDownView does not).
 	private ArrayAdapter<String> arAdapter;
-	// Dynamic Custom row label. Defaults to "Custom" until the user applies a custom AR; then reads
-	// "Custom W:H" so the spinner head + dropdown reflect the active model state. The closed spinner
-	// shows this string whenever customArActive is true (instead of the AR_LABELS preset text); the
-	// Custom dropdown row at AR_LABELS.length - 1 always shows it. Without this dynamic reflection,
-	// the spinner could show e.g. "16:9" while the crop was actually using a custom 5:7.
-	private String customArLabel = "Custom";
+	// Dynamic Custom row label. Holds the compact "W:H" form (no "Custom " prefix) so the spinner head
+	// matches the compact numeric format of the preset rows once a custom AR is applied. The closed
+	// spinner shows this string whenever customArActive is true (instead of the AR_LABELS preset text);
+	// the dropdown's Custom row always shows AR_LABELS' literal "Custom" string regardless. Initialised
+	// to null because the field is never read while customArActive is false — keeping it null surfaces
+	// a future read-without-flag-check regression as an NPE rather than silently rendering a stale
+	// literal.
+	private String customArLabel;
 	// True when state holds a Custom (non-preset) AR. Set in applyAndResetSpinner; cleared whenever the
 	// user picks a preset row from the AR spinner. Drives the getView override that overrides the closed
 	// spinner's displayed text with customArLabel so the spinner head reflects the model rather than the
@@ -100,6 +112,117 @@ final class ToolbarBinder
 		autoRotate.cancelHorizonPaintMode();
 	}
 
+	/**
+	 * Re-read CropState and write the dependent toolbar UI: AR spinner head (including the custom-AR
+	 * label substitution), Pan / Lock-center checkboxes, mode + lock highlights, and the active editor
+	 * mode's lock preference. Called by MainActivity.installImageOnUi after
+	 * RestoreController.applyIfPending consumes a saved bundle — installImageOnUi's earlier reset
+	 * block unconditionally unchecks Pan / Lock and resets the lock prefs to BOTH / VERTICAL, so
+	 * without this resync the toolbar would visually show new-load defaults while the model holds
+	 * the restored Move+H or Select+V the user had at kill time.
+	 *
+	 * Listener suppression on chkPan / chkLockCenter (setOnCheckedChangeListener(null) → setChecked →
+	 * restore) prevents the synthetic .setChecked from firing onPanCheckedChanged /
+	 * onLockCenterCheckedChanged — those handlers would call recomputeForLockChange against the
+	 * just-restored geometry and overwrite it. Same rationale as suppressArListener for the AR
+	 * spinner.
+	 *
+	 * Lock-preference reconstruction: selectLockPref / moveLockPref are persisted as separate bundle
+	 * keys (STATE_SELECT_LOCK_PREF / STATE_MOVE_LOCK_PREF in RestoreController) and re-seeded into
+	 * MainActivity's fields BEFORE this method runs via the Outcome record applyIfPending returns —
+	 * so by the time we get here, both prefs already match the user's pre-kill choices. The
+	 * setCurrentPref call below is a defensive belt-and-braces write that keeps the active mode's
+	 * pref consistent with state.getCenterMode() (which IS the committed centerMode when Pan was
+	 * off); it's idempotent when MainActivity already re-seeded the right value. We skip it when
+	 * centerMode == LOCKED (Pan was on at kill time) so the underlying axis preference that
+	 * MainActivity restored from the bundle stays in place rather than being overwritten with the
+	 * meaningless LOCKED sentinel.
+	 */
+	void syncFromState()
+	{
+		AspectRatio aspectRatio = host.getState().getAspectRatio();
+		Spinner spinner = host.findViewById(R.id.spinnerAr);
+		int targetPos = indexOfAspectRatio(aspectRatio);
+		int parkPos = (targetPos == AR_VALUES.length - 1) ? 0 : targetPos;
+		if (targetPos == AR_VALUES.length - 1)
+		{
+			// The restored AR matches no preset — it's a Custom W:H. Flip customArActive so the
+			// closed spinner head substitutes the numeric "W:H" label via getView; park the spinner
+			// at position 0 (FREE / Full) so a future tap on Custom (rightmost row) reopens the
+			// dialog. Spinner suppresses no-op selections, so the park position MUST be non-Custom.
+			customArLabel = Math.round(aspectRatio.width()) + ":" + Math.round(aspectRatio.height());
+			customArActive = true;
+			arAdapter.notifyDataSetChanged();
+		}
+		else if (customArActive)
+		{
+			customArActive = false;
+			arAdapter.notifyDataSetChanged();
+		}
+		// Only set suppressArListener when the call will actually transition the spinner. Spinner
+		// suppresses no-op (same-position) setSelection silently — onItemSelected never fires for
+		// those — so a setSelection() to the already-shown position would leave suppressArListener
+		// stuck at true, swallowing the user's next genuine AR pick. Repro: kill the process with
+		// AR = R4_5 (default position 6), restore, then tap any other AR → model unchanged because
+		// the listener early-returns on the suppress flag. Tap same AR again → works (flag cleared
+		// by the first onItemSelected). The guard scopes the suppress window to the actual
+		// position-changing call.
+		if (spinner.getSelectedItemPosition() != parkPos)
+		{
+			suppressArListener = true;
+			spinner.setSelection(parkPos);
+		}
+
+		CenterMode centerMode = host.getState().getCenterMode();
+		CheckBox chkPan = host.findViewById(R.id.chkPan);
+		chkPan.setOnCheckedChangeListener(null);
+		chkPan.setChecked(centerMode == CenterMode.LOCKED);
+		chkPan.setOnCheckedChangeListener(this::onPanCheckedChanged);
+
+		CheckBox chkLockCenter = host.findViewById(R.id.chkLockCenter);
+		chkLockCenter.setOnCheckedChangeListener(null);
+		chkLockCenter.setChecked(host.getState().isCenterLocked());
+		chkLockCenter.setOnCheckedChangeListener(this::onLockCenterCheckedChanged);
+
+		// Defensive belt-and-braces: re-derive the active-mode pref from the restored centerMode.
+		// MainActivity.installImageOnUi has ALREADY re-seeded selectLockPref / moveLockPref from the
+		// bundle's STATE_SELECT_LOCK_PREF / STATE_MOVE_LOCK_PREF before calling syncFromState, so
+		// the active mode's pref already matches state.getCenterMode() when Pan was off — this write
+		// is idempotent in that case. Skip when LOCKED (Pan was on at kill time): centerMode here is
+		// the LOCKED sentinel, not a meaningful axis preference, so writing it through
+		// setCurrentPref would overwrite the underlying axis pref MainActivity correctly restored
+		// from the bundle with the meaningless LOCKED value.
+		if (centerMode != CenterMode.LOCKED)
+		{
+			host.setCurrentPref(centerMode);
+		}
+
+		ui.updateModeHighlight();
+		ui.updateLockHighlight();
+	}
+
+	/**
+	 * Index of the given aspect ratio within AR_VALUES, or the Custom-sentinel index when ratio is null
+	 * or matches no preset. Used by setupArSpinner to set the initial spinner position to whatever
+	 * matches the model's current aspect ratio so the alphabetic-order reorder doesn't silently
+	 * overwrite the model's default with position-0.
+	 *
+	 * @param ratio aspect ratio to look up
+	 * @return index in AR_VALUES whose entry equals ratio; AR_VALUES.length - 1 (Custom row) when no
+	 *         preset matches
+	 */
+	private static int indexOfAspectRatio(AspectRatio ratio)
+	{
+		for (int i = 0; i < AR_VALUES.length; i++)
+		{
+			if (AR_VALUES[i] != null && AR_VALUES[i].equals(ratio))
+			{
+				return i;
+			}
+		}
+		return AR_VALUES.length - 1;
+	}
+
 	private static int parseIntOr(String text, int def)
 	{
 		try
@@ -138,11 +261,18 @@ final class ToolbarBinder
 	private void applyCustomArAndResetSpinner(EditText widthInput, EditText heightInput,
 		Spinner spinner, int previousArPosition)
 	{
-		applyCustomAspectRatio(widthInput, heightInput);
-		customArLabel = "Custom "
-			+ Math.max(1, parseIntOr(widthInput.getText().toString(), 16))
-			+ ":"
-			+ Math.max(1, parseIntOr(heightInput.getText().toString(), 9));
+		// Parse once and cache. The prior implementation called applyCustomAspectRatio (which parses
+		// width + height for the model write), then re-parsed both EditTexts here for the label
+		// substring — three parseIntOr calls for two values that haven't changed between calls.
+		int ratioW = Math.max(1, parseIntOr(widthInput.getText().toString(), 16));
+		int ratioH = Math.max(1, parseIntOr(heightInput.getText().toString(), 9));
+		applyCustomAspectRatio(ratioW, ratioH);
+		// Numeric "W:H" form (no "Custom " prefix) — the spinner head should display the active
+		// ratio compactly, matching the preset rows ("16:9", "4:5", ...). Only getView (the head-view
+		// override) substitutes customArLabel — getDropDownView keeps the AR_LABELS "Custom" string
+		// on the dropdown row regardless of customArActive, so the row stays discoverable as the
+		// edit affordance even after a custom AR has been applied.
+		customArLabel = ratioW + ":" + ratioH;
 		customArActive = true;
 		arAdapter.notifyDataSetChanged();
 		suppressArListener = true;
@@ -150,19 +280,28 @@ final class ToolbarBinder
 	}
 
 	/**
-	 * Apply the user-typed width/height pair as a custom aspect ratio. Floors both sides at 1 so a stray "0" or
-	 * empty input falls back to a sane min instead of crashing the engine on a zero-size ratio. After applying, if
-	 * the user has selection points the engine recomputes the crop around them; otherwise the crop is centered on
-	 * the image. Invoked from showCustomArDialog's Apply button.
+	 * Apply the already-parsed width/height pair as a custom aspect ratio. Callers are expected to
+	 * have already floored to ≥ 1 (applyCustomArAndResetSpinner does this once via parseIntOr +
+	 * Math.max) so a stray "0" or empty input from the EditText falls back to a sane min before we
+	 * reach here. After applying, if the user has selection points the engine recomputes the crop
+	 * around them; otherwise the crop is centered on the image.
 	 *
-	 * @param widthInput  EditText holding the typed width side of the ratio
-	 * @param heightInput EditText holding the typed height side of the ratio
+	 * @param ratioW width side of the ratio (≥ 1; caller is responsible for the floor)
+	 * @param ratioH height side of the ratio (≥ 1; caller is responsible for the floor)
 	 */
-	private void applyCustomAspectRatio(EditText widthInput, EditText heightInput)
+	private void applyCustomAspectRatio(int ratioW, int ratioH)
 	{
-		int ratioW = Math.max(1, parseIntOr(widthInput.getText().toString(), 16));
-		int ratioH = Math.max(1, parseIntOr(heightInput.getText().toString(), 9));
 		host.getState().setAspectRatio(new AspectRatio(ratioW, ratioH));
+		// Persist the typed Custom AR so a later showCustomArDialog can pre-fill with these values
+		// rather than the post-switch current AR. Without this, the flow "type Custom 2.39:1 →
+		// switch to preset 1:1 → reopen Custom" would land on 1:1 (current AR) instead of 2.39:1
+		// (last typed), forcing the user to re-type their custom ratio. Apply-only write (NOT on
+		// Cancel) so a previewed-and-cancelled value doesn't poison the next session's default.
+		host.getActivity().getSharedPreferences(PREFS_NAME_CUSTOM_AR, Context.MODE_PRIVATE)
+			.edit()
+			.putInt(KEY_LAST_CUSTOM_AR_W, ratioW)
+			.putInt(KEY_LAST_CUSTOM_AR_H, ratioH)
+			.apply();
 		if (!host.getState().getSelectionPoints().isEmpty())
 		{
 			CropEngine.autoComputeFromPoints(host.getState());
@@ -174,8 +313,10 @@ final class ToolbarBinder
 	}
 
 	/**
-	 * Parse the precise-rotation EditText and update CropState if it contains a valid signed decimal in [-180,
-	 * 180]. Silently no-op on a parse failure (the user's existing rotation is preserved). Invoked from
+	 * Parse the precise-rotation EditText and update CropState's rotation. The parsed float is clamped to
+	 * [-180, 180] (so a user typing 200 commits as 180, not as a rejected input) and committed via
+	 * setRotationDegrees, which applies the sub-epsilon snap-to-zero. Silently no-op on parse failure (the
+	 * user's existing rotation is preserved and the dialog stays open). Invoked from
 	 * showPreciseRotationDialog's Apply button.
 	 *
 	 * @param input EditText containing the user-typed degree value
@@ -213,7 +354,7 @@ final class ToolbarBinder
 	{
 		host.getState().clearSelectionPoints();
 		host.getEditorView().clearUndoHistory();
-		host.getEditorView().resetCropToFullImage();
+		host.getEditorView().recenterCropOnImageMidpoint();
 		host.getEditorView().invalidate();
 		ui.updatePointButtonStates();
 	}
@@ -361,9 +502,10 @@ final class ToolbarBinder
 
 		// Custom adapter with compact item views (tight padding, 12sp text). Two getView overrides
 		// reflect the active model state in the spinner UI: the closed-spinner head substitutes
-		// customArLabel for the preset text whenever a custom AR is active (so the head reads
-		// "Custom 5:7" instead of the previousArPosition preset), and the Custom dropdown row always
-		// reads customArLabel (so the user can see what's currently committed before re-tapping Custom).
+		// customArLabel for the preset text whenever a custom AR is active (so the head reads the
+		// numeric "5:7" instead of the previousArPosition preset). The DROPDOWN's Custom row always
+		// reads the static "Custom" string from AR_LABELS — it's the edit affordance, so the literal
+		// label keeps the row identifiable when the user reopens the spinner.
 		arAdapter = new ArrayAdapter<>(host.getActivity(),
 			android.R.layout.simple_spinner_item, AR_LABELS)
 		{
@@ -382,24 +524,27 @@ final class ToolbarBinder
 			public View getDropDownView(int position, View convertView, ViewGroup parent)
 			{
 				TextView tv = (TextView) super.getDropDownView(position, convertView, parent);
-				if (position == AR_LABELS.length - 1)
-				{
-					tv.setText(customArLabel);
-				}
 				return styleArLabel(tv, 13, padH * 2, padV * 2);
 			}
 		};
 		spinner.setAdapter(arAdapter);
-		spinner.setSelection(0);
+		// Default selection mirrors CropState's aspect-ratio default (R4_5). Position 0 in the
+		// spinner is now FREE / Full after the alphabetic reorder, so an unconditional
+		// setSelection(0) would silently overwrite the model's R4_5 default with FREE when the
+		// initial onItemSelected fires.
+		spinner.setSelection(indexOfAspectRatio(host.getState().getAspectRatio()));
 
-		// Size the spinner to exactly fit the widest label + arrow.
+		// Size the spinner head to fit a 2-digit:2-digit numeric label ("##:##") plus the dropdown
+		// arrow. The closed head only ever displays numeric labels — preset strings like "4:5" /
+		// "16:9" / "Full" and the customArLabel which is now also numeric ("W:H", no "Custom "
+		// prefix) — so sizing for "99:99" covers the widest plausible custom AR (2-digit sides) and
+		// every preset comfortably. The dropdown's "Custom" row (the only place the literal "Custom"
+		// string still appears, and only when no custom has been applied yet) can overflow the head
+		// width — Android's Spinner dropdown lays out independently and the row's TextView keeps
+		// the text readable.
 		Paint textPaint = new Paint();
 		textPaint.setTextSize(12 * host.getActivity().getResources().getDisplayMetrics().scaledDensity);
-		float maxTextPx = 0;
-		for (String label : AR_LABELS)
-		{
-			maxTextPx = Math.max(maxTextPx, textPaint.measureText(label));
-		}
+		float maxTextPx = textPaint.measureText("99:99");
 		int totalPx = (int) maxTextPx + padH * 2 + DpToPx.toPx(24, density);
 		spinner.setMinimumWidth(totalPx);
 		ViewGroup.LayoutParams lp = spinner.getLayoutParams();
@@ -507,9 +652,11 @@ final class ToolbarBinder
 	}
 
 	/**
-	 * Build and show the "Custom" aspect-ratio dialog with two number inputs (width, height). On Apply, parse both
-	 * and route through applyCustomAspectRatio which clamps each to ≥ 1 and triggers a recompute. Triggered by
-	 * selecting the "Custom" sentinel in the AR spinner.
+	 * Build and show the "Custom" aspect-ratio dialog with two number inputs (width, height). On Apply, the
+	 * `applyCustomArAndResetSpinner` handler floors each parsed value to ≥ 1 via Math.max before calling
+	 * applyCustomAspectRatio — applyCustomAspectRatio itself does NOT re-clamp (its Javadoc explicitly
+	 * delegates the floor to the caller, and the Apply path is the only caller). The result triggers a
+	 * recompute via setAspectRatio. Triggered by selecting the "Custom" sentinel in the AR spinner.
 	 */
 	private void showCustomArDialog(Spinner spinner, int previousArPosition)
 	{
@@ -522,7 +669,36 @@ final class ToolbarBinder
 		layout.setPadding(padH, DpToPx.toPx(16, density), padH, DpToPx.toPx(8, density));
 
 		int editWidth = DpToPx.toPx(60, density);
-		EditText editW = numberInput("16");
+		// Pre-fill in this priority order:
+		//   1. Last-typed Custom AR persisted to SharedPreferences (across switches to a preset
+		//      AND across app restarts) — so the user's typed 2.39:1 survives a brief detour to
+		//      a 1:1 preset and back. This is the dominant case once the user has used Custom
+		//      at all.
+		//   2. Currently-applied AR (preset or in-memory Custom) when no last-stored value
+		//      exists — so a fresh-install user opening the Custom dialog for the first time
+		//      sees the preset they're already on.
+		//   3. 16:9 as the universal fallback when neither source has values.
+		String initialW = "16";
+		String initialH = "9";
+		SharedPreferences customPrefs = host.getActivity()
+			.getSharedPreferences(PREFS_NAME_CUSTOM_AR, Context.MODE_PRIVATE);
+		int storedW = customPrefs.getInt(KEY_LAST_CUSTOM_AR_W, 0);
+		int storedH = customPrefs.getInt(KEY_LAST_CUSTOM_AR_H, 0);
+		if (storedW > 0 && storedH > 0)
+		{
+			initialW = String.valueOf(storedW);
+			initialH = String.valueOf(storedH);
+		}
+		else
+		{
+			AspectRatio currentAr = host.getState().getAspectRatio();
+			if (currentAr != null && !currentAr.isFree())
+			{
+				initialW = String.valueOf(Math.round(currentAr.width()));
+				initialH = String.valueOf(Math.round(currentAr.height()));
+			}
+		}
+		EditText editW = numberInput(initialW);
 		layout.addView(editW, new LinearLayout.LayoutParams(editWidth, LinearLayout.LayoutParams.WRAP_CONTENT));
 
 		TextView separator = new TextView(host.getActivity());
@@ -530,7 +706,7 @@ final class ToolbarBinder
 		separator.setTextSize(16);
 		layout.addView(separator);
 
-		EditText editH = numberInput("9");
+		EditText editH = numberInput(initialH);
 		layout.addView(editH, new LinearLayout.LayoutParams(editWidth, LinearLayout.LayoutParams.WRAP_CONTENT));
 
 		// Cancel and dismiss (X / back-press / forced dismissTransientDialogs) all restore the spinner

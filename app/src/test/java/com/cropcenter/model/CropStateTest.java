@@ -290,21 +290,32 @@ public final class CropStateTest
 	@Test
 	public void resetClearsSourceAndMetadataFields()
 	{
-		// Source-image-related state: source bytes, filename, format, gain map, SEFT trailer, jpegMeta.
+		// Source-image-related state: source bytes, filename, format, gain map, SEFT trailer, jpegMeta,
+		// pngExifTiff. Seeding via installLoadedImage matches the single production entry-point
+		// ImageLoadController.applyBytes uses to publish the load-commit; the per-field setters that
+		// previously seeded these were deleted in favour of this single atomic write. pngExifTiff is
+		// included with a non-null seed so reset()'s pngExifTiff = null line is observably tested —
+		// the earlier version of this test passed null on that argument, leaving the clear unverifiable.
 		CropState state = new CropState();
-		state.setOriginalFileBytes(new byte[] { 0x10 });
-		state.setOriginalFilename("foo.jpg");
-		state.setSourceFormat(Format.PNG);
-		state.setGainMap(new byte[] { 0x20 });
-		state.setSeftTrailer(new byte[] { 0x30 });
+		state.installLoadedImage(
+			new byte[] { 0x10 },
+			"foo.jpg",
+			Format.PNG,
+			Collections.emptyList(),
+			new byte[] { 0x40 },
+			new byte[] { 0x20 },
+			new byte[] { 0x30 });
 		state.reset();
 		assertNull(state.getOriginalFileBytes());
 		assertNull(state.getOriginalFilename());
 		assertNull(state.getSourceFormat());
+		assertNull(state.getPngExifTiff());
 		assertNull(state.getGainMap());
 		assertNull(state.getSeftTrailer());
 		assertEquals("jpegMeta is replaced with empty list, not nulled", 0, state.getJpegMeta().size());
 	}
+
+	// ── setCenter() ──
 
 	@Test
 	public void setCenterWithNullSourceImageSkipsClampAndDoesNotNpe()
@@ -327,29 +338,61 @@ public final class CropStateTest
 		assertTrue("hasCenter flips true regardless of source presence", state.hasCenter());
 	}
 
+	// ── installLoadedImage() ──
+
 	@Test
-	public void setSourceFormatSeedsExportConfig()
+	public void installLoadedImageJpegAfterPngOverridesPriorExportSeed()
 	{
-		// `setSourceFormat(PNG)` must seed `exportConfig.format()` to PNG so the
+		// Subsequent JPEG load after PNG must update the export seed. Split from
+		// installLoadedImagePngSeedsExportConfig so a regression in JPEG-override behaviour fails this
+		// test specifically rather than being masked by the prior PNG-seed assertion. The
+		// setSourceFormat seed-logic that pinned this contract was inlined into installLoadedImage when
+		// the per-field setter was deleted; the assertion is identical, the path through the model is
+		// the only thing that changed.
+		CropState state = new CropState();
+		state.installLoadedImage(null, null, Format.PNG, null, null, null, null);
+		state.installLoadedImage(null, null, Format.JPEG, null, null, null, null);
+		assertEquals(Format.JPEG, state.getExportConfig().format());
+	}
+
+	@Test
+	public void installLoadedImageNullFormatPreservesPriorExportSeed()
+	{
+		// Null source format is a no-op for exportConfig — happens when ImageLoadController's format
+		// detection bails on a loaded blob that's neither JPEG nor PNG. The export seed must NOT
+		// regress just because the next load couldn't classify itself; the user's prior session's
+		// exportConfig stays in place. Split from installLoadedImagePngSeedsExportConfig so this
+		// no-op contract has its own failure isolation.
+		//
+		// Note: the second installLoadedImage call DOES wipe originalFileBytes / originalFilename /
+		// jpegMeta / pngExifTiff / gainMap / seftTrailer back to (null, null, [], null, null, null) —
+		// those writes are intentional in the contract (every load commits its own bundle). This test
+		// only asserts the exportConfig invariant. resetClearsSourceAndMetadataFields above pins the
+		// field-clearing behaviour separately.
+		CropState state = new CropState();
+		state.installLoadedImage(null, null, Format.PNG, null, null, null, null);
+		state.installLoadedImage(null, null, null, null, null, null, null);
+		assertEquals("null source format must not clobber prior exportConfig",
+			Format.PNG, state.getExportConfig().format());
+	}
+
+	@Test
+	public void installLoadedImagePngSeedsExportConfig()
+	{
+		// `installLoadedImage(..., PNG, ...)` must seed `exportConfig.format()` to PNG so the
 		// SaveDialog's format toggle defaults to "save as PNG" for PNG sources without an intervening
 		// `updateExportConfig` call. A regression that drops the seed (only stores `sourceFormat` and
 		// forgets the `withFormat`) would silently change the user's save format from PNG to JPEG —
-		// alpha loss + format conversion on save.
+		// alpha loss + format conversion on save. The seed logic was previously inside setSourceFormat;
+		// it was inlined into installLoadedImage when the per-field setter was deleted.
 		CropState state = new CropState();
 		assertEquals("default exportConfig is JPEG", Format.JPEG, state.getExportConfig().format());
-		state.setSourceFormat(Format.PNG);
+		state.installLoadedImage(null, null, Format.PNG, null, null, null, null);
 		assertEquals("PNG source seeds exportConfig to PNG immediately",
 			Format.PNG, state.getExportConfig().format());
-		// JPEG seed pin (the spec calls out JPEG specifically as the override case after a PNG load).
-		state.setSourceFormat(Format.JPEG);
-		assertEquals("subsequent JPEG source updates the seed",
-			Format.JPEG, state.getExportConfig().format());
-		// Null source format is a no-op — happens when ImageLoadController's format detection bails on a
-		// loaded blob that's neither JPEG nor PNG; exportConfig must NOT regress.
-		state.setSourceFormat(null);
-		assertEquals("null source format must not clobber prior exportConfig",
-			Format.JPEG, state.getExportConfig().format());
 	}
+
+	// ── reset() (additional invariants) ──
 
 	@Test
 	public void resetReturnsExportConfigToDefaults()

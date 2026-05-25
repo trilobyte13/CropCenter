@@ -108,12 +108,101 @@ public final class FormatTest
 	}
 
 	@Test
+	public void fromExtensionAcceptsMixedCaseAlias()
+	{
+		// Internal mixed-case checks supplement fromExtensionIsCaseInsensitive: ".JpEg" exercises the
+		// toLowerCase(Locale.ROOT) path on every character (alternating case rather than block-cased
+		// like "JPG" / "Jpeg"). A regression that did Locale.getDefault().toLowerCase would mangle the
+		// dotless 'i' on tr_TR locales and miss this case; Locale.ROOT keeps it deterministic.
+		assertEquals(Format.JPEG, Format.fromExtension("photo.JpEg"));
+		assertEquals(Format.JPEG, Format.fromExtension("photo.jPg"));
+		assertEquals(Format.PNG, Format.fromExtension("photo.PnG"));
+	}
+
+	@Test
+	public void fromExtensionRejectsTrailingDotAfterExtension()
+	{
+		// "photo.jpg." — the trailing dot breaks the endsWith(".jpg") match. Some Android file
+		// pickers strip trailing dots automatically, but a hand-typed filename in the SAF dialog can
+		// arrive with one. Pin that we return null (no format inference) rather than guessing JPEG,
+		// because the user's typed extension as-written is NOT a valid filename a file manager
+		// would round-trip.
+		assertNull(Format.fromExtension("photo.jpg."));
+		assertNull(Format.fromExtension("photo.png."));
+	}
+
+	@Test
+	public void fromExtensionAcceptsBareExtensionAsFullName()
+	{
+		// ".jpg" / ".png" as the entire filename — degenerate but endsWith(".jpg") still matches, so
+		// the function returns JPEG / PNG. This is consistent with the function's name (it parses
+		// extensions, not stems) but worth pinning: a future regression that required a non-empty
+		// stem (e.g. via lastIndexOf('.') > 0 + substring) would change the answer here from
+		// JPEG to null.
+		assertEquals(Format.JPEG, Format.fromExtension(".jpg"));
+		assertEquals(Format.JPEG, Format.fromExtension(".jpeg"));
+		assertEquals(Format.PNG, Format.fromExtension(".png"));
+	}
+
+	@Test
+	public void fromExtensionRejectsBareDotSequences()
+	{
+		// "." / ".." — degenerate path-component names that look like extensions but have no
+		// recognisable format. Pin that we return null rather than match-by-coincidence.
+		assertNull(Format.fromExtension("."));
+		assertNull(Format.fromExtension(".."));
+		assertNull(Format.fromExtension("..."));
+	}
+
+	@Test
 	public void fromExtensionRecognisesPathBasedNames()
 	{
 		// SAF display names sometimes include path-like prefixes. The endsWith check still works.
 		assertEquals(Format.JPEG, Format.fromExtension("/storage/emulated/0/DCIM/foo.jpg"));
 		assertEquals(Format.PNG, Format.fromExtension("primary:Pictures/screenshot.png"));
 	}
+
+	// ── stripExtension ──
+
+	@Test
+	public void stripExtensionLeadingDotKeepsName()
+	{
+		// Leading-dot names (.gitignore) have NO separable extension by convention; lastIndexOf > 0
+		// rejects the index-0 dot. Pin so a refactor to `>= 0` doesn't accidentally produce an
+		// empty-stem name.
+		assertEquals(".gitignore", Format.stripExtension(".gitignore"));
+		assertEquals(".env", Format.stripExtension(".env"));
+	}
+
+	@Test
+	public void stripExtensionMultiDotKeepsAllButLast()
+	{
+		// "image.v2.final.heic" — the meaningful name structure ("image.v2.final") survives; only
+		// the trailing extension is stripped. Mirrors normaliseExtension's swap behavior.
+		assertEquals("image.v2.final", Format.stripExtension("image.v2.final.heic"));
+		assertEquals("archive.tar", Format.stripExtension("archive.tar.gz"));
+	}
+
+	@Test
+	public void stripExtensionNoDotReturnsInputUnchanged()
+	{
+		// No dot anywhere — return verbatim. Caller's normaliseExtension appends the format
+		// extension; for "photo" + JPEG, the result is "photo.jpg".
+		assertEquals("photo", Format.stripExtension("photo"));
+		assertEquals("noext", Format.stripExtension("noext"));
+	}
+
+	@Test
+	public void stripExtensionRemovesTrailingExtension()
+	{
+		// Canonical case: any trailing extension is removed regardless of what it is. Caller
+		// (normaliseExtension) appends the format-aligned extension after.
+		assertEquals("photo", Format.stripExtension("photo.jpg"));
+		assertEquals("photo", Format.stripExtension("photo.heic"));
+		assertEquals("photo", Format.stripExtension("photo.PNG"));
+	}
+
+	// ── values cardinality ──
 
 	@Test
 	public void valuesContainsExactlyJpegAndPng()

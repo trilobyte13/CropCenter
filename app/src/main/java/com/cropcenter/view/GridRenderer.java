@@ -4,6 +4,7 @@ import android.graphics.Canvas;
 import android.graphics.Paint;
 
 import com.cropcenter.model.GridConfig;
+import com.cropcenter.util.GridGeometry;
 
 /**
  * Draws grid overlay lines within the crop rectangle at positions that match the exporter's
@@ -77,7 +78,6 @@ public final class GridRenderer
 		float screenLeft = imgToScreenX.map(cropImageX);
 		float screenRight = imgToScreenX.map(cropImageX + cropImageW);
 
-		// Vertical lines.
 		float cropCenterX = cropImageX + cropImageW / 2f;
 		for (int i = 1; i < config.columns(); i++)
 		{
@@ -85,7 +85,6 @@ public final class GridRenderer
 			canvas.drawLine(sx, screenTop, sx, screenBottom, gridPaint);
 		}
 
-		// Horizontal lines.
 		float cropCenterY = cropImageY + cropImageH / 2f;
 		for (int i = 1; i < config.rows(); i++)
 		{
@@ -123,15 +122,16 @@ public final class GridRenderer
 	 */
 	static float linePos(int i, int count, float cropOrigin, int cropExtent, float cropCenter)
 	{
+		// Middle-line special case: anchor to cropCenter (the fractional float pan position) so a
+		// single-point selection marker sits exactly on the grid intersection. Delegating to
+		// GridGeometry.mirroredLinePos would lose this — that helper returns an integer offset.
 		if (i * 2 == count)
 		{
 			return cropCenter;
 		}
-		if (i * 2 < count)
-		{
-			return cropOrigin + Math.round((float) cropExtent * i / count);
-		}
-		int mirrorOut = Math.round((float) cropExtent * (count - i) / count);
-		return cropOrigin + (cropExtent - mirrorOut);
+		// Off-centre lines: delegate to the shared chokepoint so the on-screen preview and the
+		// export-baked grid use byte-identical rounding (preventing the "ghost grid" mismatch
+		// that would otherwise appear at certain dims when comparing a save against the editor).
+		return cropOrigin + GridGeometry.mirroredLinePos(i, count, cropExtent);
 	}
 }

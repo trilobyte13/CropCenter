@@ -102,25 +102,34 @@ public final class SaveDialog
 	/**
 	 * Apply highlight styling to the two format chips based on which is selected. Selected chip gets mauve
 	 * background + crust text; unselected gets surface1 bg + default text.
+	 *
+	 * @param jpegBtn       the JPEG chip; receives mauve fill + crust text when jpegSelected is true
+	 * @param pngBtn        the PNG chip; receives mauve fill + crust text when jpegSelected is false
+	 * @param jpegSelected  true when JPEG is the current selection; toggles the highlight assignment
+	 * @param density       display density for the dp→px corner-radius conversion
 	 */
 	private static void applyFormatChipStyle(TextView jpegBtn, TextView pngBtn, boolean jpegSelected, float density)
 	{
-		GradientDrawable jpegBg = new GradientDrawable();
-		jpegBg.setColor(jpegSelected ? ThemeColors.MAUVE : ThemeColors.SURFACE1);
-		jpegBg.setCornerRadius(DpToPx.toPx(4, density));
-		jpegBtn.setBackground(jpegBg);
+		GradientDrawable jpegBackground = new GradientDrawable();
+		jpegBackground.setColor(jpegSelected ? ThemeColors.MAUVE : ThemeColors.SURFACE1);
+		jpegBackground.setCornerRadius(DpToPx.toPx(4, density));
+		jpegBtn.setBackground(jpegBackground);
 		jpegBtn.setTextColor(jpegSelected ? ThemeColors.CRUST : ThemeColors.TEXT);
 
-		GradientDrawable pngBg = new GradientDrawable();
-		pngBg.setColor(!jpegSelected ? ThemeColors.MAUVE : ThemeColors.SURFACE1);
-		pngBg.setCornerRadius(DpToPx.toPx(4, density));
-		pngBtn.setBackground(pngBg);
+		GradientDrawable pngBackground = new GradientDrawable();
+		pngBackground.setColor(!jpegSelected ? ThemeColors.MAUVE : ThemeColors.SURFACE1);
+		pngBackground.setCornerRadius(DpToPx.toPx(4, density));
+		pngBtn.setBackground(pngBackground);
 		pngBtn.setTextColor(!jpegSelected ? ThemeColors.CRUST : ThemeColors.TEXT);
 	}
 
 	/**
 	 * Commit the dialog's selections to CropState — one updateExportConfig for format, one updateGridConfig for the
 	 * export-grid toggle.
+	 *
+	 * @param state    CropState to mutate; receives the format + grid-include updates
+	 * @param isJpeg   true to commit JPEG, false to commit PNG (the dialog's format chip state)
+	 * @param bakeGrid the Export Grid checkbox state to commit
 	 */
 	private static void applySettings(CropState state, boolean isJpeg, boolean bakeGrid)
 	{
@@ -139,8 +148,8 @@ public final class SaveDialog
 		LinearLayout card = DialogCards.newCard(ctx, density);
 		DialogCards.addCardTitle(card, "Format");
 
-		LinearLayout fmtRow = new LinearLayout(ctx);
-		fmtRow.setOrientation(LinearLayout.HORIZONTAL);
+		LinearLayout formatRow = new LinearLayout(ctx);
+		formatRow.setOrientation(LinearLayout.HORIZONTAL);
 		final TextView jpegBtn = formatChip(ctx, "JPEG", density);
 		final TextView pngBtn = formatChip(ctx, "PNG", density);
 
@@ -163,9 +172,9 @@ public final class SaveDialog
 		LinearLayout.LayoutParams pngBtnLayoutParams = new LinearLayout.LayoutParams(
 			0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
 		pngBtnLayoutParams.leftMargin = dp8;
-		fmtRow.addView(jpegBtn, jpegBtnLayoutParams);
-		fmtRow.addView(pngBtn, pngBtnLayoutParams);
-		card.addView(fmtRow, DialogCards.topMargin(dp8));
+		formatRow.addView(jpegBtn, jpegBtnLayoutParams);
+		formatRow.addView(pngBtn, pngBtnLayoutParams);
+		card.addView(formatRow, DialogCards.topMargin(dp8));
 		return card;
 	}
 

@@ -25,8 +25,8 @@ import java.nio.file.StandardCopyOption;
  * Verifies the end state and surfaces a failure dialog when disk doesn't match the intent.
  *
  * Lives downstream of the save flow — SaveController decides whether to invoke this. SEFT preservation is the
- * exporter's responsibility (see CropExporter.appendSeft for the verbatim-re-append contract and the why-we-don't-
- * fabricate-fresh-SEFT rationale).
+ * exporter's responsibility (see CropExporter.appendSeftFileToFile for the verbatim-re-append contract and the
+ * why-we-don't-fabricate-fresh-SEFT rationale).
  */
 final class ReplaceStrategy
 {
@@ -48,6 +48,13 @@ final class ReplaceStrategy
 	private final SafFileHelper safFiles;
 	private final SaveHost host;
 	private final StoragePermissionHelper permissions;
+	// Side-effect output from replaceViaFileIo: set to true when the atomic-move target write
+	// succeeded but the placeholder doc could not be deleted (rare; happens when SAF provider
+	// holds an exclusive lock or returns false from delete). When true, the verify-skip
+	// short-circuit must NOT fire because verifyReplace's duplicate-detection is the only path
+	// that surfaces the "leftover placeholder" state to the user as a failure dialog. Reset to
+	// false at the top of replaceViaFileIo so a prior save's value doesn't leak.
+	private boolean fileIoPlaceholderRemains;
 
 	ReplaceStrategy(SaveHost host, ExportPipeline exportPipeline, SafFileHelper safFiles,
 		StoragePermissionHelper permissions)
@@ -319,6 +326,9 @@ final class ReplaceStrategy
 	 */
 	private boolean replaceViaFileIo(Uri placeholderUri, String requestedName, byte[] data)
 	{
+		// Reset the side-effect flag so a prior save's leftover state doesn't poison this call's
+		// verify-skip decision.
+		fileIoPlaceholderRemains = false;
 		File placeholder = safFiles.fileFromSafUri(placeholderUri);
 		if (placeholder == null)
 		{
@@ -382,6 +392,10 @@ final class ReplaceStrategy
 		if (!placeholderGone)
 		{
 			Log.w(TAG, "replaceViaFileIo: target written but couldn't delete placeholder " + placeholder);
+			// Surface the leftover to the verify path so the user gets the "Couldn't verify
+			// replace" dialog (with the duplicate-file diagnosis inside verifyReplace) instead
+			// of a misleading "Replaced X" toast that ignores the stray placeholder.
+			fileIoPlaceholderRemains = true;
 		}
 		// Force mtime update even when the temp's bytes matched the prior target bytes. Samsung's
 		// FUSE-backed storage has been observed to skip mtime refresh on dedup-detected
@@ -641,15 +655,20 @@ final class ReplaceStrategy
 		// clean replace we issue the one and only "Replaced" toast (doExport's "Saved" toast was suppressed for
 		// this exact reason). The expected length is passed so existence + zero-byte files aren't mistaken for
 		// success. Two short-circuits skip the placeholder-based verifyReplace:
-		//   - Strategy A success (`targetWrittenViaFile`): replaceViaFileIo already verified the target's
-		//     on-disk length matches data.length AND deleted the placeholder. Re-running verifyReplace
-		//     would call fileFromSafUri(placeholderUri) which now resolves via /proc/self/fd readlink
-		//     (resolveViaProcFd) — that opens the URI, which fails with ENOENT because the placeholder
-		//     was just deleted, classifyVerifyOutcome falls through to its SAF-fallback path, and the
-		//     user sees a false "Couldn't verify replace" dialog on a Replace that actually succeeded.
+		//   - Strategy A clean success (`targetWrittenViaFile` AND `!fileIoPlaceholderRemains`):
+		//     replaceViaFileIo verified the target's on-disk length matches data.length AND deleted
+		//     the placeholder. Re-running verifyReplace would call fileFromSafUri(placeholderUri)
+		//     which now resolves via /proc/self/fd readlink (resolveViaProcFd) — that opens the URI,
+		//     which fails with ENOENT because the placeholder was just deleted, classifyVerifyOutcome
+		//     falls through to its SAF-fallback path, and the user sees a false "Couldn't verify
+		//     replace" dialog on a Replace that actually succeeded.
 		//   - Strategy B success (`collidingSafVerified`): the colliding URI was byte-for-byte verified
 		//     against the data, and the placeholder was deleted — same logic as Strategy A.
-		boolean verified = targetWrittenViaFile || collidingSafVerified
+		// When `fileIoPlaceholderRemains` is true (Strategy A wrote the target but couldn't delete the
+		// placeholder), we DELIBERATELY fall through to verifyReplace so its duplicate-file diagnosis
+		// surfaces a failure dialog the user can act on (delete the stray placeholder themselves).
+		boolean verified = (targetWrittenViaFile && !fileIoPlaceholderRemains)
+			|| collidingSafVerified
 			|| verifyReplace(verifyUriBox[0], requestedName, data.length);
 		if (verified)
 		{

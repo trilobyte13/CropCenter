@@ -182,8 +182,14 @@ public final class JpegMarkerWalker
 	}
 
 	/**
-	 * Scan an SOS segment's entropy-coded data forward from `off` (the FF DA position).
+	 * Scan an SOS segment's entropy-coded data forward from `off` (the FF DA position). Skips over RST
+	 * (FFD0–FFD7) and stuffing (FF00) bytes per the JPEG spec; the first non-RST, non-stuff marker
+	 * either ends the scan (EOI) or signals the next segment's start.
 	 *
+	 * @param file     JPEG bytes to walk
+	 * @param off      offset of the SOS marker's FF byte (FF DA)
+	 * @param endBound exclusive upper bound on the walk — typically `file.length`, OR a caller-imposed
+	 *                 cap when probing only a head buffer
 	 * @return one of:
 	 *   - ≥ 0: offset just past an EOI hit inside the entropy stream
 	 *   - SOS_BAIL: the SOS header is malformed — caller bails with -1

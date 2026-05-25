@@ -11,7 +11,7 @@ a Gallery-edited file keeps its Revert chain across CropCenter re-edits).
 **Target/Compile SDK**: 36
 **Language**: Java 21
 **Build**: AGP 9.1.1, Gradle 9.3.1
-**LSLOC**: 17,549 total (9,341 main + 8,208 test) — UCC-style logical SLOC via `scripts/audit.py lsloc` (counts
+**LSLOC**: 18,381 total (9,698 main + 8,683 test) — UCC-style logical SLOC via `scripts/audit.py lsloc` (counts
 `;`-terminated statements, control-flow openers, type declarations, and method signatures; excludes blanks, comments,
 and bare-brace-only lines). **Numbers must be exact** — every change that adds, removes, or restructures Java code must
 refresh this line via `python scripts/audit.py lsloc` in the same commit. No tolerance band; the spec matches the
@@ -71,7 +71,8 @@ then `JpegMetadataInjector.injectFileToFile` (head-scan + chunk-copy tail), then
 append), and finally a single sized `Files.readAllBytes` on the last tempfile once all upstream byte[]s have been freed.
 Peak Java heap during the entire encode → inject → compose → SEFT chain is ~64 KB (the streaming chunk buffer) plus the
 metadata segments (a few MB at most); the only large byte[] alive at any point is the final readback (~100-150 MB on a
-200 MP save). `MainActivity.sweepStaleCacheFiles` reclaims pipeline tempfiles from hard process kills. The complete set
+200 MP save). `UltraHdrCompat.sweepStaleCacheFiles` (called from `MainActivity.onCreate`) reclaims pipeline tempfiles
+from hard process kills. The complete set
 of pipeline tempfile prefixes the sweep matches: `hdr_src_jpeg_encode_` (JPEG encode stage), `hdr_src_inject_`
 (JPEG metadata inject), `hdr_src_compose_` (JPEG gain-map compose), `hdr_src_reinject_` (JPEG HDR-drop re-inject),
 `hdr_src_seft_` (JPEG SEFT append), `hdr_src_png_encode_` (PNG encode stage), `hdr_src_png_inject_` (PNG eXIf inject) —
@@ -116,12 +117,12 @@ that combo is uncommon and the failure aborts cleanly with the placeholder save 
 
 | Component | Class | Purpose |
 |-----------|-------|---------|
-| State | `model/CropState` | Central state: crop params, metadata, rotation anchor (stable intent center for no-selection rotations). Cross-thread fields are volatile so the bg load/graft/save executor can publish to the UI thread without a lock. Volatile fields: `sourceImage`, `displayImage` (display proxy installed in lockstep with sourceImage via `setSourceImage(source, display)`), `selectionPoints`, `jpegMeta`, `aiMask`, `graftApplied` (read by `ExportPipeline.canBypassEncode` on the UI thread, written by `installGraft` on bg), `exportConfig` + `gridConfig` (read by `ExportPipeline.canBypassEncode` and `SaveController.openSaveOptionsDialog` on UI; mutated via `setSourceFormat` / `updateGridConfig` from either thread), `gainMap` + `seftTrailer` (committed on bg by `applyBytes`, read by save paths on bg via the same single-thread executor — preventive insurance against a future UI-thread reader), and `pngExifTiff`. `sourceImage` is volatile because UI-thread `EditorRenderer.draw` reads it on every frame while bg-thread `reset()` writes it during load; the per-frame snapshot in EditorRenderer is necessary but not sufficient without the happens-before. |
+| State | `model/CropState` | Central state: crop params, metadata, rotation anchor (stable intent center for no-selection rotations). Cross-thread fields are volatile so the bg load/graft/save executor can publish to the UI thread without a lock. Volatile fields: `sourceImage`, `displayImage` (display proxy installed in lockstep with sourceImage via `setSourceImage(source, display)`), `selectionPoints`, `jpegMeta`, `aiMask`, `graftApplied` (read by `ExportPipeline.canBypassEncode` on the UI thread, written by `installGraft` on bg), `exportConfig` + `gridConfig` (read by `ExportPipeline.canBypassEncode` and `SaveController.openSaveOptionsDialog` on UI; mutated via `installLoadedImage` — which inlines the former `setSourceFormat`'s exportConfig seed — and `updateGridConfig` from either thread), `gainMap` + `seftTrailer` (committed on bg by `applyBytes`, read by save paths on bg via the same single-thread executor — preventive insurance against a future UI-thread reader), and `pngExifTiff`. `sourceImage` is volatile because UI-thread `EditorRenderer.draw` reads it on every frame while bg-thread `reset()` writes it during load; the per-frame snapshot in EditorRenderer is necessary but not sufficient without the happens-before. |
 | State Dispatch | `model/StateBus` | Listener-dispatch + batch-suppression protocol extracted from CropState. `bus.beginBatch / endBatch` lets the Activity wrap recomputeCrop + UI updates so inner setter calls coalesce into one listener invocation |
 | Output Format | `model/Format` | Enum (`JPEG` / `PNG`) carrying MIME type + file extension. Gives compile-time exhaustiveness on the export-pipeline switch |
 | Crop Math | `crop/CropEngine` | Computes crop from center + AR + lock + rotation; keeps cropX continuous mid-rotation, with parity-snap applied at drag-release in `CropEditorView.onPanRelease` |
-| Rotated Clamp | `crop/RotatedCropClamp` + `crop/CropFitContext` | Clamp candidate crop centers against a rotated image's bounds via 25-iter binary search. CropFitContext bundles the pre-computed sin/cos/halfWidth/halfHeight that the binary search and corner-check share |
-| Render Geometry | `crop/CropRender` | Final class bundling (centerX, centerY, cropW, cropH, imgW, imgH, rotation) + derived `srcX()` / `srcY()`. Private constructor + public `of(...)` factory in (W, H) order — record-style storage was rejected because a positional canonical constructor would force (H, W) alphabetical order, a transposable footgun against the codebase's (W, H) convention |
+| Rotated Clamp | `util/RotatedCropClamp` + `util/CropFitContext` | Clamp candidate crop centers against a rotated image's bounds via 25-iter binary search. CropFitContext bundles the pre-computed sin/cos/halfWidth/halfHeight that the binary search and corner-check share. Both moved from `crop/` to `util/` so `model/CropState.setCenter` can call them without inverting the model → crop layering |
+| Render Geometry | `model/CropRender` | Final class bundling (centerX, centerY, cropW, cropH, imgW, imgH, rotation) + derived `srcX()` / `srcY()`. Private constructor + public `of(...)` factory in (W, H) order — record-style storage was rejected because a positional canonical constructor would force (H, W) alphabetical order, a transposable footgun against the codebase's (W, H) convention. Lives in `model/` (moved from `crop/`) so `util/UltraHdrCompat` can import it without `util/ → crop/` inversion |
 | Export Result | `crop/ExportResult` | Record bundling encoded bytes + structurally-derived `hdrAttached` flag, returned by `CropExporter.export`. Threaded through `ExportPipeline.encodePhase` to `reportSuccess` so the [HDR OK] / [HDR dropped] toast is driven by `GainMapComposer.ComposeResult.hdrAttached()` — an explicit boolean set true only when the gain map was successfully appended AND MPF offsets were patched to point at it. The structural flag is required because reference-inequality on the byte[] is unreliable (GainMapComposer returns an XMP-patched primary on the MPF-fail path, distinct from the input array) and a full-file substring scan for `hdrgm` false-positives on preserved trailers and Extended-XMP segments |
 | Horizon | `util/HorizonDetector` | Auto-rotation: metadata pass first, fallback to painted-region Hough transform |
 | Export | `crop/CropExporter` | Full pipeline: crop, rotate, compress, HDR, EXIF, SEFT |
@@ -134,7 +135,7 @@ that combo is uncommon and the failure aborts cleanly with the placeholder save 
 | Save Dialog (legacy / no-MES) | `view/SaveDialog` | Format (JPEG / PNG) + export-grid bake-in toggle. Filename / target directory are picked separately by the SAF `ACTION_CREATE_DOCUMENT` picker that follows. Used as the fallback when MES isn't granted. |
 | Merged Save Dialog (MES path) | `view/FolderPickerDialog` | Format + Export Grid + folder navigator + thumbnail grid/list (toggle persists) + editable `Save as` filename field. Browses the filesystem via `java.io.File`, returns a `SaveChoices` record (folder, filename, format, bakeGrid), writes through externalstorage SAF document URIs that the existing Replace flow resolves back to the same `File`. |
 | Save Flow | `SaveController` + `ReplaceStrategy` + `ExportPipeline` | Dual-path routing (merged-in-app vs SAF) gated on MES, collision detection (auto-rename + sibling-create, in-app Replace/Rename/Cancel), crash-safe write-then-swap |
-| Load Flow | `ImageLoadController` | Bg-thread decode + EXIF orientation + metadata extract for SAF URIs (`load(Uri)`), Share/View intents (`handleIncomingIntent`), and in-memory graft bytes (`applyBytes(byte[], String)`). Owns the busy-release-in-finally + progress-overlay-hide contract |
+| Load Flow | `ImageLoadController` | Bg-thread decode + EXIF orientation + metadata extract for SAF URIs (`load(Uri)`), Share/View intents (`handleIncomingIntent`), and in-memory graft bytes (`applyBytes(byte[], String)`). Owns the busy-release-in-finally + progress-overlay-hide contract. Exposes `getLastLoadedUri()` so `MainActivity.onSaveInstanceState` can persist the source URI for process-death restore (promoted on the bg thread only after `applyBytes` returns true and the UI install runnable is posted — a busy-rejected or decode-failed load leaves the prior session's URI in place so the restore-bundle URI and in-memory CropState stay paired) |
 | Apply-Edit Flow | `GraftController` + `graft/EditAligner` + `metadata/GraftWriter` | Long-press-Open → SAF picker → validation (display-dim match) → optional re-orient → AI-region detect → byte splice → in-memory apply. Owns its own state machine (`graftPending`, `pendingSource` snapshot) |
 | Toolbar / AR Spinner | `ToolbarBinder` | AR spinner population, custom-AR dialog, mode/lock-axis row wiring, precise-rotation dialog. Extracted from MainActivity to keep the Activity focused on lifecycle and host-interface implementations |
 | Auto-Rotate Button | `AutoRotateBinder` | Wires the Auto button in the Points row to `HorizonDetector` (metadata pass + painted-region fallback) and posts the toast outcome |
@@ -226,7 +227,7 @@ that combo is uncommon and the failure aborts cleanly with the placeholder save 
    horizon paint mode (discards the in-progress stroke and reverts the Auto button label / color so the new image's
    first touch routes to Select / Move instead of paint).
 
-`CropState.setSourceFormat` seeds the export config to match the loaded format so the SaveDialog's format toggle and
+`CropState.installLoadedImage` seeds the export config to match the loaded format so the SaveDialog's format toggle and
 default filename arrive on the same format the user opened. Without this, loading a PNG would leave Save defaulting to
 JPEG (silent format conversion + alpha loss). The user can still flip the toggle in the SaveDialog before any individual
 save.
@@ -348,19 +349,37 @@ Per-mode lock preferences (Both/H/V) are remembered independently for Move and S
 
 ### 4. Aspect Ratio
 
-**Spinner labels in order**: 4:5 (default), Full, 16:9, 3:2, 4:3, 5:4, 1:1, 3:4, 2:3, 9:16, Custom. "Full" is the
-no-AR-constraint option (`AspectRatio.FREE` with width=height=0).
+**Spinner labels in order** (widest landscape → square → tallest portrait): Full, 16:9, 3:2, 4:3, 5:4, 1:1,
+**4:5 (default)**, 3:4, 2:3, 9:16, Custom. "Full" is the no-AR-constraint option (`AspectRatio.FREE` with
+width=height=0). The default selection mirrors `CropState`'s `R4_5` field default; `ToolbarBinder.setupArSpinner` calls
+`spinner.setSelection(indexOfAspectRatio(state.getAspectRatio()))` so position 0 (Full) doesn't silently overwrite the
+model on first show.
 
 **Custom AR**: Dialog with width:height inputs when "Custom" is selected; constructs a fresh `AspectRatio(w, h)` and
-assigns it. After Apply, the closed spinner head displays `Custom W:H` (e.g. `Custom 5:7`) instead of reverting to the
-previously-selected preset, and the dropdown's Custom row also reads `Custom W:H` so a user reopening the dropdown can
-see what's currently committed before re-tapping Custom (the spinner adapter substitutes the dynamic label via a
-`customArLabel` / `customArActive` pair driven by `getView` / `getDropDownView` overrides). Picking any preset row from
-the spinner clears the dynamic label and the closed head reads the preset name. Cancelling / dismissing the Custom
-dialog (X / back-press) leaves the model and label unchanged — the spinner setSelection restores it to the position it
-sat at before Custom was tapped.
+assigns it. The width / height fields pre-fill with the currently-applied AR's values (so editing a preset 4:5 opens
+to "4" and "5", and re-editing an existing Custom 5:7 opens to "5" and "7"); FREE falls back to a 16:9 starting point
+since FREE has no meaningful (width, height) to seed from. After Apply, the closed spinner head displays the numeric
+ratio (`W:H` — e.g., `5:7`, no "Custom " prefix) so the active custom AR reads exactly like the preset rows. The
+DROPDOWN's Custom row always reads the static "Custom" string from `AR_LABELS` — the literal label keeps the row
+identifiable as the edit affordance regardless of whether a custom is currently active. Only the closed head reflects
+the dynamic value; the spinner adapter handles this via a `customArLabel` / `customArActive` pair driven by `getView`
+(closed head) only — `getDropDownView` no longer substitutes. The spinner head is sized to fit a `##:##` ratio so the
+compact numeric width holds across every preset and any reasonable 2-digit custom AR. Picking any preset row from the
+spinner clears the dynamic label and the closed head reads the preset name. Cancelling / dismissing the Custom dialog
+(X / back-press) leaves the model and label unchanged — the spinner setSelection restores it to the position it sat at
+before Custom was tapped.
 
 **Auto-crop**: Changing AR auto-creates a crop at image center if none exists.
+
+**Recompute-on-mode-switch**: switching editor modes (Move ↔ Select) or lock-axis state runs
+`recomputeForLockChange`, which calls `autoComputeFromPoints` when selection points exist (re-frames the
+crop on the points) or `recomputeCrop` against the current anchor when they don't (re-fits the crop size
+at the current AR). Combined with the AR spinner's onItemSelected handler — which auto-recomputes on every
+AR change — every meaningful "reset" the user might want is reachable by mode switch, AR change, or the
+"Clear Points" button. No separate long-press / gesture-driven reset affordance is exposed; the earlier
+long-press-AR-spinner reset was removed because it was either a silent no-op (Select mode with points
+already framing the crop) or duplicated what `recomputeForLockChange` already does on the next toolbar
+interaction.
 
 **Locked-AR exact-integer realisation** (`AspectRatio.snap`): when an integer-valued AR is locked, `CropEngine` snaps
 the rounded crop dimensions to the nearest `(Wᵣ·k, Hᵣ·k)` realisation, where `(Wᵣ, Hᵣ)` is the AR reduced to lowest
@@ -462,18 +481,22 @@ readout, but the bypass disabled and forced a needless re-encode). The 0.005° e
 
 | Gesture | Action |
 |---------|--------|
-| Two-finger pinch | Zoom with pivot (1x to 256x) |
+| Two-finger pinch | Zoom with pivot; max zoom is per-image (caps each source pixel at 64 screen pixels) |
 | Single-finger drag | Move mode: move crop / Select mode: pan viewport |
 | Double-tap | Fit image to view (disabled in Select mode) |
 | Long-press | Remove nearest selection point (Select mode) |
 
-Viewport clamped to prevent panning image off screen. Bitmap filtering disabled at 4x+ zoom for crisp pixels.
+Zoom ceiling is `ViewportMath.maxZoom() = MAX_PIXEL_RATIO / baseScale`, so a large source image fit at a tiny
+baseScale gets a high zoom cap (e.g., a 200 MP source fit on a phone caps near 1000×) while a small image fit near 1:1
+caps at 64×. `ScaleGestureDetector`'s onScale is gated by a 1.5% scaleFactor deadzone so sub-percent finger-distance
+jitter (hand tremor, sensor noise) doesn't drift-zoom when the user is just holding two fingers down. Viewport clamped
+to prevent panning image off screen. Bitmap filtering disabled at 4x+ zoom for crisp pixels.
 
 ### 7. Grid Overlay
 
 - Toggle via toolbar `Grid` checkbox
-- Settings dialog opens via the toolbar settings icon (combined dialog covers grid + pixel-grid + selection/paint +
-  build)
+- Settings dialog opens via the toolbar settings icon (cards alphabetised: build, grid, permissions,
+  pixel-grid, selection/paint)
 - Grid-count presets: 2x2 through 8x8; arbitrary cols/rows via numeric input
 - Configurable color (via `ColorPickerDialog`), line width (1-20px)
 - **Line positions match `CropExporter.gridLinePixel`'s rounded relative-offsets**: first-half lines at `cropOrigin +
@@ -483,7 +506,12 @@ Viewport clamped to prevent panning image off screen. Bitmap filtering disabled 
   `cropCenter` (half-integer for odd cropExtent) so single-point selection markers sit at the grid intersection — the
   only case where preview diverges from export by 0.5 px
 - Line width scales by image-to-screen ratio (preview matches export)
-- Pixel grid at 6x+ zoom (separate toggle + configurable color in Settings)
+- Pixel grid activates when each source pixel renders at ≥ `EditorRenderer.MIN_PIXEL_PEEP_DP` (3dp) on
+  screen — density-normalised so visibility is consistent across screens (the prior raw-pixel threshold
+  rendered as ~2dp on a 3× phone, barely visible). Lowered from 6dp to 3dp so the grid activates at half
+  the previous zoom level — each source pixel only needs to render at ~3dp instead of ~6dp before the
+  grid shows. Separate toggle + configurable color in Settings; same threshold drives the per-pixel
+  selection-marker style in `EditorRenderer.drawSelectionMarkers`
 - Selection points, polygon fill, and horizon paint use the shared selection / paint color (`GridConfig.selectionColor`,
   configurable in the Settings card per §11) — kept separate from grid color so the paint surface stays visible against
   the grid overlay
@@ -519,8 +547,30 @@ Viewport clamped to prevent panning image off screen. Bitmap filtering disabled 
   dialog commits format / grid-include selections to `CropState` once at "Save here";
   `SaveController.onMergedSaveConfirmed` captures a `priorSnapshot` BEFORE the commit, so an in-app
   collision-dialog Cancel rolls the format / grid back (matching the SAF path's rollback contract).
-  The last-picked folder persists across launches via SharedPreferences (`cropcenter_save` /
-  `last_save_folder`) so subsequent Saves resume there.
+  Initial folder resolves in three tiers via `SaveController.loadLastSaveFolder`: the last-picked
+  save folder (`cropcenter_save` / `last_save_folder`), then the last-loaded file's parent
+  (`last_load_folder`, recorded by `ImageLoadController` on successful load via
+  `SafFileHelper.fileFromSafUri`), then primary external storage. Each persisted path is checked
+  for existence + directory-ness before use, so a deleted folder falls through to the next tier.
+  Every visible element — title region (bold folder name + clickable breadcrumb + grid/list toggle
+  icon), thumbnail scroller, format/options row (`Export Grid` checkbox on the left, JPEG/PNG
+  format chips on the right), filename input — sits inside a single SURFACE0-backed `DialogCards`
+  panel matching the Settings dialog's section cards. The panel uses MATCH_PARENT width +
+  WRAP_CONTENT height. The scroller is also WRAP_CONTENT but is internally capped via an anonymous
+  ScrollView subclass whose `onMeasure` clamps height to `Math.max(240dp, screenHeightPx − 440dp)`
+  — the 440dp reservedPx budget approximates title block + breadcrumb + options row + filename
+  row + AlertDialog frame + Save/Cancel buttons (status/nav bar 80dp + AlertDialog top frame 24dp
+  + button row 60dp + title block ~50dp + breadcrumb ~28dp + options row ~80dp + filename row
+  ~60dp ≈ 382dp, rounded up to 440dp for device variance — earlier 300dp budget clipped Save/Cancel
+  on full-grid folders). Short folders make a compact dialog; long
+  folders fill the cap and the ScrollView starts scrolling, keeping options/filename/Save
+  reachable. Grid rows span the full panel content width with no outer inset; each of three
+  cells targets a 220dp thumbnail at WRAP_CONTENT height, doubled from the prior padOuter-inset
+  width so thumbnails read at glanceable size. List rows and folder rows also span the full
+  width (no padOuter inset) for consistent left/right alignment with the options/filename rows.
+  List view and grid view share identical 4dp+4dp vertical row spacing so toggling doesn't
+  change perceived row density. Panel margins are symmetric — 12dp on every side between the
+  inlaid card and the AlertDialog frame.
 
 - **MES not granted (legacy path)** — `SaveController.openSaveOptionsDialog` opens the original
   `view/SaveDialog` (title `"Save Image"`, positive button `"Continue"`, negative button `"Cancel"`) with
@@ -563,13 +613,18 @@ features it boosts. Forcing graft saves through the full encode regenerates the 
 - **PNG** — default (sRGB) so source alpha round-trips and rotation corners stay transparent. Color-managed canvases can
   apply subtle filtering during rasterization that breaks grid-line consistency.
 
-**SAF extension-mismatch guard** (`SaveController.handleSaveAsResult`): SAF locks the document's MIME type from the
-requested filename when the picker opens. If the user renames in the picker — `.jpg → .png`, `.jpg → .webp`, `.jpg →
-.heic`, etc. — writing the encoder's bytes would land them in a document whose MIME type and filename extension
-disagree. The guard rejects when `chosen` has a non-empty extension AND that extension's Format doesn't match
-`requested`'s Format. Both known-format mismatches (`.jpg → .png`) and unknown-extension typos (`.jpg → .webp` where
-`Format.fromExtension("foo.webp") == null`) are caught; extension-less filenames are allowed through (SAF MIME stays
-valid, encoder bytes match).
+**Extension-vs-format coherence**: the merged in-app dialog and the legacy SAF picker handle this differently because
+they have different control surfaces.
+- **Merged dialog** (`FolderPickerDialog.normaliseExtension`): the format chip drives the on-disk extension. At
+  "Save here" and at in-app Rename OK, the typed filename's trailing extension is swapped to match the selected
+  format ("photo.heic" with PNG selected → "photo.png"). Same rule applies to the live extension swap when the
+  user toggles the format chip mid-edit.
+- **Legacy SAF picker** (`SaveController.handleSaveAsResult` guard): SAF locks the document's MIME type from the
+  requested filename when the picker opens. If the user renames in the picker (`.jpg → .png`, `.jpg → .webp`,
+  `.jpg → .heic`, etc.), the bytes would land in a document whose MIME and extension disagree. The guard rejects
+  when `chosen` has a non-empty extension AND that extension's Format doesn't match `requested`'s Format. Known-
+  format mismatches (`.jpg → .png`) and unknown-extension typos (`.jpg → .webp`) are both caught; extension-less
+  filenames are allowed through (SAF MIME stays valid, encoder bytes match).
 
 **Overwrite-confirm dialog** (`SaveController.showOverwriteConfirmDialog`): SAF's `ACTION_CREATE_DOCUMENT` picker can
 return a URI to pre-existing content without surfacing a Replace prompt — observed on recent Samsung Files / Google
@@ -901,19 +956,27 @@ path when applicable.
 
 ### 11. Settings
 
-Settings dialog (opened via the settings icon in the toolbar) is a single scrollable view with four cards. Toggles and
-color-picker selections commit to `state.updateGridConfig` immediately as the user interacts; the Cols / Rows EditText
-values are deferred to the "Done" button so a partial typed entry doesn't fire a re-render mid-keystroke.
+Settings dialog (opened via the settings icon in the toolbar) is a single scrollable view holding up to five
+alphabetically-ordered cards. Toggles and color-picker selections commit to `state.updateGridConfig` immediately as the
+user interacts; the Cols / Rows EditText values are deferred to the "Done" button so a partial typed entry doesn't fire
+a re-render mid-keystroke.
 
-- **Grid card** — Cols / Rows numeric inputs (clamped to [1, 50]), preset chips (2x2 / 3x3 / … / 8x8), line color (opens
-  `ColorPickerDialog`), line width seek bar (1–20 px). Cross-references §7.
-- **Pixel Grid card** — toggle for the 6x+ zoom pixel-grid overlay, plus its color picker. Cross-references §7.
-- **Selection & Paint card** — single shared color used for selection points, polygon fill, and horizon paint (kept
-  separate from grid color so the paint surface stays visible against an arbitrary grid hue).
 - **Build card** — single line `"Version: " + BuildConfig.BUILD_TIME` (the build's compile timestamp injected by
   `app/build.gradle`), used to verify which APK is installed on the device. The card heading is the literal string
   "Build" (not "Build / About") — no separate About / credits surface, and the displayed value is the compile timestamp
   rather than a manifest `versionName`.
+- **Grid card** — Cols / Rows numeric inputs (clamped to [1, 99]), preset chips (2x2 / 3x3 / … / 8x8), line color (opens
+  `ColorPickerDialog`), line width seek bar (1–20 px). Cross-references §7.
+- **Permissions card** — tap target deep-linking to the system MANAGE_EXTERNAL_STORAGE settings page. The
+  entire card panel is the tap target (LinearLayout-level `setClickable(true)` + `setOnClickListener`, with a
+  `selectableItemBackground` foreground ripple) so taps land regardless of where inside the panel they fall.
+  Only added when the host exposes a `StoragePermissionHelper` (omitted in test fixtures).
+  `openStoragePermissionSettings` tries three intents in fallback order (per-app All-files-access toggle →
+  system-wide All-files-access list → app details page) since heavily-skinned OEMs sometimes reject the per-app
+  intent.
+- **Pixel Grid card** — toggle for the dp-thresholded pixel-grid overlay (see §7), plus its color picker.
+- **Selection & Paint card** — single shared color used for selection points, polygon fill, and horizon paint (kept
+  separate from grid color so the paint surface stays visible against an arbitrary grid hue).
 
 Tapping Settings while a save / load / detect / graft is in flight surfaces the busy toast instead of opening the dialog
 (mirrors `SaveController.showSaveDialog`'s busy gate). The complementary already-open-dialog race is closed by the §1
@@ -1156,7 +1219,7 @@ lossless MCU-level transcoding (~500 LSLOC + libjpeg-turbo NDK) isn't implemente
 
 - **Records**: `model/AspectRatio`, `model/ExportConfig`, `model/GridConfig`, `model/SelectionPoint`, `model/Graft`,
   `metadata/JpegSegment`, `metadata/ExtendedXmpReassembler.ExtendedXmpChunk`, `metadata/GainMapComposer.ComposeResult`,
-  `metadata/XmpItemLengthPatcher.SegmentPatchResult`, `crop/CropFitContext`, `crop/ExportResult`,
+  `metadata/XmpItemLengthPatcher.SegmentPatchResult`, `util/CropFitContext`, `crop/ExportResult`,
   `util/AiRegionDetector.AiMask`, `view/RotationRulerView.TickConfig`, `graft/EditAligner.Result`,
   `GraftController.SourceSnapshot`, `ReplaceStrategy.VerifyFailure`, `ExportPipeline.WriteOutcome`,
   `SaveController.PriorSaveSnapshot`, `ImageLoadController.MetadataExtraction`,
@@ -1230,11 +1293,26 @@ entities, etc.).
 7. **EXIF thumbnail overflow**: If original EXIF metadata + new thumbnail would exceed the 65535-byte APP1 limit,
    thumbnail is reduced or dropped. `oldThumbLen` is sanity-clamped against `data.length` to prevent malformed source
    EXIF from inflating the budget calculation.
-8. **No saved instance state**: Activity declares `configChanges="orientation|screenSize|keyboardHidden"`,
-   which covers device rotation and software-keyboard show/hide without an Activity recreate. Other
-   configuration changes (`density`, `uiMode` dark/light, `locale`, `fontScale`, `layoutDirection`)
-   trigger a recreate and lose crop state — there is no `onSaveInstanceState` implementation. Process
-   death (force-stop, OOM eviction) likewise loses state.
+8. **Bitmap not persisted across process death**: Activity declares
+   `configChanges="orientation|screenSize"`, which covers device rotation without an Activity
+   recreate. Other configuration changes (`density`, `uiMode` dark/light, `locale`, `fontScale`,
+   `layoutDirection`) trigger a recreate, AND a low-memory kill (force-stop, OOM eviction) ends
+   the process entirely. `MainActivity.onSaveInstanceState` persists the source URI plus the
+   user's editing geometry (AR, center, cropW/H, anchor, rotation, editor mode, center mode,
+   center-locked, selection points) so a kill mid-edit doesn't lose alignment work — restore on
+   the next `onCreate` re-fetches bytes via `imageLoader.load(savedUri)` and `installImageOnUi`
+   replays the geometry via `applyRestoreBundle`. The bitmap, originalFileBytes, gain map, SEFT
+   trailer, and PNG/EXIF metadata are NOT in the Bundle — they reload from the source URI. A
+   source whose persistable-read permission was revoked between save and restore (rare; SAF
+   typically only revokes on explicit user action) is not recoverable. **Graft-session
+   exception**: when `state.isGraftApplied()` is true (the user has applied an external edit
+   via Apply External Edit), `RestoreController.writeTo` writes NOTHING to the bundle and the
+   next launch cold-starts. The graft bytes live only in memory (the original source URI still
+   points at the pre-graft file on disk); restoring from that URI would silently reload the
+   pre-graft image and replay the geometry against it, presenting it as if the external edit
+   were still applied. The user would then save a crop of the original instead of the edit.
+   Cold-starting is the lesser surprise — the user loses the in-progress session but doesn't
+   accidentally save the wrong image.
 9. **Opaque-ID providers**: Providers without document-ID path encoding (some cloud / SD-card providers) lose the
    strongest collision-detection paths. The Save flow trusts SAF auto-rename as collision evidence on those providers —
    false positives surface as a Replace dialog the user can dismiss with Keep, never as silent data loss.

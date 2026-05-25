@@ -1,17 +1,20 @@
 package com.cropcenter.model;
 
-import com.cropcenter.crop.CropEngine;
-
 /**
  * Immutable aspect-ratio specification for the crop box. Dimensions are arbitrary unit — only their ratio is used;
  * `(16, 9)` and `(160, 90)` mean the same thing. The FREE constant (dimensions ≤ 0) signals "no constraint" and lets
  * CropEngine use the maximum available extent on each axis.
+ *
+ * Hosts the MIN_CROP_DIMENSION_PX constant (moved from CropEngine) so model/ doesn't have to import crop/ —
+ * AspectRatio.snap needs the floor to keep tiny ARs from collapsing, and CropEngine's per-axis clamps need it too;
+ * keeping it on AspectRatio puts the constraint at the data-type that defines what a "valid AR shape" can be.
  */
 public record AspectRatio(float width, float height)
 {
 	public static final AspectRatio FREE  = new AspectRatio(0, 0);
-	public static final AspectRatio R1_1  = new AspectRatio(1, 1);
+	// R16_9 sorts before R1_1 in case-sensitive ASCII because '6' (0x36) < '_' (0x5F).
 	public static final AspectRatio R16_9 = new AspectRatio(16, 9);
+	public static final AspectRatio R1_1  = new AspectRatio(1, 1);
 	public static final AspectRatio R2_3  = new AspectRatio(2, 3);
 	public static final AspectRatio R3_2  = new AspectRatio(3, 2);
 	public static final AspectRatio R3_4  = new AspectRatio(3, 4);
@@ -19,6 +22,11 @@ public record AspectRatio(float width, float height)
 	public static final AspectRatio R4_5  = new AspectRatio(4, 5);
 	public static final AspectRatio R5_4  = new AspectRatio(5, 4);
 	public static final AspectRatio R9_16 = new AspectRatio(9, 16);
+
+	// 4 px gives the smallest meaningful "this is still a crop" shape — under that, the crop is visible noise
+	// rather than a usable selection. Consumed by both AspectRatio.snap (floor on k post-snap) and CropEngine's
+	// per-axis clamps (Math.max(MIN_CROP_DIMENSION_PX, ...)); a future "raise the floor" change lands here.
+	public static final int MIN_CROP_DIMENSION_PX = 4;
 
 	/**
 	 * Any non-positive or non-finite dimension means "no constraint" — catches both the canonical FREE (0, 0)
@@ -94,9 +102,9 @@ public record AspectRatio(float width, float height)
 		int k = Math.round((float) num / den);
 		// Floor k so both axes land at ≥ MIN_CROP_DIMENSION_PX pixels — keeps 1:1 / 2:1 / similar-tiny
 		// ARs from collapsing to 1×1 at the lower edge of the optimisation. ceil(floor/wInt) is the
-		// smallest k that makes wInt·k ≥ floor; same for hInt. The floor constant is shared with
-		// CropEngine via cross-file reference so a future "raise the floor" change lands once.
-		int floor = CropEngine.MIN_CROP_DIMENSION_PX;
+		// smallest k that makes wInt·k ≥ floor; same for hInt. The floor constant lives on this type
+		// so model/ doesn't have to depend on crop/; CropEngine reads it back from here.
+		int floor = MIN_CROP_DIMENSION_PX;
 		int kMin = Math.max(1, Math.max((floor + wInt - 1) / wInt, (floor + hInt - 1) / hInt));
 		// Cap k at the supplied bounds — never snap larger than the image (or no-grow caller) allows.
 		int kMax = Math.min(maxW / wInt, maxH / hInt);

@@ -1,9 +1,12 @@
-package com.cropcenter.crop;
+package com.cropcenter.model;
 
 /**
  * Bundle of crop-geometry parameters that travel together to the export pipeline. Replaces the data clump that the
  * audit flagged in UltraHdrCompat.compressWithGainmap (12-param method) and the analogous threading through
  * CropExporter.export → buildCroppedGainMap → compressWithGainmap.
+ *
+ * Lives in model/ rather than crop/ because it's a pure value object — both crop/ and util/ consume it. Keeping
+ * it in crop/ forced util/UltraHdrCompat to depend on crop/ (a layering inversion: util is the lower layer).
  *
  * Implemented as a final class with a private constructor + public static `of(...)` factory, NOT a record, because a
  * record's canonical constructor must be at least as accessible as the record itself — making the all-positional raw

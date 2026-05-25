@@ -82,6 +82,13 @@ final class ExportPipeline
 	 * byte-identical but with different DCT/Huffman tables and a regenerated EXIF thumbnail. Writing the source
 	 * bytes verbatim preserves structure exactly.
 	 *
+	 * Lives in ExportPipeline (not CropState) by design: the method's logic combines CropState
+	 * reads with an ExifPatcher.hasIfd1Thumbnail probe. Moving it to CropState would force model/
+	 * to depend on metadata/ — a layering inversion. The pipeline IS the right owner because the
+	 * pipeline is the consumer that decides "encode or bypass"; CropState is just the data
+	 * source. The method stays static + package-private so the ExportPipelineTest can exercise
+	 * every gate without instantiating the whole pipeline.
+	 *
 	 * @param state current CropState snapshot — read for sourceFormat, graftApplied, rotationDegrees,
 	 *              gridConfig.includeInExport, originalFileBytes, hasCenter, cropW/cropH
 	 * @param isPng true when the requested output format is PNG (always returns false; PNG has its own

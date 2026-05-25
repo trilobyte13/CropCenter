@@ -8,13 +8,13 @@ import android.util.Log;
  */
 public final class SeftExtractor
 {
+	private static final String TAG = "SeftExtractor";
+
 	// Byte size of the SEFT footer at the end of the file: 4-byte little-endian size value + 4-byte "SEFT"
 	// ASCII magic. Centralised so the gain-map walker's `file.length - FOOTER_SIZE` slice cap (in
 	// GainMapExtractor) and the SEFT extractor's own `file.length - FOOTER_SIZE` aren't two unconnected
 	// `8` magic literals.
 	public static final int FOOTER_SIZE = 8;
-
-	private static final String TAG = "SeftExtractor";
 
 	private SeftExtractor() {}
 
@@ -67,9 +67,36 @@ public final class SeftExtractor
 			int gainMapEoiAbs = JpegMarkerWalker.findEoi(file, primaryEnd, sliceEnd);
 			if (gainMapEoiAbs < 0)
 			{
-				return null;
+				// Gain-map JPEG inside the SEFT chain is malformed — but the SEFT trailer itself
+				// is intact (hasSeftFooter passed). Fall back to the SEFT footer's size field:
+				// bytes [len-8..len-4] are a little-endian u32 giving the body size of
+				// [SEFT data blocks][SEFH directory], so trailerStart = len - FOOTER_SIZE - bodySize.
+				// Without this fallback the SEFT chain would be silently dropped from the re-saved
+				// file (the user's edit history + custom UDTAs disappear) on a malformed-gain-map
+				// source whose SEFT was otherwise fine.
+				long bodySize = ((file[file.length - 8] & 0xFFL))
+					| ((file[file.length - 7] & 0xFFL) << 8)
+					| ((file[file.length - 6] & 0xFFL) << 16)
+					| ((file[file.length - 5] & 0xFFL) << 24);
+				long fallbackStart = (long) file.length - FOOTER_SIZE - bodySize;
+				// Sanity: fallback must point inside the file AND past the primary EOI. Reject a
+				// negative-or-zero bodySize (mis-written by Samsung) and a fallbackStart that
+				// would intersect the primary scan.
+				if (bodySize > 0 && fallbackStart > primaryEnd && fallbackStart < file.length)
+				{
+					Log.w(TAG, "Gain-map EOI walk failed (malformed gain-map JPEG); falling back"
+						+ " to SEFT size field, trailerStart=" + fallbackStart);
+					trailerStart = (int) fallbackStart;
+				}
+				else
+				{
+					return null;
+				}
 			}
-			trailerStart = gainMapEoiAbs;
+			else
+			{
+				trailerStart = gainMapEoiAbs;
+			}
 		}
 		else
 		{

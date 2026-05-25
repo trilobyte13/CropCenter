@@ -17,11 +17,6 @@ package com.cropcenter.metadata;
  */
 public record JpegSegment(int marker, byte[] data)
 {
-	// Canonical XMP namespace identifier that prefixes the XML body of an XMP APP1 segment. The 29-byte
-	// "http://ns.adobe.com/xap/1.0/\0" string is the spec-defined signature; centralised here so both isXmp() and
-	// HorizonDetector.detectFromMetadata reference one constant rather than two duplicate string literals.
-	public static final String XMP_HEADER = "http://ns.adobe.com/xap/1.0/\0";
-
 	// Canonical Extended XMP namespace identifier — Adobe's continuation-chunk header that lives on each APP1
 	// segment of a multi-chunk Extended XMP packet (used when the standard XMP body exceeds 64 KiB and has to be
 	// split across several APP1 segments). Centralised here so ExtendedXmpReassembler, HdrSignature, and
@@ -34,6 +29,11 @@ public record JpegSegment(int marker, byte[] data)
 	// the same constant the rest of the metadata layer can reference; mirrors the XMP_HEADER /
 	// EXTENDED_XMP_HEADER pattern.
 	public static final String ICC_HEADER = "ICC_PROFILE\0";
+
+	// Canonical XMP namespace identifier that prefixes the XML body of an XMP APP1 segment. The 29-byte
+	// "http://ns.adobe.com/xap/1.0/\0" string is the spec-defined signature; centralised here so both isXmp() and
+	// HorizonDetector.detectFromMetadata reference one constant rather than two duplicate string literals.
+	public static final String XMP_HEADER = "http://ns.adobe.com/xap/1.0/\0";
 
 	// Cap on a JPEG APP segment's total byte length, INCLUDING the 2-byte length field itself. The segLen field
 	// is u16, so 65535 is the absolute spec ceiling. Centralised here so ExifPatcher and XmpItemLengthPatcher
@@ -124,6 +124,16 @@ public record JpegSegment(int marker, byte[] data)
 			&& data[4] == 'M' && data[5] == 'P' && data[6] == 'F' && data[7] == 0;
 	}
 
+	/**
+	 * True when this segment is an APP1 XMP packet — APP1 marker carrying the canonical Adobe
+	 * `http://ns.adobe.com/xap/1.0/\0` header at offset 4. Distinguishes XMP from EXIF (same
+	 * marker, different `Exif\0\0` header) and from Extended XMP (APP1 with the GUID-bearing
+	 * `http://ns.adobe.com/xmp/extension/\0` header — see isExtendedXmp).
+	 *
+	 * @return true when marker is APP1 and bytes after the 2-byte length prefix match the
+	 *         XMP namespace identifier; false otherwise (wrong marker, too short, or different
+	 *         APP1 sub-format)
+	 */
 	public boolean isXmp()
 	{
 		if (marker != JpegMarker.APP1 || data.length < 4 + XMP_HEADER.length())

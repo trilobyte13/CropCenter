@@ -52,6 +52,54 @@ public final class MpfPatcherTest
 	}
 
 	@Test
+	public void patchAcceptsThreeImageMpfWhenEntry0MpTypeIsRepresentative() throws IOException
+	{
+		// 3-image MPF with entry[0] MPType = 0x030000 (canonical "Representative Image" / "Baseline MP
+		// Primary" per MPF spec section 4.5). Patcher's entry[0] guard accepts 0x030000 explicitly so a
+		// strict-spec-conformant 3-image producer (Apple Portrait with a properly labelled primary) round-
+		// trips through HDR save without falling into the "non-representative entry[0]" refusal branch.
+		// Sister test patchRejectsThreeImageMpfWhenEntry0MpTypeIsNonRepresentative pins the negative
+		// case; pin the positive case here so a regression that flipped the accept/reject polarity on
+		// the entry[0] check would surface in BOTH tests rather than appearing harmless in one.
+		int newPrimarySize = 300;
+		int gainMapSize = 80;
+		long[] attrs = {
+			0x00030000L,                // entry[0] Representative Image (canonical primary marker)
+			0x00010005L,                // entry[1] Original Preservation (gain map)
+			0x00010003L,                // entry[2] Large Thumbnail
+		};
+		MpfFixture fx = buildMpfFile(newPrimarySize, gainMapSize, attrs);
+		assertTrue("3-image MPF with MPType=0x030000 entry[0] must be accepted",
+			MpfPatcher.patch(fx.bytes, newPrimarySize));
+		// Verify entry[0] size and entry[1] gain-map fields were patched.
+		assertEquals(newPrimarySize, readU32Le(fx.bytes, fx.entry0Off + 4));
+		assertEquals(gainMapSize, readU32Le(fx.bytes, fx.entry0Off + 16 + 4));
+		assertEquals(newPrimarySize - fx.mpfStart, readU32Le(fx.bytes, fx.entry0Off + 16 + 8));
+	}
+
+	@Test
+	public void patchAcceptsTwoImageMpfWithArbitraryEntry0MpType() throws IOException
+	{
+		// 2-image MPF with a bogus entry[0] MPType — explicitly NOT 0x030000 or 0. The patcher gates
+		// the entry[0] MPType validation behind `numImages >= 3` because on 2-image MPFs the layout
+		// is fixed (entry[0] = primary, entry[1] = gain map) regardless of how the producer filled
+		// the MPType bits, and existing Samsung Ultra HDR fixtures use non-canonical MPType values
+		// that we don't want to start rejecting. Pin that a 2-image MPF with a fully bogus
+		// entry[0] MPType still patches cleanly — guards against a regression that lifted the
+		// numImages >= 3 gate and started rejecting these.
+		int newPrimarySize = 220;
+		int gainMapSize = 60;
+		long[] attrs = {
+			0x12345678L,                // entry[0] bogus MPType (≠ 0x030000, ≠ 0)
+			0x00010005L,                // entry[1] Original Preservation (gain map)
+		};
+		MpfFixture fx = buildMpfFile(newPrimarySize, gainMapSize, attrs);
+		assertTrue("2-image MPF skips entry[0] MPType validation regardless of attr value",
+			MpfPatcher.patch(fx.bytes, newPrimarySize));
+		assertEquals(gainMapSize, readU32Le(fx.bytes, fx.entry0Off + 16 + 4));
+	}
+
+	@Test
 	public void patchFallsBackToEntry1ForTwoImageMpfWithMissingMpType() throws IOException
 	{
 		// numImages == 2 with no MPType match: the empirical Samsung Ultra HDR pattern ships gain map at index
@@ -286,6 +334,35 @@ public final class MpfPatcherTest
 		// entry[1]-shaped data into adjacent memory.
 		MpfFixture fx = buildMpfFile(100, 30, 1);
 		assertFalse(MpfPatcher.patch(fx.bytes, 100));
+	}
+
+	@Test
+	public void patchRejectsThreeImageMpfWhenEntry0MpTypeIsNonRepresentative() throws IOException
+	{
+		// 3-image MPF where entry[0]'s MPType is a recognised non-primary value (Large Thumbnail =
+		// 0x010003). MPF spec section 4.5 says entry[0] is FirstIndividualImage with MPType 0x030000
+		// (Representative Image); some firmware writers omit the field (MPType=0), which the patcher
+		// also tolerates. Any other MPType on entry[0] in a 3+ image MPF means the producer used a
+		// non-standard ordering — patching entry[0].size would corrupt the wrong slot. Pin the refusal
+		// AND the no-byte-mutation invariant (same contract as the multi-match / no-match rejection
+		// branches — sister test patchRejectsThreeImageMpfWhenNoMpTypeMatch pins the analogous
+		// no-mutation invariant on the entry[1]-MPType branch).
+		int newPrimarySize = 320;
+		int gainMapSize = 80;
+		long[] attrs = {
+			0x00010003L,                // entry[0] Large Thumbnail — NOT a valid primary marker
+			0x00010005L,                // entry[1] Original Preservation (gain map)
+			0x00010003L,                // entry[2] Large Thumbnail
+		};
+		MpfFixture fx = buildMpfFile(newPrimarySize, gainMapSize, attrs);
+		byte[] snapshot = fx.bytes.clone();
+		assertFalse("3-image MPF with non-representative entry[0] MPType must be refused",
+			MpfPatcher.patch(fx.bytes, newPrimarySize));
+		for (int i = 0; i < fx.bytes.length; i++)
+		{
+			assertEquals("byte " + i + " mutated on rejected patch (non-representative entry[0])",
+				snapshot[i], fx.bytes[i]);
+		}
 	}
 
 	@Test

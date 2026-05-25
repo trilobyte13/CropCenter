@@ -335,10 +335,10 @@ public final class ViewportMathTest
 		// identical inputs. Pin so a regression that stored state in a static / shared place surfaces
 		// here (different instances would interfere).
 		FixedViewSize size = new FixedViewSize(400, 800);
-		ViewportMath a = new ViewportMath(size);
-		ViewportMath b = new ViewportMath(size);
-		assertEquals(a.imageToScreenX(123.4f), b.imageToScreenX(123.4f), 0f);
-		assertEquals(a.screenToImageY(56.7f), b.screenToImageY(56.7f), 0f);
+		ViewportMath firstInstance = new ViewportMath(size);
+		ViewportMath secondInstance = new ViewportMath(size);
+		assertEquals(firstInstance.imageToScreenX(123.4f), secondInstance.imageToScreenX(123.4f), 0f);
+		assertEquals(firstInstance.screenToImageY(56.7f), secondInstance.screenToImageY(56.7f), 0f);
 	}
 
 	@Test
@@ -466,10 +466,32 @@ public final class ViewportMathTest
 		// Pin so a regression that introduced a quadratic / non-linear term in the mapping surfaces here.
 		FixedViewSize size = new FixedViewSize(400, 800);
 		ViewportMath math = new ViewportMath(size);
-		float a = math.imageToScreenX(10f) - math.imageToScreenX(9f);
-		float b = math.imageToScreenX(200f) - math.imageToScreenX(199f);
-		assertEquals("slope is constant across image space", a, b, TOL);
-		assertEquals("at default scale=1, 1 image pixel = 1 screen pixel", 1f, a, TOL);
+		float slopeNearOrigin = math.imageToScreenX(10f) - math.imageToScreenX(9f);
+		float slopeFarFromOrigin = math.imageToScreenX(200f) - math.imageToScreenX(199f);
+		assertEquals("slope is constant across image space", slopeNearOrigin, slopeFarFromOrigin, TOL);
+		assertEquals("at default scale=1, 1 image pixel = 1 screen pixel", 1f, slopeNearOrigin, TOL);
+	}
+
+	@Test
+	public void maxZoomScalesInverselyWithBaseScale()
+	{
+		// Each source pixel renders at most MAX_PIXEL_RATIO (64) screen pixels regardless of source
+		// size — so a small image (fit at baseScale ≈ 1) caps at zoom 64, while a large image (fit at
+		// baseScale ≈ 0.1) caps at zoom 640. Pin both ends so a regression to a flat constant ceiling
+		// surfaces immediately.
+		FixedViewSize small = new FixedViewSize(1000, 1000);
+		ViewportMath smallMath = new ViewportMath(small);
+		smallMath.fitToView(1000, 1000); // baseScale = 1
+		smallMath.zoomAt(10_000f, 500f, 500f, 1000, 1000);
+		assertEquals("small image (baseScale=1) caps at MAX_PIXEL_RATIO = 64",
+			64f, smallMath.getZoom(), TOL);
+
+		FixedViewSize large = new FixedViewSize(1000, 1000);
+		ViewportMath largeMath = new ViewportMath(large);
+		largeMath.fitToView(10000, 10000); // baseScale = 0.1
+		largeMath.zoomAt(10_000f, 500f, 500f, 10000, 10000);
+		assertEquals("large image (baseScale=0.1) caps at 64 / 0.1 = 640",
+			640f, largeMath.getZoom(), TOL);
 	}
 
 	@Test
@@ -667,15 +689,19 @@ public final class ViewportMathTest
 	@Test
 	public void zoomAtClampsToMinAndMaxZoom()
 	{
-		// Zoom factor multiplied by current zoom is clamped to [MIN_ZOOM=1, MAX_ZOOM=256]. From default
-		// zoom=1, a 0.01 factor clamps DOWN to 1; a 1000 factor clamps UP to 256.
+		// Zoom factor multiplied by current zoom is clamped to [MIN_ZOOM=1, maxZoom()]. The upper
+		// bound is per-image: maxZoom() = MAX_PIXEL_RATIO / baseScale so each source pixel renders at
+		// most MAX_PIXEL_RATIO (64) screen pixels. View 400×800 + image 1000×2000 → baseScale = 0.4,
+		// so maxZoom = 64 / 0.4 = 160. From default zoom=1, a 0.01 factor clamps DOWN to 1; a 1000
+		// factor clamps UP to 160.
 		FixedViewSize size = new FixedViewSize(400, 800);
 		ViewportMath math = new ViewportMath(size);
 		math.fitToView(1000, 2000);
 		math.zoomAt(0.01f, 200f, 400f, 1000, 2000);
 		assertEquals("zoom clamps to MIN_ZOOM = 1 on absurdly-low factor", 1f, math.getZoom(), 0f);
 		math.zoomAt(1000f, 200f, 400f, 1000, 2000);
-		assertEquals("zoom clamps to MAX_ZOOM = 256 on absurdly-high factor", 256f, math.getZoom(), 0f);
+		assertEquals("zoom clamps to maxZoom() = 64 / baseScale = 160 on absurdly-high factor",
+			160f, math.getZoom(), TOL);
 	}
 
 	@Test

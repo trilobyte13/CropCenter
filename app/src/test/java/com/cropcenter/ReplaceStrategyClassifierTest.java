@@ -105,6 +105,23 @@ public final class ReplaceStrategyClassifierTest
 	}
 
 	@Test
+	public void nullParentFromRootLevelPlaceholderClassifiesAsFailure() throws IOException
+	{
+		// Defensive edge: a placeholder constructed at the filesystem root (no parent component) has
+		// File.getParentFile() == null. classifyFilesystemOutcome's `target = (parent != null) ?
+		// new File(parent, requestedName) : null` branch must NOT NPE on the downstream `target ==
+		// null` checks. The result classifies as a "both missing" failure because neither the
+		// placeholder nor the (unconstructable) target can be confirmed on disk — which is the
+		// honest answer given we have no parent path to probe a sibling against.
+		File placeholder = new File("crop (1).jpg");
+		assertNull("test fixture: root-level File has no parent", placeholder.getParentFile());
+		ReplaceStrategy.VerifyFailure failure = ReplaceStrategy.classifyFilesystemOutcome(
+			placeholder, REQUESTED_NAME, EXPECTED_LENGTH);
+		assertNotNull("null-parent placeholder must classify as failure, not NPE", failure);
+		assertEquals("Save may have failed", failure.title());
+	}
+
+	@Test
 	public void placeholderOnlyProducesCouldntReplaceMessage() throws IOException
 	{
 		// SAF overwrite + delete-original both failed. The placeholder write succeeded (the user's bytes are

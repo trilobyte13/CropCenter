@@ -10,8 +10,8 @@ import android.graphics.Paint;
 import android.os.Process;
 import android.util.Log;
 
-import com.cropcenter.crop.CropRender;
 import com.cropcenter.metadata.HdrSignature;
+import com.cropcenter.model.CropRender;
 import com.cropcenter.util.AiRegionDetector.AiMask;
 
 import java.io.ByteArrayOutputStream;
@@ -39,6 +39,15 @@ import java.io.IOException;
 public final class UltraHdrCompat
 {
 	private static final String TAG = "UltraHdrCompat";
+
+	// Tempfile name prefixes shared by every HDR pipeline stage that writes to cacheDir. The reaper
+	// at sweepStaleCacheFiles filters by these prefixes to clean up files left behind by prior runs
+	// that crashed before the per-stage cleanup ran (process killed mid-save, OOM, etc.); the
+	// writers (here AND CropExporter for its multi-stage encode/inject/compose/reinject/seft pipeline)
+	// must use one of these prefixes or the reaper won't catch them. Public so CropExporter can read
+	// the same constants instead of duplicating the literal string.
+	public static final String TEMPFILE_PREFIX_HDR_SRC = "hdr_src_";
+	public static final String TEMPFILE_PREFIX_INPUT_RAW = "input_raw_";
 
 	private UltraHdrCompat() {}
 
@@ -194,7 +203,8 @@ public final class UltraHdrCompat
 			return;
 		}
 		File[] entries = cacheDir.listFiles(
-			(dir, name) -> name.startsWith("hdr_src_") || name.startsWith("input_raw_"));
+			(dir, name) -> name.startsWith(TEMPFILE_PREFIX_HDR_SRC)
+				|| name.startsWith(TEMPFILE_PREFIX_INPUT_RAW));
 		if (entries == null)
 		{
 			return;
@@ -366,7 +376,7 @@ public final class UltraHdrCompat
 		// Unique filename so concurrent exports never collide on the cache path. Single-threaded today; suffix
 		// is cheap insurance against future parallelism.
 		File hdrSourceCache = new File(cacheDir,
-			"hdr_src_" + Process.myPid() + "_" + System.nanoTime() + ".jpg");
+			TEMPFILE_PREFIX_HDR_SRC + Process.myPid() + "_" + System.nanoTime() + ".jpg");
 		// Belt-and-braces against process kill mid-decode: the explicit delete() in the finally below
 		// runs on clean exit; deleteOnExit() registers a JVM shutdown hook for graceful Application
 		// teardown. Hard kills (OOM killer, force-stop) bypass both — sweepStaleCacheFiles handles those

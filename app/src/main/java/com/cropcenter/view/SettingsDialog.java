@@ -7,6 +7,7 @@ import android.content.res.ColorStateList;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.text.InputType;
+import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.CheckBox;
@@ -123,15 +124,19 @@ public final class SettingsDialog
 		root.setPadding(dp16, dp8, dp16, dp8);
 		scroll.addView(root);
 
+		// Cards in alphabetical order by title (Build, Grid, Permissions, Pixel Grid, Selection &
+		// Paint). The Permissions card is only added when the host exposes a permission helper —
+		// see the `permissions != null` guard at the show() signature. The first card uses dp4 top
+		// margin (tighter to the dialog header); subsequent cards use dp8.
 		EditText[] dimensionInputs = new EditText[2];
-		root.addView(buildGridCard(ctx, state, cfg, density, dimensionInputs), DialogCards.topMargin(dp4));
-		root.addView(buildPixelGridCard(ctx, state, cfg, density), DialogCards.topMargin(dp8));
-		root.addView(buildSelectionCard(ctx, state, cfg, density), DialogCards.topMargin(dp8));
+		root.addView(buildInfoCard(ctx, density), DialogCards.topMargin(dp4));
+		root.addView(buildGridCard(ctx, state, cfg, density, dimensionInputs), DialogCards.topMargin(dp8));
 		if (permissions != null)
 		{
 			root.addView(buildPermissionsCard(ctx, permissions, density), DialogCards.topMargin(dp8));
 		}
-		root.addView(buildInfoCard(ctx, density), DialogCards.topMargin(dp8));
+		root.addView(buildPixelGridCard(ctx, state, cfg, density), DialogCards.topMargin(dp8));
+		root.addView(buildSelectionCard(ctx, state, cfg, density), DialogCards.topMargin(dp8));
 
 		Runnable applyDimensions = () -> applyDimensionInputs(state, dimensionInputs[0], dimensionInputs[1]);
 
@@ -172,7 +177,7 @@ public final class SettingsDialog
 	 * field is silently ignored — preset-chip taps already synced the inputs back in.
 	 *
 	 * @param state    CropState whose gridConfig is mutated with the parsed values
-	 * @param editCols Columns input — text trimmed, parsed as int, clamped to [1, 50]
+	 * @param editCols Columns input — text trimmed, parsed as int, clamped to [1, 99]
 	 * @param editRows Rows input — same parse / clamp as editCols
 	 */
 	private static void applyDimensionInputs(CropState state, EditText editCols, EditText editRows)
@@ -181,8 +186,8 @@ public final class SettingsDialog
 		{
 			int rawCols = Integer.parseInt(editCols.getText().toString().trim());
 			int rawRows = Integer.parseInt(editRows.getText().toString().trim());
-			int newCols = Math.clamp(rawCols, 1, 50);
-			int newRows = Math.clamp(rawRows, 1, 50);
+			int newCols = Math.clamp(rawCols, 1, 99);
+			int newRows = Math.clamp(rawRows, 1, 99);
 			// Write back the clamped values so the user sees what actually got saved — without this,
 			// a "0" silently clamps to 1 with no on-screen acknowledgment, leaving the user thinking
 			// they got 0 columns (and confused when the grid renders with 1).
@@ -311,6 +316,18 @@ public final class SettingsDialog
 	{
 		int dp4 = DpToPx.toPx(4, density);
 		LinearLayout card = DialogCards.newCard(ctx, density);
+		// Whole card is the tap target — clicking anywhere inside the panel (title, status row, hint
+		// text, or the surrounding padding) opens the system Settings page. Adding the ripple via the
+		// selectableItemBackground theme attribute keeps tap feedback visible without overriding the
+		// card's SURFACE0 fill. setClickable + setFocusable are explicit because LinearLayout doesn't
+		// default to clickable, and without focusable the TalkBack semantics would skip the row.
+		TypedValue rippleAttr = new TypedValue();
+		ctx.getTheme().resolveAttribute(android.R.attr.selectableItemBackground, rippleAttr, true);
+		card.setForeground(ctx.getResources().getDrawable(rippleAttr.resourceId, ctx.getTheme()));
+		card.setClickable(true);
+		card.setFocusable(true);
+		card.setOnClickListener(view -> permissions.openStoragePermissionSettings());
+
 		DialogCards.addCardTitle(card, "Permissions");
 
 		boolean granted = permissions.hasStoragePermission();
@@ -320,7 +337,6 @@ public final class SettingsDialog
 			: "All files access: not granted (tap to grant)");
 		row.setTextSize(13);
 		row.setTextColor(granted ? ThemeColors.SUBTEXT0 : ThemeColors.MAUVE);
-		row.setOnClickListener(view -> permissions.openStoragePermissionSettings());
 		card.addView(row, DialogCards.topMargin(dp4));
 
 		TextView hint = new TextView(ctx);
@@ -351,7 +367,7 @@ public final class SettingsDialog
 		DialogCards.addCardTitle(card, "Pixel Grid");
 
 		CheckBox chkPixel = new CheckBox(ctx);
-		chkPixel.setText("Show at 6\u00D7 zoom or higher");
+		chkPixel.setText("Show when zoomed in enough to see individual pixels");
 		chkPixel.setTextSize(12);
 		chkPixel.setTextColor(ThemeColors.TEXT);
 		chkPixel.setChecked(cfg.showPixelGrid());
@@ -458,8 +474,7 @@ public final class SettingsDialog
 		// min=1 so the slider thumb can't show a position that doesn't correspond to the model. The
 		// onProgressChanged handler below clamps to [1, 20] before writing GridConfig anyway, but
 		// without setMin the thumb at the left edge would render at position 0 while the label and
-		// state both read 1 — a UI lie. Android API 26+ supports SeekBar.setMin (CropCenter's minSdk
-		// is 35, well above).
+		// state both read 1 — a UI lie.
 		widthSeekBar.setMin(1);
 		widthSeekBar.setMax(20);
 		widthSeekBar.setProgress((int) cfg.lineWidth());
@@ -596,7 +611,11 @@ public final class SettingsDialog
 		AlertDialog prev = activePicker;
 		if (prev != null && prev.isShowing())
 		{
-			prev.dismiss();
+			// cancel() fires OnCancelListener AND OnDismissListener; dismiss() only fires the latter.
+			// cancelActivePicker (the other teardown site) also uses cancel(), so this matches —
+			// without consistency, a future OnCancelListener wired to the picker would silently
+			// miss firing on the swatch-tap-while-picker-open path.
+			prev.cancel();
 		}
 		AlertDialog picker = ColorPickerDialog.show(ctx, tracked[0], palette,
 			color -> applyPickedColor(color, tracked, swatchBg, swatch, onPick));

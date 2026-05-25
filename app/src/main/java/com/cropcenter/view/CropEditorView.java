@@ -13,6 +13,7 @@ import com.cropcenter.model.CenterMode;
 import com.cropcenter.model.CropState;
 import com.cropcenter.model.EditorMode;
 import com.cropcenter.model.SelectionPoint;
+import com.cropcenter.util.RotatedCropClamp;
 
 import java.util.List;
 
@@ -98,11 +99,30 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 		invalidate();
 	}
 
+	/**
+	 * Convert the screen-space touch threshold to image-space brush radius for horizon paint mode.
+	 * Inverse-scales TOUCH_THRESHOLD_PX by (baseScale * zoom) so the brush feels the same finger-
+	 * thickness at any zoom level — at 4× zoom, one source pixel maps to 4 screen pixels, so the
+	 * image-space brush radius shrinks to a quarter to keep the visible brush at the same size.
+	 * Called by AutoRotateBinder before dispatching to HorizonDetector.
+	 *
+	 * @return brush radius in image-space pixels at the current zoom level
+	 */
 	public float getHorizonBrushRadius()
 	{
 		return TOUCH_THRESHOLD_PX / (viewport.getBaseScale() * viewport.getZoom());
 	}
 
+	/**
+	 * Expose the painted horizon polyline. Returns the live List held by HorizonPaintOverlay — NOT
+	 * a defensive copy — because AutoRotateBinder's bg-thread detector needs to read the points
+	 * after dispatch and copying multi-hundred-point lists per dispatch is wasted work. The caller
+	 * MUST take its own snapshot before crossing to the bg thread; AutoRotateBinder does this via
+	 * `new ArrayList<>(...)` immediately on dispatch.
+	 *
+	 * @return live List of (x, y) float-pairs in image-space coordinates; empty when paint mode
+	 *         is off or no points have been painted yet
+	 */
 	public List<float[]> getHorizonPoints()
 	{
 		return horizon.getPoints();
@@ -113,6 +133,16 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 		return viewport.getZoom();
 	}
 
+	/**
+	 * Whether the editor is currently in horizon-paint mode — the transient state between an AutoRotate
+	 * tap and the ACTION_UP commit that hands the painted polyline to HorizonDetector. Touch routing
+	 * inside onTouchEvent consults this so paint-mode strokes don't accidentally trigger Select-mode
+	 * point taps or Move-mode crop drags; the same flag drives the AutoRotateBinder's "Cancel" label
+	 * on the Auto button while the user is mid-stroke.
+	 *
+	 * @return true when the editor is currently in horizon-paint mode (between AutoRotate-tap and
+	 *         ACTION_UP commit)
+	 */
 	public boolean isHorizonMode()
 	{
 		return horizon.isActive();
@@ -161,7 +191,7 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 			state.removeSelectionPoint(nearest);
 			if (state.getSelectionPoints().isEmpty())
 			{
-				resetCropToFullImage();
+				recenterCropOnImageMidpoint();
 			}
 			else
 			{
@@ -258,6 +288,17 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 		}
 		int imgW = sourceImage.getWidth();
 		int imgH = sourceImage.getHeight();
+		// Defensive degenerate-size check: the snapshot guards the reference from being nulled
+		// mid-method, but the bitmap it points to can still be RECYCLED by the bg thread that
+		// initiated the reset (recycle() then null-out is the canonical teardown order). A
+		// recycled Bitmap's getWidth/getHeight is not guaranteed to keep its pre-recycle value
+		// across all Android versions — observed returning 0 on some devices. Bail before the
+		// snappedX/snappedY Math.clamp below would receive max < min (0.5f, imgW - 0.5f) and
+		// crash the UI thread with IllegalArgumentException.
+		if (imgW < 1 || imgH < 1)
+		{
+			return;
+		}
 
 		// Un-rotate: same reasoning as onLongPress — selection points are stored in un-rotated image coords, so
 		// the tap location must be converted through the inverse rotation before comparing to existing points
@@ -289,7 +330,7 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 					state.removeSelectionPoint(point);
 					if (state.getSelectionPoints().isEmpty())
 					{
-						resetCropToFullImage();
+						recenterCropOnImageMidpoint();
 					}
 					else
 					{
@@ -389,6 +430,44 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 	}
 
 	/**
+	 * Re-center crop and rotation anchor on the image midpoint, then recompute the crop dimensions for
+	 * the current aspect ratio + lock mode. Used by the four "selection just emptied" call sites
+	 * (onTap / onLongPress deletion of last point, undo/redo restoring an empty snapshot, Clear Points
+	 * button) — once the user no longer has any selection driving the framing, the natural default is
+	 * an image-centered crop at max size for the current AR.
+	 *
+	 * NOT a generic "reset" affordance. The four callers all run on an already-empty selection list, so
+	 * recomputeCrop's findCropCenter falls into the "no selection → use anchor" branch and the anchor
+	 * we just set to the image midpoint genuinely takes effect. Calling this with selection points still
+	 * present in Select mode would let the points override the anchor (rotatedSelectionMidpoint wins
+	 * inside findCropCenter), making the operation a silent no-op with confusing semantics — that's why
+	 * the prior long-press AR-spinner "Crop reset" affordance was removed; switching modes already
+	 * provides the natural recompute path users want.
+	 */
+	public void recenterCropOnImageMidpoint()
+	{
+		// Snapshot the volatile sourceImage reference once. state.getImageWidth() and getImageHeight()
+		// each independently re-dereference the volatile sourceImage field (CropState returns 0 when
+		// null) — a bg-thread reset() between the two reads would silently produce (imageMidX, 0) or
+		// (0, imageMidY) and write it through setCenterUnclamped. ToolbarBinder.onClearPointsClick
+		// reaches this method without busy-gate protection, so the race window IS reachable. The tap
+		// / pan paths in this same View already use the snapshot-once pattern.
+		Bitmap source = state.getSourceImage();
+		if (source == null)
+		{
+			return;
+		}
+		float imageMidX = source.getWidth() / 2f;
+		float imageMidY = source.getHeight() / 2f;
+		state.markCropSizeDirty();
+		state.setCenterUnclamped(imageMidX, imageMidY);
+		// Reset the rotation anchor too — the user's "intent" is now the image center, not whatever point was
+		// selected before (which may have been far away).
+		state.setAnchor(imageMidX, imageMidY);
+		CropEngine.recomputeCrop(state);
+	}
+
+	/**
 	 * Re-apply the most recently undone selection-point edit. No-op when the redo stack is empty.
 	 */
 	public void redo()
@@ -400,21 +479,6 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 		}
 		restorePoints(snapshot);
 		notifyPointsChanged();
-	}
-
-	/**
-	 * Reset crop to full image centered with current AR.
-	 */
-	public void resetCropToFullImage()
-	{
-		float imageMidX = state.getImageWidth() / 2f;
-		float imageMidY = state.getImageHeight() / 2f;
-		state.markCropSizeDirty();
-		state.setCenterUnclamped(imageMidX, imageMidY);
-		// Reset the rotation anchor too — the user's "intent" is now the image center, not whatever point was
-		// selected before (which may have been far away).
-		state.setAnchor(imageMidX, imageMidY);
-		CropEngine.recomputeCrop(state);
 	}
 
 	/**
@@ -595,33 +659,6 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 			float preDragCenterX = state.getCenterX();
 			float preDragCenterY = state.getCenterY();
 
-			// When H or V lock is active AND selection points are present, the LOCKED axis is pinned to
-			// the selection midpoint regardless of anchor drift. Without this override, resyncAnchorIfStale
-			// (just above) snaps the anchor to whatever the current center is — so any prior shift
-			// (rotation, AR change, axis-free drag, lock-toggle) bakes the drifted position into the anchor
-			// and the locked axis stays at that drifted value rather than at the selection. The user
-			// expectation reported as a bug: "with H or V active, the drag should keep the crop centered on
-			// the selection along the locked axis." Recompute the locked axis from rotated selection
-			// midpoint here so it always tracks the selection — recenterOnSelection (run on H/V toggle in
-			// the toolbar handler) only fires once on click; this catches every subsequent drag frame.
-			var points = state.getSelectionPoints();
-			boolean overrideActive = !points.isEmpty()
-				&& (lock == CenterMode.HORIZONTAL || lock == CenterMode.VERTICAL);
-			if (overrideActive)
-			{
-				float[] selectionMid = CropEngine.rotatedSelectionMidpoint(
-					points, state.getImageWidth(), state.getImageHeight(),
-					state.getRotationDegrees());
-				if (lock == CenterMode.HORIZONTAL)
-				{
-					newCenterY = selectionMid[1];
-				}
-				else
-				{
-					newCenterX = selectionMid[0];
-				}
-			}
-
 			if (lock == CenterMode.HORIZONTAL)
 			{
 				newCenterX += dx / scale;
@@ -636,20 +673,48 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 				newCenterY += dy / scale;
 			}
 
+			// Lock-aware pre-clamp: under per-axis lock, pre-clamp the FREE axis to a value valid
+			// at the LOCKED-axis pin BEFORE setCenter so the joint-clamp inside setCenter doesn't
+			// pull the locked axis. Without this pre-clamp, dragging the free axis to the rotated
+			// AABB's extreme causes clampRotated's binary search to pull the locked axis toward
+			// imageMid (the only position where the rotated corners fit at the extreme free-axis
+			// value), visibly breaking the per-axis lock (e.g. VERTICAL lock + drag Y to bottom
+			// under rotation caused X to snap to imageMidX). HORIZONTAL → free X (varyX=true);
+			// VERTICAL → free Y (varyX=false). This pre-clamp ALSO replaces an earlier
+			// selection-midpoint override that snapped the locked axis to selectionMid on every
+			// drag frame — that override was added to work around clampRotated's joint pull (the
+			// "frozen drag" bug it cited resolved because the override's `overrideActive` flag
+			// bypassed the cross-axis-drift rejection); with the pre-clamp here, the joint pull
+			// no longer happens and the override's drift-bypass is no longer needed. Dropping the
+			// override means dragging the crop in MOVE mode with selection points present no
+			// longer auto-recenters X onto the selection midpoint every frame — the user
+			// controls the locked axis position via their pre-drag center, and a one-shot
+			// `recenterOnSelection` on H/V toggle (ToolbarBinder.onLockButtonClick) still
+			// establishes the initial alignment to selection on entry. Bitmap dims read off the
+			// snapshot below — same race-avoidance pattern as setCenter.
+			Bitmap source = state.getSourceImage();
+			if (source != null && state.getCropW() > 0 && state.getCropH() > 0
+				&& (lock == CenterMode.HORIZONTAL || lock == CenterMode.VERTICAL))
+			{
+				boolean varyX = (lock == CenterMode.HORIZONTAL);
+				float[] preClamped = RotatedCropClamp.clampSingleAxis(
+					newCenterX, newCenterY,
+					state.getCropW(), state.getCropH(),
+					state.getRotationDegrees(),
+					source.getWidth(), source.getHeight(), varyX);
+				newCenterX = preClamped[0];
+				newCenterY = preClamped[1];
+			}
+
 			// setCenter clamps both axes jointly (binary search under rotation). On a locked axis we only
 			// want motion on the unlocked axis — reject moves that would drift the locked axis more than
-			// 0.5 px from its pre-drag position. EXCEPTION: when the override block above set the locked
-			// axis to selectionMid, that's INTENTIONAL motion, not "drift" — drift-rejection would
-			// freeze the drag in place because the next frame would read the unchanged anchor and the
-			// override would re-fire identically (user-reported "moving the grid froze, had to make a
-			// selection to unfreeze" — adding/clearing a selection changed the override target enough
-			// to dodge the strict-equality preDrag comparison). When the override is active, advance the
-			// anchor unconditionally — the locked axis is following the selection by design.
+			// 0.5 px from its pre-drag position. With the pre-clamp above, the locked axis is already at
+			// its pre-drag value when setCenter is called, so the joint clamp doesn't pull it and the
+			// drift check passes — anchor advances normally.
 			state.setCropSizeDirty(false);
 			state.setCenter(newCenterX, newCenterY);
-			boolean shouldAdvanceAnchor = overrideActive
-				|| !crossAxisDrifted(lock, preDragCenterX, preDragCenterY,
-					state.getCenterX(), state.getCenterY());
+			boolean shouldAdvanceAnchor = !crossAxisDrifted(lock, preDragCenterX, preDragCenterY,
+				state.getCenterX(), state.getCenterY());
 			if (shouldAdvanceAnchor)
 			{
 				// Advance the anchor to the clamped (still fractional) drag position so the next event
@@ -720,8 +785,8 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 		state.replaceSelectionPoints(snapshot);
 		if (snapshot.isEmpty())
 		{
-			// No points left — clear crop center (reverts to full image)
-			resetCropToFullImage();
+			// No points left — re-center the crop on the image midpoint at the current AR.
+			recenterCropOnImageMidpoint();
 		}
 		else
 		{

@@ -1,11 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Data extraction rules (Android 12+). Same exclusions as backup_rules.xml: external storage holds
-  the streaming-pipeline cache (partial mid-save HDR / JPEG / PNG tempfiles that could include
-  in-progress user image bytes), and the two per-install SharedPreferences files store device-local
-  nicety pointers (last save folder, grid/list toggle) that shouldn't flow to a different install via
-  cloud restore / device transfer. Internal cache (getCacheDir()) is excluded by default and the
-  lint-accepted domain set doesn't include "cache" / "external_cache" anyway, so we don't list it.
+  Data extraction rules: exclude the two per-install SharedPreferences files from both cloud
+  backup and device transfer. The SharedPreferences hold device-local nicety pointers (last save
+  folder, grid/list toggle) that shouldn't flow to a different install. The "external" domain
+  exclusion is defensive — the streaming-pipeline scratch lives in getCacheDir() (internal cache,
+  excluded by default) and the in-place save tempfiles are written directly into the user's
+  chosen public output folder (NOT under getExternalFilesDir(), so the "external" domain doesn't
+  cover them anyway). Kept here in case a future code change reroutes any scratch path into
+  getExternalFilesDir(); cheap defence-in-depth. Internal cache isn't listable explicitly because
+  the lint-accepted domain set has no "cache" / "external_cache" entry.
 -->
 <data-extraction-rules>
     <cloud-backup>

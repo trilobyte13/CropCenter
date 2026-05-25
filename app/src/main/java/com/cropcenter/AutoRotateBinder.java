@@ -26,6 +26,10 @@ final class AutoRotateBinder
 {
 	private static final String TAG = "AutoRotateBinder";
 
+	// User-facing failure toast — fires from two distinct paths (catch + NaN-result branch) inside
+	// runHorizonDetectionInBackground. Extracted so a future copy-edit lands once.
+	private static final String DETECTION_FAILED_TOAST = "Horizon detection failed";
+
 	private final ToolbarHost host;
 
 	AutoRotateBinder(ToolbarHost host)
@@ -236,6 +240,28 @@ final class AutoRotateBinder
 	private void onHorizonPaintComplete(TextView btn)
 	{
 		resetAutoRotateButton(btn);
+		// Early-return gates BEFORE claiming busy so a "paint too short" path doesn't lock anyone
+		// else out of the editor. These reads are pure inspection — they don't bind us to the
+		// state references below.
+		if (host.getEditorView().getHorizonPoints().size() < 2
+			|| host.getState().getSourceImage() == null
+			|| host.getState().getDisplayImage() == null)
+		{
+			host.toastIfAlive("Paint was too short", Toast.LENGTH_SHORT);
+			return;
+		}
+		// Acquire busy BEFORE snapshotting + transforming the points / bitmaps. The UI thread is
+		// single-threaded so an inbound Share intent can't preempt the snapshot block today, but
+		// the discipline "claim the lock before reading lock-protected state" guards against a
+		// future refactor that introduces a yielding callback or posts an intermediate UI message
+		// between the reads and the dispatch. Without busy held, a state.reset() racing in
+		// after our snapshot would leave our bitmaps detached from the in-memory state — the
+		// detection would compute against the OLD source while the new source had taken its place.
+		if (!host.getBusy().compareAndSet(false, true))
+		{
+			host.showBusyToast();
+			return;
+		}
 		// Snapshot the live points list before dispatching to the bg detector. HorizonPaintOverlay.getPoints()
 		// returns the in-progress imagePoints ArrayList; a subsequent setHorizonMode(true, ...) (entered if a
 		// new tap reaches handleAutoRotateTap before the busy gate took effect, e.g. through a future code
@@ -246,10 +272,13 @@ final class AutoRotateBinder
 		float brushRadius = host.getEditorView().getHorizonBrushRadius();
 		Bitmap source = host.getState().getSourceImage();
 		Bitmap display = host.getState().getDisplayImage();
-
-		if (rawPoints.size() < 2 || source == null || display == null)
+		// Re-check source/display under the busy lock — between the early-return gate above and
+		// this snapshot, the references must still be non-null. (A concurrent reset can't happen
+		// while we hold busy, so this is purely paranoid; we release busy on any failure path.)
+		if (source == null || display == null)
 		{
-			host.toastIfAlive("Paint was too short", Toast.LENGTH_SHORT);
+			host.getBusy().set(false);
+			host.toastIfAlive("Source image unavailable", Toast.LENGTH_SHORT);
 			return;
 		}
 		// Zero-dimension guard. proxyScale = display.getWidth() / source.getWidth() below would divide
@@ -261,6 +290,7 @@ final class AutoRotateBinder
 		if (source.getWidth() <= 0 || source.getHeight() <= 0
 			|| display.getWidth() <= 0 || display.getHeight() <= 0)
 		{
+			host.getBusy().set(false);
 			host.toastIfAlive("Source image unavailable", Toast.LENGTH_SHORT);
 			return;
 		}
@@ -280,12 +310,6 @@ final class AutoRotateBinder
 		}
 		float scaledBrushRadius = brushRadius * proxyScale;
 		Bitmap src = display;
-
-		if (!host.getBusy().compareAndSet(false, true))
-		{
-			host.showBusyToast();
-			return;
-		}
 		// Pre-enqueue cleanup guard — any throw from setBusyUi / showProgress / runInBackground would otherwise
 		// strand busy=true (the bg-task failure path only runs if the Runnable was accepted).
 		try
@@ -348,7 +372,7 @@ final class AutoRotateBinder
 			{
 				host.setBusyUi(false);
 				host.hideProgress();
-				host.toastIfAlive("Horizon detection failed", Toast.LENGTH_SHORT);
+				host.toastIfAlive(DETECTION_FAILED_TOAST, Toast.LENGTH_SHORT);
 			});
 			return;
 		}
@@ -369,7 +393,7 @@ final class AutoRotateBinder
 			{
 				host.setBusyUi(false);
 				host.hideProgress();
-				host.toastIfAlive("Horizon detection failed", Toast.LENGTH_SHORT);
+				host.toastIfAlive(DETECTION_FAILED_TOAST, Toast.LENGTH_SHORT);
 			});
 			return;
 		}

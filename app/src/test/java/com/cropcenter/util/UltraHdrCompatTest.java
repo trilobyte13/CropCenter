@@ -46,6 +46,15 @@ public final class UltraHdrCompatTest
 	}
 
 	@Test
+	public void containsHdrgmHandlesMinLengthAllZeros()
+	{
+		// 5-byte all-zero buffer — exactly at the loop-entry boundary (limit = length - 4 = 1, so the
+		// outer loop runs once with i=0 and i=1). Pins that the loop entry doesn't AIOOBE at the
+		// minimum-viable length AND that an all-zero needle position doesn't accidentally match.
+		assertFalse(UltraHdrCompat.containsHdrgm(new byte[5]));
+	}
+
+	@Test
 	public void containsHdrgmHandlesNull()
 	{
 		assertFalse(UltraHdrCompat.containsHdrgm(null));

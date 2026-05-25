@@ -89,8 +89,8 @@ public final class EditAligner
 		{
 			return Result.error("Selected file is not a JPEG");
 		}
-		int[] origStored = decodeStoredDims(originalBytes);
-		if (origStored == null)
+		int[] originalStoredDims = decodeStoredDims(originalBytes);
+		if (originalStoredDims == null)
 		{
 			// Source bytes are something we previously loaded successfully — if dim probe fails now, the
 			// source was corrupted between load and graft (memory pressure, bg-write race). The user-facing
@@ -98,42 +98,45 @@ public final class EditAligner
 			// the just-picked file; saying "original" would be ambiguous (which one?).
 			return Result.error("Source image is corrupt — reload it");
 		}
-		int[] editStored = decodeStoredDims(editBytes);
-		if (editStored == null)
+		int[] editStoredDims = decodeStoredDims(editBytes);
+		if (editStoredDims == null)
 		{
 			// Edit has a valid SOI (passed the check above) but BitmapFactory rejected it. The edit JPEG is
 			// structurally malformed past the marker — corrupt export from the editor.
 			return Result.error("Couldn't decode the edit — try exporting again");
 		}
-		int origOrient = BitmapUtils.readExifOrientation(originalBytes);
-		int editOrient = BitmapUtils.readExifOrientation(editBytes);
+		int originalOrientation = BitmapUtils.readExifOrientation(originalBytes);
+		int editOrientation = BitmapUtils.readExifOrientation(editBytes);
 
-		int[] origDisplay = displayDims(origStored, origOrient);
-		int[] editDisplay = displayDims(editStored, editOrient);
-		if (origDisplay[0] != editDisplay[0] || origDisplay[1] != editDisplay[1])
+		int[] originalDisplayDims = displayDims(originalStoredDims, originalOrientation);
+		int[] editDisplayDims = displayDims(editStoredDims, editOrientation);
+		if (originalDisplayDims[0] != editDisplayDims[0] || originalDisplayDims[1] != editDisplayDims[1])
 		{
 			return Result.error("Edit dimensions don't match the source ("
-				+ "source " + origDisplay[0] + "x" + origDisplay[1]
-				+ ", edit " + editDisplay[0] + "x" + editDisplay[1]
+				+ "source " + originalDisplayDims[0] + "x" + originalDisplayDims[1]
+				+ ", edit " + editDisplayDims[0] + "x" + editDisplayDims[1]
 				+ ") — re-crop in the editor and re-export");
 		}
 
-		boolean perfectMatch = origOrient == editOrient && origStored[0] == editStored[0]
-			&& origStored[1] == editStored[1];
+		boolean perfectMatch = originalOrientation == editOrientation
+			&& originalStoredDims[0] == editStoredDims[0]
+			&& originalStoredDims[1] == editStoredDims[1];
 		if (perfectMatch)
 		{
 			return Result.ok(editBytes);
 		}
-		byte[] reoriented = reorientEdit(editBytes, editOrient, origOrient);
+		byte[] reoriented = reorientEdit(editBytes, editOrientation, originalOrientation);
 		if (reoriented == null)
 		{
 			// reorientEdit returns null only when BitmapFactory.decodeByteArray rejects the bytes — same
 			// failure mode as the edit-decode-null branch above, so route the user to the same remediation.
 			return Result.error("Couldn't decode the edit during reorientation — try exporting again");
 		}
-		Log.d(TAG, "Reoriented edit (origOrient=" + origOrient + " editOrient=" + editOrient
-			+ ") from " + editStored[0] + "x" + editStored[1]
-			+ " to original's stored layout (" + origStored[0] + "x" + origStored[1] + ")");
+		Log.d(TAG, "Reoriented edit (originalOrientation=" + originalOrientation
+			+ " editOrientation=" + editOrientation
+			+ ") from " + editStoredDims[0] + "x" + editStoredDims[1]
+			+ " to original's stored layout ("
+			+ originalStoredDims[0] + "x" + originalStoredDims[1] + ")");
 		return Result.ok(reoriented);
 	}
 
@@ -198,11 +201,11 @@ public final class EditAligner
 	 * uses the primary scan from this file, so the missing EXIF is fine.
 	 *
 	 * @param editBytes  raw JPEG bytes of the externally-edited file
-	 * @param editOrient edit's EXIF orientation tag
-	 * @param origOrient original's EXIF orientation tag (the target stored orientation)
+	 * @param editOrientation edit's EXIF orientation tag
+	 * @param originalOrientation original's EXIF orientation tag (the target stored orientation)
 	 * @return re-encoded JPEG bytes, or null when the decode fails (corrupt edit)
 	 */
-	private static byte[] reorientEdit(byte[] editBytes, int editOrient, int origOrient)
+	private static byte[] reorientEdit(byte[] editBytes, int editOrientation, int originalOrientation)
 	{
 		// Full-resolution decode — NOT subsampled. GraftWriter.graft splices the edit's primary scan into
 		// the original's full-resolution EXIF / MPF / gainmap / SEFT package — if reorientEdit
@@ -242,19 +245,20 @@ public final class EditAligner
 		// fresh ICC profile, descriptive XMP keywords from a Lightroom round-trip), the loss is invisible.
 		// Log so the loss is at least diagnosable in bug reports rather than silent.
 		Log.d(TAG, "reorientEdit re-encoding edit JPEG to match original's stored layout"
-			+ " (editOrient=" + editOrient + ", origOrient=" + origOrient + ");"
+			+ " (editOrientation=" + editOrientation + ", originalOrientation=" + originalOrientation + ");"
 			+ " any edit-side EXIF / XMP / ICC segments are not preserved");
 		Bitmap inDisplay = null;
 		Bitmap inOrigStored = null;
 		try
 		{
-			inDisplay = BitmapUtils.applyOrientation(raw, editOrient);
-			// applyOrientation either recycled raw and returned a new rotated bitmap, OR (when editOrient
+			inDisplay = BitmapUtils.applyOrientation(raw, editOrientation);
+			// applyOrientation either recycled raw and returned a new rotated bitmap, OR (when
+			// editOrientation
 			// is 1 / out of range) returned raw unchanged — in which case inDisplay aliases raw. Either
 			// way, the only live reference to those pixels is now inDisplay; null out the local so the
 			// finally block doesn't try to recycle twice on the alias case.
 			raw = null;
-			inOrigStored = BitmapUtils.applyOrientation(inDisplay, inverseOrientation(origOrient));
+			inOrigStored = BitmapUtils.applyOrientation(inDisplay, inverseOrientation(originalOrientation));
 			// Same alias logic for inDisplay → inOrigStored.
 			inDisplay = null;
 			ByteArrayOutputStream bos = new ByteArrayOutputStream();

@@ -1,11 +1,14 @@
 package com.cropcenter.crop;
 
+import android.graphics.Bitmap;
+
 import com.cropcenter.model.AspectRatio;
 import com.cropcenter.model.CenterMode;
 import com.cropcenter.model.CropState;
 import com.cropcenter.model.EditorMode;
 import com.cropcenter.model.SelectionPoint;
 import com.cropcenter.util.BitmapUtils;
+import com.cropcenter.util.RotatedCropClamp;
 import com.cropcenter.util.RotationMath;
 
 import java.util.List;
@@ -19,13 +22,11 @@ import java.util.List;
  */
 public final class CropEngine
 {
-	// Minimum crop dimension in pixels. Below this, locked-AR snap collapses similar-tiny ARs to 1×1 at
-	// the lower edge, and free-form crops would render as a single bilinear-filtered row that's visually
-	// noise. 4 px gives the smallest meaningful "this is still a crop" shape; the constant is consumed
-	// cross-file by AspectRatio.snap to enforce the same floor on the snapped result that the per-axis
-	// clamps enforce on the pre-snap dims (hoisted to a single chokepoint so a future "raise the
-	// floor" change doesn't drift between the two files).
-	public static final int MIN_CROP_DIMENSION_PX = 4;
+	// Local alias for AspectRatio.MIN_CROP_DIMENSION_PX — moved to AspectRatio (model/) so model/
+	// doesn't depend on crop/. Alias keeps the existing CropEngine.MIN_CROP_DIMENSION_PX call sites
+	// working without the long-name AspectRatio.MIN_CROP_DIMENSION_PX at each Math.max call. The
+	// original constant docstring (4-px floor, why) lives on AspectRatio.MIN_CROP_DIMENSION_PX.
+	public static final int MIN_CROP_DIMENSION_PX = AspectRatio.MIN_CROP_DIMENSION_PX;
 
 	private CropEngine() {}
 
@@ -85,13 +86,20 @@ public final class CropEngine
 	 */
 	public static void recomputeCrop(CropState state)
 	{
-		if (!state.hasCenter() || state.getSourceImage() == null)
+		// Snapshot the volatile sourceImage reference once. The post-check getImageWidth() /
+		// getImageHeight() reads each independently dereference the same volatile field (CropState
+		// returns 0 when null), so a bg-thread reset() between the null check and the dimension
+		// reads would silently produce imgW=imgH=0, collapse rotatedAabbDimensions to (0, 0), and
+		// leave Math.clamp(center, 0, 0) writing a (0, 0) crop center. Snapshot here and read
+		// dimensions off the local Bitmap so reset() can null state.sourceImage independently.
+		Bitmap source = state.getSourceImage();
+		if (!state.hasCenter() || source == null)
 		{
 			return;
 		}
 
-		int imgW = state.getImageWidth();
-		int imgH = state.getImageHeight();
+		int imgW = source.getWidth();
+		int imgH = source.getHeight();
 		float rotation = state.getRotationDegrees();
 
 		// Compute the rotated AABB bounds for centerX / centerY. centerX / centerY live in screen-aligned

@@ -3,12 +3,14 @@ package com.cropcenter;
 import android.graphics.Bitmap;
 
 /**
- * Host surface consumed by ImageLoadController. Extends SaveHost (which already provides busy / progress / toast
- * plumbing) with one image-installation callback that lets the controller hand the decoded bitmap and info-bar strings
- * back to the Activity for view mutation. Keeps the view-touching logic on the Activity side and the bg-thread flow
- * (decode, EXIF orientation, metadata extract, busy claim/release) inside the controller.
+ * Host surface consumed by ImageLoadController. Extends EditorHost (which already provides busy / progress / toast /
+ * registerTransientDialog plumbing) with one image-installation callback that lets the controller hand the decoded
+ * bitmap and info-bar strings back to the Activity for view mutation, plus a dismiss-transient-dialogs hook for the
+ * pre-load cleanup. Does NOT extend SaveHost because ImageLoadController calls none of the save-flow surfaces
+ * (clearTransientDialog / getSaveAsLauncher / setActiveTransientDialog); narrower interface lets a future
+ * non-MainActivity ImageLoadHost implementer skip the unused save plumbing.
  */
-interface ImageLoadHost extends SaveHost
+interface ImageLoadHost extends EditorHost
 {
 	/**
 	 * Dismiss whatever state-mutating dialog is currently open before a load begins. Called by

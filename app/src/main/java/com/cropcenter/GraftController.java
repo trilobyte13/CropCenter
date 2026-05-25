@@ -9,7 +9,6 @@ import androidx.activity.result.ActivityResultLauncher;
 
 import com.cropcenter.graft.EditAligner;
 import com.cropcenter.metadata.GraftWriter;
-import com.cropcenter.metadata.JpegMarker;
 import com.cropcenter.model.Format;
 import com.cropcenter.model.Graft;
 import com.cropcenter.util.AiRegionDetector;
@@ -18,14 +17,18 @@ import com.cropcenter.util.SafFileHelper;
 import com.cropcenter.view.DialogStrings;
 
 import java.io.IOException;
+import java.util.Locale;
 
 /**
  * Orchestrates the "Apply External Edit" feature: long-press Open → user picks an external edit JPEG → CropCenter
- * validates that the edit's stored dimensions and EXIF orientation match the loaded original's, byte-splices the edit's
- * pixel content into the original's metadata container via GraftWriter, and hands the result to MainActivity to replace
- * the in-memory image. The user can then continue editing (crop, rotate) and save normally through the existing Save
- * flow — the canvas re-encode that the save flow uses adds one generation of JPEG quality loss vs. the byte-perfect
- * graft, but at quality 100 the footprint is imperceptible (~50 dB PSNR).
+ * validates that the edit's DISPLAY dimensions match the loaded original's (EditAligner compares display dims, NOT
+ * raw stored dims + EXIF orientation, because external editors routinely strip / reset orientation and re-emit pixels
+ * in display layout) and optionally reorients the edit's pixels back into the original's stored EXIF layout when the
+ * two disagree. The aligned bytes are then byte-spliced into the original's metadata container via GraftWriter, and
+ * the result is handed to MainActivity to replace the in-memory image. The user can then continue editing
+ * (crop, rotate) and save normally through the existing Save flow — the canvas re-encode that the save flow uses
+ * adds one generation of JPEG quality loss vs. the byte-perfect graft, but at quality 100 the footprint is
+ * imperceptible (~50 dB PSNR). See REQUIREMENTS.md (Apply External Edit) for the display-dim + reorient contract.
  *
  * Lives alongside SaveController because it owns its own state machine for the picker stage. Once the splice succeeds,
  * control transfers to MainActivity via the onGraftReady listener — GraftController has no save-flow involvement.
@@ -140,9 +143,7 @@ final class GraftController
 		{
 			return "graft.jpg";
 		}
-		int dot = originalFilename.lastIndexOf('.');
-		String stem = dot > 0 ? originalFilename.substring(0, dot) : originalFilename;
-		return stem + "-graft.jpg";
+		return Format.stripExtension(originalFilename) + "-graft.jpg";
 	}
 
 	/**
@@ -247,11 +248,12 @@ final class GraftController
 			toast("Original bytes unavailable — reload the image");
 			return true;
 		}
-		if (originalBytes.length < 4 || (originalBytes[0] & 0xFF) != JpegMarker.PREFIX
-			|| (originalBytes[1] & 0xFF) != JpegMarker.SOI)
+		if (!ImageLoadController.isJpegSignature(originalBytes))
 		{
 			// Loaded image is PNG (or some non-JPEG) — graft path requires JPEG identity metadata. Refuse
 			// upfront so the user doesn't navigate the picker for a graft that would fail validation later.
+			// Route through ImageLoadController.isJpegSignature so the predicate stays consistent across
+			// the load-gate (applyBytes' format-detect block) and this graft-gate.
 			toast("Apply External Edit only works on JPEG sources");
 			return true;
 		}
@@ -263,8 +265,22 @@ final class GraftController
 		// would cause the graft to land on image A's bytes BUT use image B's gain-map
 		// state and B's filename — producing a file that splices A's pixels under B's
 		// metadata defaults.
+		// Defensive copies of the byte arrays so a future code path that mutates CropState's gain
+		// map (e.g., HDR re-encode pipeline) or originalBytes can't corrupt the in-flight graft
+		// snapshot. CropState.getGainMap()'s Javadoc currently says "Caller must not mutate" — the
+		// in-flight graft holds the snapshot until applyGraftedBytes completes, well past any
+		// reasonable mutation window today, but the defensive copy makes the safety property
+		// structural rather than coincidental. originalBytes for a 200 MP HDR JPEG is ~80 MB —
+		// the copy doubles peak memory briefly but only for the duration of the graft session,
+		// which holds busy and blocks new loads anyway.
+		// originalBytes is guaranteed non-null here — the early-return at the top of this method
+		// bails on null bytes BEFORE we reach the snapshot. Clone directly without a null guard so
+		// the contract reads cleanly and a future reader doesn't think null is reachable.
+		byte[] originalBytesCopy = originalBytes.clone();
+		byte[] gainMapCopy = host.getState().getGainMap();
+		gainMapCopy = (gainMapCopy != null) ? gainMapCopy.clone() : null;
 		pendingSource = new SourceSnapshot(
-			originalBytes, host.getState().getGainMap(), host.getState().getOriginalFilename());
+			originalBytesCopy, gainMapCopy, host.getState().getOriginalFilename());
 		graftPending = true;
 		try
 		{
@@ -379,13 +395,18 @@ final class GraftController
 			// the dialog".
 			int maskedPixelCount = (aiMask != null) ? aiMask.maskedCount() : -1;
 			int maskTotal = (aiMask != null) ? aiMask.mask().length : 0;
-			graftPending = false;
 			// `handedOff = true` is set AFTER runOnUiThread succeeds so a runOnUiThread throw — rare but
 			// reachable on a torn-down view tree — lands in the catch below with handedOff still false.
 			// The finally's `if (!handedOff)` block then releases the busy AtomicBoolean. Setting the flag
 			// before the call would strand busy=true forever on this narrow path, leaving every subsequent
 			// Save/Open tap rejected with "Busy — try again" until Activity destroy.
 			host.runOnUiThread(() -> dispatchGraftToUi(graft, maskedPixelCount, maskTotal));
+			// graftPending = false runs AFTER the post succeeds so the documented "session active until
+			// applyGraftedBytes completes" invariant holds. Setting it before the post would briefly let
+			// start()'s `host.getBusy().get() || graftPending` check pass while busy was still held by
+			// THIS flow — the busy guard would catch any concurrent start() attempt anyway, but the
+			// graftPending half of the invariant should not be vacated until the handoff is queued.
+			graftPending = false;
 			handedOff = true;
 		}
 		catch (IOException e)
@@ -448,24 +469,52 @@ final class GraftController
 			releaseBusy.run();
 			return;
 		}
-		int pct = (int) Math.round(100.0 * maskedPixelCount / Math.max(1, maskTotal));
-		String message = "This edit changed about " + pct + "% of pixels — much larger than"
+		// Compute as a double so sub-1% masks (typical for AI fills at 0.001%-0.5%) don't truncate
+		// to "0%" — that wording read as misleading on a real ~0.3% mask. Format with one decimal
+		// when below 10% (covers most realistic cases with precision), integer otherwise. The
+		// dialog only fires when the fraction exceeds LARGE_EDIT_FRACTION (10%) AND the int round
+		// gates produced "0%" wording only for sub-1% pre-threshold cases — but defensive: keep
+		// the formatting consistent across the full range.
+		double pctValue = 100.0 * maskedPixelCount / Math.max(1, maskTotal);
+		String pctText = pctValue < 10.0
+			? String.format(Locale.ROOT, "%.1f", pctValue)
+			: String.format(Locale.ROOT, "%d", Math.round(pctValue));
+		String message = "This edit changed about " + pctText + "% of pixels — much larger than"
 			+ " typical for AI spot removal. Apply anyway?";
+		// Decision latch: Apply / Cancel both set it true so the OnCancelListener — which fires
+		// from BOTH the inbound dismissTransientDialogs path AND the genuine user-cancel path —
+		// only releases busy on the latter. Without the latch, Apply's flow MainActivity.
+		// applyGraftedBytes → dismissTransientDialogs → cancel() → OnCancelListener would release
+		// busy WHILE applyGraftedBytesOnBg is being queued, letting Save/Open/another-graft slip
+		// in during applyBytes/state.reset() and race the in-flight commit. Apply's busy is held
+		// downstream until applyGraftedBytesOnBg's finally releases it.
+		boolean[] decided = { false };
 		try
 		{
 			// Register with the host's transient-dialog tracker so a Share/View intent or a follow-up
 			// graft apply that arrives mid-prompt dismisses this dialog before bg state.reset() —
 			// without this registration the dialog can outlive its source state, leaving the user
 			// staring at a stale "x% of pixels" prompt that targets a vanished graft.
-			// dismissTransientDialogs uses cancel(), which fires the OnCancelListener below so
-			// releaseBusy still runs on forced dismissal.
 			host.registerTransientDialog(new AlertDialog.Builder(host.getActivity())
 				.setTitle("Large edit detected")
 				.setMessage(message)
-				.setPositiveButton(DialogStrings.APPLY,
-					(dialog, which) -> applyConfirmedGraft(graft, releaseBusy))
-				.setNegativeButton(DialogStrings.CANCEL, (dialog, which) -> releaseBusy.run())
-				.setOnCancelListener(dialog -> releaseBusy.run())
+				.setPositiveButton(DialogStrings.APPLY, (dialog, which) ->
+				{
+					decided[0] = true;
+					applyConfirmedGraft(graft, releaseBusy);
+				})
+				.setNegativeButton(DialogStrings.CANCEL, (dialog, which) ->
+				{
+					decided[0] = true;
+					releaseBusy.run();
+				})
+				.setOnCancelListener(dialog ->
+				{
+					if (!decided[0])
+					{
+						releaseBusy.run();
+					}
+				})
 				.show());
 		}
 		catch (RuntimeException e)

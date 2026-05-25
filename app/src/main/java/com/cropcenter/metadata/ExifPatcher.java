@@ -19,6 +19,18 @@ import java.util.List;
 public final class ExifPatcher
 {
 	private static final String TAG = "ExifPatcher";
+
+	// Fallback budget when maxThumbnailBytes can't measure the EXIF segment (no EXIF present,
+	// malformed byte-order, IFD-offset math fails). 20 KB is conservative: most camera thumbnails
+	// are 5-15 KB and the caller (CropExporter.buildEmbeddedThumbnail) re-checks the actual encoded
+	// size against the APP1 cap before injection.
+	private static final int DEFAULT_THUMB_BUDGET = 20_000;
+	// Byte size of a synthesised IFD1 header (entry count + 3 × 12-byte entries + 4-byte next-IFD
+	// pointer = 2 + 36 + 4 = 42). Used both as a budget-estimate overhead in maxThumbnailBytes and
+	// as the exact slot allocation in patchedNonThumbBytes' IFD1 builder. Centralised so the two
+	// callers can't drift on a future entry-count change (e.g., adding a fourth IFD1 entry would
+	// bump this to 54; the constant marks every site that depends on the count).
+	private static final int IFD1_HEADER_BYTES = 42;
 	private static final int TIFF_HEADER_OFFSET = 10; // bytes from start of APP1 data to the TIFF header
 
 	// Sentinel for `patch`'s `thumbnail` param meaning "strip the IFD1 thumbnail from the segment so
@@ -241,15 +253,6 @@ public final class ExifPatcher
 	 */
 	public static int maxThumbnailBytes(List<JpegSegment> segments)
 	{
-		// defaultThumbBudget — fallback when we can't measure the EXIF segment (no EXIF present, malformed
-		// byte-order, IFD-offset math fails). 20KB is conservative: most camera thumbnails are 5-15KB and the
-		// caller (CropExporter.buildEmbeddedThumbnail) re-checks the actual encoded size against the APP1 cap
-		// before injection.
-		int defaultThumbBudget = 20_000;
-		// ifd1EstimatedOverhead — rough byte cost of synthesising an IFD1 header (entry count + 2 entries for
-		// JPEGInterchangeFormat / Length + 4-byte next-IFD pointer + the 2 length bytes). Used when EXIF
-		// exists but has no IFD1, so we'll add one alongside the new thumbnail.
-		int ifd1EstimatedOverhead = 42;
 		for (JpegSegment seg : segments)
 		{
 			if (!seg.isExif())
@@ -278,7 +281,7 @@ public final class ExifPatcher
 			}
 
 			// IFD0 → IFD1 walk to locate the existing thumbnail entry. On any parse failure here we
-			// fall back to defaultThumbBudget rather than zero — corrupt-IFD source EXIF is still
+			// fall back to DEFAULT_THUMB_BUDGET rather than zero — corrupt-IFD source EXIF is still
 			// preserve-worthy at load / save round-trip, and a non-zero budget keeps the embedded-
 			// thumbnail injection from silently dropping just because we couldn't measure it.
 			// Long arithmetic throughout: u32 offsets + small base wrap into small-positive ints
@@ -287,14 +290,14 @@ public final class ExifPatcher
 			long absIfd0 = TIFF_HEADER_OFFSET + ifd0Rel;
 			if (ifd0Rel < 0 || absIfd0 < TIFF_HEADER_OFFSET || absIfd0 + 2 > data.length)
 			{
-				return defaultThumbBudget;
+				return DEFAULT_THUMB_BUDGET;
 			}
 			int ifd0 = (int) absIfd0;
 			int ifd0EntryCount = ByteBufferUtils.readU16(data, ifd0, isLittleEndian);
 			long nextIfdPointerLong = (long) ifd0 + 2 + (long) ifd0EntryCount * 12;
 			if (nextIfdPointerLong + 4 > data.length)
 			{
-				return defaultThumbBudget;
+				return DEFAULT_THUMB_BUDGET;
 			}
 			int nextIfdPointer = (int) nextIfdPointerLong;
 			long ifd1Rel = ByteBufferUtils.readU32(data, nextIfdPointer, isLittleEndian);
@@ -306,13 +309,13 @@ public final class ExifPatcher
 				// thumbnail and we should say so honestly rather than return a negative that relies on
 				// the caller to clamp.
 				return Math.max(0,
-					JpegSegment.MAX_SEGMENT_BYTES - (data.length + ifd1EstimatedOverhead));
+					JpegSegment.MAX_SEGMENT_BYTES - (data.length + IFD1_HEADER_BYTES));
 			}
 
 			long absIfd1 = TIFF_HEADER_OFFSET + ifd1Rel;
 			if (ifd1Rel < 0 || absIfd1 < TIFF_HEADER_OFFSET || absIfd1 + 2 > data.length)
 			{
-				return defaultThumbBudget;
+				return DEFAULT_THUMB_BUDGET;
 			}
 			int ifd1 = (int) absIfd1;
 			int ifd1EntryCount = ByteBufferUtils.readU16(data, ifd1, isLittleEndian);
@@ -345,7 +348,7 @@ public final class ExifPatcher
 			int exifOverhead = data.length - oldThumbLen;
 			return Math.max(0, JpegSegment.MAX_SEGMENT_BYTES - exifOverhead);
 		}
-		return defaultThumbBudget; // no EXIF segment found
+		return DEFAULT_THUMB_BUDGET; // no EXIF segment found
 	}
 
 	/**
@@ -520,9 +523,6 @@ public final class ExifPatcher
 		//   = 102 bytes of non-thumbnail overhead. Used when `segments` is null/empty or carries
 		//   no EXIF segment.
 		int synthesizedNonThumb = 102;
-		// Fresh-IFD1 header size that `appendFreshIfd1WithThumbnail` writes when the append path
-		// fires. 2 bytes entry count + 3 × 12-byte entries + 4 bytes next-IFD pointer = 42.
-		int freshIfd1HeaderSize = 42;
 		if (segments == null)
 		{
 			return synthesizedNonThumb;
@@ -574,26 +574,26 @@ public final class ExifPatcher
 					// estimate gives the caller a conservative budget; if the actual patch does
 					// fall through to strip, the generated thumb just isn't embedded — same
 					// outcome as every cascade rung failing.
-					return data.length + freshIfd1HeaderSize;
+					return data.length + IFD1_HEADER_BYTES;
 				}
 				int ifd0 = (int) absIfd0;
 				int ifd0EntryCount = ByteBufferUtils.readU16(data, ifd0, isLittleEndian);
 				long nextIfdPointerLong = (long) ifd0 + 2 + (long) ifd0EntryCount * 12;
 				if (nextIfdPointerLong + 4 > data.length)
 				{
-					return data.length + freshIfd1HeaderSize;
+					return data.length + IFD1_HEADER_BYTES;
 				}
 				int nextIfdPointer = (int) nextIfdPointerLong;
 				long ifd1Rel = ByteBufferUtils.readU32(data, nextIfdPointer, isLittleEndian);
 				if (ifd1Rel == 0)
 				{
 					// No IFD1 — replaceThumbnail goes through appendFreshIfd1WithThumbnail.
-					return data.length + freshIfd1HeaderSize;
+					return data.length + IFD1_HEADER_BYTES;
 				}
 				long absIfd1 = TIFF_HEADER_OFFSET + ifd1Rel;
 				if (ifd1Rel < 0 || absIfd1 < TIFF_HEADER_OFFSET || absIfd1 + 2 > data.length)
 				{
-					return data.length + freshIfd1HeaderSize;
+					return data.length + IFD1_HEADER_BYTES;
 				}
 				int ifd1 = (int) absIfd1;
 				int ifd1EntryCount = ByteBufferUtils.readU16(data, ifd1, isLittleEndian);
@@ -660,7 +660,7 @@ public final class ExifPatcher
 					}
 					return data.length - oldThumbLen;
 				}
-				return data.length + freshIfd1HeaderSize;
+				return data.length + IFD1_HEADER_BYTES;
 			}
 			return synthesizedNonThumb;
 		}
@@ -962,9 +962,9 @@ public final class ExifPatcher
 					// non-thumbnail purposes (rare but spec-permitted).
 					if (depth == 0)
 					{
-						for (int b = 0; b < 12; b++)
+						for (int j = 0; j < 12; j++)
 						{
-							data[entryOffset + b] = 0;
+							data[entryOffset + j] = 0;
 						}
 					}
 				}
@@ -981,7 +981,6 @@ public final class ExifPatcher
 							newW, newH, orientation, depth + 1);
 					}
 				}
-				// other tags left unchanged
 				default -> {}
 			}
 		}

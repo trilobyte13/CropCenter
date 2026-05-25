@@ -52,6 +52,23 @@ public final class BitmapUtils
 	// regardless of display subsampling.
 	public static final int MAX_DISPLAY_PIXELS = 16 * 1024 * 1024;
 
+	// Per-axis dimension cap on the display proxy. Independent of MAX_DISPLAY_PIXELS — guards against
+	// pathological aspect ratios (1×100M attacker input) that would otherwise produce a 1×16M proxy.
+	// Bitmap.createBitmap throws IllegalArgumentException at dim ≥ 32768 (Android's internal limit),
+	// and even before that, Skia's HARDWARE-config copy rejects dims past the device's GL_MAX_TEXTURE_SIZE
+	// (8192-16384 on modern Android). 16384 picks the wider end of that range — fits flagship-class GPUs
+	// (Adreno 730+, Mali-G77+) and is power-of-2-clean. For real camera aspect ratios (4:3, 16:9, 3:2,
+	// 1:1) at MAX_DISPLAY_PIXELS = 16 MP, neither axis comes close to this cap (~4096-5000 px max).
+	static final int MAX_PROXY_AXIS = 16384;
+
+	// Companion per-axis cap. A panorama like 32767×1000 sits under MAX_SOURCE_RENDER_PIXELS (32 MP < 64
+	// MP) but its width is past every supported GPU's GL_MAX_TEXTURE_SIZE (typically 8192–16384). Without
+	// this guard the source-switch would hand Skia a bitmap whose texture upload silently fails or
+	// allocates a fallback path and stalls. Numerically equal to MAX_PROXY_AXIS — the proxy is sized so
+	// its dimensions fit in this axis cap by construction, but the SOURCE is not pre-shrunk and must be
+	// gated explicitly before the renderer asks the GPU to bind it.
+	public static final int MAX_SOURCE_RENDER_AXIS = 16384;
+
 	// Pixel-count ceiling above which the renderer keeps using the display proxy even at zoom ≥ 4.
 	// Background: at zoom ≥ 4 EditorRenderer normally switches from the proxy to the full source so the
 	// pixel-grid overlay (scale ≥ 6) lands on true source-pixel boundaries. For sub-cap sources this is a
@@ -64,23 +81,6 @@ public final class BitmapUtils
 	// source.getWidth/getHeight unconditionally so the grid line spacing always matches source coords;
 	// only the bitmap-render path is gated by this cap.
 	public static final int MAX_SOURCE_RENDER_PIXELS = 64 * 1024 * 1024;
-
-	// Companion per-axis cap. A panorama like 32767×1000 sits under MAX_SOURCE_RENDER_PIXELS (32 MP < 64
-	// MP) but its width is past every supported GPU's GL_MAX_TEXTURE_SIZE (typically 8192–16384). Without
-	// this guard the source-switch would hand Skia a bitmap whose texture upload silently fails or
-	// allocates a fallback path and stalls. Numerically equal to MAX_PROXY_AXIS — the proxy is sized so
-	// its dimensions fit in this axis cap by construction, but the SOURCE is not pre-shrunk and must be
-	// gated explicitly before the renderer asks the GPU to bind it.
-	public static final int MAX_SOURCE_RENDER_AXIS = 16384;
-
-	// Per-axis dimension cap on the display proxy. Independent of MAX_DISPLAY_PIXELS — guards against
-	// pathological aspect ratios (1×100M attacker input) that would otherwise produce a 1×16M proxy.
-	// Bitmap.createBitmap throws IllegalArgumentException at dim ≥ 32768 (Android's internal limit),
-	// and even before that, Skia's HARDWARE-config copy rejects dims past the device's GL_MAX_TEXTURE_SIZE
-	// (8192-16384 on modern Android). 16384 picks the wider end of that range — fits flagship-class GPUs
-	// (Adreno 730+, Mali-G77+) and is power-of-2-clean. For real camera aspect ratios (4:3, 16:9, 3:2,
-	// 1:1) at MAX_DISPLAY_PIXELS = 16 MP, neither axis comes close to this cap (~4096-5000 px max).
-	static final int MAX_PROXY_AXIS = 16384;
 
 	private BitmapUtils() {}
 

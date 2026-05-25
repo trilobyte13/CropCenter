@@ -55,11 +55,11 @@ public final class PngFixtures
 		CRC32 crc = new CRC32();
 		crc.update(typeBytes);
 		crc.update(data);
-		long c = crc.getValue();
-		out.write((int) ((c >> 24) & 0xFF));
-		out.write((int) ((c >> 16) & 0xFF));
-		out.write((int) ((c >> 8) & 0xFF));
-		out.write((int) (c & 0xFF));
+		long crc32Value = crc.getValue();
+		out.write((int) ((crc32Value >> 24) & 0xFF));
+		out.write((int) ((crc32Value >> 16) & 0xFF));
+		out.write((int) ((crc32Value >> 8) & 0xFF));
+		out.write((int) (crc32Value & 0xFF));
 		return out.toByteArray();
 	}
 

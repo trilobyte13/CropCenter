@@ -74,16 +74,23 @@ public final class SafPaths
 	}
 
 	/**
-	 * Index just past the separator that ends the parent's segment of a path-addressed SAF document ID. For nested
-	 * files ("primary:Pictures/foo.jpg") this is the position after the last "/", so docId.substring(0, end) +
-	 * child yields the sibling. For files at the provider root ("primary:foo.jpg") it falls back to the position
-	 * after the volume ":". Returns -1 for opaque IDs that have neither separator.
+	 * Index just past the separator that ends the parent's segment of a PATH-ADDRESSED SAF document ID. For
+	 * nested files ("primary:Pictures/foo.jpg") this is the position after the last "/", so
+	 * docId.substring(0, end) + child yields the sibling. For root-level files in a path-addressed scheme
+	 * ("primary:foo.jpg") it falls back to the position after the volume ":". Returns -1 for opaque schemes
+	 * ("msf:12345", "image:12345", pure-numeric MediaStore IDs) where the tail after ":" is an unparseable
+	 * handle — sibling URIs can't be built by string substitution, so callers route to the opaque-provider
+	 * fallback (which presents Replace/Keep/Cancel via probe rather than auto-rename).
 	 *
 	 * @param docId document ID to parse
-	 * @return index just past the separator, or -1 when neither separator is present
+	 * @return index just past the separator, or -1 for opaque schemes / docIds without a parent separator
 	 */
 	public static int lastSegmentSeparatorEnd(String docId)
 	{
+		if (isOpaqueDocId(docId))
+		{
+			return -1;
+		}
 		int slash = docId.lastIndexOf('/');
 		if (slash >= 0)
 		{
@@ -98,15 +105,22 @@ public final class SafPaths
 	}
 
 	/**
-	 * Parent document ID of a path-addressed SAF document ID, or null when the ID is opaque. Strips the trailing
-	 * "/segment" for nested paths; for root-level files the parent is the volume prefix including the ":"
-	 * ("primary:foo.jpg" → "primary:"), which ExternalStorageProvider accepts as the root document.
+	 * Parent document ID of a PATH-ADDRESSED SAF document ID, or null when the ID is opaque. Strips the
+	 * trailing "/segment" for nested paths; for root-level files in a path-addressed scheme the parent is
+	 * the volume prefix including the ":" ("primary:foo.jpg" → "primary:"), which ExternalStorageProvider
+	 * accepts as the root document. Returns null for opaque schemes (msf:, image:, pure-numeric) because a
+	 * "parent" of an opaque handle is meaningless — there is no sibling-creation flow on those providers
+	 * (callers handle collisions via the in-place fallback instead).
 	 *
 	 * @param docId document ID to parse
 	 * @return parent document ID, or null when no parent is derivable
 	 */
 	public static String parentDocIdOf(String docId)
 	{
+		if (isOpaqueDocId(docId))
+		{
+			return null;
+		}
 		int slash = docId.lastIndexOf('/');
 		if (slash > 0)
 		{
@@ -118,5 +132,43 @@ public final class SafPaths
 			return docId.substring(0, colon + 1);
 		}
 		return null;
+	}
+
+	/**
+	 * Recognise opaque document-ID schemes whose tail after ":" is an unparseable handle, not a path
+	 * segment. The two known opaque scheme prefixes are "msf:" (DownloadStorageProvider MediaStore-Files
+	 * numeric ID) and "image:" (media.documents provider MediaStore-Images numeric ID); a pure-numeric
+	 * docId (no colon, all digits) is the legacy form of the same MediaStore reference.
+	 *
+	 * The distinction matters for sibling-URI derivation: a path-addressed docId ("primary:foo.jpg")
+	 * lets `deriveSiblingUri` build `primary:bar.jpg` as a sibling, but `msf:12345` swapped to
+	 * `msf:bar.jpg` is a bogus URI pointing at no document. Without this check, SaveController's Case-B
+	 * collision flow on Downloads providers can synthesize bogus sibling URIs and silently auto-rename
+	 * instead of surfacing the Replace/Keep/Cancel dialog.
+	 *
+	 * @param docId document ID to classify
+	 * @return true when docId is one of the recognised opaque schemes
+	 */
+	private static boolean isOpaqueDocId(String docId)
+	{
+		if (docId.startsWith("msf:") || docId.startsWith("image:"))
+		{
+			return true;
+		}
+		// Pure-numeric (no colon, all digits) — legacy MediaStore numeric ID. Empty string isn't
+		// numeric in the meaningful sense; fall through to the existing path-addressed parse which
+		// returns -1 / null on it anyway.
+		if (docId.isEmpty() || docId.indexOf(':') >= 0)
+		{
+			return false;
+		}
+		for (int i = 0; i < docId.length(); i++)
+		{
+			if (!Character.isDigit(docId.charAt(i)))
+			{
+				return false;
+			}
+		}
+		return true;
 	}
 }

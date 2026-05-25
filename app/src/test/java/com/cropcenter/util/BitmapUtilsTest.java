@@ -10,6 +10,7 @@ import org.junit.Test;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.util.Locale;
 
 /**
  * Tests for the pure-Java pieces of BitmapUtils — anything that doesn't touch a Bitmap. isCardinalRotation is the
@@ -61,10 +62,11 @@ public final class BitmapUtilsTest
 		};
 		for (int[] dim : cases)
 		{
-			int s = BitmapUtils.computeInSampleSize(dim[0], dim[1], 32 * 1024 * 1024);
-			// Power-of-2 check: s & (s − 1) == 0 AND s > 0.
-			assertTrue("sample size " + s + " for " + dim[0] + "x" + dim[1] + " must be power of 2",
-				s > 0 && (s & (s - 1)) == 0);
+			int sampleSize = BitmapUtils.computeInSampleSize(dim[0], dim[1], 32 * 1024 * 1024);
+			// Power-of-2 check: sampleSize & (sampleSize − 1) == 0 AND sampleSize > 0.
+			String msg = String.format(Locale.ROOT, "sample size %d for %dx%d must be power of 2",
+				sampleSize, dim[0], dim[1]);
+			assertTrue(msg, sampleSize > 0 && (sampleSize & (sampleSize - 1)) == 0);
 		}
 	}
 

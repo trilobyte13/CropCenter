@@ -26,6 +26,7 @@ import android.util.Log;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
+import android.view.View.MeasureSpec;
 import android.view.inputmethod.EditorInfo;
 import android.widget.CheckBox;
 import android.widget.EditText;
@@ -45,6 +46,7 @@ import com.cropcenter.util.ThemeColors;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -53,6 +55,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
+import java.util.regex.Pattern;
 
 /**
  * Merged in-app save dialog — combines what used to be SaveDialog (format chips + Export Grid checkbox) with the
@@ -87,19 +90,34 @@ public final class FolderPickerDialog
 	 */
 	public record SaveChoices(File folder, String filename, Format format, boolean bakeGrid) {}
 
+	private static final String TAG = "FolderPickerDialog";
+
 	private static final String BREADCRUMB_SEPARATOR = " › ";
-	private static final int FILENAME_MAX_LENGTH = 200; // leaves headroom under common 255-byte FS limit
 	private static final String KEY_GRID_MODE = "grid_mode";
-	private static final int MAX_THUMBNAILS = 60;
 	private static final String PREFS_NAME = "cropcenter_picker_view";
 	private static final String ROOT_LABEL = "Internal storage";
-	private static final String TAG = "FolderPickerDialog";
+	// UI input throttle, UTF-16 chars. Coarse cap to prevent copy-paste of multi-MB names into the
+	// EditText; the authoritative filesystem-compatibility check is MAX_FILENAME_UTF8_BYTES below.
+	// A 200-char string of single-byte ASCII fits easily under 255 bytes; a 200-char string of
+	// 4-byte emoji codepoints would be ~800 bytes — that's caught by the byte-length check in
+	// isValidFilename, not here.
+	private static final int FILENAME_MAX_LENGTH = 200;
+	// Filesystem filename-length cap, in UTF-8 bytes. Common Linux / Android filesystems (ext4, F2FS,
+	// FAT32 LFN) cap individual filename components at 255 bytes. We use 250 to leave headroom for
+	// the format-extension the caller may append after isValidFilename runs (`.jpg` / `.png` / `.jpeg`
+	// — longest 5 bytes), so a typed-name validation can be done before extension normalisation and
+	// the result still fits after the swap.
+	private static final int MAX_FILENAME_UTF8_BYTES = 250;
+	private static final int MAX_THUMBNAILS = 60;
 	private static final int THUMBNAIL_GRID_COLUMNS = 3;
 
 	private final AtomicInteger thumbnailGeneration = new AtomicInteger(0);
-	private final Consumer<DialogInterface> hostDismissCallback;
 	private final Consumer<SaveChoices> onPicked;
 	private final Context ctx;
+	// Use the Android-native DialogInterface.OnDismissListener (instead of Consumer<DialogInterface>)
+	// so the type matches SettingsDialog's equivalent callback shape — the codebase chose the Android
+	// idiom for that role and this file's prior Consumer variant was an outlier.
+	private final DialogInterface.OnDismissListener hostDismissCallback;
 	private final File rootDir;
 	private final Handler uiHandler = new Handler(Looper.getMainLooper());
 	private final String initialFilename;
@@ -131,7 +149,7 @@ public final class FolderPickerDialog
 	 */
 	public FolderPickerDialog(Context ctx, File startDir, String initialFilename, Format initialFormat,
 		boolean initialBakeGrid, Consumer<SaveChoices> onPicked,
-		Consumer<DialogInterface> hostDismissCallback)
+		DialogInterface.OnDismissListener hostDismissCallback)
 	{
 		this.ctx = ctx;
 		this.onPicked = onPicked;
@@ -143,6 +161,37 @@ public final class FolderPickerDialog
 		this.initialBakeGrid = initialBakeGrid;
 		this.gridMode = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 			.getBoolean(KEY_GRID_MODE, true);
+	}
+
+	/**
+	 * Validate a user-typed filename for the in-app save dialog. Rejects empty input, traversal
+	 * segments (".", ".."), any path separator ("/", "\"), and names whose UTF-8 byte length exceeds
+	 * MAX_FILENAME_UTF8_BYTES (the filesystem-compatibility cap — 200 UTF-16 chars of CJK / emoji can
+	 * easily exceed the common 255-byte filesystem-component limit, which the LengthFilter doesn't
+	 * catch). Public so SaveController (in a different package) can route its merged-save and rename
+	 * validators through this single chokepoint — and so the test class can pin the validation
+	 * contract without spinning up the dialog. A false return surfaces "Invalid filename" via Toast
+	 * and keeps the dialog open.
+	 *
+	 * @param typed user-typed filename, ALREADY trimmed by the caller. Untrimmed " " would pass the
+	 *              isEmpty check but produce a useless filename — trim at the call site, not here
+	 * @return true when the name is safe to use as a file-system filename; false otherwise
+	 */
+	public static boolean isValidFilename(String typed)
+	{
+		if (typed.isEmpty()
+			|| typed.equals(".")
+			|| typed.equals("..")
+			|| typed.contains("/")
+			|| typed.contains("\\"))
+		{
+			return false;
+		}
+		// UTF-8 byte-length cap. 200 chars of 4-byte emoji = 800 bytes — too long for ext4 / FAT32
+		// even though LengthFilter accepted it. Encoding here is unavoidable on the UI thread because
+		// String.length() (UTF-16 char count) and the on-disk byte cost diverge for any non-ASCII
+		// input.
+		return typed.getBytes(StandardCharsets.UTF_8).length <= MAX_FILENAME_UTF8_BYTES;
 	}
 
 	/**
@@ -161,9 +210,7 @@ public final class FolderPickerDialog
 	 */
 	public static String normaliseExtension(String name, Format format)
 	{
-		int dot = name.lastIndexOf('.');
-		String stem = (dot > 0) ? name.substring(0, dot) : name;
-		return stem + format.extension();
+		return Format.stripExtension(name) + format.extension();
 	}
 
 	/**
@@ -176,44 +223,84 @@ public final class FolderPickerDialog
 	public AlertDialog show()
 	{
 		density = ctx.getResources().getDisplayMetrics().density;
-		int padOuter = DpToPx.toPx(20, density);
 		int padInner = DpToPx.toPx(12, density);
 		int padSmall = DpToPx.toPx(4, density);
-		int dividerHeight = Math.max(1, DpToPx.toPx(1, density));
 		TypedValue rippleAttr = new TypedValue();
 		ctx.getTheme().resolveAttribute(android.R.attr.selectableItemBackground, rippleAttr, true);
 		this.folderRowRippleResId = rippleAttr.resourceId;
 
-		LinearLayout titleBlock = buildTitleBlock(padOuter, padInner, padSmall);
 		LinearLayout content = new LinearLayout(ctx);
 		content.setOrientation(LinearLayout.VERTICAL);
 
-		// Layout (top to bottom): title block → thumbnail scroller → format / Export-Grid options →
-		// filename input. The scroller takes all remaining height (weight=1) so the bottom controls
-		// pin to just above the dialog's framework buttons. Dividers separate semantic regions: the
-		// browsing area sits between two thin SURFACE2 lines, then the format + filename block sits
-		// below as the "configure the save" footer.
+		// Single SURFACE0-backed DialogCards panel holding every visible element — title block on
+		// top, thumbnail scroller in the middle (weight=1 so it stretches to consume the dialog's
+		// fixed body height), then the save options + filename rows. All labels, icons, and the
+		// scrolling browsing area sit inside the inlaid darker fill; no un-panelled region remains
+		// in the dialog body.
 		contentList = new LinearLayout(ctx);
 		contentList.setOrientation(LinearLayout.VERTICAL);
 		contentList.setPadding(0, padSmall, 0, padInner);
 
-		ScrollView scroller = new ScrollView(ctx);
-		scroller.setFillViewport(true);
+		// Scroller height is WRAP_CONTENT but clamped via the anonymous subclass below to a fraction
+		// of screen height. This is the "natural variance" model: short list-mode contents make a
+		// short dialog, denser thumbnail grids grow the dialog, BUT once the contents would push the
+		// options row + filename row + Save/Cancel buttons off-screen the scroller caps and starts
+		// scrolling instead. Without the clamp the panel's WRAP_CONTENT layout would let a long
+		// folder of images grow the scroller without bound, hiding the controls below it. The
+		// reservedPx budget approximates the non-scroller chrome:
+		//   ~80dp status/nav bar (Android 15 edge-to-edge varies by device)
+		//   ~24dp AlertDialog top frame
+		//   ~60dp AlertDialog button row
+		//   ~24dp panel outer margin (12dp top + 12dp bottom)
+		//   ~20dp DialogCards card padding (10dp top + 10dp bottom)
+		//   ~60dp title block (folder name 32dp + breadcrumb 24dp + 4dp gap)
+		//   ~60dp options row (padInner 12 + chip 36 + padInner 12)
+		//   ~60dp filename row (padInner 12 + EditText 36 + padInner 12)
+		// Total ≈ 388dp; rounding up to 440dp leaves a 50dp buffer for device variance (notches,
+		// gesture-nav handle, taller status bars). Prior 300dp budget was ~90dp too small — the Save
+		// here / Cancel buttons would clip off the bottom edge on a full-grid folder.
+		int reservedPx = DpToPx.toPx(440, density);
+		int screenHeightPx = ctx.getResources().getDisplayMetrics().heightPixels;
+		final int scrollerMaxPx = Math.max(DpToPx.toPx(240, density), screenHeightPx - reservedPx);
+		ScrollView scroller = new ScrollView(ctx)
+		{
+			@Override
+			protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec)
+			{
+				int heightMode = MeasureSpec.getMode(heightMeasureSpec);
+				int heightSize = MeasureSpec.getSize(heightMeasureSpec);
+				int targetMax = (heightMode == MeasureSpec.UNSPECIFIED)
+					? scrollerMaxPx
+					: Math.min(heightSize, scrollerMaxPx);
+				super.onMeasure(widthMeasureSpec,
+					MeasureSpec.makeMeasureSpec(targetMax, MeasureSpec.AT_MOST));
+			}
+		};
 		scroller.addView(contentList);
 		LinearLayout.LayoutParams scrollerLp = new LinearLayout.LayoutParams(
-			LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f);
+			LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
 
-		content.addView(buildDivider(dividerHeight));
-		content.addView(scroller, scrollerLp);
-		content.addView(buildDivider(dividerHeight));
-		content.addView(buildOptionsRow(padOuter, padInner));
-		content.addView(buildFilenameRow(padOuter, padInner));
+		LinearLayout panel = DialogCards.newCard(ctx, density);
+		panel.addView(buildTitleBlock(padSmall));
+		panel.addView(scroller, scrollerLp);
+		panel.addView(buildOptionsRow(padInner));
+		panel.addView(buildFilenameRow(padInner));
+
+		// Symmetric gutters between the inlaid panel and the AlertDialog frame: 12dp on every side
+		// so the visible "border" looks identical top/bottom/left/right. The dialog frame itself
+		// adds a small native inset on top of this; padding here only governs the gap between the
+		// dialog content area and the SURFACE0-backed panel edge.
+		int cardMargin = DpToPx.toPx(12, density);
+		LinearLayout.LayoutParams panelLp = new LinearLayout.LayoutParams(
+			LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+		panelLp.setMargins(cardMargin, cardMargin, cardMargin, cardMargin);
+		content.addView(panel, panelLp);
 
 		thumbnailExecutor = Executors.newSingleThreadExecutor(task ->
 		{
-			Thread t = new Thread(task, "FolderPicker-thumbnails");
-			t.setDaemon(true);
-			return t;
+			Thread thread = new Thread(task, "FolderPicker-thumbnails");
+			thread.setDaemon(true);
+			return thread;
 		});
 
 		boolean[] decided = { false };
@@ -223,23 +310,21 @@ public final class FolderPickerDialog
 		// flow on a correctable typo. The negative button keeps the default null-handler dismiss
 		// behaviour (Cancel really should close).
 		AlertDialog dialog = new AlertDialog.Builder(ctx)
-			.setCustomTitle(titleBlock)
 			.setView(content)
 			.setPositiveButton("Save here", null)
-			.setNegativeButton("Cancel", null)
+			.setNegativeButton(DialogStrings.CANCEL, null)
 			.create();
-		dialog.setOnShowListener(d ->
-			dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v ->
+		dialog.setOnShowListener(shown ->
+			dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view ->
 			{
 				// Sanitise the typed filename — reject path separators and traversal segments. The
 				// caller (SaveController.onMergedSaveConfirmed) re-sanitises defensively, but the
 				// user-facing path fails loudly with a Toast here so the user can correct the typo
 				// rather than the save silently aborting.
 				String typed = filenameInput.getText().toString().trim();
-				if (typed.isEmpty() || typed.equals(".") || typed.equals("..")
-					|| typed.contains("/") || typed.contains("\\"))
+				if (!isValidFilename(typed))
 				{
-					Toast.makeText(ctx, "Invalid filename", Toast.LENGTH_SHORT).show();
+					Toast.makeText(ctx, DialogStrings.INVALID_FILENAME, Toast.LENGTH_SHORT).show();
 					return;
 				}
 				// Normalise the trailing extension to match the selected format. The format chip drives
@@ -255,8 +340,12 @@ public final class FolderPickerDialog
 				decided[0] = true;
 				dialog.dismiss();
 			}));
-		dialog.setOnDismissListener(d ->
+		dialog.setOnDismissListener(dismissed ->
 		{
+			// Param is `dismissed` (not `dialog`) to avoid shadowing the outer `AlertDialog dialog`
+			// per CLAUDE.md's collision-avoidance rule. The DialogInterface passed in is the same
+			// underlying instance as the outer `dialog`, just at the narrower interface type.
+			//
 			// Bump the generation FIRST so any decode task that's already finished and posted a UI
 			// runnable to uiHandler sees the mismatch and recycles its bitmap via the else branch
 			// (instead of calling setImageBitmap on a now-detached ImageView and pinning the bitmap
@@ -270,7 +359,7 @@ public final class FolderPickerDialog
 			}
 			if (hostDismissCallback != null)
 			{
-				hostDismissCallback.accept(d);
+				hostDismissCallback.onDismiss(dismissed);
 			}
 		});
 
@@ -290,6 +379,94 @@ public final class FolderPickerDialog
 			throw e;
 		}
 		return dialog;
+	}
+
+	/**
+	 * Walk the path chain from rootDir to current (inclusive), one File per segment. The first element
+	 * is always rootDir; if current equals rootDir, the chain has length 1. Otherwise the chain
+	 * contains rootDir plus one File per "/"-separated segment of the path relative to rootDir.
+	 * Package-private so the breadcrumb-rendering test can exercise the chain-building logic without
+	 * spinning up an AlertDialog. buildBreadcrumb delegates to this for the segment enumeration; the
+	 * spannable formatting (ClickableSpan / StyleSpan / ForegroundColorSpan) stays in the View
+	 * layer's instance method where it can capture the dialog's mutable `current` field.
+	 *
+	 * Both paths are canonicalized before the relative-slice so a symlink in either input produces
+	 * the same chain a direct path would. Without this, a current path like `/sdcard/Pictures` (the
+	 * /sdcard symlink to /storage/emulated/0) under rootDir = `/storage/emulated/0` would pass
+	 * isInsideRoot (which canonicalizes) but then crash here with
+	 * StringIndexOutOfBoundsException because the absolute-path prefix doesn't match. The defensive
+	 * startsWith check after canonicalization handles the residual case where a stale `current`
+	 * from a concurrent refresh is no longer a descendant — degenerates to a root-only chain rather
+	 * than throwing.
+	 *
+	 * @param rootDir absolute path representing the breadcrumb's leftmost ("Internal storage") segment
+	 * @param current the folder currently displayed by the picker; expected to be a descendant of
+	 *                rootDir (verified at navigation time by isInsideRoot)
+	 * @return ordered list of File segments [rootDir, ..., current]; never empty (always contains
+	 *         rootDir at minimum); collapses to [rootDir] when current is not a descendant or
+	 *         either path can't be canonicalized
+	 */
+	static List<File> breadcrumbChain(File rootDir, File current)
+	{
+		List<File> chain = new ArrayList<>();
+		chain.add(rootDir);
+		String rootPath;
+		String currentPath;
+		try
+		{
+			rootPath = rootDir.getCanonicalPath();
+			currentPath = current.getCanonicalPath();
+		}
+		catch (IOException ignored)
+		{
+			// Symlink loop / unreadable parent / hostile filesystem entry — degenerate to a
+			// root-only chain rather than crashing the picker UI. The user can still navigate
+			// from the root label.
+			return chain;
+		}
+		if (currentPath.equals(rootPath))
+		{
+			return chain;
+		}
+		String prefix = rootPath + File.separator;
+		if (!currentPath.startsWith(prefix))
+		{
+			// current is no longer a descendant of root (concurrent refresh raced this call, or
+			// caller bypassed isInsideRoot). Without this guard the substring below would underflow
+			// or return a path with leading separator that split into a bogus first segment.
+			return chain;
+		}
+		String relative = currentPath.substring(prefix.length());
+		File walker = rootDir;
+		// Split on the platform's native File.separator. Android uses "/", JVM-on-Windows uses
+		// "\" — using the platform constant keeps the helper testable on both. Pattern.quote
+		// because "\" is a regex meta-character; without it the JVM throws PatternSyntaxException.
+		for (String part : relative.split(Pattern.quote(File.separator)))
+		{
+			walker = new File(walker, part);
+			chain.add(walker);
+		}
+		return chain;
+	}
+
+	/**
+	 * Extension filter for the file-list pass in `refresh()` — used to decide which files in the picked
+	 * folder are eligible for thumbnail decode + selection. Matches the same set the rest of the app
+	 * decodes (JPEG / PNG via the load path, HEIC / WebP / HEIF via Android's BitmapFactory). Anything
+	 * outside this set is hidden from the grid / list view. Package-private rather than private only so
+	 * the test class can pin the accepted extension set directly.
+	 *
+	 * @param file candidate file (only the name's lowercase suffix is inspected; the File doesn't need
+	 *             to exist)
+	 * @return true when the filename's lowercase suffix matches an accepted extension; false otherwise
+	 */
+	static boolean isImageFile(File file)
+	{
+		String name = file.getName().toLowerCase(Locale.ROOT);
+		return name.endsWith(".jpg") || name.endsWith(".jpeg")
+			|| name.endsWith(".png")
+			|| name.endsWith(".webp")
+			|| name.endsWith(".heic") || name.endsWith(".heif");
 	}
 
 	/**
@@ -379,7 +556,10 @@ public final class FolderPickerDialog
 			raw.recycle();
 			return null;
 		}
-		if (orientation == ExifInterface.ORIENTATION_NORMAL || orientation == 0)
+		// Identity-orientation predicate matches BitmapUtils.applyOrientation / UltraHdrCompat:
+		// values ≤ 1 are upright (ExifInterface.ORIENTATION_NORMAL = 1; 0 is a malformed/missing
+		// tag that all three sites also treat as identity).
+		if (orientation <= ExifInterface.ORIENTATION_NORMAL)
 		{
 			return raw;
 		}
@@ -399,47 +579,42 @@ public final class FolderPickerDialog
 	}
 
 	/**
-	 * @param file candidate file
-	 * @return true when the filename extension matches a thumbnail-renderable format (JPEG / PNG / HEIC / WebP)
-	 */
-	private static boolean isImageFile(File file)
-	{
-		String name = file.getName().toLowerCase(Locale.ROOT);
-		return name.endsWith(".jpg") || name.endsWith(".jpeg")
-			|| name.endsWith(".png")
-			|| name.endsWith(".webp")
-			|| name.endsWith(".heic") || name.endsWith(".heif");
-	}
-
-	/**
 	 * Append a single 3-column grid row to the content list containing the next up-to-3 files starting
 	 * at fromIndex. Final row pads with weighted placeholder Views so the cells size identically to a
-	 * full row (otherwise 1 or 2 cells would expand to the full row width).
+	 * full row (otherwise 1 or 2 cells would expand to the full row width). The row spans the full
+	 * content-list width (no left/right inset) so the thumbnails grow as large as the dialog allows
+	 * and align with the options / filename rows above and below the scroller.
 	 *
 	 * @param files        file list being rendered
 	 * @param fromIndex    start index within `files`; reads up to 3 sequential entries
 	 * @param thumbnailGen current thumbnail generation; bg loads check this before posting
-	 * @param gap          inter-cell margin in px
-	 * @param padOuter     left/right margin on the grid row matching the folder-row outer padding
+	 * @param gap          inter-cell margin in px (also used top/bottom for inter-row spacing so the
+	 *                     grid view's row gap matches the list view's 4dp + 4dp internal padding)
 	 */
-	private void appendGridFileRow(List<File> files, int fromIndex, int thumbnailGen, int gap, int padOuter)
+	private void appendGridFileRow(List<File> files, int fromIndex, int thumbnailGen, int gap)
 	{
 		LinearLayout row = new LinearLayout(ctx);
 		row.setOrientation(LinearLayout.HORIZONTAL);
 		LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(
 			LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-		rowLp.leftMargin = padOuter;
-		rowLp.rightMargin = padOuter;
+		// Visible spacing between adjacent rows: bottomMargin (gap) + topMargin (gap) = 2 * gap.
+		// Inter-cell horizontal spacing is also 2 * gap (cellLp.leftMargin = 2 * gap below) so
+		// vertical and horizontal gaps between thumbnails appear equal — previously horizontal was
+		// half the vertical, which read as asymmetric to the eye.
 		rowLp.topMargin = gap;
+		rowLp.bottomMargin = gap;
 		contentList.addView(row, rowLp);
-		int displayTarget = Math.max(1, DpToPx.toPx(140, density));
+		// Doubled target size now that the grid row spans the full card-content width: each of the
+		// 3 columns gets ~33% of (cardWidth - 2 * gap) instead of the prior padOuter-inset width.
+		int displayTarget = Math.max(1, DpToPx.toPx(220, density));
+		int horizontalCellGap = gap * 2;
 		for (int i = 0; i < THUMBNAIL_GRID_COLUMNS; i++)
 		{
 			LinearLayout.LayoutParams cellLp = new LinearLayout.LayoutParams(0,
 				LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
 			if (i > 0)
 			{
-				cellLp.leftMargin = gap;
+				cellLp.leftMargin = horizontalCellGap;
 			}
 			int fileIdx = fromIndex + i;
 			if (fileIdx >= files.size())
@@ -447,7 +622,7 @@ public final class FolderPickerDialog
 				View placeholder = new View(ctx);
 				LinearLayout.LayoutParams pLp = new LinearLayout.LayoutParams(0,
 					LinearLayout.LayoutParams.MATCH_PARENT, 1f);
-				pLp.leftMargin = gap;
+				pLp.leftMargin = horizontalCellGap;
 				row.addView(placeholder, pLp);
 				continue;
 			}
@@ -505,20 +680,7 @@ public final class FolderPickerDialog
 	private SpannableStringBuilder buildBreadcrumb()
 	{
 		SpannableStringBuilder sb = new SpannableStringBuilder();
-		List<File> chain = new ArrayList<>();
-		chain.add(rootDir);
-		String rootPath = rootDir.getAbsolutePath();
-		String currentPath = current.getAbsolutePath();
-		if (!currentPath.equals(rootPath))
-		{
-			String relative = currentPath.substring(rootPath.length() + 1);
-			File walker = rootDir;
-			for (String part : relative.split("/"))
-			{
-				walker = new File(walker, part);
-				chain.add(walker);
-			}
-		}
+		List<File> chain = breadcrumbChain(rootDir, current);
 		for (int i = 0; i < chain.size(); i++)
 		{
 			File segment = chain.get(i);
@@ -544,33 +706,23 @@ public final class FolderPickerDialog
 		return sb;
 	}
 
-	private View buildDivider(int height)
-	{
-		View v = new View(ctx);
-		v.setBackgroundColor(ThemeColors.SURFACE2);
-		LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-			LinearLayout.LayoutParams.MATCH_PARENT, height);
-		v.setLayoutParams(lp);
-		return v;
-	}
-
 	/**
 	 * Build the editable filename row at the bottom of the dialog (above the framework buttons).
 	 * Pre-filled with `initialFilename`; the user can edit freely. Format-chip toggling syncs the
 	 * extension automatically via syncFilenameExtension. Sanitisation (no path separators, no
 	 * traversal segments) runs on the Save-here positive-button handler, not here, so the field
-	 * itself accepts any IME input.
+	 * itself accepts any IME input. Horizontal padding lives on the enclosing DialogCards card; this
+	 * row only supplies the vertical breathing room between options and filename.
 	 *
-	 * @param padOuter horizontal padding matching the rest of the dialog
 	 * @param padInner vertical padding inside the row
 	 * @return single-row LinearLayout containing the filename EditText
 	 */
-	private LinearLayout buildFilenameRow(int padOuter, int padInner)
+	private LinearLayout buildFilenameRow(int padInner)
 	{
 		LinearLayout row = new LinearLayout(ctx);
 		row.setOrientation(LinearLayout.HORIZONTAL);
 		row.setGravity(Gravity.CENTER_VERTICAL);
-		row.setPadding(padOuter, padInner, padOuter, padInner);
+		row.setPadding(0, padInner, 0, padInner);
 
 		TextView label = new TextView(ctx);
 		label.setText("Save as");
@@ -600,37 +752,37 @@ public final class FolderPickerDialog
 		return row;
 	}
 
-	private LinearLayout buildOptionsRow(int padOuter, int padInner)
+	/**
+	 * Build the format-chip + Export-Grid checkbox row that sits at the top of the save-options card.
+	 * Horizontal padding lives on the enclosing DialogCards card; this row only supplies the vertical
+	 * breathing room between the card edge and the format chips.
+	 *
+	 * @param padInner vertical padding inside the row
+	 * @return single-row LinearLayout containing the JPEG / PNG chips and the Export Grid checkbox
+	 */
+	private LinearLayout buildOptionsRow(int padInner)
 	{
 		LinearLayout row = new LinearLayout(ctx);
 		row.setOrientation(LinearLayout.HORIZONTAL);
 		row.setGravity(Gravity.CENTER_VERTICAL);
-		row.setPadding(padOuter, padInner, padOuter, padInner);
+		row.setPadding(0, padInner, 0, padInner);
 
 		TextView jpegChip = makeFormatChip("JPEG");
 		TextView pngChip = makeFormatChip("PNG");
 		Runnable updateChipStyle = () -> styleFormatChips(jpegChip, pngChip);
 		updateChipStyle.run();
-		jpegChip.setOnClickListener(v ->
+		jpegChip.setOnClickListener(view ->
 		{
 			currentFormat = Format.JPEG;
 			updateChipStyle.run();
 			syncFilenameExtension();
 		});
-		pngChip.setOnClickListener(v ->
+		pngChip.setOnClickListener(view ->
 		{
 			currentFormat = Format.PNG;
 			updateChipStyle.run();
 			syncFilenameExtension();
 		});
-		int chipGap = DpToPx.toPx(8, density);
-		LinearLayout.LayoutParams jpegLp = new LinearLayout.LayoutParams(0,
-			LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-		LinearLayout.LayoutParams pngLp = new LinearLayout.LayoutParams(0,
-			LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-		pngLp.leftMargin = chipGap;
-		row.addView(jpegChip, jpegLp);
-		row.addView(pngChip, pngLp);
 
 		chkBakeGrid = new CheckBox(ctx);
 		chkBakeGrid.setText("Export Grid");
@@ -638,18 +790,39 @@ public final class FolderPickerDialog
 		chkBakeGrid.setTextColor(ThemeColors.TEXT);
 		chkBakeGrid.setButtonTintList(ColorStateList.valueOf(ThemeColors.MAUVE));
 		chkBakeGrid.setChecked(initialBakeGrid);
+
+		// Children order: [Export Grid] [JPEG] [PNG]. Export Grid leads the row at WRAP_CONTENT;
+		// the two format chips occupy the remaining width with equal weight=1 splits so their
+		// pill backgrounds visually balance regardless of dialog width.
+		int chipGap = DpToPx.toPx(8, density);
 		LinearLayout.LayoutParams chkLp = new LinearLayout.LayoutParams(
 			LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-		chkLp.leftMargin = chipGap * 2;
 		row.addView(chkBakeGrid, chkLp);
+
+		LinearLayout.LayoutParams jpegLp = new LinearLayout.LayoutParams(0,
+			LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+		jpegLp.leftMargin = chipGap * 2;
+		row.addView(jpegChip, jpegLp);
+
+		LinearLayout.LayoutParams pngLp = new LinearLayout.LayoutParams(0,
+			LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+		pngLp.leftMargin = chipGap;
+		row.addView(pngChip, pngLp);
 		return row;
 	}
 
-	private LinearLayout buildTitleBlock(int padOuter, int padInner, int padSmall)
+	/**
+	 * Build the title block — bold folder name + clickable breadcrumb on the left, grid/list view-mode
+	 * toggle icon on the right. Horizontal padding lives on the enclosing DialogCards card; this block
+	 * only supplies the small vertical gap between the title row and the breadcrumb below it.
+	 *
+	 * @param padSmall vertical gap between the title row and the breadcrumb label
+	 * @return assembled title block ready to be added as the sole child of the title DialogCards card
+	 */
+	private LinearLayout buildTitleBlock(int padSmall)
 	{
 		LinearLayout titleBlock = new LinearLayout(ctx);
 		titleBlock.setOrientation(LinearLayout.VERTICAL);
-		titleBlock.setPadding(padOuter, padOuter, padOuter, padInner);
 
 		LinearLayout titleRow = new LinearLayout(ctx);
 		titleRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -671,7 +844,7 @@ public final class FolderPickerDialog
 		int toggleSize = DpToPx.toPx(40, density);
 		int togglePad = DpToPx.toPx(8, density);
 		viewModeToggle.setPadding(togglePad, togglePad, togglePad, togglePad);
-		viewModeToggle.setOnClickListener(v ->
+		viewModeToggle.setOnClickListener(view ->
 		{
 			gridMode = !gridMode;
 			viewModeToggle.setImageResource(gridMode ? R.drawable.ic_view_list : R.drawable.ic_view_grid);
@@ -697,11 +870,20 @@ public final class FolderPickerDialog
 		return titleBlock;
 	}
 
-	private boolean isInsideRoot(File f)
+	private boolean isInsideRoot(File candidate)
 	{
 		try
 		{
-			return f.getCanonicalPath().startsWith(rootDir.getCanonicalPath());
+			String candidatePath = candidate.getCanonicalPath();
+			String rootPath = rootDir.getCanonicalPath();
+			// Exact match OR candidate sits at a true descendant path. The naive `startsWith(rootPath)`
+			// would accept sibling paths sharing the same textual prefix — e.g. with rootPath
+			// "/storage/emulated/0", a candidate "/storage/emulated/0abc" textually startsWith rootPath
+			// but is a completely separate location. Requiring the path-separator boundary after the
+			// prefix guarantees the candidate is genuinely nested under rootDir rather than a
+			// coincidentally-named sibling.
+			return candidatePath.equals(rootPath)
+				|| candidatePath.startsWith(rootPath + File.separator);
 		}
 		catch (IOException ignored)
 		{
@@ -734,15 +916,19 @@ public final class FolderPickerDialog
 		};
 	}
 
-	private View makeFileListRow(File file, int thumbnailGen, int padOuter, int padInner, int padSmall)
+	private View makeFileListRow(File file, int thumbnailGen, int padInner, int padSmall)
 	{
-		int rowMinHeight = DpToPx.toPx(56, density);
 		int thumbSize = DpToPx.toPx(40, density);
 		LinearLayout row = new LinearLayout(ctx);
 		row.setOrientation(LinearLayout.HORIZONTAL);
 		row.setGravity(Gravity.CENTER_VERTICAL);
-		row.setMinimumHeight(rowMinHeight);
-		row.setPadding(padOuter, padSmall, padOuter, padSmall);
+		// No setMinimumHeight: previously the 56dp minimum added ~8dp of slack above and below the
+		// 40dp thumbnail (CENTER_VERTICAL distributed half + half), making list-view thumb-to-thumb
+		// distance read as ~16dp while grid-view thumb-to-thumb is ~8dp. Letting the row WRAP its
+		// natural content height + setPadding equalises the two views' visible row density.
+		// No horizontal padding — the row spans the full card-content width so list and grid views
+		// share the same outer-bound width (matches the options / filename rows above and below).
+		row.setPadding(0, padSmall, 0, padSmall);
 		AppCompatImageView thumb = new AppCompatImageView(ctx);
 		thumb.setBackgroundColor(ThemeColors.SURFACE0);
 		thumb.setScaleType(AppCompatImageView.ScaleType.CENTER_CROP);
@@ -783,14 +969,16 @@ public final class FolderPickerDialog
 		return row;
 	}
 
-	private LinearLayout makeFolderRow(File entry, int rowMinHeight, int iconSize, int padOuter,
-		int padInner, int padSmall)
+	private LinearLayout makeFolderRow(File entry, int rowMinHeight, int iconSize, int padInner,
+		int padSmall)
 	{
 		LinearLayout row = new LinearLayout(ctx);
 		row.setOrientation(LinearLayout.HORIZONTAL);
 		row.setGravity(Gravity.CENTER_VERTICAL);
 		row.setMinimumHeight(rowMinHeight);
-		row.setPadding(padOuter, 0, padOuter, 0);
+		// No horizontal padding — folder rows align with the file list / grid rows and the
+		// options / filename rows below, spanning the full card-content width.
+		row.setPadding(0, 0, 0, 0);
 		row.setBackgroundResource(folderRowRippleResId);
 		AppCompatImageView icon = new AppCompatImageView(ctx);
 		icon.setImageResource(R.drawable.ic_folder);
@@ -802,7 +990,7 @@ public final class FolderPickerDialog
 		label.setText(entry.getName());
 		row.addView(label, new LinearLayout.LayoutParams(0,
 			LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
-		row.setOnClickListener(v ->
+		row.setOnClickListener(view ->
 		{
 			current = entry;
 			refresh();
@@ -834,7 +1022,6 @@ public final class FolderPickerDialog
 		contentList.removeAllViews();
 		int rowMinHeight = DpToPx.toPx(48, density);
 		int iconSize = DpToPx.toPx(24, density);
-		int padOuter = DpToPx.toPx(20, density);
 		int padInner = DpToPx.toPx(12, density);
 		int padSmall = DpToPx.toPx(4, density);
 		int gap = DpToPx.toPx(4, density);
@@ -862,8 +1049,7 @@ public final class FolderPickerDialog
 		}
 		for (File folder : folders)
 		{
-			contentList.addView(makeFolderRow(folder, rowMinHeight, iconSize, padOuter, padInner,
-				padSmall));
+			contentList.addView(makeFolderRow(folder, rowMinHeight, iconSize, padInner, padSmall));
 		}
 		int fileLimit = Math.min(files.size(), MAX_THUMBNAILS);
 		List<File> shownFiles = files.subList(0, fileLimit);
@@ -871,14 +1057,14 @@ public final class FolderPickerDialog
 		{
 			for (int i = 0; i < shownFiles.size(); i += THUMBNAIL_GRID_COLUMNS)
 			{
-				appendGridFileRow(shownFiles, i, gen, gap, padOuter);
+				appendGridFileRow(shownFiles, i, gen, gap);
 			}
 		}
 		else
 		{
 			for (File file : shownFiles)
 			{
-				contentList.addView(makeFileListRow(file, gen, padOuter, padInner, padSmall));
+				contentList.addView(makeFileListRow(file, gen, padInner, padSmall));
 			}
 		}
 	}

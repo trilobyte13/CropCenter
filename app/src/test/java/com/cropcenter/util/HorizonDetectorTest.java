@@ -354,10 +354,13 @@ public final class HorizonDetectorTest
 	@Test
 	public void lineFitRejectsLargeDisagreementWithHoughSeed()
 	{
+		// MAX_LINE_FIT_DELTA_DEGREES = 0.5 — a seed past 0.5° from the LSQ slope is rejected. Synthetic
+		// line is at tilt 1.23 (true LSQ angle ≈ 91.23°); a Hough seed at 92.10° puts the delta at
+		// ~0.87°, comfortably past the rejection threshold.
 		int[][] line = syntheticLine(1.23f);
 
 		float refined = HorizonDetector.refineLineFitAngle(line[0], line[1],
-			line[0].length, WIDTH, HEIGHT, 91.70f);
+			line[0].length, WIDTH, HEIGHT, 92.10f);
 
 		assertTrue(Float.isNaN(refined));
 	}

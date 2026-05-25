@@ -1,4 +1,4 @@
-package com.cropcenter.crop;
+package com.cropcenter.util;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
@@ -180,5 +180,79 @@ public final class RotatedCropClampTest
 		assertEquals(500f, result[0], TOL);
 		assertTrue("expected Y pulled back toward 400 from 750, got " + result[1],
 			result[1] < 750f && result[1] >= 400f);
+	}
+
+	// ── clampSingleAxis ──
+
+	@Test
+	public void clampSingleAxisAtRotationHoldsLockedXEvenAtFreeAxisExtreme()
+	{
+		// User bug pinned here: under VERTICAL lock (X is locked, Y is the free axis) at rotation, dragging Y
+		// to a value where the rotated corners no longer fit at the requested X caused clampRotated's joint
+		// binary search to pull X toward imageMidX — visibly snapping the locked axis to the horizontal center.
+		// clampSingleAxis with varyX=false must hold X at its input value and only clamp Y. Fixture: X=700
+		// (off image-center 500 by 200), cropW=400 (wide enough that the rotated BR corner sticks out past
+		// imgW at large Y), cropH=200, image 1000×800, rotation 30°. At X=700, Y=400 (mid) the crop fits;
+		// at X=700, Y=750 the BR corner un-rotates to X≈1071 (past imgW+0.5=1000.5). Joint clampRotated would
+		// pull X toward 500; clampSingleAxis must keep X at 700 and clamp Y inward.
+		float[] result = RotatedCropClamp.clampSingleAxis(
+			700f, 750f, 400, 200, 30f, 1000, 800, false);
+		assertEquals("locked X must NOT be pulled toward imageMidX", 700f, result[0], TOL);
+		// Y is the free axis — clamped to a valid value (less than the requested 750) at the locked X.
+		assertTrue("expected Y clamped to a value < 750 to keep corners inside at X=700, got " + result[1],
+			result[1] < 750f);
+	}
+
+	@Test
+	public void clampSingleAxisAtRotationHoldsLockedYEvenAtFreeAxisExtreme()
+	{
+		// Symmetric counterpart for HORIZONTAL lock (Y locked, X free). User drags X to extreme; Y stays put.
+		// Fixture: Y=600 (off image-center 400 by 200), cropH=400 (tall enough that the rotated corner sticks
+		// out past imgH at large X), cropW=200, image 1000×800, rotation 30°. clampSingleAxis with varyX=true
+		// must hold Y at 600 and only clamp X.
+		float[] result = RotatedCropClamp.clampSingleAxis(
+			950f, 600f, 200, 400, 30f, 1000, 800, true);
+		assertEquals("locked Y must NOT be pulled toward imageMidY", 600f, result[1], TOL);
+		assertTrue("expected X clamped to a value < 950 to keep corners inside at Y=600, got " + result[0],
+			result[0] < 950f);
+	}
+
+	@Test
+	public void clampSingleAxisAxisAlignedHoldsLockedXWhenVaryYAtSubEpsilonRotation()
+	{
+		// Sub-epsilon rotation collapses to the cheap per-axis clamp. Under VERTICAL lock (X locked, Y free)
+		// the locked X stays at input AND Y gets the simple [cropH/2, imgH-cropH/2] clamp. Requested X=900,
+		// Y=10 (below cropH/2=75): X passes through, Y clamps to 75.
+		float[] result = RotatedCropClamp.clampSingleAxis(
+			900f, 10f, 200, 150, 0f, 1000, 800, false);
+		assertEquals("locked X stays at input under sub-epsilon rotation", 900f, result[0], TOL);
+		assertEquals("free Y clamped to lower bound cropH/2", 75f, result[1], TOL);
+	}
+
+	@Test
+	public void clampSingleAxisFallsBackToImageMidWhenLockedAxisCannotAccommodateCrop()
+	{
+		// Pin the degenerate-case fallback: when the locked-axis value is so far from image-center that the
+		// crop can't fit at ANY free-axis position (even image-mid of the free axis), the lock pin is
+		// geometrically impossible. clampSingleAxis falls back to (imageMidX, imageMidY) — same as
+		// clampRotated's full-fallback. Use a locked X at the rotated extreme (X=999 with cropW=200 already
+		// puts the right edge past imgW=1000 even at 0° rotation; add 45° rotation and the lock pin is
+		// guaranteed impossible).
+		float[] result = RotatedCropClamp.clampSingleAxis(
+			999f, 400f, 200, 200, 45f, 1000, 800, false);
+		assertEquals("fallback X is imageMidX", 500f, result[0], TOL);
+		assertEquals("fallback Y is imageMidY", 400f, result[1], TOL);
+	}
+
+	@Test
+	public void clampSingleAxisReturnsRequestedPositionUnchangedWhenInBounds()
+	{
+		// In-bounds request at modest rotation: cornersInside(x, y) passes, no clamp fires. Same shape as
+		// clampRotatedAcceptsInBoundsRequestUnchanged but for the lock-aware entry point. Verifies the
+		// short-circuit when the requested position is already valid at the locked-axis pin.
+		float[] result = RotatedCropClamp.clampSingleAxis(
+			500f, 400f, 100, 100, 5f, 1000, 800, false);
+		assertEquals(500f, result[0], TOL);
+		assertEquals(400f, result[1], TOL);
 	}
 }

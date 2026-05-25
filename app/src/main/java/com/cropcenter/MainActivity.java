@@ -65,6 +65,7 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 	private final SafFileHelper safFiles = new SafFileHelper(this);
 	private final StoragePermissionHelper permissions = new StoragePermissionHelper(this);
 	private final ImageLoadController imageLoader = new ImageLoadController(this, safFiles);
+	private final RestoreController restoreController = new RestoreController(state);
 	private final SaveController saveController = new SaveController(this, safFiles, permissions);
 	private final GraftController graftController = new GraftController(this, safFiles, this::applyGraftedBytes);
 	private final UiSync ui = new UiSync(this);
@@ -101,6 +102,12 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 	}
 
 	@Override
+	public void clearTransientDialog(DialogInterface dialog)
+	{
+		clearActiveTransientDialogIfMatches(dialog);
+	}
+
+	@Override
 	public void dismissTransientDialogs()
 	{
 		AlertDialog dialog = activeTransientDialog;
@@ -117,19 +124,19 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 	}
 
 	@Override
-	public void clearTransientDialog(DialogInterface dialog)
-	{
-		clearActiveTransientDialogIfMatches(dialog);
-	}
-
-	@Override
 	public void ensureCropCenter()
 	{
 		if (!state.hasCenter() && state.getSourceImage() != null)
 		{
+			// markCropSizeDirty would be redundant: every current caller (applyStateToUi's
+			// isCropSizeDirty branch, ToolbarBinder's AR-change handler, CustomAR commit) has
+			// already flipped the dirty flag via setAspectRatio or has entered through the
+			// already-dirty branch in applyStateToUi. Re-marking here was load-bearing on no
+			// path; pruned to keep the seam minimal. setCenter's notifyChanged + the next
+			// applyStateToUi pass will pick up the dirty flag from the upstream setter and
+			// run recomputeCrop's full branch.
 			float imageMidX = state.getImageWidth() / 2f;
 			float imageMidY = state.getImageHeight() / 2f;
-			state.markCropSizeDirty();
 			state.setCenter(imageMidX, imageMidY);
 			state.setAnchor(imageMidX, imageMidY);
 		}
@@ -290,6 +297,38 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 			editorView.clearUndoHistory();
 			txtImageInfo.setText(sizeInfo);
 			txtImageFormats.setText(metaInfo);
+			// Process-death restore: apply the saved geometry now that the bitmap is in place.
+			// RestoreController consumes + nulls the bundle so a subsequent normal load (user
+			// taps Open) doesn't re-apply the stale snapshot from the prior session. The state
+			// listener fires once at the batch end inside applyIfPending, producing one
+			// consolidated re-render.
+			//
+			// Outcome.consumed is true ONLY when a bundle was actually consumed; in that case the
+			// toolbar UI reset earlier in this method (lines ~274-280: chkPan unchecked,
+			// chkLockCenter unchecked, selectLockPref = BOTH, moveLockPref = VERTICAL, AR spinner
+			// default) is now stale against the restored model, so re-derive the toolbar widgets
+			// from the freshly-restored CropState. The outcome also carries the per-mode lock-axis
+			// prefs that were stashed alongside the bundle — re-seed them BEFORE syncFromState so
+			// the toolbar resync's `host.setCurrentPref(state.getCenterMode())` writes against
+			// correct baseline values for the inactive mode. Without this, a user who had Move+H
+			// at kill time would see their Select-mode pref correctly restored but Move-mode's
+			// pref fall back to VERTICAL (and vice versa). When Pan was on at kill time
+			// (centerMode == LOCKED), BOTH prefs come from the bundle since syncFromState skips
+			// the setCurrentPref write in the LOCKED case — without this re-seed, the hidden axis
+			// preference would silently revert to defaults on Pan toggle-off.
+			RestoreController.Outcome outcome = restoreController.applyIfPending();
+			if (outcome.consumed())
+			{
+				if (outcome.restoredSelectPref() != null)
+				{
+					selectLockPref = outcome.restoredSelectPref();
+				}
+				if (outcome.restoredMovePref() != null)
+				{
+					moveLockPref = outcome.restoredMovePref();
+				}
+				toolbar.syncFromState();
+			}
 		}
 		catch (RuntimeException e)
 		{
@@ -401,24 +440,38 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 	}
 
 	/**
-	 * Disable Save/Open while busy so rapid taps can't stack up. UI thread only.
+	 * Disable Save/Open while busy so rapid taps can't stack up. UI thread only. Also acts as the
+	 * "load complete" hook for process-death restore: if a load finishes (isBusy=false) AND
+	 * pendingRestoreBundle is still non-null, the restore load must have failed (decode error,
+	 * unsupported format, revoked URI permission, file deleted) — installImageOnUi would have
+	 * consumed the bundle on success. Clear it here so a subsequent manual Open doesn't apply
+	 * the stale geometry from the failed-to-restore source.
 	 *
-	 * @param isBusy true to disable Save/Open while a background task is running; false to restore
-	 *               their normal enabled state (Save additionally requires a loaded image)
+	 * @param busy true to disable Save/Open while a background task is running; false to restore
+	 *             their normal enabled state (Save additionally requires a loaded image)
 	 */
 	@Override
-	public void setBusyUi(boolean isBusy)
+	public void setBusyUi(boolean busy)
 	{
 		View btnSave = findViewById(R.id.btnSave);
 		View btnOpen = findViewById(R.id.btnOpen);
 		boolean hasImage = state.getSourceImage() != null;
 		if (btnSave != null)
 		{
-			btnSave.setEnabled(!isBusy && hasImage);
+			btnSave.setEnabled(!busy && hasImage);
 		}
 		if (btnOpen != null)
 		{
-			btnOpen.setEnabled(!isBusy);
+			btnOpen.setEnabled(!busy);
+		}
+		// Restore-bundle leak guard: on a successful load installImageOnUi runs BEFORE this
+		// setBusyUi(false) (both post via runOnUiThread; install is posted from inside applyBytes
+		// before the bg-side finally posts setBusyUi). A non-null bundle here means installImageOnUi
+		// never fired — the load failed. Drop the bundle silently rather than letting it apply to
+		// whichever image the user opens next.
+		if (!busy)
+		{
+			restoreController.clearPendingIfUnconsumed();
 		}
 	}
 
@@ -486,11 +539,10 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 		// accumulate across launches until scoped storage filled. Cheap call (single directory listing).
 		UltraHdrCompat.sweepStaleCacheFiles(getCacheDir());
 
-		// Handle edge-to-edge: apply system bar insets as padding to root layout. Direct framework calls
-		// — `View.setOnApplyWindowInsetsListener` (API 21+) and `WindowInsets.Type.systemBars()` (API 30+)
-		// — are available unconditionally at our minSdk=35 floor, so we don't route through ViewCompat /
-		// WindowInsetsCompat. The listener returns `insets` unmodified so child views still see the
-		// unconsumed insets for their own dispatch.
+		// Handle edge-to-edge: apply system bar insets as padding to root layout. Direct framework
+		// View.setOnApplyWindowInsetsListener + WindowInsets.Type.systemBars() — no ViewCompat /
+		// WindowInsetsCompat wrapper. The listener returns `insets` unmodified so child views still
+		// see the unconsumed insets for their own dispatch.
 		View root = findViewById(android.R.id.content);
 		root.setOnApplyWindowInsetsListener((view, insets) ->
 		{
@@ -586,7 +638,31 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 		{
 			showAllFilesAccessPrompt();
 		}
-		imageLoader.handleIncomingIntent(getIntent());
+		// Process-death restore. Distinct from the Intent-handling path below: if the user was
+		// editing an image and Android killed the process for memory, savedInstanceState carries
+		// the source URI + every restore-able CropState field. Stash the bundle in the
+		// RestoreController, fire the load, and let installImageOnUi consume the bundle once the
+		// bg-side decode completes. A missing STATE_SOURCE_URI means there was nothing loaded at
+		// kill time, so falls through to the normal handleIncomingIntent path (which is also a
+		// no-op for non-Share intents).
+		Uri restoreUri = RestoreController.readSourceUri(savedInstanceState);
+		if (restoreUri != null)
+		{
+			restoreController.stash(savedInstanceState);
+			// Re-take persistable read+write permission before loading. Share / View intents only
+			// ever held SESSION-scoped grants (ImageLoadController.tryTakePersistable called with
+			// warnOnFailure=false on the Share path) — after process death the session grant is
+			// gone, so the load would fail with SecurityException without this retry. Open / Save
+			// As paths already hold the persistable grant from their tryTakePersistable calls;
+			// re-taking is idempotent and cheap. warnOnFailure=false because a restored URI whose
+			// grant was explicitly revoked by the user isn't actionable from a log line.
+			imageLoader.tryTakePersistable(restoreUri, "(restore)", false);
+			imageLoader.load(restoreUri);
+		}
+		else
+		{
+			imageLoader.handleIncomingIntent(getIntent());
+		}
 	}
 
 	@Override
@@ -617,6 +693,33 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 	{
 		super.onNewIntent(intent);
 		imageLoader.handleIncomingIntent(intent);
+	}
+
+	@Override
+	protected void onSaveInstanceState(Bundle outState)
+	{
+		super.onSaveInstanceState(outState);
+		// Process-death persistence: write the source URI plus the user's editing geometry so a
+		// memory-pressure kill doesn't lose 5 minutes of precise alignment work. The bitmap,
+		// source bytes, gain map, SEFT trailer, and PNG/EXIF metadata are NOT persisted —
+		// those reload from the source URI on restore. Persistability is best-effort: Open and
+		// Save As paths call tryTakePersistable with warnOnFailure=true and almost always
+		// succeed; the Share / View intent path calls it with warnOnFailure=false because
+		// external intents routinely deliver SESSION-only grants that expire at process death.
+		// The restore path in onCreate handles both cases — re-takes persistable permission
+		// (idempotent for already-persistable URIs, no-op-fails for session-only) and then
+		// fires imageLoader.load(), which surfaces a SecurityException as a load failure if
+		// the session grant is gone. RestoreController.writeTo handles the actual
+		// serialisation; this method is now just the lifecycle hook. The per-mode lock prefs
+		// (selectLockPref / moveLockPref) are passed in alongside CropState because they're
+		// MainActivity-private fields, not CropState fields — and they must be persisted
+		// independently of state.centerMode because Pan collapses centerMode to LOCKED, hiding
+		// the underlying axis preference. Note: RestoreController.writeTo writes NOTHING when
+		// state.isGraftApplied() is true — graft bytes are in-memory only and a restore would
+		// silently reload the pre-graft source. The session loss on a graft-mid-kill is
+		// preferable to saving a crop of the wrong image. See REQUIREMENTS.md §8.
+		RestoreController.writeTo(outState, imageLoader.getLastLoadedUri(), state,
+			selectLockPref, moveLockPref);
 	}
 
 	/**

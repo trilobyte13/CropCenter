@@ -14,7 +14,7 @@ import java.util.List;
  * original's identity metadata (EXIF, XMP, MPF) and HDR trailer (gain map + SEFT). Used by the "Apply External Edit"
  * feature to round-trip a Photoshop Generative Fill / Generative Remove edit through CropCenter. SEFT is copied
  * verbatim like every other identity segment, so the source's Revert chain (when present) survives the splice —
- * see CropExporter.appendSeft for the verbatim-preservation contract.
+ * see CropExporter.appendSeftFileToFile for the verbatim-preservation contract.
  *
  * Caller-enforced precondition: both inputs MUST be JPEGs, AND the caller MUST guarantee they already share the same
  * stored SOF0 dimensions before calling this splice — otherwise the output's metadata (from original) describes

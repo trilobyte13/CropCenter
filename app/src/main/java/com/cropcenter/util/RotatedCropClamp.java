@@ -1,4 +1,4 @@
-package com.cropcenter.crop;
+package com.cropcenter.util;
 
 /**
  * Pure-function geometry helpers that clamp a crop center to keep the crop rectangle
@@ -8,13 +8,28 @@ package com.cropcenter.crop;
  * CropState.setCenter calls these and writes the result; the helpers know nothing
  * about CropState.
  *
- * Two entry points:
- *   - clampAxisAligned: cheap path used when rotation is sub-epsilon
+ * Lives in util/ rather than crop/ so model/CropState can consume it without inverting
+ * the package layering (model → crop would be a downward dependency; model → util is
+ * the canonical direction).
+ *
+ * Three entry points:
+ *   - clampAxisAligned: cheap path used when rotation is sub-epsilon, both axes free
  *   - clampRotated: 25-iteration binary search per axis; falls back to image-center
- *                   when the crop is too large to fit at any position
+ *                   when the crop is too large to fit at any position. Both axes free.
+ *   - clampSingleAxis: lock-aware single-axis clamp — holds one axis at its input value
+ *                      and clamps only the other. Used by drag handlers under per-axis
+ *                      lock so the joint clamp's binary search can't pull a locked axis
+ *                      toward image-midpoint when the requested free-axis position puts
+ *                      rotated corners outside the image.
  */
 public final class RotatedCropClamp
 {
+	// Sign multipliers for the four corner offsets relative to crop center: TL, TR, BL, BR. Hoisted as static
+	// constants because cornersInside runs ~25 iterations per axis × 2 axes per binary search × ~50 calls per
+	// second during a fling-rotation drag — allocating two 4-element float arrays per call (the previous
+	// array-literal pattern) created hundreds of throwaway allocations per second on a hot path.
+	private static final float[] CORNER_SIGN_X = { -1f, 1f, -1f, 1f };
+	private static final float[] CORNER_SIGN_Y = { -1f, -1f, 1f, 1f };
 	// Binary-search iteration cap shared with CropEngine.maxScaleForRotation — both walk the same
 	// half-and-half interval-bisection pattern and need to converge to the same resolution so the
 	// rotation-fit guarantees they jointly enforce stay numerically consistent. 25 iterations resolves
@@ -22,13 +37,7 @@ public final class RotatedCropClamp
 	// visible jitter on thin crop slices at high zoom under continuous rotation drag. Hoisted to a
 	// single chokepoint so a future "tune the convergence" change lands in one place rather than two
 	// files drifting apart.
-	static final int BINARY_SEARCH_ITERATIONS = 25;
-	// Sign multipliers for the four corner offsets relative to crop center: TL, TR, BL, BR. Hoisted as static
-	// constants because cornersInside runs ~25 iterations per axis × 2 axes per binary search × ~50 calls per
-	// second during a fling-rotation drag — allocating two 4-element float arrays per call (the previous
-	// array-literal pattern) created hundreds of throwaway allocations per second on a hot path.
-	private static final float[] CORNER_SIGN_X = { -1f, 1f, -1f, 1f };
-	private static final float[] CORNER_SIGN_Y = { -1f, -1f, 1f, 1f };
+	public static final int BINARY_SEARCH_ITERATIONS = 25;
 
 	private RotatedCropClamp() {}
 
@@ -108,6 +117,79 @@ public final class RotatedCropClamp
 			y = binarySearchAxis(x, y, ctx, false);
 		}
 		return new float[] { x, y };
+	}
+
+	/**
+	 * Lock-aware single-axis clamp — holds the non-varying axis at its input value and clamps only the
+	 * varying axis. Used by drag handlers under per-axis lock (CenterMode.HORIZONTAL drags X with Y held,
+	 * CenterMode.VERTICAL drags Y with X held) so the joint clampRotated binary search doesn't pull the
+	 * locked axis toward image-midpoint when the requested free-axis position puts rotated corners
+	 * outside the image. Without this helper, dragging the free axis to the rotated AABB's extreme
+	 * causes the locked axis to snap to imageMid (the only X / Y where the rotated corners fit at the
+	 * extreme free-axis position), visibly breaking the per-axis lock.
+	 *
+	 * Fallback when the locked-axis pin is geometrically impossible (the locked-axis value can't
+	 * accommodate the crop at ANY value of the free axis under this rotation): snap to image-midpoint
+	 * on both axes — matches clampRotated's full-fallback behaviour so the caller gets a stable result
+	 * the renderer can draw, even if the lock pin is violated. This branch is unreachable when the
+	 * locked-axis value was inside the rotated image bounds before the drag started, which is the
+	 * common case.
+	 *
+	 * @param x               requested center X
+	 * @param y               requested center Y
+	 * @param cropW           crop width in image pixels
+	 * @param cropH           crop height in image pixels
+	 * @param rotationDegrees rotation angle (sub-epsilon collapses to the cheap per-axis clamp)
+	 * @param imgW            source image width
+	 * @param imgH            source image height
+	 * @param varyX           true to vary X while holding Y at input; false to vary Y while holding X
+	 * @return [clampedX, clampedY] with the non-varying axis equal to its input value when the lock is
+	 *         geometrically possible, or [imageMidX, imageMidY] when the lock pin can't accommodate the
+	 *         crop at any free-axis position
+	 */
+	public static float[] clampSingleAxis(float x, float y, int cropW, int cropH,
+		float rotationDegrees, int imgW, int imgH, boolean varyX)
+	{
+		if (Math.abs(rotationDegrees) < BitmapUtils.ROTATION_EPSILON)
+		{
+			// Sub-epsilon: per-axis clamps are independent, so just clamp the varying axis. The locked
+			// axis is preserved by leaving the input value alone. The cropW >= imgW (varyX) /
+			// cropH >= imgH (varyY) fallback snaps the varying axis to image-mid, matching
+			// clampAxisAligned's behaviour — the crop is too big to be shifted on that axis, so the
+			// only valid position is image-mid.
+			if (varyX)
+			{
+				float clampedX = (cropW < imgW)
+					? Math.clamp(x, cropW / 2f, imgW - cropW / 2f)
+					: imgW / 2f;
+				return new float[] { clampedX, y };
+			}
+			float clampedY = (cropH < imgH)
+				? Math.clamp(y, cropH / 2f, imgH - cropH / 2f)
+				: imgH / 2f;
+			return new float[] { x, clampedY };
+		}
+		CropFitContext ctx = CropFitContext.of(cropW, cropH, rotationDegrees, imgW, imgH);
+		// Test whether the locked-axis value can accommodate the crop AT ALL by probing at image-mid
+		// of the free axis. If even this probe fails, no value of the free axis will fit — the locked
+		// axis pin is geometrically impossible (e.g. user has dragged the previous lock to a position
+		// that's no longer valid after a rotation increase). Fall back to the both-axis-midpoint
+		// snap, same as clampRotated's degenerate-case fallback.
+		float midOfFree = varyX ? ctx.imageMidX() : ctx.imageMidY();
+		float probeX = varyX ? midOfFree : x;
+		float probeY = varyX ? y : midOfFree;
+		if (!cornersInside(probeX, probeY, ctx))
+		{
+			return new float[] { ctx.imageMidX(), ctx.imageMidY() };
+		}
+		if (cornersInside(x, y, ctx))
+		{
+			return new float[] { x, y };
+		}
+		float clamped = binarySearchAxis(x, y, ctx, varyX);
+		return varyX
+			? new float[] { clamped, y }
+			: new float[] { x, clamped };
 	}
 
 	/**

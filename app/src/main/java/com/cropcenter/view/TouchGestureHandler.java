@@ -58,6 +58,13 @@ public final class TouchGestureHandler
 		void onZoom(float scaleFactor, float focusX, float focusY);
 	}
 
+	// Per-frame scaleFactor deadzone for onScale → onZoom. Hand tremor + ScaleGestureDetector sensor
+	// noise produces scaleFactor jitter typically below 1% (0.99–1.01) when the user has two fingers
+	// down but isn't actively pinching; deltas inside this band are suppressed so the viewport
+	// doesn't drift-zoom on its own. Intentional pinch produces 2–10% scaleFactor per frame, well
+	// above the band.
+	private static final float SCALE_DEADZONE = 0.015f;
+
 	private final Callback callback;
 	private final GestureDetector gestureDetector;
 	private final ScaleGestureDetector scaleDetector;
@@ -91,7 +98,15 @@ public final class TouchGestureHandler
 			@Override
 			public boolean onScale(ScaleGestureDetector detector)
 			{
-				callback.onZoom(detector.getScaleFactor(), detector.getFocusX(), detector.getFocusY());
+				// Scale deadzone: ScaleGestureDetector reports a non-1 scaleFactor for sub-percent
+				// finger-distance jitter. Skip onZoom when |scaleFactor - 1| is inside the
+				// SCALE_DEADZONE band — hand tremor and sensor noise typically sit under 1%, while
+				// intentional pinch produces 2–10% per frame.
+				float scaleFactor = detector.getScaleFactor();
+				if (Math.abs(scaleFactor - 1f) > SCALE_DEADZONE)
+				{
+					callback.onZoom(scaleFactor, detector.getFocusX(), detector.getFocusY());
+				}
 				return true;
 			}
 

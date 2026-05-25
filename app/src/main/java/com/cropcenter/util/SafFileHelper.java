@@ -26,6 +26,25 @@ import java.io.OutputStream;
 public final class SafFileHelper
 {
 	private static final String TAG = "SafFileHelper";
+
+	// SAF authority literal used by both the externalstorage write probe and getFilePathAndId's
+	// SAF-to-File translation branch. Constant rather than two inline string literals so a rename
+	// (Android has historically held this authority stable, but a future Android could split it)
+	// only needs one update site, and so a typo regression on either site surfaces as a compile
+	// error instead of silent wrong-authority routing.
+	static final String AUTHORITY_EXTERNAL_STORAGE = "com.android.externalstorage.documents";
+	// MediaStore column names — declared once at class scope so both call sites in
+	// lookupMediaStoreFilesPath (the two-phase query body and the direct path-by-id branch in
+	// resolveViaProcFd) share the literals. Without this, identical strings appeared as bare
+	// literals in the second method, risking divergence on rename.
+	private static final String MEDIASTORE_COL_DATA = "_data";
+	private static final String MEDIASTORE_COL_ID = "_id";
+	// "external" volume name for MediaStore.Files.getContentUri — covers primary storage + removable
+	// volumes that the user has mounted with the same MediaStore semantics. Bare literal at every
+	// call site is the standard Android pattern, but pulling it into a constant makes
+	// queryDataPathById's contract self-explanatory ("looks up against the external MediaStore
+	// volume") and gives a single rename site if a future API shifts to per-volume URIs.
+	private static final String MEDIASTORE_VOLUME_EXTERNAL = "external";
 	// Upper bound on readUriBytes input size. Modern HDR + gain-map JPEGs land well under 64 MiB; this cap catches
 	// pathological inputs before they OOM the heap or overflow the int cast in the size-to-length conversion.
 	public static final long MAX_READ_BYTES = 128L * 1024 * 1024;
@@ -64,7 +83,7 @@ public final class SafFileHelper
 		{
 			return null;
 		}
-		return DocumentsContract.buildDocumentUri("com.android.externalstorage.documents", docId);
+		return DocumentsContract.buildDocumentUri(AUTHORITY_EXTERNAL_STORAGE, docId);
 	}
 
 	/**
@@ -91,7 +110,10 @@ public final class SafFileHelper
 		}
 		catch (Exception e)
 		{
-			Log.w(TAG, "copyUriContents " + src + " -> " + dst + " failed: " + e.getMessage());
+			// Pass `e` so the stack trace surfaces in logcat — copyUriContents failures can be
+			// permission errors, FUSE/SAF provider quirks, or full-disk; the exception class is
+			// the diagnostic signal.
+			Log.w(TAG, "copyUriContents " + src + " -> " + dst + " failed", e);
 			return false;
 		}
 	}
@@ -182,9 +204,17 @@ public final class SafFileHelper
 	 *   - "raw:/absolute/filesystem/path"   — DownloadStorageProvider when the file lives on the real
 	 *                                         filesystem (Download/...). The "raw" prefix is literal —
 	 *                                         the rest is an absolute path.
-	 * Plus a MediaStore _data column fallback. getFilePathAndId can throw SecurityException for URIs
-	 * the app doesn't have active read permission on (common post-uninstall/reinstall for non-app-owned
-	 * documents) — that's expected, we just return null and let the SAF paths try their luck.
+	 *   - "msf:NNN"  — DownloadStorageProvider MediaStore-Files numeric ID; resolved via
+	 *                  lookupMediaStoreFilesPath against MediaStore.Files.getContentUri("external").
+	 *   - pure-numeric — legacy form of the same MediaStore.Files lookup.
+	 * Three fallbacks beyond those branches, in order:
+	 *   1. getFilePathAndId queries MediaStore's _data column for the URI directly.
+	 *   2. resolveViaProcFd opens the URI for read and readlinks /proc/self/fd/N to recover the
+	 *      filesystem path — catches Samsung's vendor `qb:NNN` doc IDs and other opaque providers.
+	 *   3. Returns null when even the proc/fd trick fails (cloud-only providers, revoked permission).
+	 * getFilePathAndId can throw SecurityException for URIs the app doesn't have active read permission
+	 * on (common post-uninstall/reinstall for non-app-owned documents) — that's expected, we just
+	 * return null from getFilePathAndId and continue with the proc/fd fallback before giving up.
 	 *
 	 * @param uri SAF or MediaStore URI to resolve
 	 * @return File for the resolved filesystem path, or null when the URI isn't path-addressable
@@ -229,12 +259,24 @@ public final class SafFileHelper
 			}
 			// DownloadStorageProvider "raw:<absolute path>" — use the path as-is. The "raw" form is by spec
 			// an absolute path, so we don't reject "/" here, but we still guard against ".." path segments
-			// which have no legitimate use in a docId. Substring ".." is allowed (filename).
+			// which have no legitimate use in a docId. Substring ".." is allowed (filename). Additionally
+			// anchor the path under "/storage/" so an adversarial docId crafted by a malicious app sending
+			// a Share intent (e.g. "raw:/data/data/com.victim/db.sqlite") can't reach app-private dirs of
+			// other apps through our MES grant. Legitimate raw: paths from DownloadStorageProvider always
+			// land under /storage/ (primary external = /storage/emulated/0/Download/..., secondary external
+			// = /storage/XXXX-XXXX/Download/...) so the anchor doesn't reject any real provider output.
+			// Defense-in-depth: MES is a powerful grant, the URI source is untrusted in the Share-intent
+			// case, and a single defensive prefix check costs nothing.
 			if ("raw".equalsIgnoreCase(volume))
 			{
 				if (SafPaths.hasParentTraversalSegment(tail))
 				{
 					Log.w(TAG, "fileFromSafUri rejected raw docId with .. segment: " + tail);
+					return null;
+				}
+				if (!tail.startsWith("/storage/"))
+				{
+					Log.w(TAG, "fileFromSafUri rejected raw docId outside /storage/: " + tail);
 					return null;
 				}
 				return new File(tail);
@@ -321,25 +363,34 @@ public final class SafFileHelper
 	}
 
 	/**
-	 * Query MediaStore for the underlying file path and _ID column.
+	 * Resolve a URI to its underlying file path via three branches, returning the path and (where
+	 * available) the MediaStore _ID:
+	 *   1. Direct MediaStore _ID + _data column query against the URI itself — works for native
+	 *      MediaStore URIs (content://media/external/images/media/NN).
+	 *   2. media.documents SAF translation: extract the docId ("image:NNN"), strip the prefix, and
+	 *      look up the row in Images.Media by _id. Returns [path, msId].
+	 *   3. externalstorage SAF translation: parse the docId's "volumeId:relPath" form, prepend
+	 *      `/storage/emulated/0` (primary) or `/storage/<UUID>` (removable), and synthesize the
+	 *      absolute path WITHOUT a MediaStore lookup — the provider doesn't expose _id for these
+	 *      paths. Returns [absPath, null]; the null _id slot is preserved for tuple symmetry.
+	 * Path-traversal guard rejects branch 3 docIds containing ".." segments or absolute paths so a
+	 * malicious Share intent can't reach outside the volume root.
 	 *
-	 * @param uri MediaStore URI to query
-	 * @return two-element array [path, id], or null when the URI isn't a MediaStore content URI / the
-	 *         query failed / the row is missing either column
+	 * @param uri MediaStore or SAF URI to query
+	 * @return two-element array [path, id]; id may be null for SAF externalstorage URIs even on
+	 *         success. Returns null when none of the three branches yields a path.
 	 */
 	public String[] getFilePathAndId(Uri uri)
 	{
-		String colId = "_id";
-		String colData = "_data";
 		try
 		{
 			try (Cursor cursor = ctx.getContentResolver().query(uri,
-				new String[] { colId, colData }, null, null, null))
+				new String[] { MEDIASTORE_COL_ID, MEDIASTORE_COL_DATA }, null, null, null))
 			{
 				if (cursor != null && cursor.moveToFirst())
 				{
-					int idIdx = cursor.getColumnIndex(colId);
-					int dataIdx = cursor.getColumnIndex(colData);
+					int idIdx = cursor.getColumnIndex(MEDIASTORE_COL_ID);
+					int dataIdx = cursor.getColumnIndex(MEDIASTORE_COL_DATA);
 					String id = idIdx >= 0 ? cursor.getString(idIdx) : null;
 					String path = dataIdx >= 0 ? cursor.getString(dataIdx) : null;
 					if (path != null && id != null)
@@ -360,20 +411,11 @@ public final class SafFileHelper
 				if (docId != null && docId.startsWith("image:")) // docId format: "image:12345"
 				{
 					String msId = docId.substring(6);
-					Uri msUri = MediaStore.Images.Media.EXTERNAL_CONTENT_URI;
-					String[] projection = { colData };
-					String[] selectionArgs = { msId };
-					try (Cursor cursor = ctx.getContentResolver().query(msUri, projection,
-						colId + "=?", selectionArgs, null))
+					String path = queryDataPathById(
+						MediaStore.Images.Media.EXTERNAL_CONTENT_URI, msId);
+					if (path != null)
 					{
-						if (cursor != null && cursor.moveToFirst())
-						{
-							String path = cursor.getString(0);
-							if (path != null)
-							{
-								return new String[] { path, msId };
-							}
-						}
+						return new String[] { path, msId };
 					}
 				}
 			}
@@ -382,7 +424,7 @@ public final class SafFileHelper
 			// we can read those paths directly via FileInputStream, bypassing the ContentProvider's
 			// EXIF-mangling openInputStream — the entire reason this resolver exists. MediaStore _id is
 			// unavailable on this path (provider doesn't expose it); id slot preserved for symmetry.
-			if ("com.android.externalstorage.documents".equals(uri.getAuthority())
+			if (AUTHORITY_EXTERNAL_STORAGE.equals(uri.getAuthority())
 				&& DocumentsContract.isDocumentUri(ctx, uri))
 			{
 				String docId = DocumentsContract.getDocumentId(uri);
@@ -497,7 +539,8 @@ public final class SafFileHelper
 		// other's cache file if a second load entry point ever bypassed the Activity's busy gate.
 		// createTempFile gives each call its own path by construction; the finally block below deletes it
 		// regardless of outcome.
-		File cacheFile = File.createTempFile("input_raw_", ".bin", ctx.getCacheDir());
+		File cacheFile = File.createTempFile(
+			UltraHdrCompat.TEMPFILE_PREFIX_INPUT_RAW, ".bin", ctx.getCacheDir());
 		try
 		{
 			long written = 0;
@@ -750,30 +793,50 @@ public final class SafFileHelper
 	 */
 	private File lookupMediaStoreFilesPath(String id)
 	{
-		try
+		String path = queryDataPathById(MediaStore.Files.getContentUri(MEDIASTORE_VOLUME_EXTERNAL), id);
+		if (path != null)
 		{
-			Uri msUri = android.provider.MediaStore.Files.getContentUri("external");
-			try (Cursor cursor = ctx.getContentResolver().query(msUri,
-				new String[] { "_data" }, "_id=?", new String[] { id }, null))
+			Log.d(TAG, "MediaStore.Files lookup id=" + id + " → " + path);
+			return new File(path);
+		}
+		return null;
+	}
+
+	/**
+	 * Shared single-column query helper: SELECT `_data` FROM `msUri` WHERE `_id` = `id`, returning
+	 * the path of the first matching row or null on every miss path (no row, missing column,
+	 * empty string, SecurityException, any other Cursor exception). Extracted so the two prior
+	 * call sites — getFilePathAndId's media.documents `image:NNN` branch and
+	 * lookupMediaStoreFilesPath — share one query, one error path, and one log statement, instead
+	 * of duplicating the cursor + try-with-resources + column-index dance with slight differences
+	 * in null handling and logging across both.
+	 *
+	 * @param msUri MediaStore URI (Images / Videos / Files) to query against
+	 * @param id    string form of the row's _id (docIds carry it as String, not long)
+	 * @return non-empty path string from the _data column, or null when the row can't be resolved
+	 */
+	private String queryDataPathById(Uri msUri, String id)
+	{
+		try (Cursor cursor = ctx.getContentResolver().query(msUri,
+			new String[] { MEDIASTORE_COL_DATA },
+			MEDIASTORE_COL_ID + "=?", new String[] { id }, null))
+		{
+			if (cursor != null && cursor.moveToFirst())
 			{
-				if (cursor != null && cursor.moveToFirst())
+				int dataIdx = cursor.getColumnIndex(MEDIASTORE_COL_DATA);
+				if (dataIdx >= 0)
 				{
-					int dataIdx = cursor.getColumnIndex("_data");
-					if (dataIdx >= 0)
+					String path = cursor.getString(dataIdx);
+					if (path != null && !path.isEmpty())
 					{
-						String path = cursor.getString(dataIdx);
-						if (path != null && !path.isEmpty())
-						{
-							Log.d(TAG, "MediaStore.Files lookup id=" + id + " → " + path);
-							return new File(path);
-						}
+						return path;
 					}
 				}
 			}
 		}
 		catch (Exception e)
 		{
-			Log.w(TAG, "MediaStore.Files lookup failed for id=" + id + ": " + e.getMessage());
+			Log.w(TAG, "queryDataPathById failed uri=" + msUri + " id=" + id + ": " + e.getMessage());
 		}
 		return null;
 	}

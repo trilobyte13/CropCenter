@@ -132,6 +132,36 @@ public final class SafPathsTest
 	}
 
 	@Test
+	public void lastSegmentSeparatorEndRejectsImageScheme()
+	{
+		// media.documents provider's "image:12345" — the tail after ":" is a MediaStore-Images numeric
+		// ID, NOT a filename. Treating the colon as a volume separator would let deriveSiblingUri build
+		// "image:foo.jpg" which is a bogus URI pointing at no document. Pin the explicit reject so the
+		// caller routes to the opaque-provider fallback instead.
+		assertEquals(-1, SafPaths.lastSegmentSeparatorEnd("image:12345"));
+	}
+
+	@Test
+	public void lastSegmentSeparatorEndRejectsMsfScheme()
+	{
+		// DownloadStorageProvider's "msf:12345" — the tail after ":" is a MediaStore-Files numeric ID,
+		// NOT a path. Sibling-URI derivation would produce "msf:bar.jpg" which is a non-existent
+		// document, causing SaveController's Case-B Replace dialog to silently skip in favour of
+		// an auto-rename Keep. Pin the explicit reject. Regression scenario: user saves to Downloads,
+		// gets a collision, expects Replace/Keep/Cancel — without this reject, the dialog never fires
+		// and the auto-renamed save lands without the user's confirmation.
+		assertEquals(-1, SafPaths.lastSegmentSeparatorEnd("msf:12345"));
+	}
+
+	@Test
+	public void lastSegmentSeparatorEndRejectsPureNumericLegacyId()
+	{
+		// Legacy bare-numeric MediaStore reference (pre-msf: scheme). Same opaque-handle reasoning as
+		// msf: above — no parseable path tail, so sibling derivation can't proceed.
+		assertEquals(-1, SafPaths.lastSegmentSeparatorEnd("12345"));
+	}
+
+	@Test
 	public void lastSegmentSeparatorEndReturnsMinusOneForOpaqueId()
 	{
 		// Cloud-provider opaque IDs have neither separator — sibling derivation can't proceed.
@@ -147,6 +177,32 @@ public final class SafPathsTest
 		// check to `>= 0` would silently start returning "" for `/foo.jpg`, breaking SAF
 		// createDocument-against-parent flow on root-anchored docIds.
 		assertEquals(null, SafPaths.parentDocIdOf("/foo.jpg"));
+	}
+
+	@Test
+	public void parentDocIdOfRejectsImageScheme()
+	{
+		// Same opaque-handle reasoning as the msf: reject — "image:12345" is a MediaStore-Images
+		// numeric ID with no derivable parent. createSiblingPlaceholder would otherwise build a
+		// parent URI of "image:" which media.documents doesn't accept.
+		assertEquals(null, SafPaths.parentDocIdOf("image:12345"));
+	}
+
+	@Test
+	public void parentDocIdOfRejectsMsfScheme()
+	{
+		// DownloadStorageProvider's "msf:12345" has no derivable parent — the entire tail after ":"
+		// is a numeric handle, not a path. Pre-fix this returned "msf:" which createDocument-against-
+		// that-parent would reject; downstream surfaced as the silent auto-rename described in the
+		// lastSegmentSeparatorEndRejectsMsfScheme test.
+		assertEquals(null, SafPaths.parentDocIdOf("msf:12345"));
+	}
+
+	@Test
+	public void parentDocIdOfRejectsPureNumericLegacyId()
+	{
+		// Legacy bare-numeric MediaStore reference — same opaque-handle reasoning as msf:.
+		assertEquals(null, SafPaths.parentDocIdOf("12345"));
 	}
 
 	@Test

@@ -20,10 +20,10 @@ public final class TiffTag
 	public static final int COMPRESSION = 0x0103;
 	// EXIF SubIFD pointer (IFD0 → ExifSubIFD). u32 offset to the sub-IFD relative to TIFF header.
 	public static final int EXIF_SUB_IFD = 0x8769;
-	// Image width (IFD0). SHORT or LONG. CropExporter rewrites this to the cropped dimension.
-	public static final int IMAGE_WIDTH = 0x0100;
 	// Image length / height (IFD0). SHORT or LONG. CropExporter rewrites this to the cropped dimension.
 	public static final int IMAGE_LENGTH = 0x0101;
+	// Image width (IFD0). SHORT or LONG. CropExporter rewrites this to the cropped dimension.
+	public static final int IMAGE_WIDTH = 0x0100;
 	// JPEGInterchangeFormat — offset to the IFD1 thumbnail JPEG (LONG).
 	public static final int JPEG_INTERCHANGE_FORMAT = 0x0201;
 	// JPEGInterchangeFormatLength — byte length of the IFD1 thumbnail JPEG (LONG).

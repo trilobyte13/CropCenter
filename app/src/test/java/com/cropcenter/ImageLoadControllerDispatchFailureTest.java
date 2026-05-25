@@ -10,8 +10,6 @@ import android.app.AlertDialog;
 import android.graphics.Bitmap;
 import android.view.View;
 
-import androidx.activity.result.ActivityResultLauncher;
-
 import com.cropcenter.model.CropState;
 
 import org.junit.Test;
@@ -113,9 +111,6 @@ public final class ImageLoadControllerDispatchFailureTest
 		boolean showBusyToastCalled;
 
 		@Override
-		public void clearTransientDialog(android.content.DialogInterface dialog) {}
-
-		@Override
 		public void dismissTransientDialogs()
 		{
 			dismissTransientDialogsCount++;
@@ -135,9 +130,6 @@ public final class ImageLoadControllerDispatchFailureTest
 		{
 			return busy;
 		}
-
-		@Override
-		public ActivityResultLauncher<String> getSaveAsLauncher() { throw new UnsupportedOperationException(); }
 
 		@Override
 		public CropState getState() { throw new UnsupportedOperationException(); }
@@ -171,9 +163,6 @@ public final class ImageLoadControllerDispatchFailureTest
 
 		@Override
 		public void runOnUiThread(Runnable r) { r.run(); }
-
-		@Override
-		public void setActiveTransientDialog(AlertDialog dialog) {}
 
 		@Override
 		public void setBusyUi(boolean busyUi)

@@ -184,12 +184,12 @@ public final class JpegMetadataInjectorTest
 		{
 			payload[i] = (byte) (i & 0xFF);
 		}
-		File f = tmp.newFile("skip.bin");
-		try (FileOutputStream fos = new FileOutputStream(f))
+		File file = tmp.newFile("skip.bin");
+		try (FileOutputStream fos = new FileOutputStream(file))
 		{
 			fos.write(payload);
 		}
-		try (FileInputStream fis = new FileInputStream(f))
+		try (FileInputStream fis = new FileInputStream(file))
 		{
 			JpegMetadataInjector.skipExactly(fis, 100);
 			int next = fis.read();
@@ -203,12 +203,12 @@ public final class JpegMetadataInjectorTest
 		// Boundary case: count == 0 should be a no-op; the next read returns the first byte of the
 		// file. Defensive check against a future regression that conflates "skip 0" with EOF.
 		byte[] payload = { 0x42, 0x43, 0x44 };
-		File f = tmp.newFile("zero.bin");
-		try (FileOutputStream fos = new FileOutputStream(f))
+		File file = tmp.newFile("zero.bin");
+		try (FileOutputStream fos = new FileOutputStream(file))
 		{
 			fos.write(payload);
 		}
-		try (FileInputStream fis = new FileInputStream(f))
+		try (FileInputStream fis = new FileInputStream(file))
 		{
 			JpegMetadataInjector.skipExactly(fis, 0);
 			assertEquals("skipExactly(0) advances zero bytes", 0x42, fis.read());

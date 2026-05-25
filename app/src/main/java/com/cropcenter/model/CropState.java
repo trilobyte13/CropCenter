@@ -2,10 +2,10 @@ package com.cropcenter.model;
 
 import android.graphics.Bitmap;
 
-import com.cropcenter.crop.RotatedCropClamp;
 import com.cropcenter.metadata.JpegSegment;
 import com.cropcenter.util.AiRegionDetector.AiMask;
 import com.cropcenter.util.BitmapUtils;
+import com.cropcenter.util.RotatedCropClamp;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -22,8 +22,20 @@ import java.util.function.UnaryOperator;
  */
 public final class CropState
 {
+	/**
+	 * Callback fired by StateBus when any state field changes (outside of a beginBatch / endBatch
+	 * window). MainActivity installs a listener that posts applyStateToUi to the UI thread; the
+	 * listener replays into recomputeCrop + UI sync. Implementations should be cheap and safe to
+	 * call from any thread — StateBus dispatches synchronously from the setter that triggered the
+	 * change, which can be either the UI thread (user gestures) or the bg thread (image load
+	 * commit, horizon detection result). Marshal to the UI thread before touching Views.
+	 */
 	public interface OnStateChangedListener
 	{
+		/**
+		 * Notification that state has changed. Called once per setter outside a batch; once at
+		 * endBatch when one or more setters fired inside a beginBatch window.
+		 */
 		void onStateChanged();
 	}
 
@@ -49,8 +61,15 @@ public final class CropState
 	private volatile AspectRatio aspectRatio = AspectRatio.R4_5;
 	// volatile + identical-publishing reasoning as sourceImage below — the proxy bitmap derived from the
 	// source for editor-render and HorizonDetector consumption. May be the same reference as sourceImage
-	// when the source fits within MAX_DISPLAY_PIXELS (BitmapUtils.createDisplayProxy aliases). Always set
-	// in lockstep with sourceImage via setSourceImage(Bitmap, Bitmap) — never written independently.
+	// when the source fits within MAX_DISPLAY_PIXELS (BitmapUtils.createDisplayProxy aliases). Always
+	// paired with sourceImage via setSourceImage(Bitmap, Bitmap) or reset() — never written by a
+	// different writer. NOT a truly atomic pair: setSourceImage and reset() each write the two volatile
+	// fields as two separate stores, so a UI-thread reader running between them can observe the
+	// intermediate (sourceImage=old, displayImage=new) or (sourceImage=null, displayImage=old) state.
+	// EditorRenderer.draw and gesture handlers all null-check via `state.getSourceImage() == null ||
+	// state.getDisplayImage() == null` (logical OR) which tolerates either half-null state cleanly —
+	// future readers that only check one half MUST add the second check to preserve this contract, or
+	// the two writes need to move into a synchronized block / single Bitmaps record swap.
 	private volatile Bitmap displayImage;
 	private volatile Bitmap sourceImage;
 	// Volatile because `reset()` writes both on bg while EditorRenderer / gesture handlers read on UI.
@@ -58,12 +77,13 @@ public final class CropState
 	private volatile EditorMode editorMode = EditorMode.SELECT_FEATURE;
 	// Mutated only via updateExportConfig / updateGridConfig — the record types are immutable, so observers see
 	// a consistent snapshot and notifyChanged fires exactly once per logical transition. Volatile because
-	// ImageLoadController.applyBytes (bg thread) calls setSourceFormat (which mutates exportConfig) and
-	// updateGridConfig is reachable from settings paths that may run before the UI re-reads; UI-thread
-	// readers (ExportPipeline.canBypassEncode, SaveController.openSaveOptionsDialog) need a happens-before
-	// edge to the bg-side write so they don't observe a stale record reference on weak-memory ARM.
+	// ImageLoadController.applyBytes (bg thread) calls installLoadedImage (which mutates exportConfig via the
+	// inlined sourceFormat seed) and updateGridConfig is reachable from settings paths that may run before the
+	// UI re-reads; UI-thread readers (ExportPipeline.canBypassEncode, SaveController.openSaveOptionsDialog)
+	// need a happens-before edge to the bg-side write so they don't observe a stale record reference on
+	// weak-memory ARM.
 	private volatile ExportConfig exportConfig = ExportConfig.defaults();
-	// Volatile because `reset()` and `setSourceFormat` run on the bg load thread while the UI-thread
+	// Volatile because `reset()` and `installLoadedImage` run on the bg load thread while the UI-thread
 	// save-flow paths (SaveController + SaveDialog / FolderPickerDialog) read `getSourceFormat()` to
 	// drive format-picker defaults and extension validation. Without volatile, a UI tap immediately
 	// after load could see a stale sourceFormat from the previous image — causing the format picker to
@@ -76,7 +96,7 @@ public final class CropState
 	private volatile List<SelectionPoint> selectionPoints = new ArrayList<>();
 	// originalFilename / centerLocked / cropSizeDirty / hasCenter / anchorX-Y / centerX-Y /
 	// rotationDegrees / cropH / cropW are all written by `reset()` on the bg load thread (and by
-	// applyBytes via setOriginalFilename). UI-thread reads on every editor render frame, every tap /
+	// installLoadedImage for originalFilename). UI-thread reads on every editor render frame, every tap /
 	// drag / pinch handler, and every save-flow dispatch (canBypassEncode reads hasCenter, cropW/H).
 	// Without volatile, a mid-load UI frame can see torn or stale primitive values — most visibly a
 	// `hasCenter = true` paired with `cropW = 0` produces a degenerate crop overlay; less visibly a
@@ -94,7 +114,7 @@ public final class CropState
 	private volatile byte[] gainMap;
 	// Volatile because GraftController.start (UI thread) reads `getOriginalFileBytes()` and
 	// ExportPipeline.canBypassEncode reads it from both UI and bg dispatch paths, while `reset()` and
-	// `setOriginalFileBytes()` run on the bg load thread. Without volatile, the UI can observe stale
+	// `installLoadedImage` run on the bg load thread. Without volatile, the UI can observe stale
 	// null after a successful load — breaking graft-start and forcing canBypassEncode to false.
 	private volatile byte[] originalFileBytes;
 	// Raw TIFF bytes from the source PNG's eXIf chunk (PNG 1.6 spec). Set by extractMetadata on PNG sources;
@@ -115,11 +135,21 @@ public final class CropState
 	/**
 	 * Append a selection point. Fires the state listener once.
 	 *
+	 * Builds a fresh list and volatile-swaps the field rather than mutating the live list in
+	 * place. The field's contract (see selectionPoints declaration) requires every writer to use
+	 * volatile-swap so any concurrent reader's iterator — e.g. HorizonDetector running on the bg
+	 * thread while the UI thread adds a point — keeps walking the old list unaffected rather than
+	 * tripping ConcurrentModificationException. The previous in-place .add was a contract
+	 * violation that replaceSelectionPoints / reset had already documented around.
+	 *
 	 * @param point selection point to append (consumed by reference; SelectionPoint is immutable)
 	 */
 	public void addSelectionPoint(SelectionPoint point)
 	{
-		selectionPoints.add(point);
+		List<SelectionPoint> updated = new ArrayList<>(selectionPoints.size() + 1);
+		updated.addAll(selectionPoints);
+		updated.add(point);
+		selectionPoints = updated;
 		notifyChanged();
 	}
 
@@ -134,7 +164,9 @@ public final class CropState
 	}
 
 	/**
-	 * Remove every selection point. No-op + no listener fire when already empty.
+	 * Remove every selection point. No-op + no listener fire when already empty. Volatile-swaps a
+	 * fresh empty list rather than .clear()-ing in place — same contract as addSelectionPoint /
+	 * replaceSelectionPoints / reset (see selectionPoints field comment).
 	 */
 	public void clearSelectionPoints()
 	{
@@ -142,7 +174,7 @@ public final class CropState
 		{
 			return;
 		}
-		selectionPoints.clear();
+		selectionPoints = new ArrayList<>();
 		notifyChanged();
 	}
 
@@ -309,7 +341,7 @@ public final class CropState
 
 	/**
 	 * Read-only view of the loaded JPEG's segment list. Returns an empty list before any image is loaded. Populated
-	 * en-bloc by setJpegMeta during loadImage; the list is never mutated in place.
+	 * en-bloc by installLoadedImage during loadImage; the list is never mutated in place.
 	 *
 	 * @return unmodifiable view of the loaded JPEG's segment list; empty before any image is loaded
 	 */
@@ -354,8 +386,8 @@ public final class CropState
 
 	/**
 	 * Samsung Extended Format Trailer captured at load, or null for non-Samsung sources. Re-appended verbatim by
-	 * CropExporter.appendSeft on every save — see that method's Javadoc for the verbatim-preservation contract
-	 * and why CropCenter cannot fabricate fresh trailers.
+	 * CropExporter.appendSeftFileToFile on every save — see that method's Javadoc for the verbatim-preservation
+	 * contract and why CropCenter cannot fabricate fresh trailers.
 	 *
 	 * Caller must not mutate the returned array. The reference is shared and gets re-appended verbatim by the
 	 * exporter; mutation would silently corrupt the saved trailer.
@@ -427,19 +459,83 @@ public final class CropState
 	 */
 	public void installGraft(Graft graft)
 	{
-		// Order matters: setAiMask FIRST, then setGraftApplied. Mirrors reset()'s clear order
-		// (aiMask=null first, graftApplied=false second) so the same "no transient (graftApplied=true,
-		// aiMask=null) window" invariant the reset comment documents also holds on the install side.
-		// Without this order, a concurrent UltraHdrCompat.compressWithGainmap (e.g. Save tapped
-		// immediately after Apply External Edit completes) could catch graftApplied=true while aiMask
-		// is still null, skip the inpaint, and ship an HDR boost that still highlights the pre-graft
+		// Order matters WHEN AN AI MASK IS PRESENT: setAiMask FIRST, then setGraftApplied. Mirrors
+		// reset()'s clear order (aiMask=null first, graftApplied=false second) so the same "no
+		// transient (graftApplied=true, aiMask=non-null-but-stale) window" invariant the reset comment
+		// documents also holds on the install side. Without this order, a concurrent
+		// UltraHdrCompat.compressWithGainmap (e.g. Save tapped immediately after Apply External Edit
+		// completes) could catch graftApplied=true while aiMask is still the prior value, skip the
+		// inpaint against the WRONG mask, and ship an HDR boost that still highlights the pre-graft
 		// features — exactly the bug installGraft exists to prevent. Reference reads are atomic per
-		// JLS §17.7 so aiMask is always either null or the new mask, never torn.
+		// JLS §17.7 so aiMask is always either null or the new mask, never torn. The
+		// (graftApplied=true, aiMask=null) pair IS the steady state for SDR grafts (hasAiMask()=false
+		// path); UltraHdrCompat.inpaintGainmapIfMasked treats null aiMask as a no-op, so this is
+		// behaviorally safe — the "concurrent stale-mask" concern only applies when a fresh mask is
+		// being written.
 		if (graft.hasAiMask())
 		{
 			setAiMask(graft.aiMask());
 		}
 		setGraftApplied(true);
+	}
+
+	/**
+	 * Atomically install all load-time metadata from a successful image load. Single chokepoint for the
+	 * load-time commit: ImageLoadController.applyBytes builds the bundle of bytes / filename / format /
+	 * metadata on the bg thread, then calls this method to publish them as a group. Previously this was
+	 * a sequence of seven public setters (setOriginalFileBytes / setOriginalFilename / setSourceFormat /
+	 * setJpegMeta / setPngExifTiff / setGainMap / setSeftTrailer); those setters had zero production
+	 * callers outside the sequence and were deleted, with their bodies inlined here so the load-time
+	 * commit is unambiguously a single operation rather than seven semi-independent writes that callers
+	 * could reorder or selectively call.
+	 *
+	 * Wrapped in beginBatch / endBatch even though no field write below fires notifyChanged today — the
+	 * wrapper makes the atomicity contract explicit for future maintainers who might add a notifyChanged
+	 * inside the block (e.g. for one of the byte[] fields if it ever drives UI). The setSourceImage call
+	 * that always follows in the load path is the actual listener fire.
+	 *
+	 * setSourceFormat used to also seed exportConfig (via exportConfig.withFormat(fmt)) so that loading
+	 * a PNG defaults the SaveDialog format toggle to PNG — that seed logic is inlined directly here with
+	 * a null guard so a load whose format detection couldn't decide doesn't clobber the prior session's
+	 * exportConfig. A null jpegMeta argument is coerced to an empty ArrayList so the field's "never
+	 * null" contract (which getJpegMeta's Collections.unmodifiableList depends on — NPE otherwise) holds
+	 * regardless of how the caller models a no-segments load.
+	 *
+	 * @param fileBytes      raw image bytes — must be non-null on success path
+	 * @param filename       display name from SAF; null tolerated (falls back at downstream readers)
+	 * @param sourceFormat   detected Format (JPEG / PNG); null when the loaded bytes don't match either
+	 *                       supported format — exportConfig.format is preserved in that case
+	 * @param jpegMeta       parsed APP segments for a JPEG source; null tolerated (coerced to empty
+	 *                       ArrayList — PNG sources commonly pass null here)
+	 * @param pngExifTiff    raw TIFF body from a PNG eXIf chunk, or null for JPEG / non-EXIF PNG
+	 * @param gainMap        Ultra HDR gain-map bytes, or null for SDR sources
+	 * @param seftTrailer    Samsung SEFT trailer bytes, or null for non-Samsung-edited sources
+	 */
+	public void installLoadedImage(byte[] fileBytes, String filename, Format sourceFormat,
+		List<JpegSegment> jpegMeta, byte[] pngExifTiff, byte[] gainMap, byte[] seftTrailer)
+	{
+		beginBatch();
+		try
+		{
+			this.originalFileBytes = fileBytes;
+			this.originalFilename = filename;
+			this.sourceFormat = sourceFormat;
+			if (sourceFormat != null)
+			{
+				this.exportConfig = exportConfig.withFormat(sourceFormat);
+			}
+			// Null-coerce to match the field's "never null" contract — getJpegMeta wraps with
+			// Collections.unmodifiableList which NPEs on a null delegate, so a null write here would
+			// poison every downstream read.
+			this.jpegMeta = jpegMeta != null ? jpegMeta : new ArrayList<>();
+			this.pngExifTiff = pngExifTiff;
+			this.gainMap = gainMap;
+			this.seftTrailer = seftTrailer;
+		}
+		finally
+		{
+			endBatch();
+		}
 	}
 
 	/**
@@ -484,33 +580,23 @@ public final class CropState
 
 	/**
 	 * Remove a selection point by equality. Fires the state listener only when something was actually
-	 * removed.
+	 * removed. Volatile-swaps a copy with the point removed rather than mutating the live list —
+	 * same contract as addSelectionPoint / clearSelectionPoints / replaceSelectionPoints / reset
+	 * (see selectionPoints field comment for the bg-thread reader CME rationale).
 	 *
 	 * @param point selection point to remove (matched by equals)
 	 * @return true when a matching point was found and removed; false when no equal point existed
 	 */
 	public boolean removeSelectionPoint(SelectionPoint point)
 	{
-		boolean removed = selectionPoints.remove(point);
-		if (removed)
+		List<SelectionPoint> updated = new ArrayList<>(selectionPoints);
+		if (!updated.remove(point))
 		{
-			notifyChanged();
+			return false;
 		}
-		return removed;
-	}
-
-	/**
-	 * Remove the selection point at the given index. Always fires the listener when it does return.
-	 *
-	 * @param index position to remove from the selection-points list
-	 * @return the removed selection point
-	 * @throws IndexOutOfBoundsException when index is negative or beyond the list's size
-	 */
-	public SelectionPoint removeSelectionPointAt(int index)
-	{
-		SelectionPoint removed = selectionPoints.remove(index);
+		selectionPoints = updated;
 		notifyChanged();
-		return removed;
+		return true;
 	}
 
 	/**
@@ -673,11 +759,32 @@ public final class CropState
 		// No notifyChanged — caller will trigger notify via recomputeCrop → setCenter
 	}
 
+	/**
+	 * Set the cropSizeDirty flag directly. Public (rather than package-private) because
+	 * MainActivity.applyRestoreBundle, CropEngine.recomputeCrop, and CropEditorView's measure-pass
+	 * callback each clear it after applying a fresh size — the trio is across packages. Paired with
+	 * markCropSizeDirty (no-arg true setter) for symmetry; the boolean variant exists for the
+	 * explicit-false clear sites.
+	 *
+	 * @param dirty true to mark the cropW/cropH as needing recompute, false to clear after a
+	 *              recompute has applied the new size
+	 */
 	public void setCropSizeDirty(boolean dirty)
 	{
 		this.cropSizeDirty = dirty;
 	}
 
+	/**
+	 * Write cropW + cropH without firing the listener. Used by CropEngine's recompute pass (writes
+	 * the snapped dims after computing them — the listener fire is deferred to the caller, which
+	 * orchestrates the recompute as part of a larger state-mutation batch) AND by
+	 * MainActivity.applyRestoreBundle (writes the restored dims inside a beginBatch wrapper, so
+	 * the single endBatch notification covers everything). Always paired with a separate
+	 * setCropSizeDirty / notifyChanged downstream so observers see the new size.
+	 *
+	 * @param width  new crop width in image pixels
+	 * @param height new crop height in image pixels
+	 */
 	public void setCropSizeSilent(int width, int height)
 	{
 		this.cropW = width;
@@ -692,29 +799,6 @@ public final class CropState
 	}
 
 	/**
-	 * Store the raw Ultra HDR gain-map bytes for later export. No listener fire — gain map never drives UI changes
-	 * directly.
-	 *
-	 * @param gainMap raw Ultra HDR gain-map bytes; ownership transfers to CropState (do not mutate after passing
-	 *                in). Null clears.
-	 */
-	public void setGainMap(byte[] gainMap)
-	{
-		this.gainMap = gainMap;
-	}
-
-	/**
-	 * Replace the JPEG segment list en-bloc. No listener fire — the segment list is consulted by the exporter, not
-	 * rendered.
-	 *
-	 * @param meta new segment list; reference is retained (do not mutate after passing in)
-	 */
-	public void setJpegMeta(List<JpegSegment> meta)
-	{
-		this.jpegMeta = meta;
-	}
-
-	/**
 	 * Register (or clear via null) the single state-change listener. MainActivity wires itself as the listener in
 	 * onCreate and unwires in onDestroy.
 	 *
@@ -723,21 +807,6 @@ public final class CropState
 	public void setListener(OnStateChangedListener listener)
 	{
 		bus.setListener(listener);
-	}
-
-	public void setOriginalFileBytes(byte[] bytes)
-	{
-		this.originalFileBytes = bytes;
-	}
-
-	public void setOriginalFilename(String name)
-	{
-		this.originalFilename = name;
-	}
-
-	public void setPngExifTiff(byte[] tiff)
-	{
-		this.pngExifTiff = tiff;
 	}
 
 	/**
@@ -772,36 +841,6 @@ public final class CropState
 		this.rotationDegrees = deg;
 		this.cropSizeDirty = true;
 		notifyChanged();
-	}
-
-	/**
-	 * Store the Samsung Extended Format Trailer for later re-appending to the export. No listener fire — trailer
-	 * data doesn't drive UI.
-	 *
-	 * @param seft Samsung SEFT trailer bytes (re-appended verbatim on save); reference is retained — do not
-	 *             mutate after passing in. Null clears.
-	 */
-	public void setSeftTrailer(byte[] seft)
-	{
-		this.seftTrailer = seft;
-	}
-
-	/**
-	 * Record the source format (JPEG or PNG) and seed exportConfig to match — load a PNG and the SaveDialog's
-	 * format toggle and default filename should arrive on PNG, not silently default back to JPEG and drop alpha on
-	 * the next save. Callers can still override the format afterwards via updateExportConfig (e.g., the user
-	 * explicitly picks JPEG in the SaveDialog). No listener fire — listeners observe the resulting setSourceImage
-	 * call that always follows in the load path.
-	 *
-	 * @param fmt detected source format, or null when the loaded bytes don't match either supported format
-	 */
-	public void setSourceFormat(Format fmt)
-	{
-		this.sourceFormat = fmt;
-		if (fmt != null)
-		{
-			this.exportConfig = exportConfig.withFormat(fmt);
-		}
 	}
 
 	/**

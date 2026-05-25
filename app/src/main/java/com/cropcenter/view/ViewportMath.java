@@ -29,7 +29,12 @@ final class ViewportMath
 		int width();
 	}
 
-	private static final float MAX_ZOOM = 256f;
+	// Maximum on-screen size of a single source pixel, in screen pixels. The zoom ceiling is derived as
+	// MAX_PIXEL_RATIO / baseScale so each source pixel can render at most this many screen pixels —
+	// regardless of how large or small the source image is. A 200 MP source has tiny baseScale (~0.06)
+	// and thus a high zoom ceiling (~1066); a small 1024×768 source fit at baseScale ~1.05 caps at ~60.
+	// 64 lets the user pixel-peep individual sensor pixels at maximum zoom.
+	private static final float MAX_PIXEL_RATIO = 64f;
 	private static final float MIN_ZOOM = 1f;
 
 	private final ViewSize size;
@@ -284,9 +289,10 @@ final class ViewportMath
 	}
 
 	/**
-	 * Current zoom factor on top of baseScale. 1 = fit-to-view; capped at MAX_ZOOM.
+	 * Current zoom factor on top of baseScale. 1 = fit-to-view; capped at maxZoom() so each source
+	 * pixel renders at no more than MAX_PIXEL_RATIO screen pixels.
 	 *
-	 * @return the current zoom multiplier (1 at fit-to-view, up to MAX_ZOOM)
+	 * @return the current zoom multiplier (1 at fit-to-view, up to maxZoom())
 	 */
 	float getZoom()
 	{
@@ -347,6 +353,28 @@ final class ViewportMath
 	{
 		float scale = baseScale * zoom;
 		return size.height() / 2f + (iy - viewportY) * scale;
+	}
+
+	/**
+	 * Upper bound of the zoom range. Computed from baseScale so each source pixel can render at most
+	 * MAX_PIXEL_RATIO screen pixels — large images get a high ceiling, small images a low one.
+	 * Floored to MIN_ZOOM so a degenerate baseScale (0 / negative / NaN — only reachable before
+	 * fitToView measured the view) can't collapse the cap below 1 and trap the user below fit-to-view.
+	 *
+	 * @return the current zoom-ceiling (MAX_PIXEL_RATIO / baseScale, floored at MIN_ZOOM)
+	 */
+	float maxZoom()
+	{
+		// `!(x > 0)` catches 0, negative, AND NaN (>-comparisons return false for NaN, so the
+		// outer ! flips that to true). The plain `baseScale <= 0f` form would silently let NaN
+		// through and propagate a NaN cap up to the zoom clamp. baseScale can be NaN when the
+		// view is unmeasured AND imgW=0 hits the 0/0 division in fitToView (rotatedDims[0]=0 →
+		// size.width()/0 = NaN with size.width()=0).
+		if (!(baseScale > 0f))
+		{
+			return MIN_ZOOM;
+		}
+		return Math.max(MIN_ZOOM, MAX_PIXEL_RATIO / baseScale);
 	}
 
 	/**
@@ -478,15 +506,17 @@ final class ViewportMath
 	}
 
 	/**
-	 * Zoom at a screen-space focus point, keeping that point stationary under the finger. Clamps zoom against
-	 * [effectiveMinZoom(state), MAX_ZOOM] — at rotation, the lower bound drops below 1 so the user can pinch
-	 * out far enough to fit the rotated bounding box on screen (the rotated image is bigger than the un-rotated
-	 * image, so fit-to-rotated needs an effective scale below baseScale). Re-clamps the viewport against the
-	 * new scale. Skips the viewport clamp when state is null or has no loaded image — the zoom + focus-shift
-	 * arithmetic still runs.
+	 * Zoom at a screen-space focus point, keeping that point stationary under the finger. Clamps zoom
+	 * against [effectiveMinZoom(state), maxZoom()] — at rotation, the lower bound drops below 1 so the
+	 * user can pinch out far enough to fit the rotated bounding box on screen (the rotated image is
+	 * bigger than the un-rotated image, so fit-to-rotated needs an effective scale below baseScale).
+	 * The upper bound is per-image: each source pixel can render at most MAX_PIXEL_RATIO screen pixels,
+	 * so large source images get a high ceiling and small ones get a low ceiling. Re-clamps the
+	 * viewport against the new scale. Skips the viewport clamp when state is null or has no loaded
+	 * image — the zoom + focus-shift arithmetic still runs.
 	 *
 	 * @param scaleFactor multiplier applied to the current zoom (clamped post-multiply to
-	 *                    [effectiveMinZoom(state), MAX_ZOOM])
+	 *                    [effectiveMinZoom(state), maxZoom()])
 	 * @param focusX      screen-space X of the focus point (stays under the finger across the zoom)
 	 * @param focusY      screen-space Y of the focus point
 	 * @param state       CropState supplying image dimensions + rotation for the zoom floor and post-zoom
@@ -496,7 +526,7 @@ final class ViewportMath
 	{
 		float imgFocusX = screenToImageX(focusX);
 		float imgFocusY = screenToImageY(focusY);
-		zoom = Math.clamp(zoom * scaleFactor, effectiveMinZoom(state), MAX_ZOOM);
+		zoom = Math.clamp(zoom * scaleFactor, effectiveMinZoom(state), maxZoom());
 		float newImgFocusX = screenToImageX(focusX);
 		float newImgFocusY = screenToImageY(focusY);
 		viewportX += imgFocusX - newImgFocusX;
@@ -508,7 +538,7 @@ final class ViewportMath
 	 * Zero-rotation pure-geometry overload taking image dimensions directly. Backward-compat shim for tests
 	 * that don't have a rotation to pass; delegates to the rotation-aware overload with rotation = 0.
 	 *
-	 * @param scaleFactor multiplier applied to zoom (clamped post-multiply to [MIN_ZOOM=1, MAX_ZOOM=256] at
+	 * @param scaleFactor multiplier applied to zoom (clamped post-multiply to [MIN_ZOOM=1, maxZoom()] at
 	 *                    zero rotation)
 	 * @param focusX      screen-space X of the focus point (stays under the finger across the zoom)
 	 * @param focusY      screen-space Y of the focus point
@@ -525,10 +555,11 @@ final class ViewportMath
 	 * ViewportMathTest can pin the "focus stays under the finger" identity, the rotation-aware zoom-clamp
 	 * lower bound, and the post-zoom viewport clamp — without a Bitmap-bound CropState. At non-zero rotation
 	 * the minimum zoom is `min(1, (view-fit-to-rotated-AABB) / baseScale)` so a user who fit-to-view at one
-	 * rotation can still zoom out to fit at a later (more extreme) rotation without having to re-fit.
+	 * rotation can still zoom out to fit at a later (more extreme) rotation without having to re-fit. The
+	 * upper bound is `maxZoom() = MAX_PIXEL_RATIO / baseScale` — per-image rather than a flat constant.
 	 *
 	 * @param scaleFactor     multiplier applied to zoom (clamped post-multiply to
-	 *                        [effectiveMinZoom(imgW, imgH, rotationDegrees), MAX_ZOOM=256])
+	 *                        [effectiveMinZoom(imgW, imgH, rotationDegrees), maxZoom()])
 	 * @param focusX          screen-space X of the focus point (stays under the finger across the zoom)
 	 * @param focusY          screen-space Y of the focus point
 	 * @param imgW            image width in image pixels — forwarded to the post-zoom viewport clamp
@@ -539,7 +570,7 @@ final class ViewportMath
 	{
 		float imgFocusX = screenToImageX(focusX);
 		float imgFocusY = screenToImageY(focusY);
-		zoom = Math.clamp(zoom * scaleFactor, effectiveMinZoom(imgW, imgH, rotationDegrees), MAX_ZOOM);
+		zoom = Math.clamp(zoom * scaleFactor, effectiveMinZoom(imgW, imgH, rotationDegrees), maxZoom());
 		float newImgFocusX = screenToImageX(focusX);
 		float newImgFocusY = screenToImageY(focusY);
 		viewportX += imgFocusX - newImgFocusX;

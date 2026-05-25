@@ -57,6 +57,14 @@ final class ImageLoadController
 
 	private final ImageLoadHost host;
 	private final SafFileHelper safFiles;
+	// URI of the most recently SUCCESSFULLY-loaded source — promoted from the load() argument only
+	// after applyBytes returns true AND the UI install runnable has been posted. Setting before
+	// success would pair the attempted URI with the prior session's CropState if the load was
+	// busy-rejected, failed to decode, or never reached the install path — onSaveInstanceState
+	// would then persist a restore-bundle mismatching the URI to the in-memory edit state, and the
+	// restore would load image B while applying image A's geometry. Volatile so the UI thread
+	// (onSaveInstanceState) sees the bg thread's promote.
+	private volatile Uri lastLoadedUri;
 
 	ImageLoadController(ImageLoadHost host, SafFileHelper safFiles)
 	{
@@ -254,6 +262,17 @@ final class ImageLoadController
 		BitmapFactory.Options boundsOpts = new BitmapFactory.Options();
 		boundsOpts.inJustDecodeBounds = true;
 		BitmapFactory.decodeByteArray(fileBytes, 0, fileBytes.length, boundsOpts);
+		// Defensive guard against bounds-decode failing silently: BitmapFactory leaves outWidth /
+		// outHeight at 0 when it couldn't read the SOF dimensions (corrupt/truncated metadata even
+		// though the magic-byte gate above passed — e.g. a JPEG with a malformed SOF segment).
+		// Passing 0×0 into computeInSampleSize could return implementation-defined behaviour, and
+		// the subsequent real decode would also fail. Surface the diagnosis here so the user gets
+		// a clean "Failed to decode" toast instead of crash-or-garbage downstream.
+		if (boundsOpts.outWidth <= 0 || boundsOpts.outHeight <= 0)
+		{
+			host.runOnUiThread(() -> host.toastIfAlive("Failed to decode", Toast.LENGTH_SHORT));
+			return false;
+		}
 		BitmapFactory.Options decodeOpts = new BitmapFactory.Options();
 		decodeOpts.inSampleSize = BitmapUtils.computeInSampleSize(
 			boundsOpts.outWidth, boundsOpts.outHeight, maxPixels);
@@ -345,15 +364,15 @@ final class ImageLoadController
 			// executor is single-threaded so these writes are serialized; UI-thread reads see them via
 			// the Handler.post happens-before edge below. EditorRenderer / tap paths null-check
 			// getSourceImage so a null-during-load snapshot is handled as "no image loaded".
+			// installLoadedImage inlines what were previously 7 per-field setters and wraps the field
+			// writes in beginBatch/endBatch; the field writes themselves don't call notifyChanged
+			// today, so the batch is structural insurance against a future maintainer adding one
+			// rather than a current listener-coalescing measure.
 			CropState state = host.getState();
 			state.reset();
-			state.setOriginalFileBytes(fileBytes);
-			state.setOriginalFilename(origName);
-			state.setSourceFormat(extracted.sourceFormat());
-			state.setJpegMeta(extracted.jpegMeta());
-			state.setPngExifTiff(extracted.pngExifTiff());
-			state.setGainMap(extracted.gainMap());
-			state.setSeftTrailer(extracted.seftTrailer());
+			state.installLoadedImage(fileBytes, origName, extracted.sourceFormat(),
+				extracted.jpegMeta(), extracted.pngExifTiff(), extracted.gainMap(),
+				extracted.seftTrailer());
 
 			// `handedOff = true` flips ONLY AFTER runOnUiThread successfully posts the runnable. A
 			// throw from the post (RejectedExecutionException on a quitting looper) leaves handedOff
@@ -379,6 +398,21 @@ final class ImageLoadController
 				}
 			}
 		}
+	}
+
+	/**
+	 * Accessor for MainActivity.onSaveInstanceState — the URI of the most recently SUCCESSFULLY-loaded
+	 * source, promoted only after applyBytes returns true (so a busy-rejected or decode-failed load
+	 * doesn't pair a stale URI with the in-memory CropState). Stays set across the rest of the session
+	 * because the field tracks "what source is currently in the editor", which is exactly what the
+	 * process-death restore flow needs to re-fetch.
+	 *
+	 * @return URI promoted from the most recent successful load(), or null when no successful load has
+	 *         happened this session (fresh launch with no prior load, or every load attempt failed)
+	 */
+	Uri getLastLoadedUri()
+	{
+		return lastLoadedUri;
 	}
 
 	/**
@@ -434,6 +468,8 @@ final class ImageLoadController
 	 */
 	void load(Uri uri)
 	{
+		// lastLoadedUri is NOT updated here — see field comment for why. Promoted in runLoadBg
+		// after applyBytes succeeds + the install runnable posts.
 		// Dismiss whatever state-mutating dialog is open BEFORE busy.compareAndSet — once we
 		// dispatch to bg, state.reset() runs and would race any open dialog's still-active widget
 		// commits to CropState. Done synchronously on the UI thread so by the time runInBackground is called,
@@ -541,7 +577,24 @@ final class ImageLoadController
 		{
 			byte[] fileBytes = safFiles.readUriBytes(uri);
 			Log.d(TAG, "Loaded " + fileBytes.length + " raw bytes");
-			applyBytes(fileBytes, safFiles.getDisplayName(uri));
+			boolean applied = applyBytes(fileBytes, safFiles.getDisplayName(uri));
+			if (applied)
+			{
+				// Promote AFTER applyBytes posts the UI install runnable. A false return (decode
+				// failure, unsupported format) leaves lastLoadedUri pointing at whatever prior
+				// successful load it tracked, so onSaveInstanceState's restore-bundle still
+				// matches in-memory state. Volatile write is seen by the UI thread.
+				lastLoadedUri = uri;
+				// Persist the parent of the loaded file so the next FolderPickerDialog open can
+				// land there when no save folder has been recorded yet. fileFromSafUri returns
+				// null for cloud / SAF-only URIs that don't resolve to a filesystem path —
+				// recordLoadFolder treats null as a no-op so we don't need the guard here. Gated
+				// on `applied` so a failed load (unsupported format, decode error) doesn't shift
+				// the next save dialog's initial folder onto a directory that doesn't contain
+				// the currently-loaded image — matches REQUIREMENTS.md §9's "recorded on
+				// successful load" wording.
+				SaveController.recordLoadFolder(host.getActivity(), safFiles.fileFromSafUri(uri));
+			}
 		}
 		catch (Exception | OutOfMemoryError e)
 		{

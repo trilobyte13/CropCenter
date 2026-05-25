@@ -39,6 +39,41 @@ Sections and subsections are ordered alphabetically.
 - Place annotations on the line immediately above the method signature, not inline.
 - `@SuppressWarnings` requires a comment explaining why.
 
+## Boolean negation of comparisons
+
+Prefer the direct inverted comparison over wrapping a comparison in `!(...)`. The negated form
+costs the reader two cognitive passes (parse the `!`, parse the comparison, mentally combine);
+the direct form reads as one thought.
+
+| Avoid          | Use        |
+| -------------- | ---------- |
+| `!(x > y)`     | `x <= y`   |
+| `!(x >= y)`    | `x < y`    |
+| `!(x < y)`     | `x >= y`   |
+| `!(x <= y)`    | `x > y`    |
+| `!(x == y)`    | `x != y`   |
+| `!(x != y)`    | `x == y`   |
+
+The rule applies regardless of operand type — `int`, `long`, `float`, `double`, references via
+`equals` — except for the **NaN-rejection idiom** below.
+
+**Float / double NaN exception.** When the comparison is on a `float` / `double` AND a NaN
+operand must fold into the "false" side of the branch, the negated form is **not** equivalent
+to the direct form:
+
+- `!(NaN > 0f)` is `true` — folds NaN into "not positive"
+- `NaN <= 0f` is `false` — silently lets NaN through, then the surrounding code propagates
+  the NaN (an NaN cap, NaN clamp output, NaN coordinate)
+
+When this is the intent, keep the `!(x op y)` form AND attach an inline `// ` comment at the
+check site naming NaN as the reason — not just in the enclosing method's Javadoc. The local
+rationale is what tells the next reader (and the audit) that the negation is load-bearing.
+
+The exception applies only to `float` / `double`. For `int` / `long` there's no NaN, so the
+direct comparison is always correct. Compound boolean negation that doesn't fit the
+`!(x op y)` shape (`!(allowSet1 || allowSet2)`, `!isFoo()`) is unrelated to this rule —
+that's just ordinary `!` on a boolean expression.
+
 ## Braces and blocks
 
 - **Full Allman braces.** The opening `{` goes on its own line — for methods, classes, interfaces, enums, `if`, `else`,
@@ -228,10 +263,11 @@ stays load-bearing:
   by `isXmp()`, `HorizonDetector`, and `XmpItemLengthPatcher`.
 - **`model/Format`** — JPEG / PNG enum carrying `extension()` and `mimeType()`. Never re-derive `".jpg"` /
   `"image/jpeg"`; never compare format with `String.equals`.
-- **`crop/CropRender.of(...)`** — factory bundling (centerX, centerY, cropW, cropH, imgW, imgH, rotation) for the export
-  pipeline. Final class with a private constructor; the public `of(...)` factory is the only construction path (private
-  ctor closes the (W, H)-vs-(H, W) transposition footgun that a public record's positional canonical constructor would
-  re-open). Has derived `srcX()` / `srcY()`.
+- **`model/CropRender.of(...)`** — factory bundling (centerX, centerY, cropW, cropH, imgW, imgH, rotation) for the
+  export pipeline. Final class with a private constructor; the public `of(...)` factory is the only construction path
+  (private ctor closes the (W, H)-vs-(H, W) transposition footgun that a public record's positional canonical
+  constructor would re-open). Has derived `srcX()` / `srcY()`. Lives in `model/` (moved from `crop/`) so both `crop/`
+  consumers and `util/UltraHdrCompat` can import it without `util/ → crop/` layering inversion.
 - **`util/SafPaths`** — pure-string SAF document-ID parsing (`parentDocIdOf`, `lastSegmentSeparatorEnd`,
   `hasImageSignature`, `hasParentTraversalSegment`). Static, no Context — testable directly.
 - **`model/StateBus`** — listener-dispatch + batch-suppression. CropState delegates here; never re-implement the batch
@@ -508,6 +544,14 @@ grep -rnE '^\s*(if|else if|for|while)\s*\(([^()]|\([^()]*\))*\)\s+[a-zA-Z_][a-zA
 
 # Hand-rolled Math.max(lo, Math.min(hi, x)) — use Math.clamp instead:
 grep -rnE 'Math\.max\([^,]+,\s*Math\.min\(' app/src/main/java
+
+# `!(x op y)` boolean-negation of a comparison — see "Boolean negation of comparisons" section
+# above. The direct inverted comparison (`x <= y`, `x != y`, etc.) reads as one thought instead
+# of two. Justified exception: float / double NaN-rejection (`!(x > 0)` catches NaN, `x <= 0`
+# silently lets NaN through) — when keeping the negated form, attach an inline `// ` comment at
+# the check naming NaN. The grep flags every site; a clean tree has the load-bearing sites
+# annotated with "NaN" within ~3 lines of the check, and zero non-NaN sites.
+grep -rnE '!\([^!&|]+(>|<|>=|<=|==|!=)[^!&|]+\)' app/src/main/java
 
 # Single-line /** ... */ Javadoc on one physical line — expand to multi-line:
 grep -rnE '^\s*/\*\*[^*]*\*/\s*$' app/src/main/java

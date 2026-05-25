@@ -16,6 +16,11 @@ public final class DialogStrings
 	public static final String APPLY = "Apply";
 	// Negative-button label for cancel / dismiss.
 	public static final String CANCEL = "Cancel";
+	// Shared toast text for filename validation failures (path-separator inserted, empty / ".." traversal
+	// segment, or UTF-8 byte length exceeds the filesystem-component cap). Used by FolderPickerDialog's
+	// in-dialog typed-name check AND SaveController's defensive re-validation when the picker callback
+	// fires. Centralised here per CLAUDE.md's "3-site duplication" extraction threshold.
+	public static final String INVALID_FILENAME = "Invalid filename";
 	// Neutral / informational dismiss label.
 	public static final String OK = "OK";
 

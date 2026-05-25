@@ -147,6 +147,15 @@ public final class XmpItemLengthPatcher
 
 	private static boolean bytesEqual(byte[] a, int aOff, byte[] b, int bOff, int n)
 	{
+		// Defensive bounds check: callers in this file pass safe offsets by construction, but a
+		// future caller passing a shortened pattern would AIOOBE inside the comparison loop —
+		// surfacing as a save-pipeline crash on a user file. Return false on negative-length /
+		// out-of-range inputs rather than throw.
+		if (n < 0 || aOff < 0 || bOff < 0
+			|| (long) aOff + n > a.length || (long) bOff + n > b.length)
+		{
+			return false;
+		}
 		for (int i = 0; i < n; i++)
 		{
 			if (a[aOff + i] != b[bOff + i])
@@ -236,6 +245,12 @@ public final class XmpItemLengthPatcher
 	}
 
 	/**
+	 * Naive byte-pattern search within a sub-range of a buffer. Used by the XMP item-length patch site
+	 * scanner to locate the `<rdf:Description ...>` opening tag inside an XMP segment; the search range
+	 * is bounded by the XMP segment's own offsets so a stray match in the surrounding APP1 envelope
+	 * doesn't trigger a patch. Returns -1 rather than throwing on no-match so callers can treat absent
+	 * markup as a "nothing to patch" no-op.
+	 *
 	 * @param data    bytes to scan
 	 * @param start   inclusive start offset
 	 * @param end     exclusive end offset

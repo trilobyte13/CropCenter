@@ -35,7 +35,11 @@ public final class HorizonDetector
 	private static final float COARSE_HOUGH_STEP_DEGREES = 0.1f;
 	private static final float FINE_HOUGH_STEP_DEGREES = 0.01f;
 	private static final float FINE_SEARCH_WINDOW_DEGREES = 2f;
-	private static final float LINE_FIT_INLIER_DISTANCE_PX = 2f;
+	// Inlier window for the LSQ-refinement pass. Widened from 2 to 3 px so soft horizons (ocean-sky,
+	// sky-haze) whose Canny-suppressed edge pixels scatter ±2–3 px from the true line still contribute
+	// to the fit. 2 px was leaving most of the gradient outside the window, biasing the slope toward
+	// the strongest sub-pixel-aligned ridge instead of the overall trend.
+	private static final float LINE_FIT_INLIER_DISTANCE_PX = 3f;
 	// Both the metadata path (normalizeMetadataAngle) and the painted-region path
 	// (runHoughAndConvertToRotation) reject tilts past this magnitude as "too far for auto-rotate to be a
 	// reasonable correction" — large tilts indicate a held-sideways shot or sensor garbage, not a horizon
@@ -43,7 +47,12 @@ public final class HorizonDetector
 	// (e.g. a 28° tilt accepted via Hough but rejected via XMP, dropping the user into paint mode purely
 	// because metadata happened to be present).
 	private static final float MAX_HORIZON_TILT_DEGREES = 30f;
-	private static final float MAX_LINE_FIT_DELTA_DEGREES = 0.25f;
+	// Maximum LSQ-vs-Hough disagreement we accept as a refinement. Widened from 0.25° to 0.5° so a
+	// noisy Hough peak (common on soft horizons where the gradient spreads across several distance
+	// bins) can be corrected by the LSQ pass beyond the 0.25° gate. The LSQ inlier set is centered on
+	// the Hough peak's rho bin so a 0.5° disagreement still corresponds to a coherent line — wider
+	// than that and the LSQ is fitting a different feature than the Hough seed found.
+	private static final float MAX_LINE_FIT_DELTA_DEGREES = 0.5f;
 	// Pre-built 5x5 Gaussian convolution kernel (sigma ≈ 1.0). Hoisted from gaussianBlur5x5's body so we don't
 	// allocate 25 floats per call — auto-rotate runs this on a multi-MP source and the per-call allocation
 	// was pure waste.
@@ -158,12 +167,13 @@ public final class HorizonDetector
 			// 65000-byte clamp could miss a Roll attribute landing in the trailing ~535 bytes of a maxed
 			// segment.
 			String raw = new String(segData, 4, segData.length - 4, StandardCharsets.UTF_8);
-			// Lowercase pre-filter so a vendor segment with only `tilt="..."` (lowercase) isn't skipped —
-			// findXmpFloat itself uses Pattern.CASE_INSENSITIVE so catching it here keeps the pre-filter
-			// in step. Single toLowerCase pass over the raw body is bounded by
-			// the JPEG APP1 ~64 KB cap so the cost is negligible per segment.
-			String lower = raw.toLowerCase(Locale.ROOT);
-			if (!lower.contains("roll") && !lower.contains("tilt"))
+			// Case-insensitive contains-check directly against `raw` — no toLowerCase allocation. The
+			// prior lowercase pass copied up to ~64 KB per APP1 segment just to gate on contains();
+			// findXmpFloat already runs with Pattern.CASE_INSENSITIVE, so the duplicated lowercasing
+			// was pure waste on the AutoRotate hot path (each segment can hit this loop dozens of
+			// times in a multi-APP1 file). containsIgnoreCase below walks the raw bytes once with a
+			// per-character case-folded comparison — no allocation, no GC pressure.
+			if (!containsIgnoreCase(raw, "roll") && !containsIgnoreCase(raw, "tilt"))
 			{
 				continue;
 			}
@@ -212,18 +222,28 @@ public final class HorizonDetector
 		}
 		catch (OutOfMemoryError e)
 		{
-			Log.w(TAG, "OOM in painted detection");
+			// Pass the exception so the stack trace surfaces in logcat; without it we lose the
+			// allocation site that triggered the OOM (typically buildEdgeMap's float[] trio).
+			Log.w(TAG, "OOM in painted detection", e);
 			return Float.NaN;
 		}
 	}
 
 	/**
-	 * Refine the Hough winner with a least-squares fit over the edge pixels that sit on the winning line.
+	 * Refine the Hough winner with two iterative least-squares passes over the edge pixels that sit
+	 * on the winning line.
 	 *
-	 * The Hough pass votes into integer-distance bins, so a real-world horizon can sit between bins and still land
-	 * one or two ruler ticks off. Once Hough has chosen the correct line, fitting the actual inlier coordinates
-	 * recovers the sub-bin slope while retaining Hough's outlier rejection. Returns NaN when the fit is too weak or
-	 * disagrees too much with the Hough seed, in which case the caller keeps the original Hough angle.
+	 * The Hough pass votes into integer-distance bins, so a real-world horizon can sit between bins
+	 * and still land one or two ruler ticks off. Once Hough has chosen the correct line, fitting the
+	 * actual inlier coordinates recovers the sub-bin slope while retaining Hough's outlier rejection.
+	 *
+	 * The first pass uses houghAngleDeg's (cos, sin) to find the densest rho bin + inliers within
+	 * ±LINE_FIT_INLIER_DISTANCE_PX of that bin, then LSQ-fits the inlier slope. The second pass uses
+	 * the first pass's refined angle to re-project, re-vote the rho histogram, re-select inliers, and
+	 * re-fit — converging away from the Hough seed's bin-quantization noise. Final result is checked
+	 * against the original houghAngleDeg with MAX_LINE_FIT_DELTA_DEGREES; large disagreement is a
+	 * sign the LSQ is locking onto a different feature than Hough found, and the caller falls back
+	 * to the Hough seed.
 	 *
 	 * @param edgeX         edge pixel X coordinates
 	 * @param edgeY         edge pixel Y coordinates
@@ -236,86 +256,24 @@ public final class HorizonDetector
 	static float refineLineFitAngle(int[] edgeX, int[] edgeY, int edgeCount,
 		int width, int height, float houghAngleDeg)
 	{
-		double rad = Math.toRadians(houghAngleDeg);
-		double cos = Math.cos(rad);
-		double sin = Math.sin(rad);
-		float diagonal = (float) Math.hypot(width, height);
-		int numBins = (int) (2 * diagonal) + 1;
-		int distanceOffset = (int) diagonal;
-		int[] histogram = new int[numBins];
-
-		for (int i = 0; i < edgeCount; i++)
-		{
-			int bin = (int) Math.floor(edgeX[i] * cos + edgeY[i] * sin) + distanceOffset;
-			if (bin >= 0 && bin < numBins)
-			{
-				histogram[bin]++;
-			}
-		}
-
-		int bestBin = 0;
-		int bestCount = 0;
-		for (int bin = 0; bin < numBins; bin++)
-		{
-			if (histogram[bin] > bestCount)
-			{
-				bestCount = histogram[bin];
-				bestBin = bin;
-			}
-		}
-
-		int minInliers = Math.max(MIN_LINE_FIT_INLIERS, width * 3 / 100);
-		if (bestCount < minInliers)
+		float pass1 = lsqPassAtSeed(edgeX, edgeY, edgeCount, width, height, houghAngleDeg);
+		if (Float.isNaN(pass1))
 		{
 			return Float.NaN;
 		}
-
-		double rhoCenter = bestBin - distanceOffset + 0.5;
-		double sumX = 0;
-		double sumY = 0;
-		double sumXX = 0;
-		double sumXY = 0;
-		int inliers = 0;
-		for (int i = 0; i < edgeCount; i++)
+		float pass2 = lsqPassAtSeed(edgeX, edgeY, edgeCount, width, height, pass1);
+		if (Float.isNaN(pass2))
 		{
-			double rho = edgeX[i] * cos + edgeY[i] * sin;
-			if (Math.abs(rho - rhoCenter) > LINE_FIT_INLIER_DISTANCE_PX)
-			{
-				continue;
-			}
-			double x = edgeX[i];
-			double y = edgeY[i];
-			sumX += x;
-			sumY += y;
-			sumXX += x * x;
-			sumXY += x * y;
-			inliers++;
+			// Pass 2 went degenerate (the refined angle's basis collapsed denom under 1e-6 or threw
+			// out the inlier count). The pass-1 result is still a sub-bin improvement over Hough, so
+			// fall back to it rather than discarding the refinement entirely.
+			pass2 = pass1;
 		}
-		if (inliers < minInliers)
+		if (Math.abs(pass2 - houghAngleDeg) > MAX_LINE_FIT_DELTA_DEGREES)
 		{
 			return Float.NaN;
 		}
-
-		double denom = sumXX - sumX * sumX / inliers;
-		if (denom <= 1e-6)
-		{
-			return Float.NaN;
-		}
-		double slope = (sumXY - sumX * sumY / inliers) / denom;
-		// NaN slope (sumXX == sumX^2/inliers via floating-point underflow not caught by denom > 1e-6) would
-		// flow into atan → NaN → 90+NaN=NaN. The Math.clamp below would return NaN; the caller treats the
-		// result as a real rotation. Guard explicitly so a degenerate inlier set returns the spec'd "no
-		// reading" sentinel.
-		if (Double.isNaN(slope) || Double.isInfinite(slope))
-		{
-			return Float.NaN;
-		}
-		float refinedAngle = 90f + (float) Math.toDegrees(Math.atan(slope));
-		if (Math.abs(refinedAngle - houghAngleDeg) > MAX_LINE_FIT_DELTA_DEGREES)
-		{
-			return Float.NaN;
-		}
-		return Math.clamp(refinedAngle, 80f, 100f);
+		return Math.clamp(pass2, 80f, 100f);
 	}
 
 	// ── Image processing primitives ──
@@ -421,24 +379,85 @@ public final class HorizonDetector
 	}
 
 	/**
-	 * Collect the coordinates of edge pixels that survive the strength threshold AND lie within the painted mask.
-	 * Returns {edgeX[], edgeY[]} packed as a 2-element array, or null when fewer than 30 pixels qualify (not enough
-	 * signal for the Hough pass to produce a trustworthy angle).
+	 * Collect the coordinates of edge pixels that survive the strength threshold AND lie within the
+	 * painted mask. The strength threshold is computed over edges INSIDE the mask only — so a soft
+	 * ocean-sky horizon stays detectable even when the rest of the image has strong edges (foreground
+	 * rocks, foliage, foam) that would otherwise pull a global threshold above the soft gradient and
+	 * silently filter every horizon edge out. Returns {edgeX[], edgeY[]} packed as a 2-element array,
+	 * or null when fewer than MIN_MASKED_EDGE_PIXELS qualify (not enough signal for the Hough pass to
+	 * produce a trustworthy angle).
 	 */
 	static int[][] gatherMaskedEdges(float[] edges, boolean[] mask,
 		int width, int height, int maskWidth, int maskHeight)
 	{
-		float threshold = computeThreshold(edges, 0.15f);
+		// Precompute the mask-coordinate lookup so the inner loop avoids repeated Math.min calls.
+		// maskRowOffset[y] = maskY * maskWidth (the absolute index of row y's first mask sample).
+		// maskColIndex[x] = the mask sample's column index for image column x. Together they let the
+		// inner loop compute the mask bit's flat index as a single int add: maskRowOffset[y] +
+		// maskColIndex[x]. For a 16 MP proxy this eliminates ~32 M Math.min calls.
+		int[] maskRowOffset = new int[height];
+		for (int y = 0; y < height; y++)
+		{
+			maskRowOffset[y] = Math.min(y / 4, maskHeight - 1) * maskWidth;
+		}
+		int[] maskColIndex = new int[width];
+		for (int x = 0; x < width; x++)
+		{
+			maskColIndex[x] = Math.min(x / 4, maskWidth - 1);
+		}
+
+		// Walk 1: collect every non-zero edge magnitude inside the painted mask into a growable
+		// primitive buffer (initial 1024, double on overflow — amortised O(n) growth, no per-element
+		// boxing). Without the masked threshold, a shoreline composition where the painted region's
+		// strongest edges are 5-10× weaker than the off-region foreground rocks / foam would lose
+		// the entire horizon below the global top-15% cutoff.
+		float[] maskedEdges = new float[1024];
+		int maskedCount = 0;
+		for (int y = 0; y < height; y++)
+		{
+			int rowOffset = y * width;
+			int maskRow = maskRowOffset[y];
+			for (int x = 0; x < width; x++)
+			{
+				float e = edges[rowOffset + x];
+				if (e > 0 && mask[maskRow + maskColIndex[x]])
+				{
+					if (maskedCount == maskedEdges.length)
+					{
+						maskedEdges = Arrays.copyOf(maskedEdges, maskedEdges.length * 2);
+					}
+					maskedEdges[maskedCount++] = e;
+				}
+			}
+		}
+		// Trim to actual length before percentile computation — computeThreshold reads array.length.
+		if (maskedCount < maskedEdges.length)
+		{
+			maskedEdges = Arrays.copyOf(maskedEdges, maskedCount);
+		}
+		float threshold = computeThreshold(maskedEdges, 0.15f);
+
+		// Walk 2: collect (x, y) pairs whose edge magnitude clears the threshold. Same growable
+		// pattern. Fused count-and-fill replaces what was previously a count walk + a fill walk.
+		int[] edgeX = new int[1024];
+		int[] edgeY = new int[1024];
 		int edgeCount = 0;
 		for (int y = 0; y < height; y++)
 		{
-			int maskY = Math.min(y / 4, maskHeight - 1);
 			int rowOffset = y * width;
+			int maskRow = maskRowOffset[y];
 			for (int x = 0; x < width; x++)
 			{
-				int maskX = Math.min(x / 4, maskWidth - 1);
-				if (edges[rowOffset + x] >= threshold && mask[maskY * maskWidth + maskX])
+				if (edges[rowOffset + x] >= threshold && mask[maskRow + maskColIndex[x]])
 				{
+					if (edgeCount == edgeX.length)
+					{
+						int newCap = edgeX.length * 2;
+						edgeX = Arrays.copyOf(edgeX, newCap);
+						edgeY = Arrays.copyOf(edgeY, newCap);
+					}
+					edgeX[edgeCount] = x;
+					edgeY[edgeCount] = y;
 					edgeCount++;
 				}
 			}
@@ -448,24 +467,11 @@ public final class HorizonDetector
 			Log.d(TAG, "Too few masked edge pixels: " + edgeCount);
 			return null;
 		}
-
-		int[] edgeX = new int[edgeCount];
-		int[] edgeY = new int[edgeCount];
-		int edgeIndex = 0;
-		for (int y = 0; y < height; y++)
+		// Trim if we over-allocated. The downstream LSQ + Hough consumers honor array.length.
+		if (edgeCount < edgeX.length)
 		{
-			int maskY = Math.min(y / 4, maskHeight - 1);
-			int rowOffset = y * width;
-			for (int x = 0; x < width; x++)
-			{
-				int maskX = Math.min(x / 4, maskWidth - 1);
-				if (edges[rowOffset + x] >= threshold && mask[maskY * maskWidth + maskX])
-				{
-					edgeX[edgeIndex] = x;
-					edgeY[edgeIndex] = y;
-					edgeIndex++;
-				}
-			}
+			edgeX = Arrays.copyOf(edgeX, edgeCount);
+			edgeY = Arrays.copyOf(edgeY, edgeCount);
 		}
 		return new int[][] { edgeX, edgeY };
 	}
@@ -755,6 +761,47 @@ public final class HorizonDetector
 		return edges;
 	}
 
+	/**
+	 * Case-insensitive substring search without allocating a lowercased copy of the haystack. Used
+	 * by extractRollFromAppSegments' APP1 prefilter — toLowerCase on the full ~64 KB segment body
+	 * was bounded but allocation-heavy, and called per segment per autoRotate tap.
+	 *
+	 * @param haystack string to search inside (typically the raw APP1 XML body)
+	 * @param needle   ASCII substring to match (all callers pass lowercase ASCII literals like "roll"
+	 *                 or "tilt"; non-ASCII chars in needle fall back to bit-identical compare)
+	 * @return true when haystack contains needle ignoring case
+	 */
+	private static boolean containsIgnoreCase(String haystack, String needle)
+	{
+		int needleLen = needle.length();
+		int limit = haystack.length() - needleLen;
+		outer:
+		for (int i = 0; i <= limit; i++)
+		{
+			for (int j = 0; j < needleLen; j++)
+			{
+				char hayCh = haystack.charAt(i + j);
+				char needCh = needle.charAt(j);
+				// Fold ASCII uppercase to lowercase by adding 32 (0x20). Non-ASCII falls through
+				// the inequality check, matching String.contains behaviour for those characters.
+				if (hayCh >= 'A' && hayCh <= 'Z')
+				{
+					hayCh = (char) (hayCh + 32);
+				}
+				if (needCh >= 'A' && needCh <= 'Z')
+				{
+					needCh = (char) (needCh + 32);
+				}
+				if (hayCh != needCh)
+				{
+					continue outer;
+				}
+			}
+			return true;
+		}
+		return false;
+	}
+
 	private static float detectPaintedInternal(Bitmap src, List<float[]> paintPoints, float brushRadius)
 	{
 		int width = src.getWidth();
@@ -813,6 +860,102 @@ public final class HorizonDetector
 			}
 		}
 		return Float.NaN;
+	}
+
+	/**
+	 * One LSQ-refinement pass: re-vote a rho histogram at seedAngleDeg's basis, pick the densest bin
+	 * as the inlier center, LSQ-fit the points within ±LINE_FIT_INLIER_DISTANCE_PX of that bin.
+	 * Returns the fitted angle in degrees (un-clamped), or NaN when the fit can't be trusted (too
+	 * few peak votes, too few inliers, or degenerate slope-from-X denominator).
+	 *
+	 * Caller refineLineFitAngle chains two of these — first at the Hough seed, then at the first
+	 * pass's output — to converge through the Hough peak's rho-bin quantization noise.
+	 *
+	 * @param edgeX        edge pixel X coordinates
+	 * @param edgeY        edge pixel Y coordinates
+	 * @param edgeCount    number of valid coordinates in edgeX / edgeY
+	 * @param width        source bitmap width, used for the minimum inlier threshold
+	 * @param height       source bitmap height, used to size the rho histogram
+	 * @param seedAngleDeg basis angle for rho voting (degrees)
+	 * @return fitted angle in degrees (no clamp), or NaN when the fit failed
+	 */
+	private static float lsqPassAtSeed(int[] edgeX, int[] edgeY, int edgeCount,
+		int width, int height, float seedAngleDeg)
+	{
+		double rad = Math.toRadians(seedAngleDeg);
+		double cos = Math.cos(rad);
+		double sin = Math.sin(rad);
+		float diagonal = (float) Math.hypot(width, height);
+		int numBins = (int) (2 * diagonal) + 1;
+		int distanceOffset = (int) diagonal;
+		int[] histogram = new int[numBins];
+
+		for (int i = 0; i < edgeCount; i++)
+		{
+			int bin = (int) Math.floor(edgeX[i] * cos + edgeY[i] * sin) + distanceOffset;
+			if (bin >= 0 && bin < numBins)
+			{
+				histogram[bin]++;
+			}
+		}
+
+		int bestBin = 0;
+		int bestCount = 0;
+		for (int bin = 0; bin < numBins; bin++)
+		{
+			if (histogram[bin] > bestCount)
+			{
+				bestCount = histogram[bin];
+				bestBin = bin;
+			}
+		}
+
+		int minInliers = Math.max(MIN_LINE_FIT_INLIERS, width * 3 / 100);
+		if (bestCount < minInliers)
+		{
+			return Float.NaN;
+		}
+
+		double rhoCenter = bestBin - distanceOffset + 0.5;
+		double sumX = 0;
+		double sumY = 0;
+		double sumXX = 0;
+		double sumXY = 0;
+		int inliers = 0;
+		for (int i = 0; i < edgeCount; i++)
+		{
+			double rho = edgeX[i] * cos + edgeY[i] * sin;
+			if (Math.abs(rho - rhoCenter) > LINE_FIT_INLIER_DISTANCE_PX)
+			{
+				continue;
+			}
+			double x = edgeX[i];
+			double y = edgeY[i];
+			sumX += x;
+			sumY += y;
+			sumXX += x * x;
+			sumXY += x * y;
+			inliers++;
+		}
+		if (inliers < minInliers)
+		{
+			return Float.NaN;
+		}
+
+		double denom = sumXX - sumX * sumX / inliers;
+		if (denom <= 1e-6)
+		{
+			return Float.NaN;
+		}
+		double slope = (sumXY - sumX * sumY / inliers) / denom;
+		// NaN slope (sumXX == sumX^2/inliers via floating-point underflow not caught by denom > 1e-6)
+		// would flow into atan → NaN → 90+NaN=NaN. Guard explicitly so a degenerate inlier set
+		// returns the spec'd "no reading" sentinel.
+		if (Double.isNaN(slope) || Double.isInfinite(slope))
+		{
+			return Float.NaN;
+		}
+		return 90f + (float) Math.toDegrees(Math.atan(slope));
 	}
 
 	/**

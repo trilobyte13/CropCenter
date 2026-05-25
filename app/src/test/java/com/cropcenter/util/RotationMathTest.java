@@ -106,7 +106,7 @@ public final class RotationMathTest
 	}
 
 	@Test
-	public void naNRotationPropagatesAsNaN()
+	public void nanRotationPropagatesAsNan()
 	{
 		// Pin the current contract: NaN rotation in produces NaN dimensions out. The helper has no
 		// internal NaN guard — Math.cos(NaN) = NaN and the output multiplications cascade. Callers

@@ -47,22 +47,48 @@ public final class StoragePermissionHelper
 
 	/**
 	 * Launch the system Settings page where the user can grant MANAGE_EXTERNAL_STORAGE for this app.
-	 * Callers documented at the class level. Catches any Intent dispatch failure (no Settings app on
-	 * the device, ActivityNotFoundException on heavily-skinned OEMs) so the caller's UX flow doesn't
-	 * crash — failure is logged and the calling dialog stays open so the user can either retry the
-	 * tap or back out and pick a different action.
+	 * Callers documented at the class level. Tries three intents in priority order:
+	 *   1. ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION with a package URI — opens the per-app
+	 *      "All files access" toggle. Heavily-skinned OEMs (One UI, MIUI, ColorOS) sometimes don't
+	 *      handle this exact action with the package URI.
+	 *   2. ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION without a package URI — opens the system-wide
+	 *      "All files access" app list, where the user can scroll to find this app.
+	 *   3. ACTION_APPLICATION_DETAILS_SETTINGS — opens this app's general settings page, from
+	 *      which the user navigates to "Permissions > Files and media" manually.
+	 *
+	 * The FLAG_ACTIVITY_NEW_TASK is set because the call site can be a dialog whose Activity context
+	 * is mid-dismiss, and the launched Settings activity needs its own task stack. The intent chain
+	 * silently advances to the next fallback on ActivityNotFoundException or SecurityException.
+	 *
+	 * @return true when one of the intents succeeded; false when all three failed (caller can toast
+	 *         a "Cannot open settings" message, which is rare enough we don't post one ourselves)
 	 */
-	public void openStoragePermissionSettings()
+	public boolean openStoragePermissionSettings()
 	{
-		try
+		Uri packageUri = Uri.parse("package:" + activity.getPackageName());
+		Intent[] attempts = {
+			new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).setData(packageUri),
+			new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION),
+			new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).setData(packageUri),
+		};
+		for (Intent intent : attempts)
 		{
-			Intent intent = new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION);
-			intent.setData(Uri.parse("package:" + activity.getPackageName()));
-			activity.startActivity(intent);
+			intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+			try
+			{
+				activity.startActivity(intent);
+				return true;
+			}
+			catch (Exception e)
+			{
+				// ActivityNotFoundException on OEMs that don't handle the action, SecurityException
+				// on policy-restricted devices. Either way, fall through to the next intent —
+				// only escalate to a log warning if ALL attempts fail.
+				Log.d(TAG, "intent " + intent.getAction() + " rejected: "
+					+ e.getClass().getSimpleName());
+			}
 		}
-		catch (Exception e)
-		{
-			Log.w(TAG, "Cannot open MANAGE_EXTERNAL_STORAGE settings", e);
-		}
+		Log.w(TAG, "all MANAGE_EXTERNAL_STORAGE intents rejected; user must navigate manually");
+		return false;
 	}
 }

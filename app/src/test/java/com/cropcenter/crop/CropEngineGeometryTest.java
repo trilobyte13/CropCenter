@@ -200,7 +200,7 @@ public final class CropEngineGeometryTest
 	}
 
 	@Test
-	public void computeMaxCropSizeFreeARYieldsFullImage()
+	public void computeMaxCropSizeFreeArYieldsFullImage()
 	{
 		// FREE ratio with both axes unlocked → full image extent on each axis.
 		float[] result = CropEngine.computeMaxCropSize(AspectRatio.FREE, 50f, 50f, 100, 200, false, false, 0f);

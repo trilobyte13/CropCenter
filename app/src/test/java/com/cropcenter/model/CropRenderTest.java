@@ -1,4 +1,4 @@
-package com.cropcenter.crop;
+package com.cropcenter.model;
 
 import static org.junit.Assert.assertEquals;
 

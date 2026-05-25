@@ -26,6 +26,14 @@ import java.util.List;
  */
 final class EditorRenderer
 {
+	// Pixel-peep threshold in DP (density-independent units): once each source pixel renders at
+	// MIN_PIXEL_PEEP_DP or more dp on screen, the pixel grid + per-pixel selection markers become
+	// visible. Specified in dp (not raw screen pixels) so the threshold yields the same visual size
+	// across screen densities — 3dp ≈ 0.75–1mm on phones, half the previous 6dp threshold so the
+	// pixel grid activates at half the zoom level (each source pixel only needs to render at ~3dp
+	// instead of ~6dp before the grid shows). Multiplied by display density at use site.
+	private static final float MIN_PIXEL_PEEP_DP = 3f;
+
 	private static final int DIM_OVERLAY = 0xAA000000;    // 66% black — dims area outside crop
 	private static final int POINT_LABEL_COLOR = ThemeColors.CRUST;
 
@@ -42,12 +50,12 @@ final class EditorRenderer
 	private final Path selectionPolygonPath = new Path();
 	private final View view;
 	private final ViewportMath viewport;
-	// Per-draw scratch — reset at the top of each use so onDraw does no allocation.
-	private final int[] aabbScratch = new int[4];
 	// Shared 2-float scratch for the visible-bounds AABB walk (4 sequential corner reads for min/max) and
 	// the selection-label imageToScreenRotatedInto calls in drawSelectionLabels. Both run on the UI thread
 	// and don't overlap within a single draw call.
 	private final float[] coordScratch = new float[2];
+	// Per-draw scratch — reset at the top of each use so onDraw does no allocation.
+	private final int[] aabbScratch = new int[4];
 
 	private float density = 1f;
 
@@ -279,24 +287,27 @@ final class EditorRenderer
 	}
 
 	/**
-	 * Draw a 1-pixel-per-image-pixel grid when the GridConfig flag is on AND the viewport is zoomed past 6×. Below
-	 * the threshold the grid lines would be sub-pixel and unreadable. Computes a rotation-aware axis-aligned
-	 * bounding box of the visible image area and only draws lines inside that AABB to avoid the O(W * H) full-image
-	 * walk.
+	 * Draw a 1-pixel-per-image-pixel grid when the GridConfig flag is on AND each source pixel renders
+	 * at MIN_PIXEL_PEEP_DP or more dp on screen. Below the threshold the grid lines would be sub-pixel
+	 * and unreadable. The threshold is dp-normalised so visibility is consistent across screen
+	 * densities (the prior raw-pixel threshold rendered as ~2dp on a 3x phone, barely visible).
+	 * Computes a rotation-aware axis-aligned bounding box of the visible image area and only draws
+	 * lines inside that AABB to avoid the O(W * H) full-image walk.
 	 *
 	 * @param canvas target Canvas; drawn into in place
 	 * @param state  CropState supplying rotation + image dimensions
 	 * @param grid   GridConfig; pixel-grid color and the toggle that gates this method
 	 * @param source full-resolution source bitmap; only width/height are read. Must NOT be the display proxy
-	 *               — at zoom ≥ 6 (when this method runs) the renderer's bmp variable already holds the
-	 *               source, but passing the proxy here would scale the pixel grid to proxy resolution and
-	 *               the per-pixel lines would no longer land on source-coord pixel boundaries
-	 * @param scale  current screen-pixels-per-image-pixel (baseScale * zoom); sub-6× short-circuits to no-op
+	 *               — at the pixel-peep threshold the renderer's bmp variable already holds the source,
+	 *               but passing the proxy here would scale the pixel grid to proxy resolution and the
+	 *               per-pixel lines would no longer land on source-coord pixel boundaries
+	 * @param scale  current screen-pixels-per-image-pixel (baseScale * zoom); below
+	 *               MIN_PIXEL_PEEP_DP * density short-circuits to no-op
 	 */
 	private void drawPixelGridIfZoomed(Canvas canvas, CropState state, GridConfig grid, Bitmap source,
 		float scale)
 	{
-		if (!grid.showPixelGrid() || scale < 6f)
+		if (!grid.showPixelGrid() || scale < MIN_PIXEL_PEEP_DP * density)
 		{
 			return;
 		}
@@ -328,19 +339,23 @@ final class EditorRenderer
 		int endX = bounds[2];
 		int endY = bounds[3];
 
-		// Vertical lines
+		// Hoist endpoint screen coordinates outside the loops — they're constant per draw, but the
+		// prior code recomputed them on every iteration. At full zoom on a 10000×10000 source the
+		// vertical loop alone makes ~10000 redundant imageToScreenY calls per frame (2 per
+		// iteration × 4096 iterations on a 4096-wide visible AABB).
+		float screenTop = viewport.imageToScreenY(startY);
+		float screenBottom = viewport.imageToScreenY(endY);
+		float screenLeft = viewport.imageToScreenX(startX);
+		float screenRight = viewport.imageToScreenX(endX);
 		for (int x = startX; x <= endX; x++)
 		{
-			float sx = viewport.imageToScreenX(x);
-			canvas.drawLine(sx, viewport.imageToScreenY(startY),
-				sx, viewport.imageToScreenY(endY), pixelGridPaint);
+			float screenX = viewport.imageToScreenX(x);
+			canvas.drawLine(screenX, screenTop, screenX, screenBottom, pixelGridPaint);
 		}
-		// Horizontal lines
 		for (int y = startY; y <= endY; y++)
 		{
-			float sy = viewport.imageToScreenY(y);
-			canvas.drawLine(viewport.imageToScreenX(startX), sy,
-				viewport.imageToScreenX(endX), sy, pixelGridPaint);
+			float screenY = viewport.imageToScreenY(y);
+			canvas.drawLine(screenLeft, screenY, screenRight, screenY, pixelGridPaint);
 		}
 
 		if (rotated)
@@ -393,21 +408,23 @@ final class EditorRenderer
 	}
 
 	/**
-	 * Draw the per-selection-point marker. Filled image-pixel square when zoomed past 6× screen-pixel per
-	 * image-pixel (marker visibly follows the rotated pixel grid, becoming a rotated quadrilateral at non-cardinal
-	 * angles); a 10-px circle when zoomed out (single pixel is too small to see).
+	 * Draw the per-selection-point marker. Filled image-pixel square when each source pixel renders at
+	 * MIN_PIXEL_PEEP_DP or more dp on screen (marker visibly follows the rotated pixel grid, becoming a
+	 * rotated quadrilateral at non-cardinal angles); a 10-px circle when zoomed out (single pixel is too
+	 * small to see). Same dp-normalised threshold as drawPixelGridIfZoomed so the marker style switches
+	 * exactly when the pixel grid becomes visible.
 	 *
 	 * @param canvas target Canvas; runs inside the caller's rotated save layer when the image is rotated
 	 * @param points selection points in image-space coordinates; read-only
 	 * @param scale  current screen-pixels-per-image-pixel (baseScale * zoom); selects between the pixel-square
-	 *               and circle marker styles
+	 *               and circle marker styles via MIN_PIXEL_PEEP_DP * density
 	 */
 	private void drawSelectionMarkers(Canvas canvas, List<SelectionPoint> points, float scale)
 	{
-		float pixelSize = scale; // one image pixel in screen pixels
+		float pixelPeepThreshold = MIN_PIXEL_PEEP_DP * density;
 		for (SelectionPoint point : points)
 		{
-			if (pixelSize >= 6f)
+			if (scale >= pixelPeepThreshold)
 			{
 				int pixelX = (int) Math.floor(point.x());
 				int pixelY = (int) Math.floor(point.y());

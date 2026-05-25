@@ -1,4 +1,4 @@
-package com.cropcenter.crop;
+package com.cropcenter.util;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
@@ -8,8 +8,7 @@ import org.junit.Test;
 /**
  * Tests for the CropFitContext factory and the negation invariant. The factory caches `cos(-θ)` and `sin(-θ)`
  * because RotatedCropClamp checks corners by un-rotating them — a sign flip in `of()` would silently corrupt
- * every rotated-crop clamp call across the codebase. The package-private record and tests live in the same
- * package so the helper can stay non-public.
+ * every rotated-crop clamp call across the codebase.
  */
 public final class CropFitContextTest
 {
@@ -72,6 +71,35 @@ public final class CropFitContextTest
 		CropFitContext ctx = CropFitContext.of(100, 80, 0f, 1001, 801);
 		assertEquals(500.5f, ctx.imageMidX(), 0f);
 		assertEquals(400.5f, ctx.imageMidY(), 0f);
+	}
+
+	@Test
+	public void ofInfinityRotationProducesNanTrig()
+	{
+		// Mirror NaN behavior — Infinity is the other non-finite input that could leak through if a
+		// future caller bypassed CropState's setRotationDegrees sanitisation. Math.cos(Infinity) and
+		// Math.sin(Infinity) both return NaN per JLS.
+		CropFitContext ctx = CropFitContext.of(100, 80, Float.POSITIVE_INFINITY, 1000, 800);
+		assertTrue(Double.isNaN(ctx.cosR()));
+		assertTrue(Double.isNaN(ctx.sinR()));
+		assertEquals(1000, ctx.imgW());
+		assertEquals(800, ctx.imgH());
+	}
+
+	@Test
+	public void ofNanRotationProducesNanTrig()
+	{
+		// CropState.setRotationDegrees sanitises NaN to 0, so production never reaches this helper
+		// with NaN. But the helper is package-public static — a future refactor that bypasses
+		// CropState could call it directly with NaN. Pin the actual behaviour (NaN propagates
+		// through Math.cos/sin to both cosR/sinR) so callers can rely on "non-finite in → non-finite
+		// out" rather than crash or coincidental zero.
+		CropFitContext ctx = CropFitContext.of(100, 80, Float.NaN, 1000, 800);
+		assertTrue(Double.isNaN(ctx.cosR()));
+		assertTrue(Double.isNaN(ctx.sinR()));
+		// imgW/imgH unaffected by rotation — confirm the non-rotation fields still pass through.
+		assertEquals(1000, ctx.imgW());
+		assertEquals(800, ctx.imgH());
 	}
 
 	@Test

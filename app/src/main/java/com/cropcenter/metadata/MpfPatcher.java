@@ -16,14 +16,15 @@ import com.cropcenter.util.ByteBufferUtils;
 public final class MpfPatcher
 {
 	private static final String TAG = "MpfPatcher";
-	// Each MPF entry in the MP Entry list is exactly 16 bytes per CIPA DC-007: 4 bytes attr + 4 size + 4
-	// dataOffset + 2 dependent-image[0] + 2 dependent-image[1].
-	private static final int MPF_ENTRY_BYTES = 16;
+
 	// Sanity cap on MPF entry count. A spec-conformant Samsung Ultra HDR file ships 2 entries (primary +
 	// gain map); Apple Portrait composites and other multi-image MPFs rarely exceed 5-6. Anything past 64
 	// is almost certainly a corrupt byteCount field — clamping here also keeps the int cast at the
 	// numImages assignment below away from negative values.
 	private static final int MAX_MPF_ENTRIES = 64;
+	// Each MPF entry in the MP Entry list is exactly 16 bytes per CIPA DC-007: 4 bytes attr + 4 size + 4
+	// dataOffset + 2 dependent-image[0] + 2 dependent-image[1].
+	private static final int MPF_ENTRY_BYTES = 16;
 
 	private MpfPatcher() {}
 
@@ -284,6 +285,28 @@ public final class MpfPatcher
 				return false;
 			}
 			gainMapEntryBase = entryOff + MPF_ENTRY_BYTES;
+		}
+
+		// Validate entry[0] IS the primary representative image on 3+ image MPFs before rewriting its
+		// size. MPF spec section 4.5 says entry[0] is "FirstIndividualImage" with MPType 0x030000
+		// ("Representative Image" / "Baseline MP Primary"). On 2-image MPFs (the dominant case) the
+		// patcher already assumes the standard primary+gain-map layout, and existing test fixtures
+		// use placeholder MPType values that we don't want to reject. On 3+ images (Apple Portrait
+		// layers, burst frames, depth+primary+gain-map composites) the entry[0]-might-not-be-primary
+		// risk is real — a non-standard ordering would let the rewrite corrupt the wrong slot. We
+		// accept 0x030000 (canonical primary marker) AND the all-zero MPType (some firmware writers
+		// omit the field on the primary). Anything else on a 3+ image MPF refuses the patch.
+		if (numImages >= 3)
+		{
+			long primaryAttr = ByteBufferUtils.readU32(jpeg, entryOff, isLittleEndian);
+			long primaryMpType = primaryAttr & 0x00FFFFFFL;
+			if (primaryMpType != 0x00030000L && primaryMpType != 0L)
+			{
+				Log.w(TAG, "MPF entry[0] MPType=0x" + Long.toHexString(primaryMpType)
+					+ " on " + numImages + "-image MPF is neither Representative (0x030000) nor "
+					+ "empty; refusing to patch entry[0].size");
+				return false;
+			}
 		}
 
 		// Per-entry diagnostic dump; gated on debug-enabled to skip the readU32 + Long.toHexString work in
