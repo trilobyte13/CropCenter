@@ -15,8 +15,10 @@ import com.cropcenter.view.DialogStrings;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
 
 /**
  * Collision-replace policy: SAF ACTION_CREATE_DOCUMENT with a colliding filename is silently auto-renamed by the
@@ -300,7 +302,11 @@ final class ReplaceStrategy
 		{
 			// BadTokenException guard: config-change races can land between the isDestroyed pre-check
 			// and the actual show() call. The catch keeps the warning best-effort.
-			builder.show();
+			// registerTransientDialog tracks the warning so a later image load / session can
+			// dismiss it via dismissTransientDialogs() before the old Activity window leaks.
+			AlertDialog dialog = builder.create();
+			host.registerTransientDialog(dialog);
+			dialog.show();
 		}
 		catch (RuntimeException e)
 		{
@@ -387,6 +393,29 @@ final class ReplaceStrategy
 				Log.w(TAG, "couldn't clean up temp file " + tempFile);
 			}
 			return false;
+		}
+		// Fsync the parent directory so the rename's directory entry survives a crash / power loss
+		// between move-success and report-success. The temp file's bytes were already fsync'd before
+		// the rename, but ATOMIC_MOVE only guarantees the inode swap is atomic — not that the
+		// containing directory's entry has hit disk. Without this, a crash window between move and
+		// caller acknowledgement could leave the user seeing a "Replaced" toast against a target
+		// whose new name hasn't been persisted. Mirrors ExportPipeline.tryDirectAtomicWrite's
+		// parent-fsync so both direct-write paths have the same durability profile. Best-effort: a
+		// parent-fsync failure is rare on a normal filesystem and the bytes have already landed in
+		// the page cache, so we log and continue rather than fail the save. `parent` was bound
+		// earlier in the method to placeholder.getParentFile() — same directory as the target
+		// since the rename is in-folder.
+		if (parent != null)
+		{
+			try (FileChannel parentChannel = FileChannel.open(parent.toPath(), StandardOpenOption.READ))
+			{
+				parentChannel.force(true);
+			}
+			catch (Exception e)
+			{
+				Log.w(TAG, "replaceViaFileIo parent fsync failed for " + parent
+					+ ": " + e.getMessage());
+			}
 		}
 		boolean placeholderGone = !placeholder.exists() || placeholder.delete();
 		if (!placeholderGone)
@@ -640,8 +669,22 @@ final class ReplaceStrategy
 					}
 					else
 					{
-						safFiles.tryDeleteSafDocument(colliding);
-						renamedUri = tryRename(newUri, requestedName);
+						// Defensive directory guard: SaveController's merged-save / rename
+						// callbacks already reject directory targets before the Replace flow
+						// dispatches here, but providers could in principle hand back a
+						// directory document for the colliding URI too. Refuse to delete
+						// directories — leave renamedUri null so verifyReplace surfaces the
+						// failure rather than destroying the folder.
+						File collidingFile = safFiles.fileFromSafUri(colliding);
+						if (collidingFile != null && collidingFile.isDirectory())
+						{
+							Log.w(TAG, "refusing to delete directory at " + colliding);
+						}
+						else
+						{
+							safFiles.tryDeleteSafDocument(colliding);
+							renamedUri = tryRename(newUri, requestedName);
+						}
 					}
 				}
 				if (renamedUri != null)

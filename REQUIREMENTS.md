@@ -11,7 +11,7 @@ a Gallery-edited file keeps its Revert chain across CropCenter re-edits).
 **Target/Compile SDK**: 36
 **Language**: Java 21
 **Build**: AGP 9.1.1, Gradle 9.3.1
-**LSLOC**: 18,381 total (9,698 main + 8,683 test) — UCC-style logical SLOC via `scripts/audit.py lsloc` (counts
+**LSLOC**: 19,294 total (10,594 main + 8,700 test) — UCC-style logical SLOC via `scripts/audit.py lsloc` (counts
 `;`-terminated statements, control-flow openers, type declarations, and method signatures; excludes blanks, comments,
 and bare-brace-only lines). **Numbers must be exact** — every change that adds, removes, or restructures Java code must
 refresh this line via `python scripts/audit.py lsloc` in the same commit. No tolerance band; the spec matches the
@@ -25,30 +25,56 @@ codebase or it's a drift bug.
 
 ```
 +--------------------------------------------------------------------+
-| Toolbar: [AR Spinner] [Grid][Pan][Lock]    [Settings][Open][Save] |
+| Toolbar: [AR][Grid][Pin]            [Settings][Open][Graft][Save]  |
 +--------------------------------------------------------------------+
 |                                                                    |
 |              CropEditorView (flexible height)                      |
 |     Image + crop overlay + grid + selection points                 |
 |                                                                    |
 +--------------------------------------------------------------------+
-| [Select][Move]  [Both][H][V]  [Undo][Redo][Clear]  [Auto]         |
+| [Select][Move]  [Both][H][V]  [Undo][Redo][Clear]                  |
 +--------------------------------------------------------------------+
-| Rotation ruler (scrollable, Galaxy-style) [zoom -/+]               |
+| [Auto]  Rotation ruler (scrollable, Galaxy-style)             [+]  |
+|                                                                [−] |
 +--------------------------------------------------------------------+
 | Info: image size | crop size | rotation | zoom                     |
 +--------------------------------------------------------------------+
 ```
 
-The mode buttons, lock-axis row, undo/redo/clear, and Auto-rotate live on a single consolidated row (`pointControlsRow`
-in the layout). Auto is hidden until an image is loaded; Undo/Redo/Clear are hidden in Move mode.
+The top toolbar's three left chips (AR / Grid / Pin) are MaterialButton.TextButton chips matching the
+Mode / Lock / Undo cluster's visual tier. AR is a current-ratio chip ("4:5", "Full", "Custom 7:5"…)
+that opens a PopupMenu of presets + Custom on tap. Grid and Pin are toggle chips (mauve when on,
+surface2 when off).
 
-The toolbar's `Pan` checkbox is the freeze-crop ("CenterMode.LOCKED") gate — when on, drags pan the viewport regardless
-of mode. The `Lock` checkbox suppresses the selection-point auto-recompute in Select mode so points can be added or
-removed without the crop relocating. `Settings` opens the combined Settings dialog (see §11 for the full card layout —
-Grid, Pixel Grid toggle + color, Selection & Paint color, Build).
+The mode buttons, lock-axis row, and undo/redo/clear live on a single consolidated row
+(`pointControlsRow` in the layout). Undo/Redo/Clear stay visible in Move mode but render disabled
+(greyed-out) so the user sees the affordance without the row reflowing on mode switch. The Auto-rotate
+button moved to the rotation row (left of the ruler-zoom −/+ buttons); it's always visible but
+disabled until an image is loaded.
 
-**Permissions**: `MANAGE_EXTERNAL_STORAGE` only. Gates three save-flow capabilities:
+**Disabled-controls-stay-visible principle**: every toolbar / bottom-row control that depends on a
+loaded image (or a specific source format, or an editor mode) renders disabled when its precondition
+isn't met rather than vanishing from the layout. Concretely: AR / Grid / Pin chips / Mode buttons /
+H / V lock-axis / Auto-rotate all disable when no image is loaded; Both disables in Move mode
+(Move-mode lock-axis pref is V or H only); Graft disables when no image OR the loaded source isn't
+JPEG; Undo / Redo / Clear disable in Move mode AND when their history-state condition isn't met;
+ruler-zoom +/− disable at min/max pixels-per-degree AND when no image is loaded; Save disables when
+no image is loaded OR a bg op is busy. Disabled controls render at the same alpha / surface1 text
+tint as Undo/Redo/Clear's disabled state for a uniform look. Settings / Open are always enabled
+(both work pre-image). The Auto button has `minWidth=56dp` so the Auto↔Cancel text swap during
+horizon-paint mode doesn't shift adjacent controls.
+
+The toolbar's `Pin` chip is the freeze-crop ("CenterMode.LOCKED") gate — tap to toggle; when on
+(mauve), drags pan the viewport regardless of mode. `Settings` opens the combined Settings dialog
+(see §11 for the full card layout — Grid, Pixel Grid toggle + color, Selection & Paint color, Build).
+
+**Permissions**: `MANAGE_EXTERNAL_STORAGE` only. Gates four capabilities:
+- **In-app Open picker** — `MainActivity.showOpenPickerDialog` checks the grant first; if held, routes
+  to `OpenPickerDialog` (browses primary external storage via `File.listFiles`). Without MES,
+  `listFiles` returns null on most directories under primary external on Android 11+ scoped storage,
+  so the picker would open showing partial / empty contents with no signal — instead the tap surfaces
+  a directed toast pointing the user at the Settings → Permissions affordance. There is no fallback
+  to the system SAF picker for Open (replaced by design — see §1 Input methods).
 - **Merged in-app save dialog (primary path)** — `SaveController.showSaveDialog` checks the grant first;
   if held, routes to `FolderPickerDialog` (browses the filesystem via `java.io.File`, writes through
   externalstorage SAF document URIs that `SafFileHelper.fileFromSafUri` resolves to the same `File`).
@@ -56,7 +82,18 @@ Grid, Pixel Grid toggle + color, Selection & Paint color, Build).
   Samsung One UI hides every subfolder inside internal storage.
 - **File-I/O Replace** — `ReplaceStrategy` strategy A's direct `FileOutputStream` write + atomic rename
   bypasses the SAF stream path that some Samsung providers silently corrupt.
-- **Samsung MediaStore EXIF workaround** — `SafFileHelper.tryReadDirectlyFromPath`.
+- **Samsung MediaStore EXIF workaround** — `SafFileHelper.tryReadDirectlyFromPath`. Also the read path
+  the in-app Open picker exercises end-to-end: the picked `File` rounds to an externalstorage SAF URI
+  via `SafFileHelper.buildExternalStorageDocumentUri`, then `readUriBytes` → `tryReadDirectlyFromPath`
+  → `getFilePathAndId` resolves the URI back to the same `File` (pure string parsing of the
+  `primary:<rel>` docId) and reads via `FileInputStream`. **`getFilePathAndId`'s initial MediaStore
+  probe is wrapped in its own SecurityException catch** so a locally-constructed URI without
+  `takePersistableUriPermission` (the in-app picker never calls it — there's no SAF grant to persist)
+  falls through to the externalstorage-authority branch rather than short-circuiting the whole
+  resolver. Without that inner catch, the `ContentResolver.query` would throw on the un-granted
+  URI, the outer catch would return null, and `readUriBytes` would fall through to the SAF stream
+  path which also lacks a grant — surfacing a "permission denied" toast on every Open pick. Without
+  MES the file read itself fails; the Open flow's MES gate prevents that case from being reached.
 
 The grant prompt is offered at first launch via `MainActivity.showAllFilesAccessPrompt` (a one-time
 in-app dialog with a direct deep-link to the system "All files access" page), and from the Settings
@@ -133,12 +170,14 @@ that combo is uncommon and the failure aborts cleanly with the placeholder save 
 | Color Picker | `view/ColorPickerDialog` | Tap-to-select grid + alpha + hex input |
 | Settings | `view/SettingsDialog` | Combined dialog: grid config (cols, rows, presets 2x2–8x8, color, width), pixel-grid toggle/color, selection/paint color, Build (build-time version) |
 | Save Dialog (legacy / no-MES) | `view/SaveDialog` | Format (JPEG / PNG) + export-grid bake-in toggle. Filename / target directory are picked separately by the SAF `ACTION_CREATE_DOCUMENT` picker that follows. Used as the fallback when MES isn't granted. |
-| Merged Save Dialog (MES path) | `view/FolderPickerDialog` | Format + Export Grid + folder navigator + thumbnail grid/list (toggle persists) + editable `Save as` filename field. Browses the filesystem via `java.io.File`, returns a `SaveChoices` record (folder, filename, format, bakeGrid), writes through externalstorage SAF document URIs that the existing Replace flow resolves back to the same `File`. |
+| Shared Folder Browser | `view/FolderBrowser` + `view/BrowserRecyclerView` + `view/BrowserFastScroller` | Common filesystem-browser helper used by BOTH `FolderPickerDialog` (save flow) and `OpenPickerDialog` (load flow). Owns the inlaid title block + breadcrumb + sort toggle + grid/list view-mode toggle + `RecyclerView`-backed content list with a draggable fast-scroll thumb + bg work executor (folder enumeration + thumbnail decodes) + navigation state (rootDir + current folder). Both flows pass a non-null `Consumer<File> onFileTapped`: Open routes taps to a select-and-dismiss callback, Save routes taps to a populate-filename-input callback. Cells representing files outside the load pipeline's supported set (HEIC / WebP / HEIF — surfaced by `isImageFile` but rejected by `isSupportedSourceFormat`) render at 0.4 alpha with no click handler, so the user sees the file exists but doesn't tap-select something the loader would reject. Shared `CARD_RESERVED_DP` (220dp) sizes the card for ALL pickers (Load / Graft / Save) so the three dialogs open at the same maximum size — the reserve covers only the dialog frame + button row + system bars below the card, since Save's options + filename rows live inside the sized card as fixed children with the file list as the weighted flex child. Hosts the package-private static helpers `breadcrumbChain` / `decodeThumbnail` / `isImageFile` / `isSupportedSourceFormat` that both dialogs (and the test class) share, plus the dialog-attachment helpers `buildPanel` / `wrapInDialogMargins` / `attachToDialog`. **Bg enumeration + snapshot cache**: refresh() captures a generation counter, clears the visible list immediately, then posts a task to the bg executor (whose queue is cleared first so a rapid folder tap pre-empts whatever decodes were pending for the previous folder — without the clear the new enumeration would wait behind seconds of stale decode work). The bg task consults a volatile `cachedSnapshot` (FolderSnapshot record); on cache hit (same folder as previously enumerated) it skips straight to `sortAndAssemble` (pure-CPU ~10ms re-sort of cached FileEntry list). On cache miss it runs `enumerateFolder` to walk `listFiles` + isDirectory, capture each image file's lowercase name into a `FileEntry.sortKey`, alphabetize folders, then cache and assemble. The result (`EnumerationResult` carrying the items list + folder-count head offset) posts back to the UI thread and is pushed into the adapter if the generation still matches. The Camera album (~55k entries) was previously ~700ms of UI-thread freeze per navigation; the bg flow keeps the dialog responsive, and the snapshot cache makes sort-mode toggling near-instant by skipping re-enumeration entirely. Cache invalidates on folder change (folder mismatch) and on shutdown (memory release — ~50k FileEntry records is ~1.2 MB plus File path strings). **Sort toggle**: a sort-direction icon (`ic_sort_newest_first` / `ic_sort_oldest_first`) in the title row flips between `SortMode.NEWEST_FIRST` (filename desc) and `SortMode.OLDEST_FIRST` (filename asc); selection persists to SharedPreferences via `KEY_SORT_MODE` (stored by enum `name()` rather than ordinal so a future enum reordering doesn't silently flip every user's stored preference). Sort key is the file's lowercase name — camera apps prefix filenames with the capture date (Samsung `20240101_193030.jpg`, Pixel `PXL_20240101_*`, WhatsApp `IMG-20240101-WA0001.jpg`), so alphabetical filename order ≈ true chronological order. Filename sort (rather than lastModified) is correct even when a backup/restore touches every file's mtime — that scenario clustered restored years at the top under the old lastModified sort. Sort applies to file rows only — folders stay alphabetical regardless, matching file-manager convention where navigation targets are name-ordered. Default is NEWEST_FIRST to match Camera/gallery convention (latest captures on top). Toggling re-runs refresh() so the cached snapshot's `sortAndAssemble` pass re-orders the existing FileEntry list in pure CPU. **Custom fast scroller**: `BrowserFastScroller` is a View that overlays the right edge of the RecyclerView via FrameLayout z-order. The view is 40dp wide (Material-spec touch target with extra slack for fingerpad-sized aim) but the painted thumb is only 8dp wide on the right edge so it doesn't crowd the cells underneath. Always-visible draggable thumb (when content overflows), 32dp minimum height regardless of folder size so the thumb stays grabbable on 50k+ folders while leaving headroom for proportional thumb-size feedback on smaller folders, mauve while dragging / subtext0 at rest. `onSizeChanged` calls `setSystemGestureExclusionRects` over the entire strip to claim the right-edge touch zone from Android's gesture-nav back-swipe detection — without this, an in-strip touch can be intercepted by the OS and never reaches `onTouchEvent`, which reads as the thumb being "finicky to grab". Uses position-based math (`findFirstVisibleItemPosition` + `findLastCompletelyVisibleItemPosition` for thumb placement, `scrollToPositionWithOffset` for drag-to-scroll) — both O(1) on GridLayoutManager. AndroidX's built-in `initFastScroller` was rejected because (a) its thumb height has no usable minimum (collapses to a 1px sliver on 50k folders) and (b) it uses `computeVerticalScrollOffset`/`Range`/`Extent` which traverses `SpanSizeLookup.getSpanIndex` per call — O(N) for huge folders, drags drop frames. **Touch model**: when a thumb is visible, every touch in the FastScroller's 40dp strip is consumed — a touch on (or within `THUMB_TOUCH_HALO_DP = 24dp` of) the thumb starts dragging immediately, a touch further away enters an awaiting-slop state that becomes a snap-to-finger drag once movement exceeds `ViewConfiguration.getScaledTouchSlop` (a tap-without-drag stays a tap, no scroll). The 24dp halo around the visible thumb gives the immediate-grab band a ~80dp Y-extent — wider than a typical fingerpad (~40-50dp) so a touch landing near the thumb doesn't need to bullseye the visual rectangle. Consuming all in-strip touches is what closes the "auto-scroll after release" symptom — returning false for off-thumb taps fell them through to the RecyclerView, which interpreted the missed grab as a swipe and fling-scrolled on release. When no thumb is visible (folder fits viewport) ACTION_DOWN returns false so cells underneath stay tappable. During drag the thumb's drawn position is finger-driven (decoupled from recycler scroll so the visual stays snappy even if layout is mid-flight); recycler scroll updates throttle to one `scrollToPositionWithOffset` per animation frame via `postOnAnimation` so the layout queue can't hold stale anchor targets past ACTION_UP. At maxed-out drag (ratio ≥ 1.0) the scroll runnable delegates the final-row reach to `recycler.scrollBy(0, Integer.MAX_VALUE)` instead of `scrollToPositionWithOffset(maxFirstVisible, 0)` — the LayoutManager's own clamp honours the recycler's actual per-row span heights + padding + partial-last-row geometry, while the position-based math under-counted by one row in mixed-span layouts (folder rows spanning all columns alongside file rows spanning 1 column each) and left the very bottom row partially clipped. On release the pending throttled scroll is cancelled and the recycler is re-anchored at its currently-visible first-child position via `scrollToPositionWithOffset(firstVisible, firstChild.getTop())` — this OVERWRITES any pending scroll target queued by the most recent throttled runnable so the recycler doesn't "catch up" past the user's intended release position. Filters the last 0-16ms of release-flick finger motion without losing the actual final position the user dragged to. **`BrowserRecyclerView`** (public subclass) carries a runtime height cap via `setMaxHeightPx` (set to the same `screenHeight − CARD_RESERVED_DP` value as the panel, so a 50k-item folder can't report an absurd intrinsic height during the panel's measure pass; the panel sizing is the actual layout governor). **`BrowserSpanSizeLookup`**: O(1) `getSpanSize` / `getSpanIndex` / `getSpanGroupIndex` exploiting the picker's two-segment layout (folders [0..folderCount) each occupy a full row, files [folderCount..] flow as 1-span cells across the 3-column grid). The default SpanSizeLookup iterates `getSpanSize` from position 0 to derive these — O(N) per layout-affecting frame on huge folders, with cache invalidating on every `setSpanCount` / `notifyDataSetChanged`. The closed-form override eliminates the iteration entirely, so toggling grid/list at scroll position 25,000 in a 50k folder is instant rather than seconds-long. **RecyclerView-backed content list**: pushes the bg-built items through a single-data-source `BrowserAdapter` extending `RecyclerView.Adapter` (which holds `folderCount` for the SpanSizeLookup's O(1) math). A `GridLayoutManager` with `spanCount = 3` in grid mode (1 in list mode) hosts the cells. Only the cells in the visible window (~10–30 on a typical phone) get inflated — off-screen cells recycle into the pool, so a 50,000-photo Camera folder displays without OOM. View-type dispatch (`VIEW_TYPE_FOLDER` / `VIEW_TYPE_FILE_LIST` / `VIEW_TYPE_FILE_GRID`) chooses the ViewHolder per cell; toggling grid/list flips the layout manager's span count and calls `notifyDataSetChanged` so each visible cell re-binds against the new view type. The view pool is capped at `setMaxRecycledViews = 16` per type for smooth fast-scroll through long folders. `setItemAnimator(null)` disables `DefaultItemAnimator`'s 250ms cross-fade so refresh / toggle on huge folders doesn't queue per-cell change animations that aggregate into a perceptible stutter. **Lazy thumbnail decode**: `onBindViewHolder` calls `submitDecodeForCell(file, target)` per visible cell — it stamps the ImageView's tag with `path + lastModified`, captures the current refresh generation, and submits a bg decode task that returns a `Future` the ViewHolder caches. On the next bind for that ViewHolder, the previous Future is `cancel(false)`'d before the new decode submits — so a fast scroll through a 50k folder doesn't queue hundreds of stale decode tasks for cells that recycled past long before their decode could run, starving currently-visible cells of decode budget. The bg executor uses 3 threads (not 1) so the visible-window decode bursts paint roughly 3× as fast; ViewHolder Future cancellation keeps the 3 threads focused on cells the user is actually looking at. The bg task also early-returns if the refresh generation moved on (folder navigated away); the UI-post callback re-reads the tag and only paints when both the generation matches AND the tag matches. So decode work scales with what the user actually views, not folder size. **Process-wide `THUMBNAIL_CACHE`** (64 MB LruCache, sizeOf = `bitmap.getByteCount()`) caches decoded thumbnails by `path + lastModified + targetSize` — `lastModified` invalidates on file replace (Gallery edit, sync overwrite). Both grid mode and list mode decode at the same `THUMBNAIL_DECODE_DP = 110` (330px on 3x density), which after BitmapFactory's power-of-2 sampleSize produces ~500×375 bitmaps (~750 KB ARGB) for typical 4000-pixel-wide sources. The 64 MB cache holds ~85 entries — enough for the working set the user scrolls through; older entries evict under LRU when the user scrolls far down a large folder. The grid cell (~96dp) and list cell (40dp) both scale the cached bitmap down at GPU draw time — no quality difference vs decoding at cell-native size, but one cached variant per file means toggling is instant. Cached bitmaps are NEVER explicitly recycled — the stale-tag branch in `submitDecodeForCell` skips paint without recycling because the bitmap lives in the cache and a recycle would corrupt the cache for any subsequent dialog or cache hit; GC reclaims when eviction drops the cache's reference AND no ImageView still draws. |
+| Merged Save Dialog (MES path) | `view/FolderPickerDialog` | Format + Export Grid + folder navigator + thumbnail grid/list (toggle persists) + editable `Save as` filename field. Delegates the title block / breadcrumb / RecyclerView-backed content list / thumbnail decode to `FolderBrowser`; owns only the dialog frame + Save here / Cancel buttons + format chips + Export Grid checkbox + filename row + filename-validation static helpers `isValidFilename` / `normaliseExtension`. Browses the filesystem via `java.io.File`, returns a `SaveChoices` record (folder, filename, format, bakeGrid), writes through externalstorage SAF document URIs that the existing Replace flow resolves back to the same `File`. **Tap-to-populate-filename**: file rows / grid cells in the browser are tap-to-set-filename (the `FolderBrowser` callback hook): a tap on an existing photo fills the Save As field with that file's name and parks the IME caret at the stem-end, so the user can fast-overwrite an existing file (or fast-edit the stem before confirming). The dialog stays open; commit still routes through the Save here button. Distinct from `OpenPickerDialog`'s tap-to-dismiss semantics — save commits a typed name, not a tapped file. |
+| Open Dialog (in-app) | `view/OpenPickerDialog` | Filesystem picker for the Open flow — replaces the system SAF `ACTION_OPEN_DOCUMENT` picker that doesn't persist sort preferences on Samsung One UI. Tap an image cell / list row to select; the picked `File` rounds through `SafFileHelper.buildExternalStorageDocumentUri` and feeds `ImageLoadController.load` so the existing load pipeline applies unchanged. Delegates the entire browser UI (title block / breadcrumb / RecyclerView-backed thumbnail grid-or-list) to `FolderBrowser`; owns only the AlertDialog frame + Cancel button + the file-tap → dismiss-and-callback wiring (~140 LSLOC vs the pre-shared version's ~700 LSLOC). Shares the grid/list toggle preference (`cropcenter_picker_view` / `grid_mode`) with FolderPickerDialog through the common helper. |
 | Save Flow | `SaveController` + `ReplaceStrategy` + `ExportPipeline` | Dual-path routing (merged-in-app vs SAF) gated on MES, collision detection (auto-rename + sibling-create, in-app Replace/Rename/Cancel), crash-safe write-then-swap |
 | Load Flow | `ImageLoadController` | Bg-thread decode + EXIF orientation + metadata extract for SAF URIs (`load(Uri)`), Share/View intents (`handleIncomingIntent`), and in-memory graft bytes (`applyBytes(byte[], String)`). Owns the busy-release-in-finally + progress-overlay-hide contract. Exposes `getLastLoadedUri()` so `MainActivity.onSaveInstanceState` can persist the source URI for process-death restore (promoted on the bg thread only after `applyBytes` returns true and the UI install runnable is posted — a busy-rejected or decode-failed load leaves the prior session's URI in place so the restore-bundle URI and in-memory CropState stay paired) |
-| Apply-Edit Flow | `GraftController` + `graft/EditAligner` + `metadata/GraftWriter` | Long-press-Open → SAF picker → validation (display-dim match) → optional re-orient → AI-region detect → byte splice → in-memory apply. Owns its own state machine (`graftPending`, `pendingSource` snapshot) |
-| Toolbar / AR Spinner | `ToolbarBinder` | AR spinner population, custom-AR dialog, mode/lock-axis row wiring, precise-rotation dialog. Extracted from MainActivity to keep the Activity focused on lifecycle and host-interface implementations |
-| Auto-Rotate Button | `AutoRotateBinder` | Wires the Auto button in the Points row to `HorizonDetector` (metadata pass + painted-region fallback) and posts the toast outcome |
+| Apply-Edit Flow | `GraftController` + `graft/EditAligner` + `metadata/GraftWriter` | btnGraft tap → in-app `OpenPickerDialog` (same dialog as Open) → validation (display-dim match) → optional re-orient → AI-region detect → byte splice → in-memory apply. Owns its own state machine (`graftPending`, `pendingSource` snapshot) |
+| Toolbar / Crop config chips | `ToolbarBinder` | AR chip + PopupMenu wiring, Grid / Pin toggle chips, custom-AR dialog, mode/lock-axis row wiring, rotation-ruler zoom buttons. Extracted from MainActivity to keep the Activity focused on lifecycle and host-interface implementations |
+| Auto-Rotate Button | `AutoRotateBinder` | Wires the Auto button (in the rotation row, left of the ruler-zoom −/+ buttons) to `HorizonDetector` (metadata pass + painted-region fallback) and posts the toast outcome |
 | Editor Render Pipeline | `view/EditorRenderer` + `view/ViewportMath` + `view/GridRenderer` + `view/HorizonPaintOverlay` + `view/SelectionHistory` + `view/DialogCards` + `view/DialogStrings` | onDraw delegate (rendering only, no state mutation), screen↔image transform helper, grid render, horizon-paint overlay, undo/redo storage (50-step), shared dialog-card styling, shared dialog button labels (Apply / Cancel / OK) |
 | Host interfaces | `EditorHost` / `ImageLoadHost` / `SaveHost` / `UiHost` / `ToolbarHost` + `UiSync` | Capability-typed views the controllers and binders see of MainActivity. `UiSync` collects the per-state-change UI refresh methods (toolbar / progress / dialog reactions) so MainActivity owns the wiring but the response code lives in one cohesive collaborator. |
 
@@ -223,7 +262,7 @@ that combo is uncommon and the failure aborts cleanly with the placeholder save 
    Bg-thread mutations to the state become visible to the queued runnable via the Handler.post happens-before;
    concurrent UI-thread reads (e.g., a stray onDraw) see either pre-reset state (still consistent) or unwritten state
    (the renderer's null-source-image guard handles it). The UI runnable also resets non-state-backed UI affordances that
-   don't auto-sync from CropState — the Pan / Lock toolbar checkboxes and the per-mode lock-axis prefs, and any active
+   don't auto-sync from CropState — the Pin toolbar checkbox and the per-mode lock-axis prefs, and any active
    horizon paint mode (discards the in-progress stroke and reverts the Auto button label / color so the new image's
    first touch routes to Select / Move instead of paint).
 
@@ -233,7 +272,28 @@ JPEG (silent format conversion + alpha loss). The user can still flip the toggle
 save.
 
 **Input methods**:
-- Open button: `ACTION_OPEN_DOCUMENT` (JPEG, PNG)
+- Open button (tap): in-app `view/OpenPickerDialog` — browses primary external storage with a folder
+  navigator + thumbnail grid/list (toggle persists, shares the `cropcenter_picker_view` / `grid_mode`
+  SharedPreference with FolderPickerDialog). Tapping an image cell selects it; the picked File is
+  converted to a SAF externalstorage URI via `SafFileHelper.buildExternalStorageDocumentUri` and
+  routed through `ImageLoadController.load` (same path as Share / View intents). Replaces the prior
+  `ACTION_OPEN_DOCUMENT` system picker because Samsung One UI's DocumentsUI doesn't persist user
+  sort preferences across launches — every session forced the user to re-pick "Sort by name".
+  Initial folder resolves via `SaveController.loadInitialPickerFolder` (last-save vs last-load
+  folder, most recent wins; falls back to primary external storage). Trade-off: loses cross-app
+  access to Drive / Dropbox / Gallery — files must be in a filesystem-visible folder. **Requires
+  MANAGE_EXTERNAL_STORAGE**: without MES the picker can't enumerate primary external storage, so
+  `showOpenPickerDialog` checks the grant first and surfaces a "grant All files access" toast
+  instead of opening an empty / broken picker. There is no SAF fallback for Open — the system
+  picker was removed by user design.
+- Graft button (tap): graft flow — opens the **same `view/OpenPickerDialog`** as the load flow.
+  Picked `File` rounds through `SafFileHelper.buildExternalStorageDocumentUri` to a SAF
+  externalstorage URI, which `GraftController.onEditPicked` then validates and splices. The
+  prior `ACTION_OPEN_DOCUMENT` system picker was removed when graft was unified with the load
+  flow — cross-app sources (Drive / Gallery / Lightroom HDR exports) now have to be copied
+  into a filesystem-visible folder first, same trade-off as the Open flow. Only entry point
+  for the graft flow — the prior btnOpen long-press shortcut was removed once the dedicated
+  icon existed so users don't discover the same action two ways with different gestures.
 - Share intent: `ACTION_SEND` with `image/*`
 - View intent: `ACTION_VIEW` with `image/*`
 
@@ -265,12 +325,16 @@ like `savePending`):
   on Save here. Uses `setActiveTransientDialog` (not `registerTransientDialog`) because it installs its own
   composite `OnDismissListener` that owns thumbnail-executor shutdown + savePending release; the host's
   `clearTransientDialog` callback is composed into that listener.
+- `OpenPickerDialog` — the in-app Open picker (replaces system SAF `ACTION_OPEN_DOCUMENT`). Same
+  `setActiveTransientDialog` + composite OnDismissListener pattern as FolderPickerDialog because of the
+  thumbnail-executor shutdown. Selection on file tap dispatches through `ImageLoadController.load`,
+  which dismisses any tracked transient dialog (including this one if it were somehow still showing) via
+  `host.dismissTransientDialogs()` before its bg dispatch.
 - `SaveController.showInAppCollisionDialog` — Replace / Rename / Cancel for the in-app save flow
 - `SaveController.showInAppRenameDialog` — filename input with auto-numbered "(N)" suggestion
 - `SaveController.showOverwriteConfirmDialog` — Cases A/C overwrite confirmation for the SAF flow
 - `SaveController.showReplaceDialog` — Case B Replace / Keep / Cancel for SAF auto-rename collisions
 - `ToolbarBinder.showCustomArDialog` — aspectRatio + customArLabel / customArActive UI flags
-- `ToolbarBinder.showPreciseRotationDialog` — rotationDegrees
 - `GraftController` sanity-check dialog — large-edit warning before applying a graft
 - `MainActivity.showAllFilesAccessPrompt` — first-launch MES grant prompt
 
@@ -319,8 +383,8 @@ activity teardown.
 
 ### 3. Lock Modes
 
-The lock-axis row at the bottom of the editor has three buttons (Both / H / V). Two independent toolbar checkboxes —
-**Pan** and **Lock** — modulate that row's behavior:
+The lock-axis row at the bottom of the editor has three buttons (Both / H / V). The toolbar **Pin** checkbox modulates
+that row's behavior:
 
 | Mode (lock-axis button) | Select Behavior | Move Behavior |
 |------|----------------|---------------|
@@ -328,13 +392,10 @@ The lock-axis row at the bottom of the editor has three buttons (Both / H / V). 
 | H | Center horizontally on points, maximize vertically | Drag moves X only |
 | V | Center vertically on points, maximize horizontally | Drag moves Y only |
 
-**Toolbar `Pan` checkbox**: when on, sets `CenterMode.LOCKED`, which makes drags pan the viewport regardless of the
-lock-axis selection (effectively overriding the row above for the duration the box is checked). Unchecking restores the
-previously-selected lock-axis mode.
-
-**Toolbar `Lock` checkbox** (`chkLockCenter`): independent of `Pan`. When on, selection-point edits do NOT
-auto-recompute the crop center — the user can add or remove points without the crop moving. Off (default) gives the
-documented auto-center behavior.
+**Toolbar `Pin` chip** (`btnPin`): tap to toggle. When selected (mauve), sets `CenterMode.LOCKED`, which makes drags
+pan the viewport regardless of the lock-axis selection (effectively overriding the row above for the duration Pin
+is on). Toggling Pin off restores the previously-selected lock-axis mode. The chip's selected-vs-not state IS the
+source of truth for "is Pin on" — `MainActivity.isPanning()` reads `btnPin.isSelected()` directly.
 
 **Select mode centering logic**:
 - Locked axis: center = midpoint of selection points, crop extent = symmetric from center
@@ -349,37 +410,41 @@ Per-mode lock preferences (Both/H/V) are remembered independently for Move and S
 
 ### 4. Aspect Ratio
 
-**Spinner labels in order** (widest landscape → square → tallest portrait): Full, 16:9, 3:2, 4:3, 5:4, 1:1,
-**4:5 (default)**, 3:4, 2:3, 9:16, Custom. "Full" is the no-AR-constraint option (`AspectRatio.FREE` with
-width=height=0). The default selection mirrors `CropState`'s `R4_5` field default; `ToolbarBinder.setupArSpinner` calls
-`spinner.setSelection(indexOfAspectRatio(state.getAspectRatio()))` so position 0 (Full) doesn't silently overwrite the
-model on first show.
+**Popup rows in order** (widest landscape → square → tallest portrait): Full, 16:9, 3:2, 4:3, 5:4, 1:1,
+4:5, 3:4, 2:3, 9:16, Custom. "Full" is the no-AR-constraint option (`AspectRatio.FREE` with width=height=0).
+The AR control is a `MaterialButton.TextButton` chip (`btnAspectRatio`) whose text shows the current
+ratio — preset name for matched presets ("4:5", "Full"), numeric "W:H" for custom ratios.
+`ToolbarBinder.setupArButton` wires the chip's tap handler to open a `PopupMenu` built from `AR_LABELS`;
+the chip's text is sourced from `ToolbarBinder.arLabel(state.getAspectRatio())` and updated via
+`UiSync.updateAspectRatioButton` on every state change.
 
-**Custom AR**: Dialog with width:height inputs when "Custom" is selected; constructs a fresh `AspectRatio(w, h)` and
-assigns it. The width / height fields pre-fill with the currently-applied AR's values (so editing a preset 4:5 opens
-to "4" and "5", and re-editing an existing Custom 5:7 opens to "5" and "7"); FREE falls back to a 16:9 starting point
-since FREE has no meaningful (width, height) to seed from. After Apply, the closed spinner head displays the numeric
-ratio (`W:H` — e.g., `5:7`, no "Custom " prefix) so the active custom AR reads exactly like the preset rows. The
-DROPDOWN's Custom row always reads the static "Custom" string from `AR_LABELS` — the literal label keeps the row
-identifiable as the edit affordance regardless of whether a custom is currently active. Only the closed head reflects
-the dynamic value; the spinner adapter handles this via a `customArLabel` / `customArActive` pair driven by `getView`
-(closed head) only — `getDropDownView` no longer substitutes. The spinner head is sized to fit a `##:##` ratio so the
-compact numeric width holds across every preset and any reasonable 2-digit custom AR. Picking any preset row from the
-spinner clears the dynamic label and the closed head reads the preset name. Cancelling / dismissing the Custom dialog
-(X / back-press) leaves the model and label unchanged — the spinner setSelection restores it to the position it sat at
-before Custom was tapped.
+**Orientation-aware default**: `CropState` constructs at `R4_5` (4:5) — chosen so a pre-image session and the
+test-fake path land on a sensible value — but `MainActivity.installImageOnUi` re-seeds the AR from the loaded
+image's display dimensions on every fresh load: landscape (`width > height`) defaults to **5:4** (`R5_4`),
+portrait (`height > width`) defaults to **4:5** (`R4_5`), and a true square (`width == height`) defaults to **1:1**
+(`R1_1`) so the initial crop doesn't trim a square source for no benefit. The orientation-aware seed only fires when
+no restore bundle was consumed (`RestoreController.Outcome.consumed() == false`); a restored session keeps the user's
+pre-kill AR choice (stashed in `STATE_AR_WIDTH` / `STATE_AR_HEIGHT`) so process-death restore doesn't silently
+overwrite a non-default custom AR with the orientation default. After either branch, `ToolbarBinder.syncFromState`
+always fires so the AR chip text reflects the committed model value (orientation default OR restored AR).
+
+**Custom AR**: Dialog with width:height inputs when "Custom" is selected from the popup; constructs a fresh
+`AspectRatio(w, h)` and assigns it. The width / height fields pre-fill in priority order: last-typed Custom values
+persisted in SharedPreferences (so a Custom 2.39:1 survives a brief detour to a 1:1 preset), then the currently-
+applied AR's values when no stored Custom exists, then 16:9 as final fallback. FREE falls back to a 16:9 starting
+point since FREE has no meaningful (width, height) to seed from. After Apply, the AR chip text re-derives via
+`ToolbarBinder.arLabel` — preset name when the typed ratio happens to match a preset (defensive; the user almost
+always picks Custom for non-presets), numeric `W:H` (e.g. `5:7`) otherwise. Cancel is a pure no-op: with the popup
+layout there's no spinner position to restore (the popup builds fresh on each tap).
 
 **Auto-crop**: Changing AR auto-creates a crop at image center if none exists.
 
 **Recompute-on-mode-switch**: switching editor modes (Move ↔ Select) or lock-axis state runs
 `recomputeForLockChange`, which calls `autoComputeFromPoints` when selection points exist (re-frames the
 crop on the points) or `recomputeCrop` against the current anchor when they don't (re-fits the crop size
-at the current AR). Combined with the AR spinner's onItemSelected handler — which auto-recomputes on every
+at the current AR). Combined with the AR popup's onMenuItemClick handler — which auto-recomputes on every
 AR change — every meaningful "reset" the user might want is reachable by mode switch, AR change, or the
-"Clear Points" button. No separate long-press / gesture-driven reset affordance is exposed; the earlier
-long-press-AR-spinner reset was removed because it was either a silent no-op (Select mode with points
-already framing the crop) or duplicated what `recomputeForLockChange` already does on the next toolbar
-interaction.
+"Clear Points" button. No separate long-press / gesture-driven reset affordance is exposed.
 
 **Locked-AR exact-integer realisation** (`AspectRatio.snap`): when an integer-valued AR is locked, `CropEngine` snaps
 the rounded crop dimensions to the nearest `(Wᵣ·k, Hᵣ·k)` realisation, where `(Wᵣ, Hᵣ)` is the AR reduced to lowest
@@ -415,18 +480,22 @@ The gain map is **not** snapped — it stays at its natural rounded quarter-reso
   the visible minor tick so fine values near a detent (like 0.01°-0.79° near 0°) remain selectable rather than getting
   pulled into a fixed dead zone.
 - Center indicator: mauve triangle + line; zero marker in red
-- Degree readout in info bar (visible only when |rotation| ≥ ROTATION_EPSILON = 0.005°), tappable for exact numeric
-  input
 - Ruler disabled (30% opacity, no touch) when no image loaded
+- Ruler-zoom −/+ buttons (in the rotation row alongside the ruler) disable when (a) no image is loaded OR (b) the
+  ruler is at its min / max pixels-per-degree limit — surfaced via `RotationRulerView.canZoomIn` / `canZoomOut`,
+  with `setOnZoomChangedListener` firing the toolbar's `UiSync.updateRotationZoomButtons` on every zoom mutation
+  (pinch OR button press OR zoomToMax from auto-rotate)
 
 **Sub-epsilon rotation snap**: `CropState.setRotationDegrees` is the single chokepoint for every rotation entry point
-(ruler, precise-rotation dialog, horizon detector). After clamp it snaps `|deg| < ROTATION_EPSILON` to exactly 0,
+(ruler, horizon detector). After clamp it snaps `|deg| < ROTATION_EPSILON` to exactly 0,
 keeping the renderer, readout, and `ExportPipeline.canBypassEncode` aligned with the model — sub-epsilon values were the
 path that previously let the ruler land on a value the rest of the pipeline rounded to zero (no visible rotation, hidden
 readout, but the bypass disabled and forced a needless re-encode). The 0.005° epsilon sits a half-step below the ruler's
 0.01° finest tick so every value the ruler / horizon detector can produce is honored end-to-end.
 
-**Auto-rotate button** (in the Points row, hidden until an image is loaded):
+**Auto-rotate button** (in the rotation row on the left, opposite the stacked ruler-zoom +/− buttons
+on the right; always visible, disabled until an image is loaded — see "Disabled-controls-stay-visible
+principle" above):
 - First attempts horizon detection from JPEG metadata via `HorizonDetector.detectFromMetadata` — three passes in
   priority order: (1) standard XMP APP1 segments (canonical Adobe namespace prefix) searched for `Roll` / `Tilt`
   attributes; (2) Adobe Extended XMP chunks (the secondary-segment shape that carries XMP overflow past the ~64 KB APP1
@@ -524,9 +593,9 @@ to prevent panning image off screen. Bitmap filtering disabled at 4x+ zoom for c
 - Buttons greyed out when not applicable
 - Clear button removes all points and resets crop to full image
 - History cleared on new image load
-- Controls visible only in Select mode (they act on selection points; the row is hidden in Move mode where there's
-  nothing for them to do). The history itself persists across mode switches — switching back to Select restores the
-  buttons with their previous enabled state.
+- Controls stay visible in Move mode but render disabled / greyed-out — the "Disabled-controls-stay-visible
+  principle" above keeps pointControlsRow from reflowing on every mode switch. The history itself persists across
+  mode switches — switching back to Select restores the buttons with their previous enabled state.
 
 ### 9. Export
 
@@ -540,37 +609,47 @@ to prevent panning image off screen. Bitmap filtering disabled at 4x+ zoom for c
   `grid_mode`). The breadcrumb above the folder name is clickable per-segment (each segment a
   `ClickableSpan` that jumps to that level) and ellipsizes at START so the current segment stays visible
   on deep paths. On "Save here", the picked folder is mapped to an externalstorage SAF document URI via
-  `SafFileHelper.buildExternalStorageDocumentUri` (primary-external-storage only; secondary volumes fall
-  back to the legacy SAF path), and the write dispatches through `routeCrashSafeSave` with the same
+  `SafFileHelper.buildExternalStorageDocumentUri` (primary-external-storage only; secondary-volume picks
+  toast "Picked folder isn't on primary storage" and cancel — there is no automatic fallback, reaching
+  the legacy SAF picker requires revoking MES per invariant #10 below), and the write dispatches through
+  `routeCrashSafeSave` with the same
   Replace / Rename / Cancel collision handling the SAF flow uses. The Rename input pre-fills with
   `nextAvailableNumberedName`'s "(N)" suffix per Samsung / Android Files-app convention. The merged
   dialog commits format / grid-include selections to `CropState` once at "Save here";
   `SaveController.onMergedSaveConfirmed` captures a `priorSnapshot` BEFORE the commit, so an in-app
   collision-dialog Cancel rolls the format / grid back (matching the SAF path's rollback contract).
-  Initial folder resolves in three tiers via `SaveController.loadLastSaveFolder`: the last-picked
-  save folder (`cropcenter_save` / `last_save_folder`), then the last-loaded file's parent
-  (`last_load_folder`, recorded by `ImageLoadController` on successful load via
-  `SafFileHelper.fileFromSafUri`), then primary external storage. Each persisted path is checked
-  for existence + directory-ness before use, so a deleted folder falls through to the next tier.
+  Initial folder resolves in three tiers via `SaveController.loadInitialPickerFolder` (same helper
+  the OpenPickerDialog uses): the last-picked save folder (`cropcenter_save` / `last_save_folder`),
+  then the last-loaded file's parent (`last_load_folder`, recorded by `ImageLoadController` on
+  successful load via `SafFileHelper.fileFromSafUri`), then primary external storage. Most-recent
+  timestamp wins between the two folder candidates. Each persisted path is checked for existence +
+  directory-ness before use, so a deleted folder falls through to the next tier.
   Every visible element — title region (bold folder name + clickable breadcrumb + grid/list toggle
-  icon), thumbnail scroller, format/options row (`Export Grid` checkbox on the left, JPEG/PNG
-  format chips on the right), filename input — sits inside a single SURFACE0-backed `DialogCards`
-  panel matching the Settings dialog's section cards. The panel uses MATCH_PARENT width +
-  WRAP_CONTENT height. The scroller is also WRAP_CONTENT but is internally capped via an anonymous
-  ScrollView subclass whose `onMeasure` clamps height to `Math.max(240dp, screenHeightPx − 440dp)`
-  — the 440dp reservedPx budget approximates title block + breadcrumb + options row + filename
-  row + AlertDialog frame + Save/Cancel buttons (status/nav bar 80dp + AlertDialog top frame 24dp
-  + button row 60dp + title block ~50dp + breadcrumb ~28dp + options row ~80dp + filename row
-  ~60dp ≈ 382dp, rounded up to 440dp for device variance — earlier 300dp budget clipped Save/Cancel
-  on full-grid folders). Short folders make a compact dialog; long
-  folders fill the cap and the ScrollView starts scrolling, keeping options/filename/Save
-  reachable. Grid rows span the full panel content width with no outer inset; each of three
-  cells targets a 220dp thumbnail at WRAP_CONTENT height, doubled from the prior padOuter-inset
-  width so thumbnails read at glanceable size. List rows and folder rows also span the full
-  width (no padOuter inset) for consistent left/right alignment with the options/filename rows.
-  List view and grid view share identical 4dp+4dp vertical row spacing so toggling doesn't
-  change perceived row density. Panel margins are symmetric — 12dp on every side between the
-  inlaid card and the AlertDialog frame.
+  icon), `RecyclerView`-backed content list, format/options row (`Export Grid` checkbox on the
+  left, JPEG/PNG format chips on the right), filename input — sits inside a single SURFACE0-backed
+  `DialogCards` panel matching the Settings dialog's section cards. The panel uses MATCH_PARENT
+  width and is sized to a fixed height of `Math.max(240dp, screenHeightPx − 220dp)` (clamped to the
+  dialog's available height) by `FolderBrowser.buildPanel`'s panel `onMeasure` override, which measures
+  `EXACTLY` that height rather than wrapping to content. The file-list container is added as a
+  `weight=1` / `height=0` flex child that fills whatever remains after the fixed title and footer rows
+  (options + filename), so the list shrinks and scrolls internally while those fixed rows keep their
+  full height. The panel measures `EXACTLY` (not wrap-to-content) on purpose: the adapter populates
+  asynchronously (after `show()`, off the bg enumeration), so a wrap-to-content panel would measure
+  against an empty list at `show()` time and open squished, never growing back when items land —
+  filling to the height gives a stable, generous extent regardless of when the list populates. The 220dp
+  reserve is headroom for the dialog frame + Save/Cancel buttons + system bars below the
+  card (the footer rows live inside the sized card and are measured normally, so they don't need
+  separate reserving). (`BrowserRecyclerView.setMaxHeightPx` still bounds the list's own
+  intrinsic-height report at the same value so a 50k-item folder can't claim an absurd base height
+  during the panel's measure pass; the panel sizing is the actual layout governor.) Grid rows span the
+  full panel content width with no outer
+  inset; each of three cells targets a square thumbnail (height tracks width via the cell's
+  `onMeasure` override). List rows and folder rows also span the full width (no padOuter inset)
+  for consistent left/right alignment with the options/filename rows. Grid-mode inter-cell
+  spacing is supplied by a `GridSpacingDecoration` (`RecyclerView.ItemDecoration`) that adds 4dp
+  vertical + 8dp horizontal between file cells and skips folder rows so the full-width folder
+  navigation stays flush. Panel margins are symmetric — 12dp on every side between the inlaid
+  card and the AlertDialog frame.
 
 - **MES not granted (legacy path)** — `SaveController.openSaveOptionsDialog` opens the original
   `view/SaveDialog` (title `"Save Image"`, positive button `"Continue"`, negative button `"Cancel"`) with
@@ -965,7 +1044,8 @@ a re-render mid-keystroke.
   `app/build.gradle`), used to verify which APK is installed on the device. The card heading is the literal string
   "Build" (not "Build / About") — no separate About / credits surface, and the displayed value is the compile timestamp
   rather than a manifest `versionName`.
-- **Grid card** — Cols / Rows numeric inputs (clamped to [1, 99]), preset chips (2x2 / 3x3 / … / 8x8), line color (opens
+- **Grid card** — Cols / Rows numeric inputs (IME-capped at 2 digits via `InputFilter.LengthFilter`, clamped to
+  [1, 99] on Done so a stray 0 / negative resolves to 1), preset chips (2x2 / 3x3 / … / 8x8), line color (opens
   `ColorPickerDialog`), line width seek bar (1–20 px). Cross-references §7.
 - **Permissions card** — tap target deep-linking to the system MANAGE_EXTERNAL_STORAGE settings page. The
   entire card panel is the tap target (LinearLayout-level `setClickable(true)` + `setOnClickListener`, with a
@@ -1007,14 +1087,17 @@ block and serves whatever JPEG it finds at that path. The graft preserves origin
 segment shape (substituting Adobe's MPF reliably breaks Gallery's Revert pre-flight), so any backup chain the user
 already had stays intact.
 
-**Entry point**: Long-press the toolbar **Open** button. Available only when (a) an image is loaded, (b) the loaded
-image is JPEG. (Long-press chosen over a new toolbar icon to avoid clutter; Open and Apply-External-Edit are
-semantically related — both load external files — so the gesture pairing is intuitive.)
+**Entry point**: Tap the toolbar **Graft** button (the merge-glyph icon between Settings and Open).
+Available only when (a) an image is loaded, (b) the loaded image is JPEG, (c)
+MANAGE_EXTERNAL_STORAGE is held (the in-app picker needs it to enumerate the filesystem).
 
 **Flow**:
 1. User loads the original Samsung HDR JPEG (the metadata source) into CropCenter normally.
-2. User long-presses Open.
-3. SAF `ACTION_OPEN_DOCUMENT` (image/jpeg) → user picks the external edit (the pixel donor).
+2. User taps the Graft toolbar icon.
+3. In-app `OpenPickerDialog` (same dialog as the load flow) → user picks the external edit
+   (the pixel donor). The picked File is converted to an externalstorage SAF URI via
+   `SafFileHelper.buildExternalStorageDocumentUri` so `GraftController.onEditPicked` can read
+   it through the existing SAF byte-reader path.
 4. Validation (`EditAligner.align`):
    - Picked file is a JPEG (SOI = `FFD8`).
    - **Display** dimensions match between loaded and picked (stored dims after applying each side's EXIF orientation).
@@ -1041,10 +1124,13 @@ semantically related — both load external files — so the gesture pairing is 
    in-memory image. **Only on a successful decode** (applyBytes returns true) does it then call
    `state.installGraft(graft)` — installGraft writes the AI mask FIRST then sets `graftApplied=true` (which gates
    the verbatim-write bypass). The setAiMask-before-setGraftApplied order mirrors `reset()`'s clear order
-   (aiMask=null FIRST, then graftApplied=false) so no observer can catch the inconsistent
-   `(graftApplied=true, aiMask=null)` transient pair on either side of the lifecycle —
-   `UltraHdrCompat.compressWithGainmap` reading the pair would otherwise skip the inpaint while
-   the verbatim-bypass gate was already firing, shipping a stale boost. A decode failure leaves the
+   (aiMask=null FIRST, then graftApplied=false) so — **when an AI mask is present** — no observer catches the
+   inconsistent `(graftApplied=true, aiMask=null)` transient pair on either side of the lifecycle.
+   `UltraHdrCompat.compressWithGainmap` reading that pair mid-install would otherwise skip the inpaint while
+   the verbatim-bypass gate was already firing, shipping a stale boost. The qualification matters because
+   `(graftApplied=true, aiMask=null)` IS the steady state for SDR / no-mask grafts (see
+   `CropState.installGraft`'s Javadoc) — `UltraHdrCompat.inpaintGainmapIfMasked` treats null aiMask as a no-op,
+   so a no-mask graft observing that pair is correct, not a violation. A decode failure leaves the
    previously-loaded image intact and surfaces "Failed to decode" to the user. The user's saved AR preference applies
    to the post-graft crop the same way it does on a normal image load — if they want the full image, they pick "Full"
    in the spinner.
@@ -1154,8 +1240,8 @@ Display-dimension mismatch is the only refusal trigger at this stage.
 - Re-orient re-encode fails (BitmapFactory rejects the edit bytes mid-reorient — same failure mode as the edit-side
   dim-probe-null case, so the message routes to the same remediation) → toast "Couldn't decode the edit during
   reorientation — try exporting again", abort.
-- Loaded image isn't JPEG → toast "Apply External Edit only works on JPEG sources" (refused at long-press time, picker
-  never opens).
+- Loaded image isn't JPEG → toast "Apply External Edit only works on JPEG sources" (refused at btnGraft tap time,
+  picker never opens).
 - GraftWriter splice fails (edit isn't a JPEG, missing SOI / primary EOI, malformed segments) → toast "Graft failed:
   <reason>", in-memory image unchanged.
 - Decode of grafted bytes fails → toast "Graft produced an undecodable result — apply aborted" (more specific than the
@@ -1163,9 +1249,9 @@ Display-dimension mismatch is the only refusal trigger at this stage.
   developer-facing breadcrumb at `Log.w(TAG, "graft splice produced undecodable bytes...")`), in-memory image unchanged.
 - SAF read of the picked edit URI fails (provider permission denial, IOException, fewer than 4 bytes returned) → toast
   "Couldn't read picked edit", abort. Fires before any decode / dimension probe runs.
-- Source snapshot bytes lost between long-press and SAF return (rare; can happen on memory pressure that nulls the
+- Source snapshot bytes lost between btnGraft tap and picker return (rare; can happen on memory pressure that nulls the
   captured `originalBytes`) → toast "Original bytes unavailable — reload the image and try again", abort.
-- Source bytes null at long-press (state.originalFileBytes was nulled between load and the long-press tap) → toast
+- Source bytes null at btnGraft tap time (state.originalFileBytes was nulled between load and the tap) → toast
   "Original bytes unavailable — reload the image" (no "and try again" suffix), abort. Distinct from the similarly-worded
   toast above which fires DURING `assembleGraftOnBg` after the snapshot has been claimed; this one fires earlier in
   `GraftController.start()` before any picker opens.
@@ -1256,8 +1342,11 @@ entities, etc.).
 2. **PNG metadata**: Only EXIF is injected (via eXIf chunk). Other PNG ancillary chunks are not preserved. HDR is not
    possible in PNG format.
 3. **Single image**: Only one image can be open at a time.
-4. **Large files**: Files > 128MB are rejected (`SafFileHelper.MAX_READ_BYTES`). Entire file is read into memory via a
-   per-call `createTempFile` cache file (so concurrent loads don't clobber each other). Sources whose decoded pixel
+4. **Large files**: Files > 128MB are rejected (`SafFileHelper.MAX_READ_BYTES`). Entire file is read into memory.
+   Local-filesystem paths (the common MediaStore case) read directly via `tryReadDirectlyFromPath`'s
+   `FileInputStream` — no temp file, immediate oversize-fail when `File.length()` already exceeds the cap.
+   SAF / cloud URIs without a readable filesystem path fall back to a per-call `createTempFile` cache copy (so
+   concurrent loads don't clobber each other) that streams up to the cap before rejecting. Sources whose decoded pixel
    count exceeds the **static cap** `BitmapUtils.MAX_DECODE_PIXELS` (256 MP, ~1 GB ARGB) are subsampled at decode
    time — see the `BitmapUtils.computeInSampleSize` Javadoc for the power-of-2 sampleSize contract. The cap handles
    Samsung's "200 MP" capture mode (16384×12288 = 192 mebipixels) at `inSampleSize=1` with comfortable headroom for

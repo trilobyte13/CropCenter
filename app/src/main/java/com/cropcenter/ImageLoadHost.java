@@ -16,8 +16,8 @@ interface ImageLoadHost extends EditorHost
 	 * Dismiss whatever state-mutating dialog is currently open before a load begins. Called by
 	 * ImageLoadController on the UI thread immediately before busy.compareAndSet so any open dialog
 	 * (SettingsDialog, SaveDialog, FolderPickerDialog, the in-app collision / rename / overwrite-
-	 * confirm dialogs, Replace dialog, Custom-AR or precise-rotation toolbar dialogs, the all-files-
-	 * access prompt, or the graft sanity-check dialog) can't keep committing to CropState while a
+	 * confirm dialogs, Replace dialog, the Custom-AR toolbar dialog, the all-files-access prompt,
+	 * or the graft sanity-check dialog) can't keep committing to CropState while a
 	 * bg state.reset() races them. Without this forced dismissal, an open dialog at the moment a
 	 * Share/View intent fires races the reset's clears with the user's still-active widget commits.
 	 * No-op when no transient dialog is open.
@@ -27,7 +27,7 @@ interface ImageLoadHost extends EditorHost
 	/**
 	 * Install a freshly-loaded bitmap on the UI thread. Called from ImageLoadController's runOnUiThread block once
 	 * decode + metadata extraction + display-proxy creation finished on the bg thread. Implementer is expected to:
-	 * reset toolbar checkboxes (chkPan, chkLockCenter), apply lock mode, refresh ui highlights, write
+	 * deselect the Pin toolbar chip (btnPin), apply lock mode, refresh ui highlights, write
 	 * setSourceImage(source, display) on CropState, populate the info-bar text views with sizeInfo and metaInfo,
 	 * and clear the editor's undo history. Implementer must also guard with isDestroyed() — the bg dispatch may
 	 * have queued this Runnable before onDestroy ran.

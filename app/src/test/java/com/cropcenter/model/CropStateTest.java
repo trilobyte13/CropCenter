@@ -423,16 +423,14 @@ public final class CropStateTest
 	@Test
 	public void resetReturnsModesToDocumentedDefaults()
 	{
-		// Spec: new loads start in Select mode with Both lock-axis. A previous Move + Pan combo must not leak
+		// Spec: new loads start in Select mode with Both lock-axis. A previous Move + Pin combo must not leak
 		// into the new image session.
 		CropState state = new CropState();
 		state.setEditorMode(EditorMode.MOVE);
 		state.setCenterMode(CenterMode.HORIZONTAL);
-		state.setCenterLocked(true);
 		state.reset();
 		assertEquals(EditorMode.SELECT_FEATURE, state.getEditorMode());
 		assertEquals(CenterMode.BOTH, state.getCenterMode());
-		assertFalse("centerLocked must be cleared", state.isCenterLocked());
 	}
 
 	@Test

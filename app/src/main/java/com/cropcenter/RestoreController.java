@@ -59,7 +59,6 @@ final class RestoreController
 	static final String STATE_ANCHOR_Y = "anchor_y";
 	static final String STATE_AR_HEIGHT = "ar_h";
 	static final String STATE_AR_WIDTH = "ar_w";
-	static final String STATE_CENTER_LOCKED = "ctr_locked";
 	static final String STATE_CENTER_MODE = "ctr_mode";
 	static final String STATE_CENTER_X = "ctr_x";
 	static final String STATE_CENTER_Y = "ctr_y";
@@ -68,10 +67,10 @@ final class RestoreController
 	static final String STATE_EDITOR_MODE = "editor_mode";
 	static final String STATE_HAS_CENTER = "has_center";
 	// Per-mode lock prefs. Persisted INDEPENDENTLY of STATE_CENTER_MODE because centerMode
-	// collapses to LOCKED while Pan is on, hiding the underlying axis preference. Without these
-	// keys, a user who picked HORIZONTAL for Select / VERTICAL for Move, then enabled Pan, then
+	// collapses to LOCKED while Pin is on, hiding the underlying axis preference. Without these
+	// keys, a user who picked HORIZONTAL for Select / VERTICAL for Move, then enabled Pin, then
 	// got process-killed would see their lock axis fall back to defaults (BOTH / VERTICAL) when
-	// they untoggle Pan after restore — contradicting REQUIREMENTS.md's "each mode remembers its
+	// they untoggle Pin after restore — contradicting REQUIREMENTS.md's "each mode remembers its
 	// own lock setting" contract.
 	static final String STATE_MOVE_LOCK_PREF = "move_lock_pref";
 	static final String STATE_ROTATION = "rot_deg";
@@ -125,10 +124,10 @@ final class RestoreController
 	 * @param sourceUri       URI of the currently-loaded source, or null when nothing is loaded
 	 * @param state           current CropState; every restore-able field is read here
 	 * @param selectLockPref  Select-mode lock-axis preference (BOTH / HORIZONTAL / VERTICAL).
-	 *                        Persisted independently of CropState.centerMode because Pan collapses
+	 *                        Persisted independently of CropState.centerMode because Pin collapses
 	 *                        centerMode to LOCKED, hiding the underlying axis choice — without
 	 *                        this key, the user's prior axis pref reverts to BOTH after a
-	 *                        Pan-on-during-kill restore.
+	 *                        Pin-on-during-kill restore.
 	 * @param moveLockPref    Move-mode lock-axis preference (HORIZONTAL / VERTICAL — BOTH is
 	 *                        Select-only). Same persistence rationale as selectLockPref.
 	 */
@@ -153,7 +152,6 @@ final class RestoreController
 		outState.putFloat(STATE_ROTATION, state.getRotationDegrees());
 		outState.putString(STATE_EDITOR_MODE, state.getEditorMode().name());
 		outState.putString(STATE_CENTER_MODE, state.getCenterMode().name());
-		outState.putBoolean(STATE_CENTER_LOCKED, state.isCenterLocked());
 		if (selectLockPref != null)
 		{
 			outState.putString(STATE_SELECT_LOCK_PREF, selectLockPref.name());
@@ -179,9 +177,9 @@ final class RestoreController
 	 * the reloaded bitmap. Consumes + nulls the bundle so a subsequent normal load (user taps
 	 * Open) doesn't re-apply the stale snapshot. The returned Outcome lets the caller re-seed its
 	 * lock-pref fields BEFORE syncing toolbar UI from the restored CropState — without that
-	 * re-sync the toolbar would show the new-load defaults (chkPan unchecked, lock prefs reset to
-	 * BOTH/VERTICAL, AR spinner on R4_5) while the model holds whatever the user had before the
-	 * kill, and the hidden lock-axis prefs (per-mode preferences that aren't visible while Pan
+	 * re-sync the toolbar would show the new-load defaults (btnPin deselected, lock prefs reset to
+	 * BOTH/VERTICAL, AR chip on R4_5's label) while the model holds whatever the user had before the
+	 * kill, and the hidden lock-axis prefs (per-mode preferences that aren't visible while Pin
 	 * forces centerMode = LOCKED) would silently fall back to defaults.
 	 *
 	 * @return Outcome with `consumed = true` plus the restored per-mode prefs when a bundle was
@@ -307,8 +305,6 @@ final class RestoreController
 					// Same forward-compat concern as above; tolerate and continue.
 				}
 			}
-			state.setCenterLocked(restore.getBoolean(STATE_CENTER_LOCKED, false));
-
 			// Rotation BEFORE crop dimensions so the recompute that fires on cropW/H change
 			// reads the final rotation rather than 0 — otherwise the crop rect would briefly
 			// snap to the un-rotated AABB before settling.

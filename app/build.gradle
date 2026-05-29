@@ -68,6 +68,10 @@ dependencies {
     // androidx ExifInterface — lint flags android.media.ExifInterface for known security bugs.
     // Used by FolderPickerDialog.decodeThumbnail to read EXIF orientation + the embedded thumbnail.
     implementation 'androidx.exifinterface:exifinterface:1.4.1'
+    // RecyclerView backs FolderBrowser's content list — off-screen cells recycle so a 50k-photo
+    // folder doesn't OOM during View inflation. Material 1.12.0 pulls this transitively, but the
+    // explicit declaration locks the version and surfaces the dep in this file.
+    implementation 'androidx.recyclerview:recyclerview:1.3.2'
 
     testImplementation 'junit:junit:4.13.2'
 }

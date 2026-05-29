@@ -6,6 +6,7 @@ import android.content.DialogInterface;
 import android.content.res.ColorStateList;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.text.InputFilter;
 import android.text.InputType;
 import android.util.TypedValue;
 import android.view.Gravity;
@@ -582,6 +583,11 @@ public final class SettingsDialog
 		edit.setGravity(Gravity.CENTER);
 		edit.setSingleLine(true);
 		edit.setInputType(InputType.TYPE_CLASS_NUMBER);
+		// Hard-cap to 2 digits at the IME layer. Mirrors the [1, 99] applyDimensionInputs clamp so the
+		// user can't type a 3-digit value (e.g. 100) that would silently clamp to 99 at Done — the
+		// soft keyboard simply refuses the third character. Both current call sites (cols, rows) want
+		// the same cap; if a future numeric input wants a different width, parameterise this.
+		edit.setFilters(new InputFilter[] { new InputFilter.LengthFilter(2) });
 		edit.setTextColor(ThemeColors.TEXT);
 		GradientDrawable bg = new GradientDrawable();
 		bg.setColor(ThemeColors.SURFACE1);

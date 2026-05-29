@@ -5,8 +5,6 @@ import android.net.Uri;
 import android.util.Log;
 import android.widget.Toast;
 
-import androidx.activity.result.ActivityResultLauncher;
-
 import com.cropcenter.graft.EditAligner;
 import com.cropcenter.metadata.GraftWriter;
 import com.cropcenter.model.Format;
@@ -20,7 +18,7 @@ import java.io.IOException;
 import java.util.Locale;
 
 /**
- * Orchestrates the "Apply External Edit" feature: long-press Open → user picks an external edit JPEG → CropCenter
+ * Orchestrates the "Apply External Edit" feature: btnGraft tap → user picks an external edit JPEG → CropCenter
  * validates that the edit's DISPLAY dimensions match the loaded original's (EditAligner compares display dims, NOT
  * raw stored dims + EXIF orientation, because external editors routinely strip / reset orientation and re-emit pixels
  * in display layout) and optionally reorients the edit's pixels back into the original's stored EXIF layout when the
@@ -34,7 +32,7 @@ import java.util.Locale;
  * control transfers to MainActivity via the onGraftReady listener — GraftController has no save-flow involvement.
  *
  * State machine:
- *   IDLE          → start()                  → AWAITING_EDIT (pickerLauncher launched)
+ *   IDLE          → start()                  → AWAITING_EDIT (in-app OpenPickerDialog opened)
  *   AWAITING_EDIT → onEditPicked() success    → IDLE (image replaced via onGraftReady)
  *   AWAITING_EDIT → onEditPicked() failure    → IDLE (toast surfaced)
  *   AWAITING_EDIT → onEditPickerCancelled()   → IDLE
@@ -55,12 +53,12 @@ final class GraftController
 	}
 
 	/**
-	 * Captured at long-press time so onEditPicked sees a coherent view of the source even when the user has loaded
+	 * Captured at graft-tap time so onEditPicked sees a coherent view of the source even when the user has loaded
 	 * a different image while the picker was open.
 	 *
-	 * @param originalBytes raw bytes of the source the user long-pressed on
-	 * @param gainMap       source's gain map at long-press time, or null for SDR sources
-	 * @param filename      source's display name at long-press time (used for the "{stem}-graft.jpg"
+	 * @param originalBytes raw bytes of the source loaded when the user tapped btnGraft
+	 * @param gainMap       source's gain map at graft-tap time, or null for SDR sources
+	 * @param filename      source's display name at graft-tap time (used for the "{stem}-graft.jpg"
 	 *                      default save name)
 	 */
 	private record SourceSnapshot(byte[] originalBytes, byte[] gainMap, String filename) {}
@@ -80,10 +78,10 @@ final class GraftController
 	private final SafFileHelper safFiles;
 	private final SaveHost host;
 
-	// Snapshot of the original source taken at the moment the user long-pressed Open. Read on the bg graft
-	// executor, written on the UI thread (start, onEditPicked completion, onEditPickerCancelled). Captured so
-	// onEditPicked grafts onto the image the user actually long-pressed, not whatever happens to be loaded when the
-	// picker returns — without this, the user could load image B while the picker for image A is still open, and
+	// Snapshot of the original source taken at the moment the user tapped btnGraft. Read on the bg graft executor,
+	// written on the UI thread (start, onEditPicked completion, onEditPickerCancelled). Captured so onEditPicked
+	// grafts onto the image the user actually tapped graft on, not whatever happens to be loaded when the picker
+	// returns — without this, the user could load image B while the picker for image A is still open, and
 	// onEditPicked would graft the picked edit onto B's bytes BUT use B's gain-map state (which determines whether
 	// AI mask detection runs) and B's filename (which determines the default save name). Volatile because of the
 	// cross-thread visibility requirement. All three fields snapshot together: bytes drive the splice, gainMap
@@ -92,8 +90,8 @@ final class GraftController
 
 	// Read on the UI thread (start, onEditPicked entry, onEditPickerCancelled) and written from both the UI thread
 	// and the background graft executor (after each terminal step in onEditPicked's bg lambda). Volatile guarantees
-	// the UI thread sees the bg-side transition to false promptly, so a fresh long-press isn't spuriously rejected
-	// with the busy toast after the bg work has finished.
+	// the UI thread sees the bg-side transition to false promptly, so a fresh btnGraft tap isn't spuriously
+	// rejected with the busy toast after the bg work has finished.
 	private volatile boolean graftPending;
 
 	GraftController(SaveHost host, SafFileHelper safFiles, GraftReadyHandler onGraftReady)
@@ -134,7 +132,7 @@ final class GraftController
 	 * loaded a different image while the picker was open; reading state here would produce image B's stem on a
 	 * graft assembled from image A's bytes.
 	 *
-	 * @param originalFilename source's display name at long-press time (may be null)
+	 * @param originalFilename source's display name at graft-tap time (may be null)
 	 * @return "{stem}-graft.jpg" when originalFilename is non-empty, else "graft.jpg"
 	 */
 	static String suggestedFilename(String originalFilename)
@@ -154,7 +152,7 @@ final class GraftController
 	 *
 	 * Reads the picked edit on a bg thread, validates dimensions and EXIF orientation against the loaded
 	 * original, computes the graft, and dispatches the result to onGraftReady on the UI thread. All
-	 * failure paths clear graftPending so a fresh long-press can start over.
+	 * failure paths clear graftPending so a fresh btnGraft tap can start over.
 	 *
 	 * @param editUri SAF URI of the user-picked external edit (PhotoShop/Lightroom output); ignored
 	 *                when graftPending is false (spurious picker result with no active session)
@@ -209,7 +207,7 @@ final class GraftController
 
 	/**
 	 * Edit-picker cancellation: user backed out before picking an external edit. Clear graftPending and the
-	 * captured bytes so a fresh long-press can start over.
+	 * captured bytes so a fresh btnGraft tap can start over.
 	 */
 	void onEditPickerCancelled()
 	{
@@ -218,7 +216,16 @@ final class GraftController
 	}
 
 	/**
-	 * Long-press entry point. Called from MainActivity's btnOpen long-click handler.
+	 * Entry point — called from MainActivity's btnGraft click handler (the dedicated toolbar
+	 * merge-glyph icon between Open and Save). Validates the loaded source, snapshots the
+	 * source-derived state, sets graftPending, then invokes the caller-supplied launchPicker
+	 * Runnable to open the file picker. On launch failure the state is rolled back so a
+	 * subsequent tap can start over.
+	 *
+	 * launchPicker is a Runnable (rather than an ActivityResultLauncher) so the controller stays
+	 * decoupled from any specific picker implementation — the picker is now MainActivity's
+	 * in-app OpenPickerDialog (same dialog as the load flow). The Runnable is run synchronously
+	 * inside start; the picker is expected to open without throwing under normal conditions.
 	 *
 	 * The recommended source editor is Photoshop with Camera Raw set to NOT auto-open JPEGs (Edit →
 	 * Preferences → Camera Raw → File Handling → JPEG → Disabled). Photoshop in pixel-space mode
@@ -226,12 +233,15 @@ final class GraftController
 	 * level differences after canvas P3 conversion. Lightroom HDR exports apply a global tone curve
 	 * that produces a visible seam at the fill boundary; not recommended.
 	 *
-	 * @param graftPickerLauncher launcher used to open the SAF picker for the external edit document
-	 * @return true when the long-press is consumed (regardless of whether the graft session actually
-	 *         started — busy-rejected attempts also consume the gesture so the user gets feedback);
-	 *         false when no image is loaded so the gesture can fall through
+	 * @param launchPicker called synchronously to open the in-app picker; if it throws, the
+	 *                     graft state (graftPending / pendingSource) is rolled back and the
+	 *                     exception re-thrown so the caller's catch can surface it
+	 * @return true when the tap actually triggered a graft session (image was loaded, busy was
+	 *         free, source was JPEG); false when the tap was rejected because no image was
+	 *         loaded. Busy-rejected and non-JPEG-source rejections also return true (they
+	 *         surface a toast and consume the gesture).
 	 */
-	boolean start(ActivityResultLauncher<String[]> graftPickerLauncher)
+	boolean start(Runnable launchPicker)
 	{
 		if (host.getState().getSourceImage() == null)
 		{
@@ -257,7 +267,7 @@ final class GraftController
 			toast("Apply External Edit only works on JPEG sources");
 			return true;
 		}
-		// Snapshot all source-derived state the user actually long-pressed on:
+		// Snapshot all source-derived state the user actually picked on:
 		//  - originalBytes: locks in the bytes that GraftWriter splices against
 		//  - gainMap: determines whether onEditPicked runs HDR mask detection
 		//  - filename: drives the {stem}-graft.jpg default save name
@@ -265,26 +275,23 @@ final class GraftController
 		// would cause the graft to land on image A's bytes BUT use image B's gain-map
 		// state and B's filename — producing a file that splices A's pixels under B's
 		// metadata defaults.
-		// Defensive copies of the byte arrays so a future code path that mutates CropState's gain
-		// map (e.g., HDR re-encode pipeline) or originalBytes can't corrupt the in-flight graft
-		// snapshot. CropState.getGainMap()'s Javadoc currently says "Caller must not mutate" — the
-		// in-flight graft holds the snapshot until applyGraftedBytes completes, well past any
-		// reasonable mutation window today, but the defensive copy makes the safety property
-		// structural rather than coincidental. originalBytes for a 200 MP HDR JPEG is ~80 MB —
-		// the copy doubles peak memory briefly but only for the duration of the graft session,
-		// which holds busy and blocks new loads anyway.
+		// Hold the raw references rather than defensive copies — originalBytes for a 200 MP HDR JPEG is
+		// ~80 MB and arrayClone on the UI thread would freeze the toolbar / jitter the next-frame draw
+		// (and OOM outside this method's recovery flow if the heap is tight). The defensive copy lives
+		// in assembleGraftOnBg (bg thread) where the existing OutOfMemoryError catch surfaces "Graft
+		// failed" instead of crashing. CropState pivoting to a new image swaps its volatile fields to
+		// fresh arrays, so the references captured here stay valid for the picker-open window without
+		// any clone. The only remaining hazard is in-place mutation of the captured arrays during the
+		// picker-open window; no current code path does that, and any future one must coordinate with
+		// graftPending (which stays true through the picker callback) before touching the bytes.
 		// originalBytes is guaranteed non-null here — the early-return at the top of this method
-		// bails on null bytes BEFORE we reach the snapshot. Clone directly without a null guard so
-		// the contract reads cleanly and a future reader doesn't think null is reachable.
-		byte[] originalBytesCopy = originalBytes.clone();
-		byte[] gainMapCopy = host.getState().getGainMap();
-		gainMapCopy = (gainMapCopy != null) ? gainMapCopy.clone() : null;
+		// bails on null bytes BEFORE we reach the snapshot.
 		pendingSource = new SourceSnapshot(
-			originalBytesCopy, gainMapCopy, host.getState().getOriginalFilename());
+			originalBytes, host.getState().getGainMap(), host.getState().getOriginalFilename());
 		graftPending = true;
 		try
 		{
-			graftPickerLauncher.launch(new String[] { Format.JPEG.mimeType() });
+			launchPicker.run();
 		}
 		catch (RuntimeException e)
 		{
@@ -348,7 +355,7 @@ final class GraftController
 				return;
 			}
 
-			// Use the snapshot captured at long-press time, not whatever state currently holds — the user
+			// Use the snapshot captured at graft-tap time, not whatever state currently holds — the user
 			// might have loaded a new image while the picker was open. Grafting onto the wrong source would
 			// silently produce a file with mismatched metadata vs. primary scan; reading the wrong gain map
 			// would route an SDR source through the HDR-mask-detection branch (or vice versa); reading the
@@ -360,7 +367,13 @@ final class GraftController
 				graftPending = false;
 				return;
 			}
-			byte[] originalBytes = snapshot.originalBytes();
+			// Defensive clone of the source bytes (and gain map below) — held off until the bg thread
+			// so the UI thread doesn't freeze / OOM cloning an 80 MB HDR JPEG. See start()'s comment
+			// for the deferred-clone rationale. Without this clone, a future code path that mutates the
+			// shared array in place could corrupt mid-graft data; with it, GraftWriter operates on
+			// bytes nothing else can touch. OOM here lands in the assembleGraftOnBg catch and surfaces
+			// "Graft failed" rather than escaping.
+			byte[] originalBytes = snapshot.originalBytes().clone();
 
 			EditAligner.Result alignment = EditAligner.align(originalBytes, editBytes);
 			if (alignment.alignedBytes() == null)
@@ -428,9 +441,9 @@ final class GraftController
 		finally
 		{
 			// Drop the captured-snapshot reference on every exit path — it served its purpose (locked in
-			// the long-pressed source for this graft) and a long-lived strong reference to multi-MB byte[]s
-			// is wasted memory. Clearing here covers every path: success (handoff happened), failure (toast
-			// + early return), and unexpected throw.
+			// the source tapped for this graft) and a long-lived strong reference to multi-MB byte[]s is
+			// wasted memory. Clearing here covers every path: success (handoff happened), failure (toast +
+			// early return), and unexpected throw.
 			pendingSource = null;
 			// Release busy on every failure path. The success path leaves it held because applyGraftedBytes
 			// is about to claim it transitively.

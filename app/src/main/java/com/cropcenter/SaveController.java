@@ -157,6 +157,38 @@ final class SaveController
 	}
 
 	/**
+	 * Initial folder for both the FolderPickerDialog (save flow) and the OpenPickerDialog (load flow).
+	 * Picks whichever of (last-save-folder, last-load-folder) was MORE RECENTLY recorded by comparing
+	 * the persisted timestamps. Falls back to whichever single folder is available if the other is
+	 * missing, then to primary external storage. Each persisted path is sanity-checked for existence +
+	 * directory-ness so a deleted folder doesn't strand the picker at a non-existent path; if the
+	 * more-recent folder is missing on disk the other folder is tried before falling through to
+	 * external storage.
+	 *
+	 * Rationale: a user who loaded a fresh image and immediately taps Save expects to land in the
+	 * folder they just loaded from, not the folder of an old save from a previous session. The
+	 * pre-timestamp logic always preferred save-folder, so a stale save folder from days ago would
+	 * win over a load-folder from minutes ago. The timestamp comparison makes "most recent action"
+	 * the tiebreaker. The same rationale applies to Open: tapping Open right after a save expects to
+	 * land in the just-saved folder, not the older load folder. Static + Context-taking so MainActivity
+	 * can compute the OpenPickerDialog's start dir without holding a SaveController reference.
+	 *
+	 * @param ctx any Context (Activity preferred); used only for getSharedPreferences
+	 * @return the most-recently-recorded existing folder, or the primary external storage root when
+	 *         no prior folder is usable
+	 */
+	static File loadInitialPickerFolder(Context ctx)
+	{
+		SharedPreferences prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+		File savedFolder = readFolder(prefs, KEY_LAST_SAVE_FOLDER);
+		File loadedFolder = readFolder(prefs, KEY_LAST_LOAD_FOLDER);
+		long savedTs = prefs.getLong(KEY_LAST_SAVE_FOLDER_TS, 0L);
+		long loadedTs = prefs.getLong(KEY_LAST_LOAD_FOLDER_TS, 0L);
+		File picked = pickInitialSaveFolder(savedFolder, savedTs, loadedFolder, loadedTs);
+		return picked != null ? picked : Environment.getExternalStorageDirectory();
+	}
+
+	/**
 	 * Find the first available "stem (N).ext" filename in `folder` that doesn't collide. Strips any
 	 * existing "(N)" suffix from `original` first so renaming "foo (1).jpg" suggests "foo (2).jpg"
 	 * rather than "foo (1) (1).jpg". Used by showInAppRenameDialog to pre-populate the input with a
@@ -191,7 +223,7 @@ final class SaveController
 	}
 
 	/**
-	 * Pure-function priority helper for loadLastSaveFolder — extracted so the timestamp + existence
+	 * Pure-function priority helper for loadInitialPickerFolder — extracted so the timestamp + existence
 	 * fallback logic can be unit-tested without instantiating SharedPreferences. Prefers whichever
 	 * of (savedFolder, loadedFolder) has the larger timestamp; on a tie, prefers savedFolder; if
 	 * the more-recent folder reference is null (caller's existence check rejected it as missing /
@@ -581,33 +613,6 @@ final class SaveController
 		return false;
 	}
 
-	/**
-	 * Initial folder for the FolderPickerDialog. Picks whichever of (last-save-folder, last-load-folder)
-	 * was MORE RECENTLY recorded by comparing the persisted timestamps. Falls back to whichever single
-	 * folder is available if the other is missing, then to primary external storage. Each persisted
-	 * path is sanity-checked for existence + directory-ness so a deleted folder doesn't strand the
-	 * picker at a non-existent path; if the more-recent folder is missing on disk the other folder
-	 * is tried before falling through to external storage.
-	 *
-	 * Rationale: a user who loaded a fresh image and immediately taps Save expects to land in the
-	 * folder they just loaded from, not the folder of an old save from a previous session. The
-	 * pre-timestamp logic always preferred save-folder, so a stale save folder from days ago would
-	 * win over a load-folder from minutes ago. The timestamp comparison makes "most recent action"
-	 * the tiebreaker.
-	 *
-	 * @return the most-recently-recorded existing folder, or the primary external storage root when
-	 *         no prior folder is usable
-	 */
-	private File loadLastSaveFolder()
-	{
-		SharedPreferences prefs = host.getActivity().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-		File savedFolder = readFolder(prefs, KEY_LAST_SAVE_FOLDER);
-		File loadedFolder = readFolder(prefs, KEY_LAST_LOAD_FOLDER);
-		long savedTs = prefs.getLong(KEY_LAST_SAVE_FOLDER_TS, 0L);
-		long loadedTs = prefs.getLong(KEY_LAST_LOAD_FOLDER_TS, 0L);
-		File picked = pickInitialSaveFolder(savedFolder, savedTs, loadedFolder, loadedTs);
-		return picked != null ? picked : Environment.getExternalStorageDirectory();
-	}
 
 	/**
 	 * Result handler for the merged in-app FolderPickerDialog (format + grid options + folder + thumbnails).
@@ -677,7 +682,20 @@ final class SaveController
 			pendingSaveName = name;
 			savePending = true;
 			saveLastSaveFolder(choices.folder());
-			if (new File(choices.folder(), name).exists())
+			File target = new File(choices.folder(), name);
+			if (target.isDirectory())
+			{
+				// A directory at the requested path is "name unavailable" — the Replace flow
+				// downstream would route through ReplaceStrategy's delete-then-rename fallback,
+				// which on permissive SAF providers could actually delete the user's folder.
+				// Reject here BEFORE the collision dialog so Replace is never offered against
+				// a directory target. File.isFile() below excludes directories symmetrically so
+				// the otherwise-existence-driven collision path can only fire on regular files.
+				host.toastIfAlive("That name is a folder — pick another", Toast.LENGTH_SHORT);
+				onSaveCancelled();
+				return;
+			}
+			if (target.isFile())
 			{
 				showInAppCollisionDialog(choices.folder(), name);
 			}
@@ -727,8 +745,17 @@ final class SaveController
 		// inference would misclassify the file.
 		String normalised = FolderPickerDialog.normaliseExtension(typed,
 			host.getState().getExportConfig().format());
+		File target = new File(folder, normalised);
+		if (target.isDirectory())
+		{
+			// Same rationale as onMergedSaveConfirmed — never route directory targets into the
+			// Replace flow, which on permissive SAF providers could delete the folder. Toast and
+			// leave the rename dialog open (don't dismiss) so the user can correct the name.
+			host.toastIfAlive("That name is a folder — pick another", Toast.LENGTH_SHORT);
+			return;
+		}
 		dialog.dismiss();
-		if (new File(folder, normalised).exists())
+		if (target.isFile())
 		{
 			showInAppCollisionDialog(folder, normalised);
 		}
@@ -1066,11 +1093,15 @@ final class SaveController
 			// BadTokenException guard: config-change races can land between the isDestroyed pre-check
 			// and the actual show() call (the Activity finishes after the pre-check but before
 			// WindowManager accepts the dialog). The catch keeps the warning best-effort.
-			new AlertDialog.Builder(host.getActivity())
+			// registerTransientDialog tracks the warning so a later image load / session can
+			// dismiss it via dismissTransientDialogs() before the old Activity window leaks.
+			AlertDialog dialog = new AlertDialog.Builder(host.getActivity())
 				.setTitle("Change format in Save, not the picker")
 				.setMessage(message)
 				.setPositiveButton(DialogStrings.OK, null)
-				.show();
+				.create();
+			host.registerTransientDialog(dialog);
+			dialog.show();
 		}
 		catch (RuntimeException e)
 		{
@@ -1196,7 +1227,7 @@ final class SaveController
 		{
 			return;
 		}
-		File startDir = loadLastSaveFolder();
+		File startDir = loadInitialPickerFolder(host.getActivity());
 		Format initialFormat = host.getState().getExportConfig().format();
 		boolean initialBakeGrid = host.getState().getGridConfig().includeInExport();
 		// Compute the source's display-stem + initial-format extension as the filename pre-fill.

@@ -91,6 +91,7 @@ public final class RotationRulerView extends View
 	private final ScaleGestureDetector scaleDetector;
 
 	private OnRotationChangedListener listener;
+	private Runnable onZoomChanged;
 	private VelocityTracker velocityTracker;
 	private boolean enabled = true;
 	private boolean flingActive; // true between scroller.fling start and last frame
@@ -172,6 +173,7 @@ public final class RotationRulerView extends View
 			{
 				pixelsPerDegree = Math.clamp(pixelsPerDegree * detector.getScaleFactor(),
 					basePixelsPerDegree * MIN_PPD_FACTOR, basePixelsPerDegree * MAX_PPD_FACTOR);
+				fireZoomChanged();
 				invalidate();
 				return true;
 			}
@@ -230,6 +232,30 @@ public final class RotationRulerView extends View
 				}
 			}
 		};
+	}
+
+	/**
+	 * True when further zoom-in (finer ticks) is possible — i.e., pixelsPerDegree is below the
+	 * MAX_PPD_FACTOR cap. Used by the toolbar's btnRotZoomIn enable-state binding so the button
+	 * dims out once the ruler is at maximum zoom.
+	 *
+	 * @return true if zoomBy(>1) would change the zoom; false at the cap
+	 */
+	public boolean canZoomIn()
+	{
+		return pixelsPerDegree < basePixelsPerDegree * MAX_PPD_FACTOR;
+	}
+
+	/**
+	 * True when further zoom-out (coarser ticks) is possible — i.e., pixelsPerDegree is above the
+	 * MIN_PPD_FACTOR floor. Used by the toolbar's btnRotZoomOut enable-state binding so the button
+	 * dims out once the ruler is at minimum zoom.
+	 *
+	 * @return true if zoomBy(<1) would change the zoom; false at the floor
+	 */
+	public boolean canZoomOut()
+	{
+		return pixelsPerDegree > basePixelsPerDegree * MIN_PPD_FACTOR;
 	}
 
 	@Override
@@ -307,6 +333,19 @@ public final class RotationRulerView extends View
 	}
 
 	/**
+	 * Install a listener that fires whenever pixelsPerDegree changes (zoomBy, zoomToMax, or
+	 * pinch-zoom via the scale gesture detector). Used by the toolbar to refresh the
+	 * btnRotZoomIn / btnRotZoomOut enable states; only one listener is supported so this
+	 * overwrites any previously-set one.
+	 *
+	 * @param listener fired (on the UI thread) after each zoom mutation; null to clear
+	 */
+	public void setOnZoomChangedListener(Runnable listener)
+	{
+		this.onZoomChanged = listener;
+	}
+
+	/**
 	 * Toggle the ruler's interactive state. Disabled rulers ignore touch events and dim to 30% alpha so the user
 	 * can see the value but can't change it (used during long-running operations like image load).
 	 *
@@ -333,6 +372,7 @@ public final class RotationRulerView extends View
 		stopFling();
 		pixelsPerDegree = Math.clamp(pixelsPerDegree * scaleFactor,
 			basePixelsPerDegree * MIN_PPD_FACTOR, basePixelsPerDegree * MAX_PPD_FACTOR);
+		fireZoomChanged();
 		invalidate();
 	}
 
@@ -345,6 +385,7 @@ public final class RotationRulerView extends View
 		// Same fling-divisor invariant as zoomBy — see comment there.
 		stopFling();
 		pixelsPerDegree = basePixelsPerDegree * MAX_PPD_FACTOR;
+		fireZoomChanged();
 		invalidate();
 	}
 
@@ -374,9 +415,13 @@ public final class RotationRulerView extends View
 		int width = getWidth();
 		int height = getHeight();
 		float centerX = width / 2f;
-		float labelY = height - 1;
+		// Breathing room between the bottom of the degree labels and the next row's content. Without
+		// it the labels sit flush against the info bar / row divider underneath; the gap reads as a
+		// missing baseline. 3dp is enough to look intentional without consuming the tick area.
+		float labelBottomPaddingPx = 3 * getResources().getDisplayMetrics().density;
+		float labelY = height - 1 - labelBottomPaddingPx;
 		float tickTop = 2;
-		float tickBot = height - labelPaint.getTextSize() - 3;
+		float tickBot = height - labelPaint.getTextSize() - 3 - labelBottomPaddingPx;
 
 		float degreesVisible = width / pixelsPerDegree;
 		TickConfig tickConfig = chooseTickConfig(degreesVisible);
@@ -489,6 +534,14 @@ public final class RotationRulerView extends View
 			currentDegrees = snapped;
 			notifyChanged();
 			invalidate();
+		}
+	}
+
+	private void fireZoomChanged()
+	{
+		if (onZoomChanged != null)
+		{
+			onZoomChanged.run();
 		}
 	}
 

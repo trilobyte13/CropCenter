@@ -338,6 +338,19 @@ public final class SafFileHelper
 	 */
 	public String getDisplayName(Uri uri)
 	{
+		// Path-first short-circuit: for URIs that resolve to a filesystem path (externalstorage
+		// SAF including the in-app Open picker's locally-constructed URIs, MediaStore-indexed
+		// files, etc.), extract the filename from the resolved File via pure string parsing — no
+		// ContentResolver query, so no SecurityException risk for un-granted URIs. Falls through
+		// to the cursor query below for cloud / opaque providers where fileFromSafUri returns
+		// null. Without this, the in-app Open picker's loads landed with originalFilename=null
+		// because the cursor query throws on un-granted URIs, then SaveController fell back to
+		// the "crop" placeholder in its filename pre-fill.
+		File resolved = fileFromSafUri(uri);
+		if (resolved != null)
+		{
+			return resolved.getName();
+		}
 		try (Cursor cursor = ctx.getContentResolver().query(uri,
 			new String[] { OpenableColumns.DISPLAY_NAME }, null, null, null))
 		{
@@ -384,6 +397,12 @@ public final class SafFileHelper
 	{
 		try
 		{
+			// Inner try-catch on the MediaStore probe so a SecurityException here (URI not
+			// granted to the app — common for locally-constructed externalstorage URIs that
+			// OpenPickerDialog feeds in without takePersistableUriPermission) falls through to
+			// the SAF-authority branches below rather than short-circuiting the whole method.
+			// The SAF-authority branches resolve via pure string parsing of the docId + MES
+			// for the on-disk read, neither of which needs a content-provider grant on the URI.
 			try (Cursor cursor = ctx.getContentResolver().query(uri,
 				new String[] { MEDIASTORE_COL_ID, MEDIASTORE_COL_DATA }, null, null, null))
 			{
@@ -399,6 +418,12 @@ public final class SafFileHelper
 						return new String[] { path, id };
 					}
 				}
+			}
+			catch (SecurityException ignored)
+			{
+				// No content-provider grant for this URI — expected for the in-app picker's
+				// locally-constructed externalstorage URIs. The SAF-authority branches below
+				// can still resolve via pure string parsing of the docId.
 			}
 			// For SAF URIs, extract document ID and look up path in MediaStore. Gate on
 			// DocumentsContract.isDocumentUri before calling getDocumentId — a non-document URI carrying
@@ -896,15 +921,22 @@ public final class SafFileHelper
 	 * privacy-driven sanitisation pass). Direct read via FileInputStream gives the pristine on-disk bytes that
 	 * still carry GPS.
 	 *
-	 * Returns null when the URI doesn't resolve to an accessible filesystem path (cloud / SAF-only providers,
-	 * opaque-ID URIs without a DATA column, paths under scoped storage we don't have read access to). Caller falls
-	 * back to the SAF stream copy in that case — accepting the EXIF mangling for non-MediaStore sources where the
-	 * alternative is not loading the file at all.
+	 * Three-way result: returns the bytes on success, returns NULL when the URI doesn't resolve to an
+	 * accessible filesystem path (cloud / SAF-only providers, opaque-ID URIs without a DATA column, paths
+	 * under scoped storage we don't have read access to), and THROWS IOException when the resolved file is
+	 * known to exceed MAX_READ_BYTES. The null case is "cannot read directly, try the SAF stream"; the
+	 * throw case is "we measured the file and it's too big — fail fast without wasting I/O copying up to
+	 * the cap into the temp cache only to throw the same rejection there." Validates existence /
+	 * readability before returning null so a stale MediaStore row pointing at a missing file falls back
+	 * cleanly.
 	 *
-	 * Validates the resolved path against existence / readability / size before returning so a stale MediaStore row
-	 * pointing at a missing or oversized file doesn't poison the load.
+	 * @param uri SAF URI to read directly
+	 * @return raw bytes on success, or null when the URI can't be read directly (caller should fall
+	 *         back to the SAF stream copy)
+	 * @throws IOException when the resolved path exists but its length exceeds MAX_READ_BYTES — caller
+	 *                     propagates without the temp-copy fallback
 	 */
-	private byte[] tryReadDirectlyFromPath(Uri uri)
+	private byte[] tryReadDirectlyFromPath(Uri uri) throws IOException
 	{
 		String[] pathAndId;
 		try
@@ -931,10 +963,19 @@ public final class SafFileHelper
 			return null;
 		}
 		long len = file.length();
-		if (len <= 0 || len > MAX_READ_BYTES)
+		if (len <= 0)
 		{
-			Log.d(TAG, "direct-read: " + pathAndId[0] + " size out of range: " + len);
+			Log.d(TAG, "direct-read: " + pathAndId[0] + " has bad size: " + len);
 			return null;
+		}
+		if (len > MAX_READ_BYTES)
+		{
+			// Known-too-large: throw rather than returning null so readUriBytes propagates the failure
+			// instead of falling back to the SAF stream copy. The fallback would read up to MAX_READ_BYTES
+			// into a temp cache file and only THEN throw the same rejection — wasting up to 128 MiB of I/O
+			// and disk space to re-discover what File.length() already told us in one syscall.
+			throw new IOException("Input exceeds " + MAX_READ_BYTES + " byte limit ("
+				+ pathAndId[0] + " is " + len + " bytes)");
 		}
 		try (FileInputStream fis = new FileInputStream(file))
 		{

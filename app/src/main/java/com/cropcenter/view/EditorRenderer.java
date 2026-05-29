@@ -8,7 +8,10 @@ import android.graphics.Paint;
 import android.graphics.Path;
 import android.view.View;
 
+import com.cropcenter.crop.CropEngine;
+import com.cropcenter.model.CenterMode;
 import com.cropcenter.model.CropState;
+import com.cropcenter.model.EditorMode;
 import com.cropcenter.model.GridConfig;
 import com.cropcenter.model.SelectionPoint;
 import com.cropcenter.util.BitmapUtils;
@@ -179,15 +182,56 @@ final class EditorRenderer
 		{
 			int cropW = state.getCropW();
 			int cropH = state.getCropH();
+			// Crop-center derivation: in SELECT mode with selection points, re-derive the center from
+			// the rotated selection midpoint at draw time rather than reading state.centerX / centerY.
+			// CropEngine.recomputeCrop normally keeps state.centerX / Y in lockstep with the rotation,
+			// but during ruler-fling momentum (where setRotationDegrees fires once per frame and the
+			// renderer reads state on the same UI thread) we've seen intermittent one-frame flickers
+			// where the bitmap renders at the new rotation while the crop overlay sits at a center
+			// derived from a previous rotation — the crop visibly jumps to a different position then
+			// snaps back the next frame. Deriving the center from the rotated selection midpoint at
+			// draw time guarantees the crop tracks the selection every frame, regardless of any timing
+			// window between rotation update and the recompute pass that refreshes state.centerX / Y.
+			//
+			// PER-AXIS, though: the midpoint only equals the EXPORTED center on LOCKED axes. On a FREE
+			// axis (H mode frees Y, V mode frees X) recomputeCrop's clampFreeAxes shifts the export
+			// center to the image midpoint, so drawing the overlay at the raw selection midpoint there
+			// would position the crop box / grid / crosshair where the save does NOT land — the overlay
+			// would lie about what gets exported. So use the midpoint only on locked axes (where it
+			// matches export AND tracks rotation, keeping the default BOTH mode flicker-free) and read
+			// state.centerX / Y on free axes (the authoritative exported value). Outside SELECT mode
+			// (Move mode, or SELECT with no points) both axes fall back to state.centerX / Y, which the
+			// user-pannable MOVE mode depends on (it's not derivable from selection).
+			float drawCenterX;
+			float drawCenterY;
+			List<SelectionPoint> activeSelection = state.getSelectionPoints();
+			if (state.getEditorMode() == EditorMode.SELECT_FEATURE && !activeSelection.isEmpty())
+			{
+				CenterMode mode = state.getCenterMode();
+				boolean lockedX = mode == CenterMode.BOTH || mode == CenterMode.HORIZONTAL;
+				boolean lockedY = mode == CenterMode.BOTH || mode == CenterMode.VERTICAL;
+				float[] midpoint = CropEngine.rotatedSelectionMidpoint(
+					activeSelection, source.getWidth(), source.getHeight(), rotation);
+				drawCenterX = lockedX ? midpoint[0] : state.getCenterX();
+				drawCenterY = lockedY ? midpoint[1] : state.getCenterY();
+			}
+			else
+			{
+				drawCenterX = state.getCenterX();
+				drawCenterY = state.getCenterY();
+			}
 			// Use the continuous-float crop origin for rendering so smooth rotation produces smooth crop
 			// motion. CropExporter samples the same float origin via BitmapUtils.drawCropped, which falls
 			// back to bilinear sampling on non-integer offsets — so the rendered overlay and the exported
-			// pixels stay in lockstep at sub-pixel precision.
-			gridImgX = state.getCropImageXFloat();
-			gridImgY = state.getCropImageYFloat();
+			// pixels stay in lockstep at sub-pixel precision. Computed from drawCenterX / Y instead of
+			// state.getCropImageXFloat() so the crop rectangle, grid lines, and crosshair all use the
+			// same draw-time-derived center.
+			gridImgX = drawCenterX - cropW / 2f;
+			gridImgY = drawCenterY - cropH / 2f;
 			gridW = cropW;
 			gridH = cropH;
-			drawCropOverlay(canvas, state, grid, gridImgX, gridImgY, cropW, cropH);
+			drawCropOverlay(canvas, grid, drawCenterX, drawCenterY,
+				gridImgX, gridImgY, cropW, cropH);
 		}
 		else
 		{
@@ -231,18 +275,22 @@ final class EditorRenderer
 	 * Draw the crop-rectangle overlay: 4 dim rectangles outside the crop, the grid lines inside, and the
 	 * center-of-crop crosshair. Crop coordinates arrive in image-space; converted to screen-space via the viewport
 	 * before drawing. The crosshair colour is taken from `grid.color()` (with 0xCC alpha) so the centerpoint
-	 * marker visually matches the grid lines the user picked — earlier the crosshair was a hard-coded mauve
-	 * and stayed mauve even after the user recoloured the grid (user-reported bug).
+	 * marker visually matches the grid lines the user picked. The crop center is passed as a parameter (not
+	 * read from CropState) so the caller controls whether to use state.centerX / Y or a draw-time-derived
+	 * override — see the caller's site for the rotation-flicker rationale.
 	 *
 	 * @param canvas   target Canvas; drawn into in place
-	 * @param state    CropState providing the crop center (read-only)
 	 * @param grid     GridConfig supplying crop / grid colors and the crosshair color
+	 * @param centerX  crop center X in image-space coordinates — same source as gridImgX (gridImgX is
+	 *                 centerX − cropW / 2f)
+	 * @param centerY  crop center Y in image-space coordinates — same source as gridImgY
 	 * @param gridImgX crop origin X in image-space coordinates
 	 * @param gridImgY crop origin Y in image-space coordinates
 	 * @param cropW    crop width in image pixels
 	 * @param cropH    crop height in image pixels
 	 */
-	private void drawCropOverlay(Canvas canvas, CropState state, GridConfig grid,
+	private void drawCropOverlay(Canvas canvas, GridConfig grid,
+		float centerX, float centerY,
 		float gridImgX, float gridImgY, int cropW, int cropH)
 	{
 		float cropLeft = viewport.imageToScreenX(gridImgX);
@@ -260,8 +308,8 @@ final class EditorRenderer
 
 		canvas.drawRect(cropLeft, cropTop, cropRight, cropBottom, cropBorderPaint);
 
-		float screenCenterX = viewport.imageToScreenX(state.getCenterX());
-		float screenCenterY = viewport.imageToScreenY(state.getCenterY());
+		float screenCenterX = viewport.imageToScreenX(centerX);
+		float screenCenterY = viewport.imageToScreenY(centerY);
 		crosshairPaint.setColor(withAlpha(grid.color(), 0xCC));
 		float crosshairArmLength = DpToPx.toPx(8, density);
 		canvas.drawLine(screenCenterX - crosshairArmLength, screenCenterY,

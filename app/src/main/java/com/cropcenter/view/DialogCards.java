@@ -46,6 +46,21 @@ final class DialogCards
 	static LinearLayout newCard(Context ctx, float density)
 	{
 		LinearLayout card = new LinearLayout(ctx);
+		styleCard(card, density);
+		return card;
+	}
+
+	/**
+	 * Apply the shared card styling (vertical orientation + SURFACE0 fill + 8 dp corner radius + 12 / 10 dp
+	 * padding) to an existing LinearLayout. Split out of newCard so callers that need a LinearLayout subclass
+	 * (e.g. FolderBrowser's height-capped panel, which overrides onMeasure) can still get the canonical card
+	 * look without duplicating the GradientDrawable / padding setup.
+	 *
+	 * @param card    LinearLayout to style in place; orientation is forced VERTICAL
+	 * @param density display density (dp → px conversion factor)
+	 */
+	static void styleCard(LinearLayout card, float density)
+	{
 		card.setOrientation(LinearLayout.VERTICAL);
 		GradientDrawable background = new GradientDrawable();
 		background.setColor(ThemeColors.SURFACE0);
@@ -53,7 +68,6 @@ final class DialogCards
 		card.setBackground(background);
 		int padding = DpToPx.toPx(12, density);
 		card.setPadding(padding, DpToPx.toPx(10, density), padding, DpToPx.toPx(10, density));
-		return card;
 	}
 
 	/**

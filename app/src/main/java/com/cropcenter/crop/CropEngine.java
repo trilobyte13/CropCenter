@@ -37,21 +37,17 @@ public final class CropEngine
 	 * vertically on image center (max height) V: center vertically on points, horizontally on image center (max
 	 * width)
 	 *
-	 * @param state crop state to mutate; reads selection points, lock flags, and rotation, and writes the
-	 *              recomputed center, crop size, and rotation/drag anchor. No-op when the center is locked, the
-	 *              center mode is LOCKED (pan), or there are no selection points.
+	 * @param state crop state to mutate; reads selection points and rotation, and writes the recomputed
+	 *              center, crop size, and rotation/drag anchor. No-op when the center mode is LOCKED (Pin)
+	 *              or there are no selection points.
 	 */
 	public static void autoComputeFromPoints(CropState state)
 	{
-		if (state.isCenterLocked())
-		{
-			return; // center locked — skip auto-recompute
-		}
 		if (state.getCenterMode() == CenterMode.LOCKED)
 		{
-			// Pan mode: crop is frozen while the user drags the viewport. Points may still be added or
-			// removed, but the crop box must not resize/relocate until Pan turns off and the chkPan handler
-			// fires recomputeForLockChange(), which runs this method again with the real centerMode
+			// Pin mode: crop is frozen while the user drags the viewport. Points may still be added or
+			// removed, but the crop box must not resize/relocate until Pin turns off and the btnPin click
+			// handler fires recomputeForLockChange(), which runs this method again with the real centerMode
 			// restored.
 			return;
 		}

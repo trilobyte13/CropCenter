@@ -132,6 +132,18 @@ public final class SafPathsTest
 	}
 
 	@Test
+	public void lastSegmentSeparatorEndRejectsDocumentScheme()
+	{
+		// Recent Samsung Files behaviour — the provider returns "document:12345" where the tail after ":"
+		// is a numeric MediaStore handle, NOT a path. SaveController's Case-B flow relies on
+		// deriveSiblingUri returning null here so the collision probe falls back to trusting the
+		// auto-rename pattern and surfaces Replace/Keep/Cancel. Pre-fix the colon was treated as the
+		// volume separator and deriveSiblingUri synthesised "document:foo.jpg" — a bogus URI whose
+		// follow-up collision probe failed, causing the save to silently auto-rename instead of asking.
+		assertEquals(-1, SafPaths.lastSegmentSeparatorEnd("document:12345"));
+	}
+
+	@Test
 	public void lastSegmentSeparatorEndRejectsImageScheme()
 	{
 		// media.documents provider's "image:12345" — the tail after ":" is a MediaStore-Images numeric
@@ -177,6 +189,15 @@ public final class SafPathsTest
 		// check to `>= 0` would silently start returning "" for `/foo.jpg`, breaking SAF
 		// createDocument-against-parent flow on root-anchored docIds.
 		assertEquals(null, SafPaths.parentDocIdOf("/foo.jpg"));
+	}
+
+	@Test
+	public void parentDocIdOfRejectsDocumentScheme()
+	{
+		// Same opaque-handle reasoning as the msf: / image: rejects — recent Samsung Files returns
+		// "document:12345" where the numeric tail is a MediaStore handle, not a path segment.
+		// Pre-fix this returned "document:" which createDocument-against-that-parent would reject.
+		assertEquals(null, SafPaths.parentDocIdOf("document:12345"));
 	}
 
 	@Test

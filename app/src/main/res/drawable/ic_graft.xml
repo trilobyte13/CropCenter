@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Graft icon — Material Design "call_merge" glyph (two paths converging into one with an
+    upward arrow head). Chosen for the graft / apply-external-edit toolbar action because the
+    Y-shape literally depicts "merge two things into one" — the loaded image + the external edit
+    combine into the resulting in-memory bitmap. Standard 24dp viewport so it visually matches
+    the size of the surrounding `@android:drawable/ic_menu_*` icons (Settings / Open / Save).
+    Tintable: the white fillColor is replaced by the layout's `app:tint` attribute at render time.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M17,20.41L18.41,19 15,15.59 13.59,17 17,20.41zM7.5,8H11v5.59L5.59,19 7,20.41 13,14.41V8h3.5L12,3.5 7.5,8z" />
+</vector>

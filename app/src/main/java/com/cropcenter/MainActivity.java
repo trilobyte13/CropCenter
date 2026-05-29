@@ -12,7 +12,6 @@ import android.os.Bundle;
 import android.util.Log;
 import android.view.View;
 import android.view.WindowInsets;
-import android.widget.CheckBox;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -21,6 +20,7 @@ import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.appcompat.app.AppCompatActivity;
 
 import com.cropcenter.crop.CropEngine;
+import com.cropcenter.model.AspectRatio;
 import com.cropcenter.model.CenterMode;
 import com.cropcenter.model.CropState;
 import com.cropcenter.model.EditorMode;
@@ -30,9 +30,11 @@ import com.cropcenter.util.SafFileHelper;
 import com.cropcenter.util.StoragePermissionHelper;
 import com.cropcenter.util.UltraHdrCompat;
 import com.cropcenter.view.CropEditorView;
+import com.cropcenter.view.OpenPickerDialog;
 import com.cropcenter.view.RotationRulerView;
 import com.cropcenter.view.SettingsDialog;
 
+import java.io.File;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -71,12 +73,10 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 	private final UiSync ui = new UiSync(this);
 	private final ToolbarBinder toolbar = new ToolbarBinder(this, ui);
 
-	private ActivityResultLauncher<String[]> graftPickerLauncher;
-	private ActivityResultLauncher<String[]> openLauncher;
 	private ActivityResultLauncher<String> saveAsLauncher;
 	// Currently-open state-mutating transient dialog (Settings, merged save, in-app collision / rename /
-	// overwrite-confirm, Replace, Custom AR, Precise Rotation, All-files-access prompt, extension-
-	// mismatch — every producer that calls registerTransientDialog or setActiveTransientDialog) tracked
+	// overwrite-confirm, Replace, Custom AR, All-files-access prompt, extension-mismatch —
+	// every producer that calls registerTransientDialog or setActiveTransientDialog) tracked
 	// so an inbound load can dismiss it before its own bg dispatch starts. Cleared via the dialog's
 	// OnDismissListener so the field doesn't outlive the dialog. Touched only from the UI thread — see
 	// registerTransientDialog / setActiveTransientDialog / clearTransientDialog / dismissTransientDialogs
@@ -224,16 +224,16 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 	public void installImageOnUi(Bitmap source, Bitmap display, String sizeInfo, String metaInfo)
 	{
 		// Activity-destroyed guard: bg load tasks dispatched via runInBackground can outlive the Activity
-		// (rotation, app backgrounded then killed). findViewById on a destroyed Activity returns null, and the
-		// immediate CheckBox cast below would NPE the main thread, taking down the app. state.setListener(null)
-		// in onDestroy suppresses listener-driven UI updates but not these inline findViewByIds, so the guard
-		// has to live here. ImageLoadController.applyBytes flips its handedOff flag BEFORE posting this UI
-		// runnable so the bg-side cleanup won't recycle the bitmaps on its way out — without an explicit
-		// recycle here, the native pixel buffer would only be reclaimed by the GC finalizer once the
-		// destroyed Activity itself was GC'd, which on a config-change with a multi-MB source means a real
-		// (if short-lived) memory pressure spike. display may alias source — recycle source first, then
-		// only recycle display if it's a separate allocation (Bitmap.recycle is idempotent but the identity
-		// check makes the intent explicit).
+		// (rotation, app backgrounded then killed). findViewById on a destroyed Activity returns null, and
+		// the immediate setSelected call below would NPE the main thread, taking down the app.
+		// state.setListener(null) in onDestroy suppresses listener-driven UI updates but not these inline
+		// findViewByIds, so the guard has to live here. ImageLoadController.applyBytes flips its handedOff
+		// flag BEFORE posting this UI runnable so the bg-side cleanup won't recycle the bitmaps on its way
+		// out — without an explicit recycle here, the native pixel buffer would only be reclaimed by the GC
+		// finalizer once the destroyed Activity itself was GC'd, which on a config-change with a multi-MB
+		// source means a real (if short-lived) memory pressure spike. display may alias source — recycle
+		// source first, then only recycle display if it's a separate allocation (Bitmap.recycle is
+		// idempotent but the identity check makes the intent explicit).
 		if (isDestroyed())
 		{
 			// state.reset() runs FIRST so any state field still holding a Bitmap reference (today only the
@@ -259,14 +259,14 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 			}
 			return;
 		}
-		// CropState.reset() restored editorMode and centerMode to defaults (Select + Both) and cleared
-		// centerLocked, but the Pan / Lock toolbar checkboxes AND the per-mode lock-axis prefs are UI-driven
-		// state that doesn't auto-sync. Uncheck the toolbar boxes AND reset the lock-axis prefs to their
-		// initial defaults (Select=BOTH, Move=VERTICAL) so a previous image's H/V Select-lock doesn't bleed
-		// into the new load — without this reset, applyLockMode() below would re-apply the persisted
-		// selectLockPref and overwrite reset()'s BOTH, contradicting the documented "new loads start
-		// Select+Both" invariant. Then call applyLockMode() to propagate the unchecked Pan into centerMode
-		// (now genuinely a no-op since both reset() and the pref reset agree on BOTH).
+		// CropState.reset() restored editorMode and centerMode to defaults (Select + Both), but the Pin
+		// chip's selected state AND the per-mode lock-axis prefs are UI-driven state that doesn't auto-sync.
+		// Deselect Pin AND reset the lock-axis prefs to their initial defaults (Select=BOTH, Move=VERTICAL)
+		// so a previous image's H/V Select-lock doesn't bleed into the new load — without this reset,
+		// applyLockMode() below would re-apply the persisted selectLockPref and overwrite reset()'s BOTH,
+		// contradicting the documented "new loads start Select+Both" invariant. Then call applyLockMode()
+		// to propagate the deselected Pin into centerMode (now genuinely a no-op since both reset() and the
+		// pref reset agree on BOTH).
 		// Wrap the UI-side commit in try/catch so a throw between here and `setSourceImage` (any
 		// findViewById returning null on an unusually-laid-out view tree, applyLockMode hitting a
 		// stale listener that throws, ui.updateModeHighlight reaching a recycled view) recycles the
@@ -277,8 +277,7 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 		// our throw; ownership transfer is complete and the UI side now owns the cleanup contract.
 		try
 		{
-			((CheckBox) findViewById(R.id.chkPan)).setChecked(false);
-			((CheckBox) findViewById(R.id.chkLockCenter)).setChecked(false);
+			findViewById(R.id.btnPin).setSelected(false);
 			selectLockPref = CenterMode.BOTH;
 			moveLockPref = CenterMode.VERTICAL;
 			applyLockMode();
@@ -304,18 +303,18 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 			// consolidated re-render.
 			//
 			// Outcome.consumed is true ONLY when a bundle was actually consumed; in that case the
-			// toolbar UI reset earlier in this method (lines ~274-280: chkPan unchecked,
-			// chkLockCenter unchecked, selectLockPref = BOTH, moveLockPref = VERTICAL, AR spinner
-			// default) is now stale against the restored model, so re-derive the toolbar widgets
-			// from the freshly-restored CropState. The outcome also carries the per-mode lock-axis
+			// toolbar UI reset earlier in this method (Pin chip deselected, selectLockPref = BOTH,
+			// moveLockPref = VERTICAL, AR chip text on the default ratio) is now stale against the
+			// restored model, so re-derive the toolbar widgets from the freshly-restored CropState.
+			// The outcome also carries the per-mode lock-axis
 			// prefs that were stashed alongside the bundle — re-seed them BEFORE syncFromState so
 			// the toolbar resync's `host.setCurrentPref(state.getCenterMode())` writes against
 			// correct baseline values for the inactive mode. Without this, a user who had Move+H
 			// at kill time would see their Select-mode pref correctly restored but Move-mode's
-			// pref fall back to VERTICAL (and vice versa). When Pan was on at kill time
+			// pref fall back to VERTICAL (and vice versa). When Pin was on at kill time
 			// (centerMode == LOCKED), BOTH prefs come from the bundle since syncFromState skips
 			// the setCurrentPref write in the LOCKED case — without this re-seed, the hidden axis
-			// preference would silently revert to defaults on Pan toggle-off.
+			// preference would silently revert to defaults on Pin toggle-off.
 			RestoreController.Outcome outcome = restoreController.applyIfPending();
 			if (outcome.consumed())
 			{
@@ -327,8 +326,41 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 				{
 					moveLockPref = outcome.restoredMovePref();
 				}
-				toolbar.syncFromState();
 			}
+			else
+			{
+				// Fresh load (no restore bundle): seed the aspect ratio from the image's
+				// orientation. Landscape (width > height) defaults to R5_4, portrait
+				// (height > width) defaults to R4_5, and a true square (width == height)
+				// defaults to R1_1 — picking a non-square AR on a square source would crop
+				// off part of the image immediately for no obvious benefit. The model-level
+				// default of R4_5 covered the portrait-phone case but produced a tall-narrow
+				// crop on landscape captures, which was almost always wrong as a starting
+				// point. Restored sessions skip this branch so the user's prior AR choice
+				// (stashed in the bundle) takes precedence over the orientation default.
+				int srcW = source.getWidth();
+				int srcH = source.getHeight();
+				AspectRatio orientationDefault;
+				if (srcW > srcH)
+				{
+					orientationDefault = AspectRatio.R5_4;
+				}
+				else if (srcW < srcH)
+				{
+					orientationDefault = AspectRatio.R4_5;
+				}
+				else
+				{
+					orientationDefault = AspectRatio.R1_1;
+				}
+				state.setAspectRatio(orientationDefault);
+			}
+			// Always resync the toolbar from state so the AR spinner reflects the orientation
+			// default (fresh load) or the restored AR (restore path). Previously this only fired
+			// on the restore branch because fresh loads were guaranteed to land on the same R4_5
+			// the spinner was already showing; the orientation-aware default breaks that
+			// invariant.
+			toolbar.syncFromState();
 		}
 		catch (RuntimeException e)
 		{
@@ -354,10 +386,11 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 	public boolean isPanning()
 	{
 		// findViewById can return null on a destroyed Activity (or, theoretically, before view inflation
-		// completes if a listener fires very early). Without the null check the cast-and-isChecked NPEs the UI
-		// thread. Pattern-match on CheckBox to dodge both the null and any unlikely class mismatch.
-		View view = findViewById(R.id.chkPan);
-		return view instanceof CheckBox checkBox && checkBox.isChecked();
+		// completes if a listener fires very early). Without the null check the isSelected call NPEs the UI
+		// thread. The btnPin chip's selected state IS the source of truth for Pin / panning — the model's
+		// centerMode is derived from it via applyLockMode, not vice versa.
+		View view = findViewById(R.id.btnPin);
+		return view != null && view.isSelected();
 	}
 
 	@Override
@@ -458,11 +491,29 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 		boolean hasImage = state.getSourceImage() != null;
 		if (btnSave != null)
 		{
-			btnSave.setEnabled(!busy && hasImage);
+			// ImageButton with app:tint doesn't auto-dim on setEnabled — the tint stays mauve
+			// regardless of state. Pair setEnabled with alpha so the disabled state reads at a
+			// glance, matching the disabled-controls-stay-visible-but-dim contract the rest of
+			// the toolbar follows (see UiSync.updateImageDependentToolbar).
+			boolean saveEnabled = !busy && hasImage;
+			btnSave.setEnabled(saveEnabled);
+			btnSave.setAlpha(saveEnabled ? 1f : 0.4f);
 		}
 		if (btnOpen != null)
 		{
-			btnOpen.setEnabled(!busy);
+			boolean openEnabled = !busy;
+			btnOpen.setEnabled(openEnabled);
+			btnOpen.setAlpha(openEnabled ? 1f : 0.4f);
+		}
+		View btnGraft = findViewById(R.id.btnGraft);
+		if (btnGraft != null)
+		{
+			// Mirror UiSync.updateImageDependentToolbar's isJpeg gate plus the busy factor so the graft
+			// icon dims during background work like Save / Open do (it used to live on btnOpen, which
+			// dimmed). On busy=false this lands on the same value UiSync sets, so there's no conflict.
+			boolean graftEnabled = !busy && hasImage && state.getSourceFormat() == Format.JPEG;
+			btnGraft.setEnabled(graftEnabled);
+			btnGraft.setAlpha(graftEnabled ? 1f : 0.4f);
 		}
 		// Restore-bundle leak guard: on a successful load installImageOnUi runs BEFORE this
 		// setBusyUi(false) (both post via runOnUiThread; install is posted from inside applyBytes
@@ -565,20 +616,13 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 		editorView.setOnPointsChangedListener(ui::updatePointButtonStates);
 		state.setListener(() -> runOnUiThread(this::applyStateToUi));
 
-		// Plain SAF DocumentsUI contracts for Open, Save As, and Graft. The Save As CreateDocument
-		// override only swaps JPEG → PNG mime type when the pre-filled filename ends in .png so the
-		// picker shows the right extension. No EXTRA_INITIAL_URI seeding — SAF DocumentsUI tracks the
-		// user's last-navigated location across launches itself, so the picker naturally resumes
-		// wherever they were last.
-		openLauncher = registerForActivityResult(new ActivityResultContracts.OpenDocument(), uri ->
-		{
-			if (uri != null)
-			{
-				imageLoader.tryTakePersistable(uri, "(open)", true);
-				imageLoader.load(uri);
-			}
-		});
-
+		// Plain SAF DocumentsUI contract for Save As — the only remaining ACTION_*_DOCUMENT site
+		// in this Activity. The CreateDocument override only swaps JPEG → PNG mime type when the
+		// pre-filled filename ends in .png so the picker shows the right extension. No
+		// EXTRA_INITIAL_URI seeding — SAF DocumentsUI tracks the user's last-navigated location
+		// across launches itself. Open and Graft both route through the in-app OpenPickerDialog
+		// instead; the prior SAF-based graft picker was removed when graft was unified with the
+		// load flow's picker (see onGraftClicked / launchGraftPicker below).
 		saveAsLauncher = registerForActivityResult(
 			new ActivityResultContracts.CreateDocument(Format.JPEG.mimeType())
 			{
@@ -598,33 +642,29 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 				}
 			}, this::onSaveAsLauncherResult);
 
-		graftPickerLauncher = registerForActivityResult(new ActivityResultContracts.OpenDocument(),
-			this::onGraftPickerResult);
-
 		View btnOpen = findViewById(R.id.btnOpen);
-		// Broad "image/*" filter so SAF DocumentsUI shows every folder containing any image (HEIC, WebP,
-		// camera RAW, etc.) — Samsung's One UI applies the EXTRA_MIME_TYPES filter recursively to folder
-		// listings, so the previous narrow ["image/jpeg", "image/png"] filter hid folders that contained
-		// only other image types. ImageLoadController.applyBytes still rejects non-JPEG / non-PNG bytes
-		// with the "Unsupported image format" toast, so picking a HEIC fails loudly rather than silently
-		// loading garbage.
-		btnOpen.setOnClickListener(view ->
-			openLauncher.launch(new String[] { "image/*" }));
-		btnOpen.setOnLongClickListener(view -> graftController.start(graftPickerLauncher));
+		// In-app OpenPickerDialog replaces the system SAF picker for both the Open flow and the
+		// Graft flow — Samsung One UI's DocumentsUI doesn't persist user sort preferences across
+		// launches, and the in-app picker fixes that. Trade-off: loses cross-app access to Drive
+		// / Dropbox / Gallery — users must copy files into a filesystem-visible folder first.
+		btnOpen.setOnClickListener(view -> showOpenPickerDialog());
+		findViewById(R.id.btnGraft).setOnClickListener(view -> onGraftClicked());
 		findViewById(R.id.btnSave).setOnClickListener(view -> saveController.showSaveDialog());
 		setBusyUi(false); // Save stays disabled until an image is loaded
 		findViewById(R.id.btnSettings).setOnClickListener(view -> showSettingsDialog());
 
-		// Display-only toggle; full grid settings live in the Settings dialog.
-		CheckBox chkGrid = findViewById(R.id.chkGridMain);
-		chkGrid.setChecked(state.getGridConfig().enabled());
-		chkGrid.setOnCheckedChangeListener((button, isChecked) ->
-			state.updateGridConfig(g -> g.withEnabled(isChecked)));
-
+		// Grid / Pin / AR chip wire-up lives entirely inside ToolbarBinder.bindAll's per-chip setup
+		// methods (setupGridToggle / setupPinToggle / setupArButton) rather than as one-off
+		// findViewById blocks here. setupArButton additionally seeds the chip text via
+		// ui.updateAspectRatioButton, so the post-bindAll fan-out below skips it.
 		toolbar.bindAll();
 
+		ui.updateGridToggle();
 		ui.updateModeHighlight();
 		ui.updateLockHighlight();
+		ui.updateImageDependentToolbar();
+		ui.updateAutoRotateChips();
+		ui.updatePointButtonStates();
 		// MANAGE_EXTERNAL_STORAGE proactive prompt. The Replace-on-save flow needs MES to overwrite a
 		// colliding file in public storage (without it, the SAF rename refuses to rename-to-existing
 		// on strict providers and the user sees auto-renamed "(N)" files accumulate). Samsung's
@@ -669,8 +709,18 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 	protected void onDestroy()
 	{
 		// Clear the state listener FIRST so any in-flight notifyChanged() from a background task doesn't fire
-		// an Activity-destroyed callback.
+		// an Activity-destroyed callback — also so dialog-dismiss-driven setter calls (e.g. SaveDialog's
+		// snapshot rollback writing back to ExportConfig) are absorbed as silent no-ops rather than
+		// triggering applyStateToUi against the half-destroyed Activity.
 		state.setListener(null);
+		// Dismiss any tracked transient dialog (FolderPickerDialog, OpenPickerDialog, Settings, in-app
+		// collision / rename, Custom AR, etc.) so each dialog's own OnDismissListener runs its cleanup —
+		// most critically FolderBrowser.shutdown(), which terminates the picker's bg enumeration / decode
+		// executor. Without this, a config-change destroy that fires while the picker is open leaves both
+		// the dialog window pinned to the destroyed Activity (via the AlertDialog → Context chain) AND
+		// the picker's 3-thread executor running for the lifetime of the worker threads. Runs AFTER
+		// setListener(null) by design — see the listener-clearing comment above.
+		dismissTransientDialogs();
 		// Cancel any open ColorPicker tracked via SettingsDialog's static field. The field is process-wide
 		// so a config-change destroy that fires while the picker is open would otherwise pin the destroyed
 		// Activity's window through the AlertDialog → Context chain until the next SettingsDialog.show()
@@ -713,7 +763,7 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 		// serialisation; this method is now just the lifecycle hook. The per-mode lock prefs
 		// (selectLockPref / moveLockPref) are passed in alongside CropState because they're
 		// MainActivity-private fields, not CropState fields — and they must be persisted
-		// independently of state.centerMode because Pan collapses centerMode to LOCKED, hiding
+		// independently of state.centerMode because Pin collapses centerMode to LOCKED, hiding
 		// the underlying axis preference. Note: RestoreController.writeTo writes NOTHING when
 		// state.isGraftApplied() is true — graft bytes are in-memory only and a restore would
 		// silently reload the pre-graft source. The session loss on a graft-mid-kill is
@@ -849,10 +899,15 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 					CropEngine.recomputeCrop(state);
 				}
 			}
+			ui.updateAspectRatioButton();
 			ui.updateCropInfo();
+			ui.updateGridToggle();
 			ui.updateZoomBadge();
 			ui.updatePointButtonStates();
-			ui.updateAutoRotateVisibility();
+			ui.updateAutoRotateChips();
+			ui.updateImageDependentToolbar();
+			ui.updateModeHighlight();
+			ui.updateLockHighlight();
 			ui.syncRotationUi();
 			editorView.invalidate();
 		}
@@ -906,28 +961,107 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 	}
 
 	/**
-	 * Result handler for the long-press graft picker. Extracted from the registerForActivityResult call-site
-	 * lambda so the null / non-null branch dispatch has a name in stack traces.
-	 *
-	 * @param uri SAF document URI returned by the picker; null when the user cancelled
+	 * Picker-launch Runnable handed to GraftController.start. Opens the same in-app
+	 * OpenPickerDialog the Open flow uses, but with the graft-specific result callback
+	 * (onGraftFilePicked). Re-throws on dialog-show failure so GraftController.start's catch
+	 * can roll back graftPending — silent swallowing would leak the state and block future
+	 * graft attempts.
 	 */
-	private void onGraftPickerResult(Uri uri)
+	private void launchGraftPicker()
 	{
-		if (uri != null)
+		File startDir = SaveController.loadInitialPickerFolder(this);
+		try
 		{
-			graftController.onEditPicked(uri);
+			// jpegOnly=true: graft splices JPEG bytes via EditAligner, so PNG taps would only fail
+			// downstream with "Selected file is not a JPEG". Gating at the picker greys PNGs out so
+			// the user can see they're not selectable, matching the way WebP / HEIC / HEIF are
+			// already handled for the load flow.
+			activeTransientDialog = new OpenPickerDialog(this, startDir,
+				this::onGraftFilePicked, this::clearTransientDialog, true).show();
 		}
-		else
+		catch (RuntimeException e)
 		{
-			graftController.onEditPickerCancelled();
+			Log.w(TAG, "graft picker dialog failed to show", e);
+			throw e;
 		}
 	}
 
 	/**
+	 * btnGraft click handler. Gates on isDestroyed (config-change race) and
+	 * MANAGE_EXTERNAL_STORAGE BEFORE calling GraftController.start so the controller's state
+	 * machine (graftPending + pendingSource snapshot) doesn't get half-set when MES is missing
+	 * — the in-app picker needs MES to enumerate the filesystem, and a partial state would
+	 * block future graft attempts after the user grants the permission. Mirrors the gate ordering
+	 * in showOpenPickerDialog.
+	 */
+	private void onGraftClicked()
+	{
+		if (isDestroyed())
+		{
+			return;
+		}
+		if (!requireStoragePermission("Apply External Edit"))
+		{
+			return;
+		}
+		graftController.start(this::launchGraftPicker);
+	}
+
+	/**
+	 * Result handler for the in-app picker when launched for the graft flow. Picked File is
+	 * converted to a SAF externalstorage URI (same round-trip the Open flow uses) and handed
+	 * to GraftController.onEditPicked. Null file (Cancel / external dismiss) routes through
+	 * onEditPickerCancelled so the controller can clear graftPending + pendingSource.
+	 *
+	 * @param file file the user tapped in the picker; null on Cancel / dismiss
+	 */
+	private void onGraftFilePicked(File file)
+	{
+		if (file == null)
+		{
+			graftController.onEditPickerCancelled();
+			return;
+		}
+		Uri uri = SafFileHelper.buildExternalStorageDocumentUri(file);
+		if (uri == null)
+		{
+			toastIfAlive("Couldn't resolve picked file to a graft URI", Toast.LENGTH_SHORT);
+			graftController.onEditPickerCancelled();
+			return;
+		}
+		graftController.onEditPicked(uri);
+	}
+
+	/**
+	 * Result handler for the in-app OpenPickerDialog. Picked file gets converted to a SAF
+	 * externalstorage document URI so the existing ImageLoadController.load path applies unchanged —
+	 * the URI resolves back to the same File via SafFileHelper.fileFromSafUri's primary: branch
+	 * (pure string parsing), and tryReadDirectlyFromPath reads from disk directly. No
+	 * tryTakePersistable call: the URI is locally constructed from the file path (not granted by a
+	 * SAF picker), so there's no SAF permission grant to persist — MES covers the read.
+	 *
+	 * @param file file the user tapped in the picker; null on Cancel / dismiss
+	 */
+	private void onOpenPickerResult(File file)
+	{
+		if (file == null)
+		{
+			return;
+		}
+		Uri uri = SafFileHelper.buildExternalStorageDocumentUri(file);
+		if (uri == null)
+		{
+			toastIfAlive("Couldn't resolve picked file to a load URI", Toast.LENGTH_SHORT);
+			return;
+		}
+		imageLoader.load(uri);
+	}
+
+	/**
 	 * Result handler for the Save As SAF picker. Extracted from the registerForActivityResult call-site
-	 * lambda for the same reason as onGraftPickerResult — exceeded the 3-line cap, plus the success
-	 * path must run tryTakePersistable BEFORE handleSaveAsResult so a busy-thrown SAF re-read of the
-	 * just-created document can succeed.
+	 * lambda because the success path must run tryTakePersistable BEFORE handleSaveAsResult so a
+	 * busy-thrown SAF re-read of the just-created document can succeed — that ordering is hard to
+	 * read inline, and a named method gives the dispatch a stack-trace anchor.
 	 *
 	 * @param uri SAF document URI committed by the user; null when the picker was cancelled
 	 */
@@ -949,6 +1083,28 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 	}
 
 	/**
+	 * Common MES (MANAGE_EXTERNAL_STORAGE) gate for the toolbar's filesystem-using actions (Open,
+	 * Apply External Edit). Returns true when the permission is held; otherwise surfaces a
+	 * directed toast naming the feature so the user knows which action was blocked, and returns
+	 * false. Shared by btnOpen's click handler and onGraftClicked so the gate wording stays in
+	 * one place.
+	 *
+	 * @param featureNoun user-facing label of the action being attempted (e.g. "Open",
+	 *                    "Apply External Edit") — interpolated into the toast
+	 * @return true when MES is currently granted; false after the toast fires
+	 */
+	private boolean requireStoragePermission(String featureNoun)
+	{
+		if (permissions.hasStoragePermission())
+		{
+			return true;
+		}
+		toastIfAlive(featureNoun + " requires \"All files access\" — grant it from "
+			+ "Settings → Permissions", Toast.LENGTH_LONG);
+		return false;
+	}
+
+	/**
 	 * One-time-per-launch dialog that offers a direct deep-link to the system "All files access"
 	 * Settings page when MANAGE_EXTERNAL_STORAGE isn't granted. Without this, users have to dig
 	 * three levels deep into Settings (Apps → Special access → All files access → CropCenter) to
@@ -960,10 +1116,14 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 	 */
 	private void showAllFilesAccessPrompt()
 	{
-		String message = "CropCenter saves edits over the original file when you pick \"Replace\"."
-			+ " Granting \"All files access\" lets the app do that directly; without it, every"
+		String message = "CropCenter uses \"All files access\" for three things:"
+			+ "\n\n• Open — the in-app picker needs it to browse your photo folders."
+			+ "\n• Apply External Edit — same picker, same requirement."
+			+ "\n• Save → Replace — overwrites the original file directly. Without it, every"
 			+ " Replace falls back to an auto-renamed copy (\"foo (1).jpg\")."
-			+ "\n\nYou can grant or revoke this anytime from Settings.";
+			+ "\n\nWithout the grant, Open and Apply External Edit show a \"requires All files"
+			+ " access\" toast. You can grant or revoke it anytime from Settings."
+			+ "\n\nGrant access now?";
 		try
 		{
 			registerTransientDialog(new AlertDialog.Builder(this)
@@ -977,6 +1137,55 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 		catch (RuntimeException e)
 		{
 			Log.w(TAG, "All-files-access prompt failed to show", e);
+		}
+	}
+
+	/**
+	 * Open the in-app image picker — replaces the system SAF ACTION_OPEN_DOCUMENT picker for the
+	 * Open flow. Computes the initial folder via SaveController.loadInitialPickerFolder (last-saved
+	 * or last-loaded folder, most recent wins; falls back to primary external storage). On pick,
+	 * resolves the File to a SAF externalstorage URI via SafFileHelper.buildExternalStorageDocumentUri
+	 * (which keeps the load path's tryReadDirectlyFromPath fast-path engaged so the Samsung MediaStore
+	 * EXIF mangling stays bypassed) and routes through imageLoader.load — same path the Share / View
+	 * intents take, so the busy-gating, dialog dismissal, and progress-overlay contract is shared.
+	 *
+	 * Gated on busy so a tap during an in-flight load / save / detect / graft surfaces the busy toast
+	 * rather than opening a picker that would no-op on file tap. Also gated on MES: the in-app picker
+	 * uses File.listFiles() to enumerate folders, which returns null on most directories under
+	 * primary external storage without MANAGE_EXTERNAL_STORAGE on Android 11+ scoped storage. Without
+	 * MES the picker would open showing partial / empty contents with no signal to the user, so we
+	 * surface a directed toast pointing at the Settings card's Permissions affordance rather than
+	 * silently failing. Mirrors SaveController.showSaveDialog's MES branch (which falls back to the
+	 * legacy SAF picker for the save flow); for Open there is no equivalent fallback because the
+	 * user chose "in-app only" — the system SAF picker is gone by design. Wrapped in try/catch
+	 * (BadTokenException) for the config-change race window between the isDestroyed pre-check and
+	 * the .show() call.
+	 */
+	private void showOpenPickerDialog()
+	{
+		if (busy.get())
+		{
+			showBusyToast();
+			return;
+		}
+		if (isDestroyed())
+		{
+			return;
+		}
+		if (!requireStoragePermission("Open"))
+		{
+			return;
+		}
+		File startDir = SaveController.loadInitialPickerFolder(this);
+		try
+		{
+			// jpegOnly=false: the load pipeline accepts both JPEG and PNG.
+			activeTransientDialog = new OpenPickerDialog(this, startDir,
+				this::onOpenPickerResult, this::clearTransientDialog, false).show();
+		}
+		catch (RuntimeException e)
+		{
+			Log.w(TAG, "open picker dialog failed to show", e);
 		}
 	}
 

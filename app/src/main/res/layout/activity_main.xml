@@ -10,62 +10,90 @@
     android:layout_height="match_parent"
     android:orientation="vertical">
 
-    <!-- Toolbar -->
+    <!-- Top toolbar: crop config chips on the left (AR / Grid / Pin), app/file actions on the
+         right (Settings / Open / Graft / Save). Chips use the same MaterialButton.TextButton
+         style as the Mode/Lock/Undo cluster below — one unified chip family across the app. The
+         scrollable left section ensures the right action cluster stays visible even when chip
+         labels push the row past the screen width on narrow devices (long Custom AR labels like
+         "65535:65535", landscape on small phones); requiresFadingEdge gives the right edge a
+         gradient hint when content extends past the visible width. -->
     <LinearLayout
         android:layout_width="match_parent" android:layout_height="44dp"
         android:background="@color/sidebar_bg" android:gravity="center_vertical"
-        android:paddingHorizontal="4dp" android:orientation="horizontal">
+        android:paddingHorizontal="0dp" android:orientation="horizontal">
 
-        <!-- Scrollable left section (shrinks/scrolls when narrow) -->
         <HorizontalScrollView
             android:layout_width="0dp" android:layout_height="match_parent"
             android:layout_weight="1"
             android:scrollbars="none"
+            android:requiresFadingEdge="horizontal"
+            android:fadingEdgeLength="16dp"
             android:fillViewport="false">
 
             <LinearLayout
                 android:layout_width="wrap_content" android:layout_height="match_parent"
-                android:gravity="center_vertical" android:orientation="horizontal">
+                android:gravity="center_vertical" android:orientation="horizontal"
+                android:paddingHorizontal="4dp">
 
-                <Spinner android:id="@+id/spinnerAr"
-                    android:layout_width="wrap_content" android:layout_height="30dp"
-                    android:background="@color/surface0"
-                    android:popupBackground="@color/base" android:paddingHorizontal="4dp" />
+                <com.google.android.material.button.MaterialButton android:id="@+id/btnAspectRatio"
+                    style="@style/Widget.MaterialComponents.Button.TextButton"
+                    android:layout_width="wrap_content" android:layout_height="26dp"
+                    android:text="4:5" android:textSize="11sp" android:textColor="@color/subtext0"
+                    android:minWidth="0dp" android:paddingHorizontal="6dp"
+                    android:insetTop="0dp" android:insetBottom="0dp"
+                    android:contentDescription="Aspect ratio: tap to choose preset or Custom" />
 
-                <CheckBox android:id="@+id/chkGridMain"
-                    android:layout_width="wrap_content" android:layout_height="wrap_content"
-                    android:text="Grid" android:textColor="@color/subtext0" android:textSize="10sp"
-                    android:checked="true" android:layout_marginStart="6dp"
-                    android:buttonTint="@color/mauve" />
+                <View android:layout_width="1dp" android:layout_height="16dp"
+                    android:background="@color/surface1" android:layout_marginHorizontal="3dp" />
 
-                <CheckBox android:id="@+id/chkPan"
-                    android:layout_width="wrap_content" android:layout_height="wrap_content"
-                    android:text="Pan" android:textColor="@color/subtext0" android:textSize="10sp"
-                    android:layout_marginStart="4dp" android:buttonTint="@color/mauve" />
+                <com.google.android.material.button.MaterialButton android:id="@+id/btnGridToggle"
+                    style="@style/Widget.MaterialComponents.Button.TextButton"
+                    android:layout_width="wrap_content" android:layout_height="26dp"
+                    android:text="Grid" android:textSize="11sp" android:textColor="@color/mauve"
+                    android:minWidth="0dp" android:paddingHorizontal="6dp"
+                    android:insetTop="0dp" android:insetBottom="0dp"
+                    android:contentDescription="Toggle grid overlay" />
 
-                <CheckBox android:id="@+id/chkLockCenter"
-                    android:layout_width="wrap_content" android:layout_height="wrap_content"
-                    android:text="Lock" android:textColor="@color/subtext0" android:textSize="10sp"
-                    android:layout_marginStart="2dp" android:layout_marginEnd="4dp"
-                    android:buttonTint="@color/mauve" />
+                <View android:layout_width="1dp" android:layout_height="16dp"
+                    android:background="@color/surface1" android:layout_marginHorizontal="3dp" />
+
+                <com.google.android.material.button.MaterialButton android:id="@+id/btnPin"
+                    style="@style/Widget.MaterialComponents.Button.TextButton"
+                    android:layout_width="wrap_content" android:layout_height="26dp"
+                    android:text="Pin" android:textSize="11sp" android:textColor="@color/surface2"
+                    android:minWidth="0dp" android:paddingHorizontal="6dp"
+                    android:insetTop="0dp" android:insetBottom="0dp"
+                    android:contentDescription="Freeze crop while panning" />
             </LinearLayout>
         </HorizontalScrollView>
 
-        <!-- Fixed right section: always visible -->
+        <!-- Fixed right section: always visible. All four icons share identical geometry (38dp
+             container, 6dp padding → 26dp icon area) and the same Material vector family (custom
+             vectors in res/drawable/ic_*.xml) so stroke weight + visual size match across the
+             four. layout_marginStart=4dp between adjacent buttons keeps the borderless ripples
+             from visually colliding while preserving compact spacing. -->
         <ImageButton android:id="@+id/btnSettings"
             android:layout_width="38dp" android:layout_height="38dp"
             android:background="?attr/selectableItemBackgroundBorderless"
-            android:src="@android:drawable/ic_menu_preferences"
-            android:contentDescription="Settings" app:tint="@color/mauve" android:padding="8dp" />
+            android:src="@drawable/ic_settings"
+            android:contentDescription="Settings" app:tint="@color/mauve" android:padding="6dp" />
         <ImageButton android:id="@+id/btnOpen"
             android:layout_width="38dp" android:layout_height="38dp"
             android:background="?attr/selectableItemBackgroundBorderless"
-            android:src="@android:drawable/ic_menu_upload"
-            android:contentDescription="Open" app:tint="@color/blue" android:padding="6dp" />
+            android:layout_marginStart="4dp"
+            android:src="@drawable/ic_open"
+            android:contentDescription="Open" app:tint="@color/mauve" android:padding="6dp" />
+        <ImageButton android:id="@+id/btnGraft"
+            android:layout_width="38dp" android:layout_height="38dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:layout_marginStart="4dp"
+            android:src="@drawable/ic_graft"
+            android:contentDescription="Apply external edit" app:tint="@color/mauve" android:padding="6dp" />
         <ImageButton android:id="@+id/btnSave"
             android:layout_width="38dp" android:layout_height="38dp"
             android:background="?attr/selectableItemBackgroundBorderless"
-            android:src="@android:drawable/ic_menu_save"
+            android:layout_marginStart="4dp"
+            android:src="@drawable/ic_save"
             android:contentDescription="Save" app:tint="@color/mauve" android:padding="6dp" />
     </LinearLayout>
 
@@ -82,9 +110,16 @@
     <View android:layout_width="match_parent" android:layout_height="1dp"
         android:background="@color/divider" />
 
-    <!-- Mode + Lock axes + Undo/Redo/Clear + Auto, all consolidated into one row. -->
+    <!-- Mode + Lock axes + Undo/Redo/Clear, consolidated into one row. AR / Grid / Pin chips
+         (the other config controls) live in the top toolbar above the editor — keeping them
+         together at the top keeps both regions visually populated and lets this row stay focused
+         on the immediate-interaction controls (mode toggle, axis lock, point edit).
+
+         30dp height: 26dp chip + 2dp top/bottom breathing — matches the rotation actions row's
+         tightness (28dp / 26dp = 1dp pad), keeping the chip tier rhythm consistent. The prior
+         34dp left 4dp top/bottom, which read as visually heavier than the rest of the chip tier. -->
     <LinearLayout android:id="@+id/pointControlsRow"
-        android:layout_width="match_parent" android:layout_height="34dp"
+        android:layout_width="match_parent" android:layout_height="30dp"
         android:background="@color/sidebar_bg" android:gravity="center_vertical"
         android:paddingHorizontal="4dp" android:orientation="horizontal">
 
@@ -109,8 +144,7 @@
             android:layout_width="wrap_content" android:layout_height="26dp"
             android:text="Both" android:textSize="11sp" android:textColor="@color/mauve"
             android:minWidth="0dp" android:paddingHorizontal="5dp"
-            android:insetTop="0dp" android:insetBottom="0dp"
-            android:visibility="gone" />
+            android:insetTop="0dp" android:insetBottom="0dp" />
         <com.google.android.material.button.MaterialButton android:id="@+id/btnLockH"
             style="@style/Widget.MaterialComponents.Button.TextButton"
             android:layout_width="wrap_content" android:layout_height="26dp"
@@ -144,31 +178,75 @@
             android:text="Clear" android:textSize="11sp" android:textColor="@color/red"
             android:minWidth="0dp" android:paddingHorizontal="6dp"
             android:insetTop="0dp" android:insetBottom="0dp" />
-
-        <TextView android:id="@+id/btnAutoRotate"
-            android:layout_width="wrap_content" android:layout_height="22dp"
-            android:text="Auto" android:textSize="11sp" android:textColor="@color/subtext0"
-            android:gravity="center" android:paddingHorizontal="8dp"
-            android:layout_marginStart="4dp" android:background="@color/surface0"
-            android:visibility="gone" />
     </LinearLayout>
 
-    <!-- Rotation ruler with zoom buttons. Buttons let the user pick a finer (or coarser) tick resolution
-         without pinch-zooming on the ruler itself. -->
+    <!-- Rotation actions row: Auto-rotate trigger on the left, live rotation value centered,
+         Reset-to-0° on the right. Buttons use the same Material TextButton style as the Mode /
+         Lock / Undo / Redo / Clear buttons above for visual consistency across the "compact
+         action chip" tier. The rotation value lives here (rather than in the info bar) so it
+         sits next to the controls that change it.
+
+         FrameLayout (not LinearLayout) so the centered degree label sits at the row's geometric
+         center — i.e. directly above the ruler's central axis below (32dp btn + weighted ruler +
+         32dp btn → ruler centered on row). A LinearLayout with weight=1 on the label centered it
+         within the residual space between Auto and Reset, but those buttons can have different
+         widths ("Auto" vs "Reset", different glyph counts), pulling the label off the row's true
+         center. FrameLayout with layout_gravity=center locks the label to the row's midline
+         regardless of sibling widths. -->
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="28dp"
+        android:background="@color/sidebar_bg"
+        android:paddingHorizontal="4dp">
+
+        <com.google.android.material.button.MaterialButton android:id="@+id/btnAutoRotate"
+            style="@style/Widget.MaterialComponents.Button.TextButton"
+            android:layout_width="wrap_content" android:layout_height="26dp"
+            android:layout_gravity="start|center_vertical"
+            android:text="Auto" android:textSize="11sp" android:textColor="@color/subtext0"
+            android:minWidth="0dp" android:paddingHorizontal="6dp"
+            android:insetTop="0dp" android:insetBottom="0dp" />
+
+        <TextView android:id="@+id/txtRotDegrees"
+            android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:text="0°" android:textColor="@color/mauve" android:textSize="14sp"
+            android:singleLine="true" />
+
+        <com.google.android.material.button.MaterialButton android:id="@+id/btnResetRotation"
+            style="@style/Widget.MaterialComponents.Button.TextButton"
+            android:layout_width="wrap_content" android:layout_height="26dp"
+            android:layout_gravity="end|center_vertical"
+            android:text="Reset" android:textSize="11sp" android:textColor="@color/subtext0"
+            android:minWidth="0dp" android:paddingHorizontal="6dp"
+            android:insetTop="0dp" android:insetBottom="0dp"
+            android:contentDescription="Reset rotation to 0 degrees" />
+    </FrameLayout>
+
+    <!-- Ruler row: the rotation ruler in the middle, ruler-density −/+ buttons flanking it.
+         The −/+ buttons use the same Material TextButton style as the other action buttons; they
+         disable themselves when the ruler is at min/max pixels-per-degree (see
+         UiSync.updateRotationZoomButtons). 32dp wide gives a comfortable tap target while the
+         ruler still owns the bulk of the row.
+
+         34dp is the tallest of the bottom-row tier — slightly more than the 30dp pointControlsRow
+         and 28dp rotation-actions row above because the ruler has to fit BOTH the tick marks AND
+         the degree labels stacked vertically, plus the indicator triangle at the top. The labels
+         add a 3dp bottom-padding gap (see RotationRulerView.onDraw) so they don't sit flush
+         against the info bar below. -->
     <LinearLayout
         android:layout_width="match_parent"
-        android:layout_height="36dp"
+        android:layout_height="34dp"
         android:orientation="horizontal"
+        android:gravity="center_vertical"
         android:background="@color/sidebar_bg">
 
-        <TextView android:id="@+id/btnRotZoomOut"
-            android:layout_width="32dp"
-            android:layout_height="match_parent"
-            android:text="−"
-            android:textSize="20sp"
-            android:textColor="@color/subtext0"
-            android:gravity="center"
-            android:background="@color/surface0"
+        <com.google.android.material.button.MaterialButton android:id="@+id/btnRotZoomOut"
+            style="@style/Widget.MaterialComponents.Button.TextButton"
+            android:layout_width="32dp" android:layout_height="match_parent"
+            android:text="−" android:textSize="16sp" android:textColor="@color/subtext0"
+            android:minWidth="0dp" android:paddingHorizontal="0dp"
+            android:insetTop="0dp" android:insetBottom="0dp"
             android:contentDescription="Zoom rotation ruler out" />
 
         <com.cropcenter.view.RotationRulerView
@@ -177,14 +255,12 @@
             android:layout_weight="1"
             android:layout_height="match_parent" />
 
-        <TextView android:id="@+id/btnRotZoomIn"
-            android:layout_width="32dp"
-            android:layout_height="match_parent"
-            android:text="+"
-            android:textSize="20sp"
-            android:textColor="@color/subtext0"
-            android:gravity="center"
-            android:background="@color/surface0"
+        <com.google.android.material.button.MaterialButton android:id="@+id/btnRotZoomIn"
+            style="@style/Widget.MaterialComponents.Button.TextButton"
+            android:layout_width="32dp" android:layout_height="match_parent"
+            android:text="+" android:textSize="16sp" android:textColor="@color/subtext0"
+            android:minWidth="0dp" android:paddingHorizontal="0dp"
+            android:insetTop="0dp" android:insetBottom="0dp"
             android:contentDescription="Zoom rotation ruler in" />
     </LinearLayout>
 
@@ -194,7 +270,9 @@
         android:background="@color/mantle" android:gravity="center_vertical"
         android:paddingHorizontal="10dp" android:orientation="horizontal">
 
-        <!-- Order: image formats, original size, cropped size, zoom, rotation -->
+        <!-- Order: image formats, original size, cropped size, zoom. The rotation value used to
+             live here but moved to the rotation actions row above (where the controls that
+             change it live). -->
         <TextView android:id="@+id/txtImageFormats"
             android:layout_width="0dp" android:layout_height="wrap_content"
             android:layout_weight="1"
@@ -222,11 +300,6 @@
             android:textColor="@color/mauve" android:textSize="10sp"
             android:layout_marginStart="8dp" android:visibility="gone"
             android:singleLine="true" />
-
-        <TextView android:id="@+id/txtRotDegrees"
-            android:layout_width="wrap_content" android:layout_height="wrap_content"
-            android:text="0°" android:textColor="@color/mauve" android:textSize="10sp"
-            android:layout_marginStart="8dp" android:singleLine="true" />
     </LinearLayout>
 
 </LinearLayout>

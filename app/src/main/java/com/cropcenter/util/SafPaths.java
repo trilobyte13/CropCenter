@@ -136,22 +136,24 @@ public final class SafPaths
 
 	/**
 	 * Recognise opaque document-ID schemes whose tail after ":" is an unparseable handle, not a path
-	 * segment. The two known opaque scheme prefixes are "msf:" (DownloadStorageProvider MediaStore-Files
-	 * numeric ID) and "image:" (media.documents provider MediaStore-Images numeric ID); a pure-numeric
-	 * docId (no colon, all digits) is the legacy form of the same MediaStore reference.
+	 * segment. Three known opaque scheme prefixes: "msf:" (DownloadStorageProvider MediaStore-Files numeric
+	 * ID), "image:" (media.documents provider MediaStore-Images numeric ID), and "document:" (recent
+	 * Samsung Files behaviour — the provider returns "document:12345" with the numeric MediaStore handle
+	 * as the tail). A pure-numeric docId (no colon, all digits) is the legacy form of the same MediaStore
+	 * reference.
 	 *
 	 * The distinction matters for sibling-URI derivation: a path-addressed docId ("primary:foo.jpg")
 	 * lets `deriveSiblingUri` build `primary:bar.jpg` as a sibling, but `msf:12345` swapped to
 	 * `msf:bar.jpg` is a bogus URI pointing at no document. Without this check, SaveController's Case-B
-	 * collision flow on Downloads providers can synthesize bogus sibling URIs and silently auto-rename
-	 * instead of surfacing the Replace/Keep/Cancel dialog.
+	 * collision flow on Downloads / Samsung Files providers can synthesize bogus sibling URIs and silently
+	 * auto-rename instead of surfacing the Replace/Keep/Cancel dialog.
 	 *
 	 * @param docId document ID to classify
 	 * @return true when docId is one of the recognised opaque schemes
 	 */
 	private static boolean isOpaqueDocId(String docId)
 	{
-		if (docId.startsWith("msf:") || docId.startsWith("image:"))
+		if (docId.startsWith("msf:") || docId.startsWith("image:") || docId.startsWith("document:"))
 		{
 			return true;
 		}

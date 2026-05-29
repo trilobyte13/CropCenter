@@ -94,15 +94,14 @@ public final class CropState
 	// Mutated only via addSelectionPoint / removeSelectionPoint* / replaceSelectionPoints / clearSelectionPoints
 	// (UI thread); getSelectionPoints returns an unmodifiable view.
 	private volatile List<SelectionPoint> selectionPoints = new ArrayList<>();
-	// originalFilename / centerLocked / cropSizeDirty / hasCenter / anchorX-Y / centerX-Y /
-	// rotationDegrees / cropH / cropW are all written by `reset()` on the bg load thread (and by
-	// installLoadedImage for originalFilename). UI-thread reads on every editor render frame, every tap /
-	// drag / pinch handler, and every save-flow dispatch (canBypassEncode reads hasCenter, cropW/H).
-	// Without volatile, a mid-load UI frame can see torn or stale primitive values — most visibly a
+	// originalFilename / cropSizeDirty / hasCenter / anchorX-Y / centerX-Y / rotationDegrees / cropH /
+	// cropW are all written by `reset()` on the bg load thread (and by installLoadedImage for
+	// originalFilename). UI-thread reads on every editor render frame, every tap / drag / pinch
+	// handler, and every save-flow dispatch (canBypassEncode reads hasCenter, cropW/H). Without
+	// volatile, a mid-load UI frame can see torn or stale primitive values — most visibly a
 	// `hasCenter = true` paired with `cropW = 0` produces a degenerate crop overlay; less visibly a
 	// stale `rotationDegrees` rotates the new image by the old image's angle for a frame or two.
 	private volatile String originalFilename;
-	private volatile boolean centerLocked = false; // when true, auto-recompute from points is suppressed
 	private volatile boolean cropSizeDirty = true;
 	// True when the in-memory image came from the Apply External Edit graft flow. Read by
 	// ExportPipeline.canBypassEncode to refuse the verbatim-write bypass for graft saves — bypassing would
@@ -539,16 +538,6 @@ public final class CropState
 	}
 
 	/**
-	 * True while the user has the Lock-center checkbox enabled — suppresses the selection-point auto-recompute
-	 * in Select mode so the crop stays put as points are added or removed. Independent of Pan mode (which
-	 * routes through setCenterMode(LOCKED) instead). See REQUIREMENTS.md §3.
-	 */
-	public boolean isCenterLocked()
-	{
-		return centerLocked;
-	}
-
-	/**
 	 * True when cropW / cropH need a fresh recompute. Set by setAspectRatio, setRotationDegrees, markCropSizeDirty,
 	 * and CropEngine.autoComputeFromPoints; cleared by CropEngine.recomputeCrop on completion.
 	 */
@@ -632,9 +621,8 @@ public final class CropState
 		hasCenter = false;
 		cropSizeDirty = true;
 		rotationDegrees = 0f;
-		centerLocked = false;
 		// Restore the documented defaults (Select mode, Both lock-axis). Without this, a new image inherits the
-		// previous session's editor/lock state — e.g. loading a photo into a still-active Move + Pan combo
+		// previous session's editor/lock state — e.g. loading a photo into a still-active Move + Pin combo
 		// jumps straight to viewport-pan gestures when the spec says new loads start in Select mode centered on
 		// the image. MainActivity's loadImage UI runnable resyncs the toolbar widgets to match these reset
 		// values.
@@ -720,11 +708,6 @@ public final class CropState
 		this.centerY = y;
 		this.hasCenter = true;
 		notifyChanged();
-	}
-
-	public void setCenterLocked(boolean locked)
-	{
-		this.centerLocked = locked;
 	}
 
 	/**
@@ -814,8 +797,8 @@ public final class CropState
 	 * magnitudes below BitmapUtils.ROTATION_EPSILON (0.005°) to exactly 0, marks the crop size dirty (recompute
 	 * needed to shrink the crop for the new rotation), and fires the listener.
 	 *
-	 * The sub-epsilon snap is the single chokepoint that keeps every rotation entry point — ruler, precise-rotation
-	 * dialog, horizon detector, programmatic — aligned with what UiSync, CropEngine, ViewportMath,
+	 * The sub-epsilon snap is the single chokepoint that keeps every rotation entry point — ruler, Reset chip,
+	 * horizon detector, programmatic — aligned with what UiSync, CropEngine, ViewportMath,
 	 * BitmapUtils.drawCropped, and ExportPipeline actually render. The 0.005° epsilon sits a half-step below the
 	 * ruler's 0.01° finest tick (and the horizon detector's 0.01° rounding), so every value those entry points can
 	 * produce is honored end-to-end. The snap exists for inputs strictly smaller than what the UI exposes — e.g.,

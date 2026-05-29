@@ -19,8 +19,8 @@ public final class BitmapUtils
 {
 	private static final String TAG = "BitmapUtils";
 	// Rotation values with magnitude below this threshold (degrees) are treated as 0 for rendering purposes. The
-	// ruler exposes 0.01° as its finest tick step (and the horizon detector / precise-rotation dialog round to
-	// 0.01° too), so the threshold sits a half-step below that — anything ≥ 0.005° is honored end-to-end (renderer
+	// ruler exposes 0.01° as its finest tick step (and the horizon detector rounds to 0.01° too), so the
+	// threshold sits a half-step below that — anything ≥ 0.005° is honored end-to-end (renderer
 	// rotates, readout shows, ExportPipeline can't bypass); anything below is below user control and would just
 	// burn a bilinear pass for no visible benefit. On a 4000-px-wide image, 0.01° corresponds to a corner shift of
 	// ~0.7 px, which is observable on fine vertical/horizontal lines.

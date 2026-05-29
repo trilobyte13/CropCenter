@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- FolderBrowser's content list + draggable fast scroller. The FastScroller overlays the right
+     edge of the RecyclerView via FrameLayout z-order; when a thumb is visible it consumes every
+     touch in its 40dp strip so a missed grab doesn't fall through and trigger a RecyclerView
+     fling. When no thumb is needed (folder fits viewport) ACTION_DOWN returns false so cells
+     underneath stay tappable. RecyclerView's own scrollbars are off (the custom thumb is the
+     only scroll affordance) and the built-in fastScrollEnabled attribute is unused — its
+     dynamic thumb height has no usable minimum (collapses to a sliver on 50k folders) and its
+     pixel-based math hits expensive SpanSizeLookup paths on huge content. BrowserFastScroller
+     uses position-based math (findFirstVisibleItemPosition, scrollToPositionWithOffset) so it
+     stays O(1) regardless of folder size. -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content">
+
+    <com.cropcenter.view.BrowserRecyclerView
+        android:id="@+id/folder_browser_recycler"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:clipToPadding="false"
+        android:paddingTop="4dp"
+        android:paddingBottom="12dp"
+        android:scrollbars="none" />
+
+    <com.cropcenter.view.BrowserFastScroller
+        android:id="@+id/folder_browser_fast_scroller"
+        android:layout_width="40dp"
+        android:layout_height="match_parent"
+        android:layout_gravity="end" />
+
+    <!-- Progress spinner shown while bg enumeration is in flight. On the Camera album (50k+ items)
+         listFiles + sort takes ~700ms — without this, the user sees an empty list and can't tell
+         whether the dialog is loading or whether the folder is genuinely empty. Centered over the
+         recycler area; toggled visible by FolderBrowser.refresh and hidden when the UI post lands. -->
+    <ProgressBar android:id="@+id/folder_browser_progress"
+        android:layout_width="48dp"
+        android:layout_height="48dp"
+        android:layout_gravity="center"
+        android:indeterminateTint="@color/mauve"
+        android:visibility="gone" />
+
+</FrameLayout>

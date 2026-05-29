@@ -12,12 +12,17 @@ import java.io.File;
 import java.util.List;
 
 /**
- * Tests for FolderPickerDialog's package-private static helpers. The merged save dialog is dominated by
- * AlertDialog / Context / View dependencies that are difficult to exercise from JUnit, but the
- * extension-normalisation, filename-validation, breadcrumb-chain, and image-extension-recognition
- * rules that gate the in-app save path are pure-string / pure-File logic worth pinning. A regression
- * in any of these would silently mis-handle the user's pick — wrong extension on save, traversal
- * filename accepted, breadcrumb missing a segment, image file invisible in the grid.
+ * Tests for the pure-function helpers backing the merged save dialog. Extension-normalisation +
+ * filename-validation live on FolderPickerDialog (save-flow-specific); breadcrumb-chain +
+ * image-extension-recognition live on FolderBrowser (shared between FolderPickerDialog and
+ * OpenPickerDialog since the refactor). Both pickers route through the same FolderBrowser helpers,
+ * so the breadcrumb / image-filter tests here pin the contract for both dialogs simultaneously.
+ *
+ * The merged save dialog itself is dominated by AlertDialog / Context / View dependencies that are
+ * difficult to exercise from JUnit; these pure-string / pure-File tests are the JVM-side coverage
+ * we can offer. A regression in any of them would silently mis-handle the user's pick — wrong
+ * extension on save, traversal filename accepted, breadcrumb missing a segment, image file
+ * invisible in the grid.
  */
 public final class FolderPickerDialogTest
 {
@@ -28,7 +33,7 @@ public final class FolderPickerDialogTest
 		// uses this to show "Internal storage" alone with no chevron-separated descendants.
 		File root = new File("/storage/emulated/0");
 		File current = new File("/storage/emulated/0");
-		List<File> chain = FolderPickerDialog.breadcrumbChain(root, current);
+		List<File> chain = FolderBrowser.breadcrumbChain(root, current);
 		assertEquals(1, chain.size());
 		assertEquals(root.getAbsolutePath(), chain.get(0).getAbsolutePath());
 	}
@@ -45,7 +50,7 @@ public final class FolderPickerDialogTest
 		File camera = new File(dcim, "Camera");
 		File year = new File(camera, "2026");
 		File vacation = new File(year, "Vacation");
-		List<File> chain = FolderPickerDialog.breadcrumbChain(root, vacation);
+		List<File> chain = FolderBrowser.breadcrumbChain(root, vacation);
 		assertEquals(5, chain.size());
 		assertEquals(root.getAbsolutePath(), chain.get(0).getAbsolutePath());
 		assertEquals(dcim.getAbsolutePath(), chain.get(1).getAbsolutePath());
@@ -67,7 +72,7 @@ public final class FolderPickerDialogTest
 		// from filesystem-resolution behaviour.
 		File root = new File("/storage/emulated/0");
 		File outsider = new File("/tmp/somewhere-else");
-		List<File> chain = FolderPickerDialog.breadcrumbChain(root, outsider);
+		List<File> chain = FolderBrowser.breadcrumbChain(root, outsider);
 		assertEquals(1, chain.size());
 		assertEquals(root.getAbsolutePath(), chain.get(0).getAbsolutePath());
 	}
@@ -79,24 +84,26 @@ public final class FolderPickerDialogTest
 		// a top-level folder.
 		File root = new File("/storage/emulated/0");
 		File dcim = new File(root, "DCIM");
-		List<File> chain = FolderPickerDialog.breadcrumbChain(root, dcim);
+		List<File> chain = FolderBrowser.breadcrumbChain(root, dcim);
 		assertEquals(2, chain.size());
 		assertEquals(root.getAbsolutePath(), chain.get(0).getAbsolutePath());
 		assertEquals(dcim.getAbsolutePath(), chain.get(1).getAbsolutePath());
 	}
 
 	@Test
-	public void isImageFileAcceptsAllSupportedExtensions()
+	public void isImageFileAcceptsAllVisibleExtensions()
 	{
-		// Production filter for the file-list pass in refresh(): JPEG, PNG, WebP, HEIC, HEIF. Anything
-		// outside this set is hidden from the grid / list view. Locking the accepted set so a
-		// regression doesn't silently drop one of the formats.
-		assertTrue(FolderPickerDialog.isImageFile(new File("photo.jpg")));
-		assertTrue(FolderPickerDialog.isImageFile(new File("photo.jpeg")));
-		assertTrue(FolderPickerDialog.isImageFile(new File("photo.png")));
-		assertTrue(FolderPickerDialog.isImageFile(new File("photo.webp")));
-		assertTrue(FolderPickerDialog.isImageFile(new File("photo.heic")));
-		assertTrue(FolderPickerDialog.isImageFile(new File("photo.heif")));
+		// Production filter for the file-list pass in refresh(): JPEG, PNG, WebP, HEIC, HEIF —
+		// the visible set. This is intentionally broader than the loadable set (isSupportedSourceFormat
+		// — JPEG/PNG only); WebP / HEIC / HEIF render as dimmed non-tappable cells so the user sees
+		// they exist but can't pick them. Locking the accepted set so a regression doesn't silently
+		// drop one of the formats from the picker.
+		assertTrue(FolderBrowser.isImageFile(new File("photo.jpg")));
+		assertTrue(FolderBrowser.isImageFile(new File("photo.jpeg")));
+		assertTrue(FolderBrowser.isImageFile(new File("photo.png")));
+		assertTrue(FolderBrowser.isImageFile(new File("photo.webp")));
+		assertTrue(FolderBrowser.isImageFile(new File("photo.heic")));
+		assertTrue(FolderBrowser.isImageFile(new File("photo.heif")));
 	}
 
 	@Test
@@ -105,22 +112,45 @@ public final class FolderPickerDialogTest
 		// Filenames from Windows / macOS USB transfers often have uppercase extensions. Lowercase
 		// pass in production via toLowerCase(Locale.ROOT) inside isImageFile — pin the contract
 		// so a regression doesn't make those files invisible.
-		assertTrue(FolderPickerDialog.isImageFile(new File("PHOTO.JPG")));
-		assertTrue(FolderPickerDialog.isImageFile(new File("Photo.PnG")));
-		assertTrue(FolderPickerDialog.isImageFile(new File("vacation.HEIC")));
+		assertTrue(FolderBrowser.isImageFile(new File("PHOTO.JPG")));
+		assertTrue(FolderBrowser.isImageFile(new File("Photo.PnG")));
+		assertTrue(FolderBrowser.isImageFile(new File("vacation.HEIC")));
 	}
 
 	@Test
 	public void isImageFileRejectsNonImageExtensions()
 	{
-		// GIF / BMP / RAW / TIFF intentionally not supported (no thumbnail decode path); the picker
+		// GIF / BMP / RAW / TIFF intentionally not visible (no thumbnail decode path); the picker
 		// hides them. Also non-image files (.txt, .pdf) and bare names without an extension.
-		assertFalse(FolderPickerDialog.isImageFile(new File("photo.gif")));
-		assertFalse(FolderPickerDialog.isImageFile(new File("photo.bmp")));
-		assertFalse(FolderPickerDialog.isImageFile(new File("photo.raw")));
-		assertFalse(FolderPickerDialog.isImageFile(new File("photo.tiff")));
-		assertFalse(FolderPickerDialog.isImageFile(new File("readme.txt")));
-		assertFalse(FolderPickerDialog.isImageFile(new File("noext")));
+		assertFalse(FolderBrowser.isImageFile(new File("photo.gif")));
+		assertFalse(FolderBrowser.isImageFile(new File("photo.bmp")));
+		assertFalse(FolderBrowser.isImageFile(new File("photo.raw")));
+		assertFalse(FolderBrowser.isImageFile(new File("photo.tiff")));
+		assertFalse(FolderBrowser.isImageFile(new File("readme.txt")));
+		assertFalse(FolderBrowser.isImageFile(new File("noext")));
+	}
+
+	@Test
+	public void isSupportedSourceFormatAcceptsJpegAndPngOnly()
+	{
+		// The narrower predicate that gates which visible cells are TAPPABLE (load-pipeline
+		// accepts only JPEG/PNG by magic-byte check; HEIC / WebP / HEIF show in the picker but
+		// render at 0.4 alpha with no click handler). Visibility (isImageFile, broader) and
+		// loadability (isSupportedSourceFormat, narrower) must stay separate — if a future
+		// refactor collapses them, the user either loses the visual cue for HEIC / WebP / HEIF
+		// or starts tapping them and hitting "Unsupported image format" toasts after-the-fact.
+		assertTrue(FolderBrowser.isSupportedSourceFormat(new File("photo.jpg")));
+		assertTrue(FolderBrowser.isSupportedSourceFormat(new File("photo.jpeg")));
+		assertTrue(FolderBrowser.isSupportedSourceFormat(new File("photo.png")));
+		assertTrue(FolderBrowser.isSupportedSourceFormat(new File("PHOTO.JPG")));
+		assertTrue(FolderBrowser.isSupportedSourceFormat(new File("Photo.PnG")));
+
+		assertFalse(FolderBrowser.isSupportedSourceFormat(new File("photo.webp")));
+		assertFalse(FolderBrowser.isSupportedSourceFormat(new File("photo.heic")));
+		assertFalse(FolderBrowser.isSupportedSourceFormat(new File("photo.heif")));
+		assertFalse(FolderBrowser.isSupportedSourceFormat(new File("vacation.HEIC")));
+		assertFalse(FolderBrowser.isSupportedSourceFormat(new File("photo.gif")));
+		assertFalse(FolderBrowser.isSupportedSourceFormat(new File("noext")));
 	}
 
 	@Test
