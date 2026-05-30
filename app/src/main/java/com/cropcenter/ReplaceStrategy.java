@@ -127,28 +127,20 @@ final class ReplaceStrategy
 	/**
 	 * Replace the colliding file in the user's chosen directory (NOT the opened file's directory).
 	 *
-	 * Write-first-then-swap ordering: the new bytes are written to the SAF placeholder (which has a "(N)"
-	 * auto-renamed suffix) and verified BEFORE we touch the original. This makes the operation crash-safe — if
-	 * encode/write fails the original is preserved, and the worst case is a leftover placeholder with the
-	 * auto-suffix name.
-	 *
-	 * Strategy after the verified write, tried in order of reliability:
-	 *   A. File I/O via MANAGE_EXTERNAL_STORAGE — FileOutputStream bypasses SAF's inconsistent
-	 *      delete/rename semantics entirely.
-	 *   B. SAF direct overwrite — stream placeholder bytes into the colliding original URI when
-	 *      the provider grants sibling access.
+	 * Write-first-then-swap: the new bytes go to the auto-renamed "(N)" SAF placeholder and are verified
+	 * BEFORE we touch the original, so a failed encode/write leaves the original intact (worst case: a leftover
+	 * placeholder). Then, in order of reliability:
+	 *   A. File I/O (MANAGE_EXTERNAL_STORAGE) — bypasses SAF's inconsistent delete/rename semantics.
+	 *   B. SAF direct overwrite — stream placeholder bytes into the colliding URI.
 	 *   C. SAF delete-colliding + rename-placeholder — last resort.
 	 *
-	 * Ordering is critical: File I/O, when it succeeds, writes the TARGET file (the original at requestedName) with
-	 * the new bytes. The SAF fallback paths that follow operate on the same two URIs, and their delete/rename calls
-	 * could accidentally destroy the just-written target if we ran them unconditionally. So File I/O short-circuits
-	 * the rest of the flow on a fully-successful outcome; SAF paths only run when File I/O couldn't touch the
-	 * target. verifyReplace runs in both branches to catch partial states.
+	 * Ordering is critical: when File I/O succeeds it has already written the target, so the SAF paths'
+	 * delete/rename calls could destroy it — File I/O short-circuits the rest, and SAF runs only when it
+	 * couldn't touch the target. verifyReplace runs in both branches to catch partial states.
 	 *
-	 * @param newUri        SAF placeholder URI (auto-renamed "(N)" suffix) holding the freshly-written bytes
+	 * @param newUri        SAF placeholder URI ("(N)" suffix) holding the freshly-written bytes
 	 * @param requestedName the user-typed filename the placeholder should land at after the swap
-	 * @param wasOverwrite  true when the call was triggered by a confirmed-overwrite path (drives the
-	 *                      success toast wording: "Replaced X" vs "Saved X")
+	 * @param wasOverwrite  true on a confirmed-overwrite path (toast "Replaced X" vs "Saved X")
 	 */
 	void replaceColliding(Uri newUri, String requestedName, boolean wasOverwrite)
 	{
@@ -528,35 +520,26 @@ final class ReplaceStrategy
 
 	/**
 	 * Bg-thread callback fired once ExportPipeline has written the placeholder. Owns the three-strategy ladder:
-	 *
-	 *   A. File I/O. Writes the encoded bytes directly from `data` — avoids re-reading the placeholder through
-	 *      FUSE/MediaStore layers that may not be in sync yet. Verifies the target's on-disk length matches before
-	 *      reporting success. When this path succeeds, skip SAF paths entirely — running them on the
-	 *      already-correct target could delete it.
-	 *   B. SAF direct overwrite. Verifies the colliding target byte-for-byte against `data` before deleting the
-	 *      verified placeholder. If verification fails, leaves the placeholder in place so the user still has their
-	 *      verified save at the auto-suffixed name and verifyReplace's "two files" branch surfaces the situation.
-	 *   C. SAF rename-with-fallback. Tries rename FIRST; falls back to delete-then-rename only when the strict
-	 *      provider rejected the rename-to-existing collision.
-	 *
-	 * On a verified end state, fires the user-facing toast ("Replaced <name>" or "Saved <name>" depending on
-	 * wasOverwrite). verifyReplace shows a failure dialog internally for unclean states.
+	 *   A. File I/O — writes `data` directly to the target (avoids re-reading the placeholder through
+	 *      FUSE/MediaStore layers that may lag), verifies on-disk length, and on success SKIPS the SAF paths
+	 *      (running them on the already-correct target could delete it).
+	 *   B. SAF direct overwrite — verifies the colliding target byte-for-byte against `data` before deleting
+	 *      the placeholder; on verify failure leaves the placeholder so the user keeps their save at the
+	 *      auto-suffixed name and verifyReplace's "two files" branch surfaces it.
+	 *   C. SAF rename-with-fallback — tries rename first, then delete-then-rename only if the provider rejects
+	 *      rename-to-existing.
+	 * On a verified end state fires the toast ("Replaced"/"Saved" per wasOverwrite); verifyReplace shows a
+	 * failure dialog for unclean states.
 	 *
 	 * @param newUri        SAF placeholder URI ExportPipeline wrote `data` to
 	 * @param requestedName the user's requested filename (the colliding target's display name)
-	 * @param wasOverwrite  true when caller knows the colliding target held real prior content (toast says
-	 *                      "Replaced"); false when the Replace path was taken purely for crash-safety on an
-	 *                      unknown-size target (toast says "Saved")
-	 * @param verifyUriBox  single-element box mutated to the post-rename URI when strategy C succeeds — see
-	 *                      replaceColliding for why we use a box rather than a local
-	 * @param encoded       the exported payload that ExportPipeline already verified against the placeholder.
-	 *                      May be tempfile-mode (PNG streaming) — readbackByteCount and replaceViaFileIo need
-	 *                      bytes, so we materialise the tempfile here. The PNG streaming path was added to avoid
-	 *                      a 400-600 MB heap allocation during Save; the Replace + 200 MP PNG combination is
-	 *                      rare enough that we accept the OOM risk and abort the Replace cleanly when the
-	 *                      materialisation throws (the placeholder save is already verified, so the user has a
-	 *                      copy at the auto-suffixed name and `verifyReplace`'s "two files" dialog surfaces the
-	 *                      partial state).
+	 * @param wasOverwrite  true when the colliding target held real prior content (toast "Replaced"); false
+	 *                      when Replace was taken purely for crash-safety (toast "Saved")
+	 * @param verifyUriBox  single-element box mutated to the post-rename URI when strategy C succeeds
+	 * @param encoded       the verified exported payload. Tempfile-mode (PNG streaming) is materialised here
+	 *                      since readbackByteCount / replaceViaFileIo need bytes; the rare Replace + 200 MP PNG
+	 *                      combo may OOM, in which case we abort cleanly (the placeholder save is already
+	 *                      verified, so the user has a copy and verifyReplace's "two files" dialog surfaces it)
 	 */
 	private void writeReplacementPayload(Uri newUri, String requestedName, boolean wasOverwrite,
 		Uri[] verifyUriBox, ExportResult encoded)

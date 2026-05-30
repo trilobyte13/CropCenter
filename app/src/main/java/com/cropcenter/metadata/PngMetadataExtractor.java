@@ -28,7 +28,7 @@ public final class PngMetadataExtractor
 
 	// 4-byte ASCII "eXIf" chunk-type bytes. Lowercase 'e' marks ancillary, uppercase 'X' marks public,
 	// uppercase 'I' is the reserved bit, lowercase 'f' marks safe-to-copy across edits. Shared by
-	// `findExifChunk` (the byte-by-byte walk) and `CropExporter.injectPngExifFromTiff` (the chunk writer)
+	// `findExifChunk` (the byte-by-byte walk) and `CropExporter.injectPngExifFromTiffFileToFile` (the chunk writer)
 	// so the chunk-type literal lives in one place rather than as parallel inline byte sequences in both
 	// files.
 	public static final byte[] EXIF_CHUNK_TYPE = { 'e', 'X', 'I', 'f' };

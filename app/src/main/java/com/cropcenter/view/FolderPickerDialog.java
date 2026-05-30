@@ -26,22 +26,17 @@ import java.nio.charset.StandardCharsets;
 import java.util.function.Consumer;
 
 /**
- * Merged in-app save dialog — combines the format chips + Export Grid checkbox + editable
- * "Save as" filename field with a filesystem browser (delegated to FolderBrowser) for picking
- * the target folder. Used by the Save flow as a workaround for Samsung's One UI
+ * Merged in-app save dialog — format chips + Export Grid checkbox + editable "Save as" filename + a
+ * filesystem browser (delegated to FolderBrowser) for the target folder. Workaround for Samsung's One UI
  * ACTION_CREATE_DOCUMENT picker, which hides folder listings in internal-storage views.
  *
- * Layout top-to-bottom: a single SURFACE0-backed DialogCards panel hosting the FolderBrowser
- * panel (title block + breadcrumb + thumbnail scroller) plus an options row (format chips +
- * Export Grid checkbox) plus a "Save as" filename row. The browser panel's file rows / grid
- * cells are tap-to-populate: tapping an existing file fills the "Save as" filename input with
- * that file's name (convenient for overwriting), but the dialog stays open and the actual
- * save commit happens via the Save here button. Distinct from OpenPickerDialog's
- * tap-to-dismiss semantics where a tap commits the choice directly.
+ * Layout: a single SURFACE0 DialogCards panel hosting the FolderBrowser panel (title + breadcrumb +
+ * thumbnail scroller) + an options row (format chips + Export Grid) + a "Save as" filename row. File taps
+ * are tap-to-populate — tapping a file fills the filename input (convenient for overwriting) but the dialog
+ * stays open; the save commits via "Save here". Distinct from OpenPickerDialog's tap-to-dismiss.
  *
- * Transient-dialog tracking uses host.setActiveTransientDialog (not registerTransientDialog)
- * plus a hostDismissCallback because the dialog installs its own composite OnDismissListener
- * that calls FolderBrowser.shutdown.
+ * Transient-dialog tracking uses host.setActiveTransientDialog (not registerTransientDialog) + a
+ * hostDismissCallback because the dialog installs its own composite OnDismissListener calling FolderBrowser.shutdown.
  */
 public final class FolderPickerDialog
 {

@@ -56,28 +56,22 @@ public record AspectRatio(float width, float height)
 	}
 
 	/**
-	 * Snap (cropW, cropH) to (Wr·k, Hr·k) where (Wr, Hr) is THIS aspect ratio reduced to lowest terms,
-	 * picking the integer k that minimises Euclidean distance from (cropW, cropH). The result is the
-	 * exact integer-pixel realisation of the locked aspect ratio nearest the requested crop, eliminating
-	 * the ~0.5-pixel-per-axis drift that independent Math.round on each dimension produces.
+	 * Snap (cropW, cropH) to (Wr·k, Hr·k) where (Wr, Hr) is this AR reduced to lowest terms, picking the
+	 * integer k minimising Euclidean distance from (cropW, cropH) — the exact integer-pixel realisation of the
+	 * locked AR nearest the requested crop, eliminating the ~0.5 px/axis drift that independent per-axis
+	 * Math.round produces.
 	 *
-	 * Returns input unchanged when:
-	 *   - this AR is FREE (no constraint, nothing to snap to), or
-	 *   - either dimension is non-integer (custom AR with fractional inputs — exact-integer snap isn't
-	 *     achievable; the caller's per-axis round is the best available match)
-	 *
-	 * The snap is capped at (maxW, maxH) so the result never exceeds the image's actual bounds — caller
-	 * passes imgW / imgH (or, in a never-grow context, the input cropW / cropH) to bound the search.
-	 * k is also floored at the smallest value that keeps both axes ≥ `CropEngine.MIN_CROP_DIMENSION_PX`
-	 * (so a 1:1 lock at the bottom end yields 4×4, not 1×1).
+	 * Returns input unchanged when this AR is FREE (nothing to snap to) or either dimension is non-integer
+	 * (fractional custom AR — exact-integer snap isn't achievable). Capped at (maxW, maxH) so the result never
+	 * exceeds bounds (caller passes imgW/imgH, or the input cropW/cropH in a never-grow context), and k is
+	 * floored so both axes stay ≥ CropEngine.MIN_CROP_DIMENSION_PX (a 1:1 lock yields 4×4, not 1×1).
 	 *
 	 * @param cropW pre-snap width in image pixels (output of CropEngine's per-axis Math.round)
 	 * @param cropH pre-snap height in image pixels (same)
-	 * @param maxW  upper bound on the snapped width (typically imgW; pass cropW to forbid growth)
-	 * @param maxH  upper bound on the snapped height (typically imgH; pass cropH to forbid growth)
-	 * @return two-element int array {snappedW, snappedH}; snappedW / snappedH equals Wr / Hr exactly
-	 *         when both dimensions are integer-valued, or the original (cropW, cropH) when this AR is
-	 *         FREE / fractional
+	 * @param maxW  upper bound on snapped width (typically imgW; pass cropW to forbid growth)
+	 * @param maxH  upper bound on snapped height (typically imgH; pass cropH to forbid growth)
+	 * @return {snappedW, snappedH}; equals Wr / Hr exactly when both dims are integer, or (cropW, cropH) when
+	 *         this AR is FREE / fractional
 	 */
 	public int[] snap(int cropW, int cropH, int maxW, int maxH)
 	{

@@ -120,20 +120,16 @@ public final class RotatedCropClamp
 	}
 
 	/**
-	 * Lock-aware single-axis clamp — holds the non-varying axis at its input value and clamps only the
-	 * varying axis. Used by drag handlers under per-axis lock (CenterMode.HORIZONTAL drags X with Y held,
-	 * CenterMode.VERTICAL drags Y with X held) so the joint clampRotated binary search doesn't pull the
-	 * locked axis toward image-midpoint when the requested free-axis position puts rotated corners
-	 * outside the image. Without this helper, dragging the free axis to the rotated AABB's extreme
-	 * causes the locked axis to snap to imageMid (the only X / Y where the rotated corners fit at the
-	 * extreme free-axis position), visibly breaking the per-axis lock.
+	 * Lock-aware single-axis clamp — holds the non-varying axis at its input value and clamps only the varying
+	 * axis. Used by drag handlers under per-axis lock (HORIZONTAL varies X with Y held; VERTICAL the reverse)
+	 * so the joint clampRotated binary search doesn't pull the locked axis toward image-midpoint when the free
+	 * axis puts rotated corners outside the image — which would visibly break the lock by snapping the locked
+	 * axis to imageMid.
 	 *
-	 * Fallback when the locked-axis pin is geometrically impossible (the locked-axis value can't
-	 * accommodate the crop at ANY value of the free axis under this rotation): snap to image-midpoint
-	 * on both axes — matches clampRotated's full-fallback behaviour so the caller gets a stable result
-	 * the renderer can draw, even if the lock pin is violated. This branch is unreachable when the
-	 * locked-axis value was inside the rotated image bounds before the drag started, which is the
-	 * common case.
+	 * Fallback when the locked-axis pin is geometrically impossible (the crop can't fit at that locked value
+	 * for ANY free-axis position under this rotation): snap to image-midpoint on both axes, matching
+	 * clampRotated's full fallback so the caller still gets a drawable result. Unreachable when the locked
+	 * value was inside the rotated bounds before the drag (the common case).
 	 *
 	 * @param x               requested center X
 	 * @param y               requested center Y
@@ -142,10 +138,9 @@ public final class RotatedCropClamp
 	 * @param rotationDegrees rotation angle (sub-epsilon collapses to the cheap per-axis clamp)
 	 * @param imgW            source image width
 	 * @param imgH            source image height
-	 * @param varyX           true to vary X while holding Y at input; false to vary Y while holding X
-	 * @return [clampedX, clampedY] with the non-varying axis equal to its input value when the lock is
-	 *         geometrically possible, or [imageMidX, imageMidY] when the lock pin can't accommodate the
-	 *         crop at any free-axis position
+	 * @param varyX           true to vary X while holding Y; false to vary Y while holding X
+	 * @return [clampedX, clampedY] with the non-varying axis at its input value when the lock is possible, or
+	 *         [imageMidX, imageMidY] when the lock pin can't accommodate the crop at any free-axis position
 	 */
 	public static float[] clampSingleAxis(float x, float y, int cropW, int cropH,
 		float rotationDegrees, int imgW, int imgH, boolean varyX)

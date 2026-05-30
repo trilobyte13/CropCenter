@@ -7,7 +7,7 @@ package com.cropcenter.model;
  * Field meanings:
  *   enabled            — master toggle for the preview grid
  *   includeInExport    — bake the grid into saved output
- *   showPixelGrid      — show the pixel grid when zoom ≥ 6x
+ *   showPixelGrid      — show the pixel grid at high zoom (once each source pixel renders at ~3dp)
  *   lineWidth          — grid stroke width in image pixels
  *   color              — grid line color (default white)
  *   columns / rows     — grid cell count
@@ -18,8 +18,8 @@ public record GridConfig(boolean enabled, boolean includeInExport, boolean showP
 	int color, int columns, int pixelGridColor, int rows, int selectionColor)
 {
 	/**
-	 * Default configuration applied to every freshly-loaded image: grid visible at 4×4, pixel grid visible when
-	 * zoomed past 6×, grid NOT baked into exports, 50%-transparent blue selection overlay.
+	 * Default configuration applied to every freshly-loaded image: grid visible at 4×4, pixel grid visible at
+	 * high zoom (~3dp per source pixel), grid NOT baked into exports, 50%-transparent blue selection overlay.
 	 */
 	public static GridConfig defaults()
 	{

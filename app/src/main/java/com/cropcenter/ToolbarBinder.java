@@ -111,28 +111,19 @@ final class ToolbarBinder
 
 	/**
 	 * Re-read CropState and write the dependent toolbar UI: AR chip text + visual state, Pin chip selected
-	 * state, mode + lock highlights, and the active editor mode's lock preference. Called by
-	 * MainActivity.installImageOnUi after RestoreController.applyIfPending consumes a saved bundle —
-	 * installImageOnUi's earlier reset block unconditionally unpins and resets the lock prefs to BOTH /
-	 * VERTICAL, so without this resync the toolbar would visually show new-load defaults while the model
-	 * holds the restored Move+H or Select+V the user had at kill time.
+	 * state, mode + lock highlights, and the active mode's lock preference. Called by
+	 * MainActivity.installImageOnUi after a restore consumes a saved bundle — the earlier reset block unpins
+	 * and resets the lock prefs to defaults, so without this resync the toolbar would show new-load defaults
+	 * while the model holds the restored Move+H / Select+V.
 	 *
-	 * No listener-suppression dance needed: AR is set via popup choice (no synthetic re-firing) and
-	 * Pin / Grid are MaterialButton chips driven by View.isSelected (no CompoundButton listener firing
-	 * on programmatic setSelected). The whole Spinner / CheckBox protection apparatus the prior
-	 * implementation needed (suppressArListener, chkPin.setOnCheckedChangeListener(null) bracketing)
-	 * collapsed away with the chip migration.
+	 * No listener-suppression needed: AR is set via popup choice (no synthetic re-fire) and Pin / Grid are
+	 * MaterialButton chips driven by setSelected (no CompoundButton listener on programmatic set).
 	 *
-	 * Lock-preference reconstruction: selectLockPref / moveLockPref are persisted as separate bundle
-	 * keys (STATE_SELECT_LOCK_PREF / STATE_MOVE_LOCK_PREF in RestoreController) and re-seeded into
-	 * MainActivity's fields BEFORE this method runs via the Outcome record applyIfPending returns —
-	 * so by the time we get here, both prefs already match the user's pre-kill choices. The
-	 * setCurrentPref call below is a defensive belt-and-braces write that keeps the active mode's
-	 * pref consistent with state.getCenterMode() (which IS the committed centerMode when Pin was
-	 * off); it's idempotent when MainActivity already re-seeded the right value. We skip it when
-	 * centerMode == LOCKED (Pin was on at kill time) so the underlying axis preference that
-	 * MainActivity restored from the bundle stays in place rather than being overwritten with the
-	 * meaningless LOCKED sentinel.
+	 * Lock-preference reconstruction: selectLockPref / moveLockPref are re-seeded into MainActivity's fields
+	 * BEFORE this runs (via applyIfPending's Outcome), so both already match the pre-kill choices. The
+	 * setCurrentPref below is a defensive write keeping the active mode's pref consistent with
+	 * state.getCenterMode() (idempotent when already re-seeded); skipped when centerMode == LOCKED (Pin was
+	 * on) so the restored axis pref isn't overwritten with the meaningless LOCKED sentinel.
 	 */
 	void syncFromState()
 	{

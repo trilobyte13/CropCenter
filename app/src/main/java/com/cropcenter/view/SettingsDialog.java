@@ -65,31 +65,23 @@ public final class SettingsDialog
 	}
 
 	/**
-	 * Build and show the settings dialog. Card-style layout: Grid (cols/rows + line color/width), Pixel Grid
-	 * (toggle + color), Selection & Paint (shared color), and a Build info card. Toggles and color-picker
-	 * selections commit immediately; Cols / Rows EditTexts are deferred to the "Done" button.
+	 * Build and show the settings dialog. Card layout: Grid (cols/rows + line color/width), Pixel Grid
+	 * (toggle + color), Selection & Paint (shared color), Build info. Toggles and color-picker selections
+	 * commit immediately; Cols / Rows EditTexts are deferred to "Done".
 	 *
-	 * Returns the AlertDialog so the caller can track it for forced dismissal — a Share/View intent that
-	 * arrives mid-dialog runs state.reset() on bg, racing the user's in-dialog commits.
+	 * Returns the AlertDialog so the caller can force-dismiss it — a Share/View intent mid-dialog runs
+	 * state.reset() on bg, racing the user's in-dialog commits.
 	 *
-	 * Both OnCancel AND OnDismiss cancel any open ColorPickerDialog: the picker is a separate AlertDialog
-	 * that mutates state.gridConfig through its own OK button, so without forced cancellation a stale
-	 * picker outliving SettingsDialog could keep applying colors to the new image's state. Cancel covers
-	 * user-initiated cancels; dismiss covers Done, the Activity-destroyed-at-config-change path, and any
-	 * future dialog-API dismissal — all of which reach dismiss-but-not-cancel.
-	 *
-	 * AlertDialog.setOnDismissListener replaces rather than chains, so SettingsDialog installs one
-	 * listener that calls cancelActivePicker AND then hostDismissListener — a caller cannot install
-	 * its own dismiss listener without clobbering the picker cleanup.
+	 * Both OnCancel AND OnDismiss cancel any open ColorPickerDialog (a separate AlertDialog that mutates
+	 * gridConfig via its own OK): a stale picker outliving SettingsDialog could keep applying colors to the
+	 * new image. Cancel covers user cancels; dismiss covers Done, config-change destroy, and any future
+	 * dismissal. setOnDismissListener replaces rather than chains, so this installs ONE listener calling
+	 * cancelActivePicker then hostDismissListener — a caller can't add its own without clobbering the cleanup.
 	 *
 	 * @param ctx                 Activity context for inflation
 	 * @param state               CropState whose gridConfig is mutated as the user interacts
-	 * @param permissions         storage-permission helper — used to render the "All files access"
-	 *                            row that lets the user grant MANAGE_EXTERNAL_STORAGE without first
-	 *                            triggering a save-time collision. Pass null to omit the row (host
-	 *                            doesn't expose the permission surface)
-	 * @param hostDismissListener additional cleanup composed with cancelActivePicker on dismiss; may
-	 *                            be null
+	 * @param permissions         storage-permission helper for the "All files access" row; null omits the row
+	 * @param hostDismissListener additional cleanup composed with cancelActivePicker on dismiss; may be null
 	 * @return the shown AlertDialog (caller tracks it for cross-load dismissal)
 	 */
 	public static AlertDialog show(Context ctx, CropState state, StoragePermissionHelper permissions,
@@ -174,7 +166,7 @@ public final class SettingsDialog
 	}
 
 	/**
-	 * Commit the Columns / Rows EditText values to state, clamping each to [1, 50]. A blank / non-numeric
+	 * Commit the Columns / Rows EditText values to state, clamping each to [1, 99]. A blank / non-numeric
 	 * field is silently ignored — preset-chip taps already synced the inputs back in.
 	 *
 	 * @param state    CropState whose gridConfig is mutated with the parsed values

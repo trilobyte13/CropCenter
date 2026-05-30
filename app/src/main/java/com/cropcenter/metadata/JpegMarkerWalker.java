@@ -29,34 +29,29 @@ public final class JpegMarkerWalker
 	private JpegMarkerWalker() {}
 
 	/**
-	 * Walk JPEG markers from `startOff` (which must point at an SOI marker — FF D8) to find the byte offset
-	 * just past the matching EOI (FF D9). Returns -1 when the JPEG starting at startOff doesn't end cleanly
-	 * within `endBound` — caller treats this as "no recoverable scan" and surfaces a real failure toast
-	 * rather than relying on an undefined post-EOF read.
+	 * Walk JPEG markers from `startOff` (must point at SOI, FF D8) to the byte just past the matching EOI
+	 * (FF D9). Returns -1 when the JPEG doesn't end cleanly within `endBound` — caller treats that as "no
+	 * recoverable scan" rather than reading past EOF.
 	 *
-	 * Forward marker-chain walking (vs. backward FF D9 scan) is required for any JPEG embedded in a container
-	 * that holds other binary content — SEFT trailers can contain embedded thumbnails whose own FF D9 EOIs and
-	 * arbitrary edit-history bytes would short-circuit a backward scan onto a wrong terminator. Walking the
-	 * marker chain forward stops only at the first real EOI.
+	 * Forward marker-chain walking (not a backward FF D9 scan) is required for a JPEG embedded in a container:
+	 * SEFT trailers hold embedded thumbnails whose own FF D9 and arbitrary bytes would short-circuit a backward
+	 * scan onto the wrong terminator. Walking forward stops only at the first real EOI.
 	 *
-	 * Hardened against four classes of malformed / adversarial input:
-	 *   - segLen < 2 (per spec the length must include the 2 length bytes themselves; smaller is invalid and
-	 *     would advance off by 2 or 3 instead of the real segment size, getting stuck mid-segment)
-	 *   - segLen / sosLen near 65535 with `off` near MAX_INT, where the addition wraps to a negative `next`
-	 *     that satisfies subsequent loop bounds and triggers a negative-index AIOOBE
-	 *   - SOS header truncated mid-length-field — readU16BE would throw IOOBE before returning
-	 *   - leading fill bytes 0xFF before a marker (legal per ITU-T T.81 §B.1.1.2) — mis-reading the second 0xFF
-	 *     as a marker code would parse a bogus segment length from the next two bytes
+	 * Hardened against four malformed / adversarial inputs:
+	 *   - segLen < 2 (spec requires it include the 2 length bytes; smaller advances by the wrong amount)
+	 *   - segLen / sosLen near 65535 with `off` near MAX_INT — the addition wraps to a negative `next` that
+	 *     passes loop bounds and triggers a negative-index AIOOBE
+	 *   - SOS header truncated mid-length-field — readU16BE would throw before returning
+	 *   - leading fill bytes 0xFF before a marker (legal per ITU-T T.81 §B.1.1.2) — mis-reading the second
+	 *     0xFF as a marker code would parse a bogus length
 	 *
-	 * The explicit startOff lets callers scan an embedded JPEG (gain-map slice in an Ultra HDR file's
-	 * post-primary bytes, for example) without allocating a fresh Arrays.copyOfRange — the walker reads
-	 * directly out of the source array between [startOff, endBound).
+	 * The explicit startOff lets callers scan an embedded JPEG (e.g. a gain-map slice) without an
+	 * Arrays.copyOfRange — the walker reads directly from [startOff, endBound).
 	 *
 	 * @param file     bytes containing a JPEG whose SOI sits at startOff
-	 * @param startOff inclusive offset of the SOI marker (this method advances past it)
+	 * @param startOff inclusive offset of the SOI marker (advanced past)
 	 * @param endBound exclusive upper offset to stop scanning at
-	 * @return offset just past the matching EOI (relative to file's byte 0, NOT to startOff), or -1 when no
-	 *         clean EOI is found within endBound
+	 * @return offset just past the matching EOI (relative to file byte 0, NOT startOff), or -1 when none found
 	 */
 	public static int findEoi(byte[] file, int startOff, int endBound)
 	{

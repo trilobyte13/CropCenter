@@ -21,7 +21,7 @@ public final class GridConfigTest
 		assertTrue("grid is visible by default", defaults.enabled());
 		assertFalse("grid bake-in is OFF by default — saving must not silently embed a grid",
 			defaults.includeInExport());
-		assertTrue("pixel grid is on (only kicks in at zoom ≥ 6×)", defaults.showPixelGrid());
+		assertTrue("pixel grid is on (kicks in at high zoom)", defaults.showPixelGrid());
 		assertEquals("default line width = 1px", 1f, defaults.lineWidth(), 0f);
 		assertEquals("default grid color = white", 0xFFFFFFFF, defaults.color());
 		assertEquals("default columns = 4 (rule of thirds + 1)", 4, defaults.columns());
@@ -85,8 +85,9 @@ public final class GridConfigTest
 	@Test
 	public void withShowPixelGridTogglesPixelGridFlagAndPreservesSiblings()
 	{
-		// The per-pixel grid overlay that fires at zoom ≥ 6×. Independent toggle from `enabled`. Pin
-		// that flipping it doesn't disturb the main grid's own enabled state or any color / size siblings.
+		// The per-pixel grid overlay that fires at high zoom (~3dp per source pixel). Independent toggle
+		// from `enabled`. Pin that flipping it doesn't disturb the main grid's own enabled state or any
+		// color / size siblings.
 		GridConfig original = GridConfig.defaults().withColumns(8).withColor(0xFF0000FF);
 		GridConfig hidden = original.withShowPixelGrid(false);
 		assertFalse(hidden.showPixelGrid());

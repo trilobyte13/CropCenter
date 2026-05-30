@@ -34,34 +34,25 @@ public final class SaveDialog
 	}
 
 	/**
-	 * Build and show the save dialog. The user can pick the output format (JPEG / PNG), toggle the bake-grid
-	 * option, and tweak related export config; on confirmation, onSave is invoked. Cancellation routes
-	 * through onCancel — see the OnCancel paragraph below for the rollback contract.
+	 * Build and show the save dialog (format JPEG/PNG, bake-grid toggle, export config); onSave fires on
+	 * confirm, onCancel on every cancel path.
 	 *
-	 * Note on state mutation: applySettings commits the user's choices to CropState BEFORE onSave fires —
-	 * the SAF picker that follows needs the format-aware filename extension already on state. This means
-	 * a SAF cancel after Continue would silently bake the dialog's choices into the next save unless the
-	 * caller restores. SaveController owns that restoration via a snapshot taken in openSaveOptionsDialog
-	 * before this method is called and applied on every abort path (onSaveCancelled, launcher exception,
-	 * post-dialog busy-toast).
+	 * State mutation: applySettings commits the user's choices to CropState BEFORE onSave fires (the following
+	 * SAF picker needs the format-aware extension already on state), so a SAF cancel after Continue would bake
+	 * the choices into the next save unless rolled back — SaveController owns that via a snapshot taken before
+	 * this call and restored on every abort path.
 	 *
-	 * Returns the AlertDialog so the caller can register it with SaveHost.registerTransientDialog — a
-	 * Share/View intent or graft apply that arrives mid-dialog must dismiss this dialog before bg
-	 * state.reset() runs, otherwise applySettings's CropState mutations on Continue would commit the
-	 * user's choices for image A onto image B.
+	 * Returns the AlertDialog so the caller registers it with SaveHost.registerTransientDialog: a Share/View
+	 * intent or graft arriving mid-dialog must dismiss it before bg state.reset(), else applySettings's commits
+	 * for image A would land on image B.
 	 *
-	 * The onCancel callback fires on every cancel path — Cancel button (which routes through
-	 * dialog.cancel() so OnCancelListener is the single source of truth), back-press, outside-touch,
-	 * and forced dismissTransientDialogs.
-	 * SaveController uses it to clear priorSnapshot so an abandoned dialog doesn't pin the source bitmap
-	 * via a snapshot that no rollback path will consume. It does NOT fire on the
-	 * Continue path — applySettings + onSave have committed user choices, and the SAF flow's own abort
-	 * paths (onSaveCancelled, launcher RuntimeException, post-dialog busy-toast) still own the snapshot
-	 * rollback contract.
+	 * onCancel fires on Cancel (routed through dialog.cancel() so OnCancelListener is the single source of
+	 * truth), back-press, outside-touch, and forced dismissTransientDialogs — SaveController uses it to clear
+	 * priorSnapshot so an abandoned dialog doesn't pin the source bitmap. It does NOT fire on Continue (onSave
+	 * committed, and the SAF abort paths own the rollback).
 	 *
-	 * @param ctx      Activity context for inflation; the dialog uses Android's AlertDialog.Builder
-	 * @param state    CropState mutated in-place with the user's format / grid choices before onSave fires —
-	 *                 caller is responsible for snapshotting and rolling back on abort
+	 * @param ctx      Activity context for inflation
+	 * @param state    CropState mutated with format / grid choices before onSave — caller snapshots + rolls back
 	 * @param onSave   invoked on the positive-button click
 	 * @param onCancel invoked on every cancel path; SaveController uses it to clear priorSnapshot
 	 * @return the shown AlertDialog (caller registers it with the host's transient-dialog tracker)

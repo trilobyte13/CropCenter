@@ -43,23 +43,17 @@ final class SaveController
 {
 	/**
 	 * Snapshot of state.exportConfig.format / state.gridConfig.includeInExport taken in
-	 * openSaveOptionsDialog before SaveDialog opens. SaveDialog's "Continue" tap commits the user's
-	 * in-dialog selections to CropState directly, but the user can still cancel the SAF picker that follows —
-	 * without this snapshot the cancelled choices would silently bake into the next save (e.g. "Export Grid"
-	 * stays enabled, or the next default extension is .png even though the user chose .jpg for the abandoned
-	 * save). Restored on every abort path: SAF cancel, launcher.launch RuntimeException, post-dialog
-	 * busy-toast early return. Bundling the fields as a record makes "no live snapshot" a single null
-	 * check (priorSnapshot == null) instead of the previous parallel-fields shape that needed an
-	 * "if priorFormat == null return" guard plus symmetric clear of priorIncludeGrid.
+	 * openSaveOptionsDialog before SaveDialog opens. SaveDialog's "Continue" commits the user's in-dialog
+	 * selections to CropState directly, but the user can still cancel the SAF picker that follows — without
+	 * this snapshot the cancelled choices would bake into the next save (Export Grid stays on, or the next
+	 * default extension is .png after the user chose .jpg for the abandoned save). Restored on every abort
+	 * path: SAF cancel, launcher.launch RuntimeException, post-dialog busy-toast early return.
 	 *
-	 * sourceImage pins the Bitmap reference that was loaded when the snapshot was taken. A Share/View
-	 * intent that arrives with the SaveDialog still open runs ImageLoadController.applyBytes →
-	 * state.reset() + state.setSourceImage(newSource, newDisplay) on the bg executor; the snapshot's
-	 * sourceImage field still points at the OLD bitmap reference, so restorePriorSaveSettings can identify
-	 * a stale snapshot by bitmap-reference inequality and skip the rollback. Without this guard the
-	 * rollback would overwrite the new image's fresh exportConfig.format (seeded by installLoadedImage
-	 * during the load) with the old image's format, defaulting the next save to JPEG over a PNG source
-	 * (or vice versa).
+	 * sourceImage pins the Bitmap loaded when the snapshot was taken so restorePriorSaveSettings can detect a
+	 * stale snapshot and skip the rollback: a Share/View intent arriving with the dialog open runs applyBytes
+	 * → reset() + setSourceImage(new) on the bg executor, leaving this field pointing at the OLD bitmap.
+	 * Without the bitmap-reference check the rollback would overwrite the new image's fresh
+	 * exportConfig.format with the old one's, defaulting the next save to the wrong format.
 	 */
 	private record PriorSaveSnapshot(Bitmap sourceImage, Format format, boolean includeGrid) {}
 
@@ -98,23 +92,16 @@ final class SaveController
 
 	/**
 	 * Detect SAF's auto-rename pattern on `chosen` alone and return the inferred base name (what the user was
-	 * actually trying to save). Returns null when chosen doesn't look like an auto-rename.
+	 * actually trying to save), or null when chosen doesn't look like an auto-rename. Pattern: "X (N).ext" —
+	 * non-empty stem, 1+ digits, optional leading whitespace.
 	 *
-	 * Pattern: "X (N).ext" where X is any non-empty stem and N is 1+ digits, optionally
-	 * preceded by whitespace. The caller uses the returned base as the `requested` name
-	 * for the Replace dialog and for ReplaceStrategy, so this correctly handles both:
-	 * (1) classical auto-rename (pendingSaveName = "crop.jpg", chosen = "crop (1).jpg" → base
-	 *     = "crop.jpg", matches the original suggestion)
-	 * (2) user-edited-then-collided (pendingSaveName = "crop.jpg", user typed "foo.jpg",
-	 *     chosen = "foo (1).jpg" → base = "foo.jpg", the ACTUAL name that collided).
+	 * Deriving the base from `chosen` (not pendingSaveName) handles both the classical auto-rename
+	 * ("crop.jpg" → "crop (1).jpg" → base "crop.jpg") and user-edited-then-collided (user typed "foo.jpg", SAF
+	 * returned "foo (1).jpg" → base "foo.jpg", the name that ACTUALLY collided). A false positive from a user
+	 * typing "(N)" without a real collision is filtered at the call site by checking the base actually exists.
 	 *
-	 * A false positive from a user typing "(N)" intentionally without a real collision is filtered at the call site
-	 * by querying whether the base name actually exists.
-	 *
-	 * Kept in SaveController (rather than extracted to util/) because the "X (N).ext" pattern encoded here IS
-	 * the SAF DocumentsUI auto-rename convention — it's save-flow-specific, not generic. Extracting to util/
-	 * would either pull the convention into a utility layer that shouldn't know about it, or create a new
-	 * class with one caller. Tested directly via SaveControllerTest.
+	 * Kept here, not in util/, because the "X (N).ext" pattern IS the SAF DocumentsUI convention —
+	 * save-flow-specific, not generic. Tested via SaveControllerTest.
 	 *
 	 * @param chosen SAF-returned filename (e.g. "crop (1).jpg")
 	 * @return inferred base name when chosen matches the auto-rename pattern, null otherwise
@@ -282,45 +269,29 @@ final class SaveController
 	}
 
 	/**
-	 * Route the SAF-returned URI to the correct save path.
+	 * Route the SAF-returned URI to the correct save path. ACTION_CREATE_DOCUMENT's collision behaviour
+	 * varies across providers, so the returned URI's display name is what tells us what actually happened.
 	 *
-	 * SAF's ACTION_CREATE_DOCUMENT behaviour on filename collision is inconsistent across providers. The returned
-	 * URI's display name tells us what actually happened.
+	 * Preflight: if the user changed the extension to one implying a different encoder (.jpg ↔ .png), the
+	 * document's MIME — locked before the picker opened — no longer matches the bytes we'd write. Reject with
+	 * a dialog and leave newUri on disk. Do NOT delete the placeholder: the picker may return an existing
+	 * zero-byte file after the provider's own Replace prompt, indistinguishable from a fresh empty doc, so
+	 * deleting on rejection could destroy a real user file — a leftover placeholder is the safer fallout.
 	 *
-	 * Preflight: if the user changed the extension to one that implies a different encoder (.jpg ↔ .png), the
-	 * document's MIME — locked before the picker opened — no longer matches the bytes we would write. Reject with a
-	 * dialog and leave newUri on disk. We do NOT delete the placeholder here: ACTION_CREATE_DOCUMENT may have
-	 * returned an existing zero-byte file after the provider's own Replace prompt, and that case is
-	 * indistinguishable from a fresh SAF-created empty doc. Deleting on rejection would risk destroying a real user
-	 * file; a leftover fresh placeholder is acceptable fallout.
+	 * Otherwise, by the returned name:
 	 *
-	 * Otherwise:
+	 * (A) chosen == requested — SAF kept the name (new file, or the user accepted SAF's Replace prompt; the
+	 *     URI can't tell which). Route through routeCrashSafeSave (sibling placeholder + write-then-swap,
+	 *     falling back to preserve-on-failure direct overwrite on opaque-ID providers that can't placeholder).
+	 *     A SIZE probe (+ content-stream fallback for no-SIZE providers) sets wasOverwrite for the toast.
 	 *
-	 * (A) chosen == requested — SAF kept the name. Either the file didn't exist (new file) or
-	 *     SAF prompted "Replace?" and the user accepted. Since we can't distinguish the two
-	 *     from the URI alone, route through routeCrashSafeSave: create a sibling placeholder
-	 *     and write-then-swap via ReplaceStrategy when possible, falling back to direct
-	 *     overwrite (with preserveOnFailure) or preserving write on opaque-ID providers
-	 *     that can't placeholder. The wasOverwrite flag — derived from a SIZE probe plus
-	 *     a content-stream fallback for no-SIZE providers — drives the "Replaced" vs
-	 *     "Saved" toast wording.
+	 * (B) chosen has an "(N)" suffix AND the stripped base still exists in the directory — SAF silently
+	 *     auto-renamed to dodge a collision (detected from `chosen` alone, so a user who edited the name and
+	 *     still collided also lands here). Offer Replace / Keep / Cancel on the collided name.
 	 *
-	 * (B) chosen ends in an "(N)" auto-rename suffix AND the inferred base name still exists
-	 *     in the picked directory — SAF silently renamed to dodge a collision. The detection
-	 *     is derived from `chosen` alone, not from the original pendingSaveName, so a user
-	 *     who edited the filename in the picker and still collided (typed "foo.jpg", SAF
-	 *     returned "foo (1).jpg" because foo.jpg existed) also lands here. Offer Replace /
-	 *     Keep / Cancel on the collided name. Replace overwrites the colliding original;
-	 *     Keep saves at the auto-renamed location; Cancel cleans up the placeholder.
-	 *
-	 * (C) chosen differs from requested but NOT an auto-rename pattern (or "(N)" stripped
-	 *     doesn't actually collide in that directory) — the user deliberately typed a
-	 *     different name in the picker. Route through the same routeCrashSafeSave path as
-	 *     Case A: the provider may still have shown its own Replace prompt for the user-typed
-	 *     name and returned a URI pointing at pre-existing content, so a non-preserving
-	 *     direct write would risk truncating a real user file on encoder failure. `chosen`
-	 *     drives the toast wording so a provider-confirmed overwrite announces as
-	 *     "Replaced <chosen>" rather than the misleading "Saved <chosen>".
+	 * (C) chosen differs but isn't an auto-rename (or the stripped base doesn't collide) — the user typed a
+	 *     different name. Same routeCrashSafeSave path as A, since the provider may still have shown its own
+	 *     Replace prompt and returned pre-existing content; `chosen` drives the toast wording.
 	 *
 	 * @param newUri SAF document URI returned by the ACTION_CREATE_DOCUMENT picker
 	 */
@@ -1131,11 +1102,8 @@ final class SaveController
 				.setMessage("\"" + name + "\" already exists in this folder. What do you want to do?")
 				// Replace re-dispatches through the normal in-app save path. routeCrashSafeSave's
 				// own wasOverwrite probe (placeholder.exists() + length > 0) handles the toast
-				// wording on every reachable race outcome: dialog confirms Replace → file still
-				// there → "Replaced X"; dialog confirms Replace → file vanished mid-decision →
-				// "Saved N KB" (no data destroyed). The earlier dispatchInAppSaveAsOverwrite
-				// wrapper promised an authoritative overwrite hint it didn't actually wire
-				// through; deleted in favour of the direct call.
+				// wording on every reachable race outcome: Replace → file still there → "Replaced X";
+				// Replace → file vanished mid-decision → "Saved N KB" (no data destroyed).
 				.setPositiveButton("Replace",
 					(dialog, which) -> dispatchInAppSave(folder, name))
 				.setNeutralButton("Rename",

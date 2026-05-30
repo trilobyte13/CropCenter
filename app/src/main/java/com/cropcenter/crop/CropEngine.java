@@ -181,28 +181,21 @@ public final class CropEngine
 	}
 
 	/**
-	 * AABB midpoint of the selection points in ROTATED image space — rotate each point around the image center
-	 * first, then take the axis-aligned bounding box of the rotated positions, then return its midpoint. Rotation
-	 * doesn't commute with axis-aligned-bbox, so this gives a different (correct) result than rotating the
-	 * un-rotated midpoint.
+	 * AABB midpoint of the selection points in ROTATED image space — rotate each point around the image center,
+	 * take the axis-aligned bounding box there, return its midpoint. Rotation doesn't commute with AABB, so this
+	 * differs (correctly) from rotating the un-rotated midpoint.
 	 *
-	 * Used by CropEngine.recomputeCrop (Select-mode center derivation) AND by callers that need to match its
-	 * framing in other modes (MainActivity.recenterOnSelection when the user switches lock axis in Move mode on a
-	 * rotated image). Keeping both paths on the same formula means switching between Select and Move can't shift
-	 * the crop's visual position on a rotated image.
-	 *
-	 * For a single selection point, snaps to the nearest half-integer in rotated space so the grid's middle line
-	 * can draw through the marker pixel (onTap already pre-snaps the stored point to pixel+0.5 in un-rotated
-	 * coords; under rotation the rotated position is fractional, so a re-snap is needed).
+	 * Used by CropEngine.recomputeCrop (Select-mode center) and MainActivity.recenterOnSelection (lock-axis
+	 * switch in Move mode on a rotated image) — sharing one formula means switching Select↔Move can't shift the
+	 * crop's visual position. For a single point, snaps to the nearest half-integer in rotated space so the
+	 * grid's middle line draws through the marker pixel (onTap pre-snaps to pixel+0.5 un-rotated; rotation makes
+	 * that fractional, so a re-snap is needed).
 	 *
 	 * @param points   selection points in un-rotated image coords
 	 * @param imgW     source image width
 	 * @param imgH     source image height
 	 * @param rotation user-applied rotation in degrees
-	 * @return [midX, midY] in ROTATED image space (each input point is forward-rotated around the image center
-	 *         and the AABB midpoint is taken there); callers consume this directly to match rotated selection
-	 *         framing in CropEngine.recomputeCrop and MainActivity.recenterOnSelection. For a single-point
-	 *         input the result is snapped to a pixel-half-integer.
+	 * @return [midX, midY] in ROTATED image space (single-point input is snapped to a pixel-half-integer)
 	 */
 	public static float[] rotatedSelectionMidpoint(List<SelectionPoint> points, int imgW, int imgH, float rotation)
 	{
@@ -231,16 +224,14 @@ public final class CropEngine
 	}
 
 	/**
-	 * Shift free-axis centers so the crop rectangle stays inside the rotated AABB. Guards against degenerate
-	 * cases where the crop dimension meets or exceeds the rotated AABB extent on its axis — the upper clamp
-	 * bound would fall at or below the lower bound and `Math.clamp` would throw, so we fall back to centering
-	 * on the image midpoint. Rotation-aware: at zero rotation rotatedW = imgW and the formula matches the
-	 * pre-rotation behavior exactly.
+	 * Shift free-axis centers so the crop stays inside the rotated AABB. Guards the degenerate case where the
+	 * crop dimension meets or exceeds the AABB extent on its axis (the upper clamp bound would fall ≤ the lower
+	 * and Math.clamp would throw) by centering on the image midpoint. Rotation-aware: at zero rotation
+	 * rotatedW = imgW and it matches pre-rotation behavior.
 	 *
-	 * Package-private so CropEngineGeometryTest can pin the free-axis clamp formula directly. A regression
-	 * that flips the locked/free predicates or drops the "cropW >= rotatedW → center on midpoint" guard would
-	 * let the image-larger-than-crop case throw Math.clamp's lo > hi exception instead of degenerate-but-safe
-	 * centering.
+	 * Package-private so CropEngineGeometryTest pins the formula — a regression flipping the locked/free
+	 * predicates or dropping the "cropW >= rotatedW → midpoint" guard would let Math.clamp throw lo > hi instead
+	 * of centering safely.
 	 *
 	 * @param centerX         current crop center X (screen-aligned image coords)
 	 * @param centerY         current crop center Y (screen-aligned image coords)
@@ -248,10 +239,9 @@ public final class CropEngine
 	 * @param cropH           crop height in image pixels
 	 * @param imgW            source image width
 	 * @param imgH            source image height
-	 * @param lockedX         true when X axis must stay symmetric around the user's anchor (no shift applied)
-	 * @param lockedY         true when Y axis must stay symmetric around the user's anchor (no shift applied)
-	 * @param rotationDegrees current image rotation; used to compute the rotated AABB bounds the free axes
-	 *                        clamp against
+	 * @param lockedX         true when X must stay symmetric around the anchor (no shift)
+	 * @param lockedY         true when Y must stay symmetric around the anchor (no shift)
+	 * @param rotationDegrees current rotation; sets the rotated AABB the free axes clamp against
 	 * @return [shiftedX, shiftedY] keeping the crop inside the rotated AABB on each free axis
 	 */
 	static float[] clampFreeAxes(float centerX, float centerY,
@@ -281,16 +271,13 @@ public final class CropEngine
 	}
 
 	/**
-	 * Compute the maximum crop size on each axis, subject to lock mode and aspect ratio. Locked axes are symmetric
-	 * about the center (so a selection stays framed); free axes get the full rotated-AABB extent and will be
-	 * clamped / shifted later by clampFreeAxes. Rotation-aware: at zero rotation the rotated AABB matches the
-	 * un-rotated image bounds exactly, so behavior is preserved for the common unrotated case. At non-zero
-	 * rotation the rotated AABB is bigger than [0, imgW] × [0, imgH], so the symmetric-axis math uses the
-	 * larger range and the resulting crop is shrunk to fit inside the actual rotated bitmap by the downstream
+	 * Compute the maximum crop size per axis, subject to lock mode and aspect ratio. Locked axes are symmetric
+	 * about the center (keeping a selection framed); free axes get the full rotated-AABB extent (clamped later
+	 * by clampFreeAxes). Rotation-aware: at zero rotation the rotated AABB matches the un-rotated bounds; at
+	 * non-zero rotation it's bigger, and the resulting crop is shrunk to fit by the downstream
 	 * maxScaleForRotation pass.
 	 *
-	 * Package-private so CropEngineGeometryTest can pin the locked-axis symmetry and AR fit/shrink branches
-	 * without instantiating a full CropState.
+	 * Package-private so CropEngineGeometryTest can pin the locked-axis symmetry and AR fit/shrink branches.
 	 *
 	 * @param ar              aspect ratio constraint; FREE leaves both axes at their maxima
 	 * @param centerX         crop center X (screen-aligned image coords)

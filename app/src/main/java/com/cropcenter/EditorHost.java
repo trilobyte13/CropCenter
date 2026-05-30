@@ -62,8 +62,8 @@ interface EditorHost
 	/**
 	 * Track an AlertDialog as the active state-mutating transient dialog and install an OnDismissListener that
 	 * clears the tracked reference when the dialog dismisses normally. Called by every dialog producer whose
-	 * widgets commit to CropState directly (SaveDialog format/grid choices, custom AR dimensions, precise
-	 * rotation value) and the Replace dialog (writes to the SAF target on Replace/Keep) so a Share/View intent
+	 * widgets commit to CropState directly (SaveDialog format/grid choices, custom AR dimensions) and the
+	 * Replace dialog (writes to the SAF target on Replace/Keep) so a Share/View intent
 	 * or graft apply that arrives mid-dialog can dismiss it via dismissTransientDialogs() before bg
 	 * state.reset() races the dialog's UI commits.
 	 *

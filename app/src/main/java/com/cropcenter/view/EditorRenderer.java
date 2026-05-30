@@ -120,7 +120,7 @@ final class EditorRenderer
 		canvas.drawColor(ThemeColors.BACKGROUND);
 		float scale = viewport.getBaseScale() * viewport.getZoom();
 
-		// Switch from display proxy to full source at zoom ≥ 4 so the pixel-grid (which activates at scale ≥ 6)
+		// Switch from proxy to full source at zoom ≥ 4 so the pixel-grid (activates at scale ≥ 3·density)
 		// shows true source pixels rather than the proxy's bilinear-filtered samples. Below 4× the proxy
 		// (≤ MAX_DISPLAY_PIXELS = 16 MP, HARDWARE config) renders as a GPU-resident texture — the whole point
 		// of the display-proxy pattern. The 4× boundary picks up just before pixel-grid territory so the
@@ -272,20 +272,18 @@ final class EditorRenderer
 	}
 
 	/**
-	 * Draw the crop-rectangle overlay: 4 dim rectangles outside the crop, the grid lines inside, and the
-	 * center-of-crop crosshair. Crop coordinates arrive in image-space; converted to screen-space via the viewport
-	 * before drawing. The crosshair colour is taken from `grid.color()` (with 0xCC alpha) so the centerpoint
-	 * marker visually matches the grid lines the user picked. The crop center is passed as a parameter (not
-	 * read from CropState) so the caller controls whether to use state.centerX / Y or a draw-time-derived
-	 * override — see the caller's site for the rotation-flicker rationale.
+	 * Draw the crop-rectangle overlay: 4 dim rectangles outside the crop, grid lines inside, and the
+	 * center-of-crop crosshair. Crop coords arrive in image-space, converted to screen-space via the viewport.
+	 * The crosshair uses grid.color() (0xCC alpha) to match the grid lines. The crop center is a parameter (not
+	 * read from CropState) so the caller chooses state.centerX/Y or a draw-time override — see the call site for
+	 * the rotation-flicker rationale.
 	 *
 	 * @param canvas   target Canvas; drawn into in place
 	 * @param grid     GridConfig supplying crop / grid colors and the crosshair color
-	 * @param centerX  crop center X in image-space coordinates — same source as gridImgX (gridImgX is
-	 *                 centerX − cropW / 2f)
-	 * @param centerY  crop center Y in image-space coordinates — same source as gridImgY
-	 * @param gridImgX crop origin X in image-space coordinates
-	 * @param gridImgY crop origin Y in image-space coordinates
+	 * @param centerX  crop center X in image-space (gridImgX is centerX − cropW / 2f)
+	 * @param centerY  crop center Y in image-space (source of gridImgY)
+	 * @param gridImgX crop origin X in image-space
+	 * @param gridImgY crop origin Y in image-space
 	 * @param cropW    crop width in image pixels
 	 * @param cropH    crop height in image pixels
 	 */

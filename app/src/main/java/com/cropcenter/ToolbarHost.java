@@ -19,8 +19,8 @@ interface ToolbarHost extends EditorHost
 	void applyLockMode();
 
 	/**
-	 * Seed a crop center at the image midpoint when none exists yet. Called from AR spinner / custom AR dialog
-	 * flows so an aspect-ratio change takes immediate effect.
+	 * Seed a crop center at the image midpoint when none exists yet. Called from the AR popup / Custom AR
+	 * dialog flows so an aspect-ratio change takes immediate effect.
 	 */
 	void ensureCropCenter();
 

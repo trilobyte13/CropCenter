@@ -3,30 +3,19 @@ package com.cropcenter.metadata;
 import java.util.List;
 
 /**
- * Detect the XMP "hdrgm" namespace marker — the canonical signature of an Ultra HDR gain map. Used to gate
- * gain-map extraction so a non-HDR Samsung file whose SEFT data block starts with FF D8 (typically an embedded
- * JPEG thumbnail) isn't mis-extracted as a gain map.
+ * Detect the XMP "hdrgm" namespace marker — the canonical signature of an Ultra HDR gain map. Gates gain-map
+ * extraction so a non-HDR Samsung file whose SEFT block starts with FF D8 (an embedded thumbnail) isn't
+ * mis-extracted as a gain map. Pure Java (no Android deps) so the metadata extractors and GraftWriter can call
+ * it without the Android Bitmap / Gainmap surface in util/UltraHdrCompat.
  *
- * Pure Java — no Android dependencies — so the metadata extractors and GraftWriter can call it without dragging
- * in the Android Bitmap / Gainmap surface that lives in util/UltraHdrCompat (which delegates to this helper for
- * the post-compress diagnostic full-file scan).
- *
- * Three predicates are exposed for different call sites:
- *
+ * Three predicates for different call sites:
  *   - hasHdrgmInXmp(List of JpegSegment) — load-time gate. Walks ONLY the XMP APP1 segments (standard +
- *     extended) where the hdrgm namespace declaration legitimately lives, so a stray "hdrgm" 5-byte
- *     sequence in MakerNote, COM, vendor blob, or SEFT edit history doesn't false-positive. This is what
- *     ImageLoadController.extractMetadata and GraftWriter.graft use to decide whether post-primary FF D8
- *     bytes are a gain map.
- *
- *   - isHdrgmXmpSegment(JpegSegment) — per-segment predicate. Used by CropExporter.stripHdrSegments on
- *     the HDR-drop path so the saved JPEG's metadata doesn't claim HDR the file no longer carries
- *     to downstream consumers. Same XMP-restricted scan as hasHdrgmInXmp, exposed as a single-segment
- *     callable for filter-loop call sites.
- *
- *   - isHdrSource(byte[]) — full-file scan. Used by UltraHdrCompat post Bitmap.compress to verify the
- *     compressed output emitted the hdrgm marker. The output is fresh and well-formed so a broader scan is
- *     fine; segment parsing on every export to gate a diagnostic log line is wasted work.
+ *     extended) where the hdrgm declaration legitimately lives, so a stray "hdrgm" in MakerNote / COM / SEFT
+ *     edit history doesn't false-positive. Used by ImageLoadController.extractMetadata and GraftWriter.graft.
+ *   - isHdrgmXmpSegment(JpegSegment) — the same XMP-restricted scan as a single-segment predicate, for
+ *     CropExporter.stripHdrSegments on the HDR-drop path.
+ *   - isHdrSource(byte[]) — full-file scan, used by UltraHdrCompat post-compress to verify the output emitted
+ *     the marker; the output is fresh and well-formed so the broad scan is fine.
  */
 public final class HdrSignature
 {

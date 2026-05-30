@@ -18,24 +18,23 @@ import java.io.IOException;
 import java.util.Locale;
 
 /**
- * Orchestrates the "Apply External Edit" feature: btnGraft tap → user picks an external edit JPEG → CropCenter
- * validates that the edit's DISPLAY dimensions match the loaded original's (EditAligner compares display dims, NOT
- * raw stored dims + EXIF orientation, because external editors routinely strip / reset orientation and re-emit pixels
- * in display layout) and optionally reorients the edit's pixels back into the original's stored EXIF layout when the
- * two disagree. The aligned bytes are then byte-spliced into the original's metadata container via GraftWriter, and
- * the result is handed to MainActivity to replace the in-memory image. The user can then continue editing
- * (crop, rotate) and save normally through the existing Save flow — the canvas re-encode that the save flow uses
- * adds one generation of JPEG quality loss vs. the byte-perfect graft, but at quality 100 the footprint is
- * imperceptible (~50 dB PSNR). See REQUIREMENTS.md (Apply External Edit) for the display-dim + reorient contract.
+ * Orchestrates the "Apply External Edit" feature: btnGraft tap → user picks an external edit JPEG → validate
+ * that the edit's DISPLAY dimensions match the loaded original's (EditAligner compares display dims, NOT raw
+ * stored dims + EXIF orientation, because external editors routinely strip orientation and re-emit pixels in
+ * display layout) and optionally reorient the edit's pixels back into the original's stored EXIF layout when
+ * the two disagree. The aligned bytes are byte-spliced into the original's metadata container via GraftWriter
+ * and handed to MainActivity to replace the in-memory image. The user can then crop / rotate / save normally;
+ * the save flow's canvas re-encode adds one generation of JPEG loss vs the byte-perfect graft, imperceptible
+ * at quality 100. See REQUIREMENTS.md (Apply External Edit) for the display-dim + reorient contract.
  *
- * Lives alongside SaveController because it owns its own state machine for the picker stage. Once the splice succeeds,
- * control transfers to MainActivity via the onGraftReady listener — GraftController has no save-flow involvement.
+ * Lives alongside SaveController but owns its own picker-stage state machine; once the splice succeeds control
+ * transfers to MainActivity via onGraftReady (no save-flow involvement).
  *
  * State machine:
- *   IDLE          → start()                  → AWAITING_EDIT (in-app OpenPickerDialog opened)
- *   AWAITING_EDIT → onEditPicked() success    → IDLE (image replaced via onGraftReady)
- *   AWAITING_EDIT → onEditPicked() failure    → IDLE (toast surfaced)
- *   AWAITING_EDIT → onEditPickerCancelled()   → IDLE
+ *   IDLE          → start()                 → AWAITING_EDIT (in-app OpenPickerDialog opened)
+ *   AWAITING_EDIT → onEditPicked() success  → IDLE (image replaced via onGraftReady)
+ *   AWAITING_EDIT → onEditPicked() failure  → IDLE (toast surfaced)
+ *   AWAITING_EDIT → onEditPickerCancelled() → IDLE
  */
 final class GraftController
 {

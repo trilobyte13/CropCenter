@@ -1,13 +1,10 @@
 package com.cropcenter.util;
 
 /**
- * Bundle of pre-computed values needed by the rotated-clamp's binary search and corner check. Eliminates the 11-param
- * method signatures that originally threaded these through RotatedCropClamp.binarySearchAxis and cornersInside — every
- * value is a function of (cropW, cropH, rotationDegrees, imgW, imgH) so the caller pre-computes once and passes a
- * single context object instead.
- *
- * Lives in util/ alongside RotatedCropClamp (rather than in crop/) so the geometry helpers don't force a layering
- * inversion when model/CropState consumes them.
+ * Pre-computed values for the rotated-clamp binary search and corner check — replaces the 11-param signatures
+ * that threaded these through RotatedCropClamp.binarySearchAxis / cornersInside. Every value is a function of
+ * (cropW, cropH, rotationDegrees, imgW, imgH), so the caller pre-computes once. Lives in util/ alongside
+ * RotatedCropClamp so model/CropState can consume the geometry helpers without a layering inversion.
  *
  * @param cosR        pre-computed cosine of negated rotation in radians
  * @param halfHeight  half the crop height

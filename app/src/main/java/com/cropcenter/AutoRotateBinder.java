@@ -64,32 +64,28 @@ final class AutoRotateBinder
 			return;
 		}
 		host.getEditorView().setHorizonMode(false, null);
-		// Direct deref matches bind() at line 42 and UiSync.java:54 — both look up R.id.btnAutoRotate the
-		// same way and trust the lookup. The view is statically declared in activity_main.xml and the call
+		// Direct deref matches the same R.id.btnAutoRotate lookup in bind() and UiSync — both trust the
+		// lookup. The view is statically declared in activity_main.xml and the call
 		// is always reached after onCreate's setContentView; a hypothetical null here would be a deeper
 		// inflation bug that a defensive guard would only mask.
 		resetAutoRotateButton(host.findViewById(R.id.btnAutoRotate));
 	}
 
 	/**
-	 * Read back a HARDWARE-config bitmap to an ARGB_8888 copy so HorizonDetector.buildEdgeMap (which relies on
-	 * getPixels() — null on HARDWARE) can walk the data. Returns src unchanged when it's already an in-memory
-	 * config (the aliased-source case where createDisplayProxy returned the source itself because it already fit
-	 * MAX_DISPLAY_PIXELS), so the caller pays for the ~64 MB readback only when the proxy is GPU-resident.
+	 * Read back a HARDWARE-config bitmap to an ARGB_8888 copy so HorizonDetector.buildEdgeMap (which uses
+	 * getPixels(), null on HARDWARE) can walk it. Returns src unchanged when already an in-memory config (the
+	 * aliased-source case where createDisplayProxy returned the source itself), so the caller pays the ~64 MB
+	 * readback only when the proxy is GPU-resident.
 	 *
-	 * The caller must use identity comparison against src to decide ownership of the returned reference: a
-	 * reference identical to src must NOT be recycled (would tear down the live display proxy in CropState); a
-	 * reference distinct from src is a fresh ARGB copy that the caller owns and should recycle once detection
-	 * completes. A null return signals the GPU readback failed (driver bug / GPU memory exhausted) and the
-	 * caller should surface a clean detection-failure toast rather than crash on getPixels() inside the detector.
+	 * Ownership by identity: a reference identical to src must NOT be recycled (it's the live display proxy); a
+	 * distinct reference is a fresh copy the caller owns and recycles after detection. Null signals the GPU
+	 * readback failed — caller surfaces a clean detection-failure toast rather than crashing on getPixels().
 	 *
 	 * @param src the bitmap to read back from; must be non-null
-	 * @return src itself for non-HARDWARE configs, a fresh ARGB_8888 copy for HARDWARE configs, or null when the
-	 *         GPU readback failed (a warning is logged at this point so the caller doesn't need to). Failure
-	 *         includes Bitmap.copy returning null (driver-rejection path) and the copy throwing — the catch
-	 *         covers Exception + OutOfMemoryError because a 16 MP HARDWARE→ARGB readback may exhaust the
-	 *         native heap on a device already under memory pressure, and a Skia HARDWARE-readback fault can
-	 *         surface as an unchecked RuntimeException rather than a null return
+	 * @return src itself for non-HARDWARE configs; a fresh ARGB_8888 copy for HARDWARE; or null on readback
+	 *         failure (logged here). Failure covers Bitmap.copy returning null and the copy throwing — the catch
+	 *         takes Exception + OutOfMemoryError since a 16 MP HARDWARE→ARGB readback can exhaust native heap or
+	 *         surface a Skia fault as an unchecked exception
 	 */
 	private static Bitmap tryReadbackArgb(Bitmap src)
 	{

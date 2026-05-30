@@ -229,47 +229,29 @@ public final class BitmapUtils
 
 	/**
 	 * Derive a display-proxy bitmap downsampled to fit within MAX_DISPLAY_PIXELS, preserving aspect ratio. When
-	 * the source already fits, returns the source reference directly (no allocation, no copy) — the caller
-	 * treats source and proxy as interchangeable and must NOT recycle the proxy independently in that case.
-	 * Used by ImageLoadController on the bg thread immediately after the EXIF-rotation pass; the resulting
-	 * proxy is installed alongside the source via CropState.setSourceImage(source, display) so
-	 * EditorRenderer can render the smaller buffer per frame while save paths still pull the full source.
+	 * the source already fits, returns the source reference directly (no copy) — caller treats source and proxy
+	 * as interchangeable and must NOT recycle the proxy independently in that case. Used by ImageLoadController
+	 * after the EXIF-rotation pass; installed alongside the source via CropState.setSourceImage(source, display)
+	 * so EditorRenderer renders the smaller buffer per frame while save paths pull the full source.
 	 *
-	 * For sources requiring downscale, the result is a Bitmap.Config.HARDWARE bitmap: pixel data lives in
-	 * GPU memory permanently and per-frame canvas.drawBitmap is a zero-upload texture-bind + draw. Without
-	 * HARDWARE the Skia renderer must re-upload the ARGB pixel data from native heap to the GPU on any
-	 * texture-cache eviction (driven by other apps' memory pressure or even our own source bitmap's
-	 * cache footprint), causing per-frame upload spikes that read as gesture lag. With HARDWARE, the
-	 * texture is uploaded once and bound for the lifetime of the bitmap. Tradeoff: HARDWARE bitmaps are
-	 * immutable and getPixels() returns null on them — AutoRotateBinder must copy the proxy back to
-	 * ARGB_8888 before passing it to HorizonDetector.detectFromPaintedRegion. That one-shot GPU→CPU
-	 * readback (a few hundred ms on a 16 MP HARDWARE bitmap) only fires when the user invokes auto-rotate,
-	 * not per render frame. If the HARDWARE copy fails (rare — typically GPU memory exhausted), the
-	 * fallback is the ARGB scaled bitmap with mipmaps (slower per frame but functional).
+	 * When downscaled, the result is Bitmap.Config.HARDWARE: pixels live in GPU memory and per-frame drawBitmap
+	 * is a zero-upload texture-bind. Without HARDWARE, Skia re-uploads ARGB from native heap on any texture-cache
+	 * eviction, causing per-frame upload spikes that read as gesture lag. Tradeoff: HARDWARE is immutable and
+	 * getPixels() returns null, so AutoRotateBinder copies the proxy back to ARGB_8888 before HorizonDetector —
+	 * a one-shot GPU→CPU readback that only fires on auto-rotate, not per frame. If the HARDWARE copy fails (GPU
+	 * memory exhausted), falls back to an ARGB scaled bitmap with mipmaps.
 	 *
-	 * Enables `setHasMipMap(true)` on the result so the Skia renderer maintains a mipmap chain (1, 1/4,
-	 * 1/16, ... pixel counts) — at typical fit-to-view editor zoom the GPU samples the appropriate ~2-8 MP
-	 * mip level via HW-accelerated trilinear filtering instead of supersampling. Memory overhead: +33%
-	 * from the geometric series of mip levels. Then prepareToDraw() to hint the renderer to start the GPU
-	 * upload + mipmap generation immediately on a worker thread, so the first frame after load doesn't
-	 * pay the upload latency on the UI thread. Both hints are valid on HARDWARE bitmaps (the underlying
-	 * GPU-texture renderer honors them).
+	 * setHasMipMap(true) lets the GPU sample an appropriate mip level (trilinear) at fit-to-view zoom instead of
+	 * supersampling (+33% memory from the mip chain); prepareToDraw() hints an early off-thread upload so the
+	 * first post-load frame doesn't pay upload latency on the UI thread.
 	 *
-	 * Alias case (source already fits MAX_DISPLAY_PIXELS): returns the source unchanged, ARGB_8888 mutable.
-	 * Save paths use the source via CPU drawCropped (no GPU sampling), so leaving it ARGB costs nothing on
-	 * the save side. HorizonDetector reads pixels from the aliased source directly — no readback needed.
+	 * Side effect in the alias case (source already fits): the proxy IS the source, so these two hints mutate
+	 * the source bitmap (mipmap flag on, GPU upload pending). Harmless for save-path CPU consumers, but a caller
+	 * expecting an unmutated source reference must know it isn't pristine after this call.
 	 *
-	 * Side effects on aliased source: `setHasMipMap(true)` and `prepareToDraw()` are invoked on the proxy
-	 * unconditionally — in the alias case the proxy IS the source, so the source bitmap's mipmap flag is
-	 * flipped to true and its texture upload is hinted. Both are harmless for save-path consumers (which
-	 * draw via CPU canvas and ignore the GPU-side flags) but documented because callers passing in a source
-	 * expecting an unmutated reference must understand the contract: the source after this call is the same
-	 * object with mipmaps enabled and a GPU upload pending, not a pristine pre-call copy.
-	 *
-	 * @param source full-resolution bitmap to be downsampled; never null. Mutated in-place when aliased (see
-	 *               "Side effects on aliased source" above)
-	 * @return display proxy bitmap (HARDWARE config when downscaled; ARGB_8888 source reference when
-	 *         aliased), with setHasMipMap(true) and prepareToDraw() invoked
+	 * @param source full-resolution bitmap to downsample; never null. Mutated in-place when aliased (see above)
+	 * @return display proxy (HARDWARE when downscaled; ARGB_8888 source reference when aliased), with
+	 *         setHasMipMap(true) and prepareToDraw() invoked
 	 */
 	public static Bitmap createDisplayProxy(Bitmap source)
 	{

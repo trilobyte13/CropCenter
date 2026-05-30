@@ -10,18 +10,17 @@ import androidx.recyclerview.widget.RecyclerView;
 
 /**
  * RecyclerView subclass with an optional intrinsic-height cap. Used by FolderBrowser's content
- * list so the dialog grows naturally with the folder's item count up to a screen-fraction cap,
- * then starts scrolling — short folders make a compact dialog while long ones stay bounded so
- * the picker's bottom controls (Save/Cancel buttons, filename input, options row) stay reachable
- * without scrolling them.
+ * list as a SELF-CAP: it bounds the RecyclerView's own intrinsic-height report so a 50k-item
+ * folder can't claim an absurd base height during the panel's measure pass. It does NOT govern
+ * the dialog size — FolderBrowser's panel does that, sizing the card to a FIXED height (measured
+ * EXACTLY) with the list as a weight=1 flex child (see FolderBrowser.buildPanel).
  *
  * Subclass (rather than an anonymous-subclass closure inside FolderBrowser.buildPanel) so the
  * picker's content RecyclerView can be inflated from XML alongside the BrowserFastScroller
  * sibling that overlays its right edge. XML inflation requires a concrete public class.
  *
  * The height cap is set imperatively via setMaxHeightPx because the value depends on screen
- * height minus a dialog-specific reserved-chrome budget (440dp for save, 300dp for open) that
- * isn't available from layout XML alone.
+ * height minus the shared FolderBrowser.CARD_RESERVED_DP (220dp) — not available from layout XML.
  */
 public final class BrowserRecyclerView extends RecyclerView
 {

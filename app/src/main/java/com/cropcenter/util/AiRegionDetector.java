@@ -164,24 +164,21 @@ public final class AiRegionDetector
 
 	/**
 	 * Per-pixel max-channel-diff pass. Pure int-array math, package-private so AiRegionDetectorTest can pin the
-	 * channel-diff and threshold contract without Robolectric — the Bitmap decode side of detect() is what needs
-	 * an Android runtime, but the diff math is where the load-bearing correctness lives (a bad threshold or
-	 * channel-extraction bug would silently include encode noise OR exclude real AI fills).
+	 * channel-diff + threshold contract without Robolectric (a bad threshold / channel-extraction bug would
+	 * silently include encode noise or exclude real AI fills).
 	 *
-	 * Mask + count contract: mask[i] is SET to true at indices where the max-channel diff exceeds threshold —
-	 * pre-existing true entries are not cleared. The returned count is the number of pixels whose diff exceeds
-	 * threshold (NOT the number of false → true transitions); when the production caller passes a fresh
-	 * boolean[] these two counts coincide, but a pre-populated input would double-count the already-true bits.
+	 * Mask + count contract: mask[i] is SET true where the max-channel diff exceeds threshold; pre-existing
+	 * true entries are NOT cleared. The count is the number of pixels exceeding threshold (NOT false→true
+	 * transitions) — equal when the caller passes a fresh boolean[] (production always does), but a
+	 * pre-populated input would double-count.
 	 *
-	 * @param sourcePixels ARGB-packed pixel array from the source bitmap
-	 * @param editPixels   ARGB-packed pixel array from the alignment-corrected edit bitmap; must be the same
-	 *                     length as sourcePixels
-	 * @param mask         caller-allocated boolean[sourcePixels.length] — filled with true at indices where the
-	 *                     max-channel diff exceeds `threshold`. Pre-existing true entries are NOT cleared (the
-	 *                     production caller always passes a fresh new boolean[]).
-	 * @param threshold    inclusive upper bound on "encode noise" — a diff equal to threshold is NOT flagged,
-	 *                     diff > threshold is. Production uses DIFF_THRESHOLD (30).
-	 * @return number of pixels whose diff exceeds threshold (regardless of prior mask state at that index)
+	 * @param sourcePixels ARGB-packed pixels from the source bitmap
+	 * @param editPixels   ARGB-packed pixels from the alignment-corrected edit; same length as sourcePixels
+	 * @param mask         caller-allocated boolean[sourcePixels.length]; set true where diff exceeds threshold,
+	 *                     pre-existing true entries NOT cleared (production passes a fresh array)
+	 * @param threshold    inclusive "encode noise" bound — diff == threshold is NOT flagged, diff > is.
+	 *                     Production uses DIFF_THRESHOLD (30).
+	 * @return number of pixels whose diff exceeds threshold (regardless of prior mask state)
 	 */
 	static int diffPixels(int[] sourcePixels, int[] editPixels, boolean[] mask, int threshold)
 	{

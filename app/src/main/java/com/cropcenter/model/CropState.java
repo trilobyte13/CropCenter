@@ -479,33 +479,24 @@ public final class CropState
 	}
 
 	/**
-	 * Atomically install all load-time metadata from a successful image load. Single chokepoint for the
-	 * load-time commit: ImageLoadController.applyBytes builds the bundle of bytes / filename / format /
-	 * metadata on the bg thread, then calls this method to publish them as a group. Previously this was
-	 * a sequence of seven public setters (setOriginalFileBytes / setOriginalFilename / setSourceFormat /
-	 * setJpegMeta / setPngExifTiff / setGainMap / setSeftTrailer); those setters had zero production
-	 * callers outside the sequence and were deleted, with their bodies inlined here so the load-time
-	 * commit is unambiguously a single operation rather than seven semi-independent writes that callers
-	 * could reorder or selectively call.
+	 * Atomically install all load-time metadata from a successful image load. Single chokepoint:
+	 * ImageLoadController.applyBytes builds the bundle (bytes / filename / format / metadata) on the bg
+	 * thread, then calls this to publish them as one group — not a sequence of independent setters a caller
+	 * could reorder or partially apply.
 	 *
-	 * Wrapped in beginBatch / endBatch even though no field write below fires notifyChanged today — the
-	 * wrapper makes the atomicity contract explicit for future maintainers who might add a notifyChanged
-	 * inside the block (e.g. for one of the byte[] fields if it ever drives UI). The setSourceImage call
-	 * that always follows in the load path is the actual listener fire.
+	 * Wrapped in beginBatch / endBatch even though no write below fires notifyChanged today — it makes the
+	 * atomicity contract explicit for a future maintainer who adds one. The setSourceImage call that follows
+	 * in the load path is the actual listener fire.
 	 *
-	 * setSourceFormat used to also seed exportConfig (via exportConfig.withFormat(fmt)) so that loading
-	 * a PNG defaults the SaveDialog format toggle to PNG — that seed logic is inlined directly here with
-	 * a null guard so a load whose format detection couldn't decide doesn't clobber the prior session's
-	 * exportConfig. A null jpegMeta argument is coerced to an empty ArrayList so the field's "never
-	 * null" contract (which getJpegMeta's Collections.unmodifiableList depends on — NPE otherwise) holds
-	 * regardless of how the caller models a no-segments load.
+	 * sourceFormat also seeds exportConfig (so loading a PNG defaults the SaveDialog toggle to PNG), with a
+	 * null guard so a format-detection miss doesn't clobber the prior session's exportConfig. A null jpegMeta
+	 * is coerced to an empty list so the field's never-null contract (getJpegMeta's unmodifiableList) holds.
 	 *
 	 * @param fileBytes      raw image bytes — must be non-null on success path
 	 * @param filename       display name from SAF; null tolerated (falls back at downstream readers)
-	 * @param sourceFormat   detected Format (JPEG / PNG); null when the loaded bytes don't match either
-	 *                       supported format — exportConfig.format is preserved in that case
-	 * @param jpegMeta       parsed APP segments for a JPEG source; null tolerated (coerced to empty
-	 *                       ArrayList — PNG sources commonly pass null here)
+	 * @param sourceFormat   detected Format (JPEG / PNG); null when bytes match neither — exportConfig.format
+	 *                       is preserved in that case
+	 * @param jpegMeta       parsed APP segments for a JPEG source; null tolerated (coerced to empty list)
 	 * @param pngExifTiff    raw TIFF body from a PNG eXIf chunk, or null for JPEG / non-EXIF PNG
 	 * @param gainMap        Ultra HDR gain-map bytes, or null for SDR sources
 	 * @param seftTrailer    Samsung SEFT trailer bytes, or null for non-Samsung-edited sources

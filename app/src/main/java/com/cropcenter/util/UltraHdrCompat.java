@@ -349,26 +349,19 @@ public final class UltraHdrCompat
 	}
 
 	/**
-	 * Decode the source JPEG into a Bitmap that preserves its gainmap. BitmapFactory reads HDR gainmaps from files
-	 * (not ByteArrays), so we write the bytes to a cache file first. The cache file is deleted as soon as
-	 * decodeFile returns, whether it produced a bitmap or not — no "leaked cache file on decode failure" path.
+	 * Decode the source JPEG into a Bitmap that preserves its gainmap. BitmapFactory reads HDR gainmaps from
+	 * files (not byte arrays), so the bytes are written to a cache file first; the file is deleted as soon as
+	 * decodeFile returns (success or not — no leaked-cache-file path).
 	 *
-	 * Subsampled via a two-pass decode: the bounds-only pre-pass reads the SOF dimensions, and
-	 * BitmapUtils.computeInSampleSize picks the smallest power-of-2 sample size that fits the decoded bitmap
-	 * under BitmapUtils.MAX_DECODE_PIXELS (256 MP — handles a 200 MP Samsung capture at sampleSize=1).
-	 * Without this cap a future > 256 MP source would OOM the HDR-save path even though
-	 * ImageLoadController.applyBytes already loaded the original at subsampled resolution — this method
-	 * re-decodes the original bytes from scratch to preserve the gainmap, so without its own subsampling
-	 * it bypasses the load-time cap and burns the heap at export time. Skia's HDR-aware decoder applies
-	 * inSampleSize to both the primary AND the embedded gainmap consistently, so the gainmap-to-primary
-	 * ratio (typically 4:1 quarter-res) stays correct after subsampling and the downstream renderGainmap
-	 * math is unaffected.
+	 * Subsampled via a bounds-only pre-pass + BitmapUtils.computeInSampleSize (smallest power-of-2 fitting
+	 * MAX_DECODE_PIXELS, 256 MP). This method re-decodes the original from scratch to keep the gainmap, so
+	 * without its own cap it would bypass the load-time subsampling and OOM the HDR-save path on a > 256 MP
+	 * source. Skia applies inSampleSize to primary AND gainmap consistently, so the gainmap-to-primary ratio
+	 * stays correct and downstream renderGainmap math is unaffected.
 	 *
 	 * @param originalBytes raw source JPEG bytes including the gainmap segments
-	 * @param cacheDir      writable scratch directory; this method creates and immediately deletes a unique cache
-	 *                      file inside it
-	 * @return decoded Bitmap with its gainmap attached (subsampled when the source exceeds MAX_DECODE_PIXELS); may
-	 *         be null if BitmapFactory.decodeFile fails to decode the cache file
+	 * @param cacheDir      writable scratch dir; a unique cache file is created and immediately deleted inside it
+	 * @return decoded Bitmap with gainmap attached (subsampled when over MAX_DECODE_PIXELS); null on decode failure
 	 * @throws IOException if writing the source bytes to the cache file fails
 	 */
 	private static Bitmap decodeHdrBitmap(byte[] originalBytes, File cacheDir) throws IOException

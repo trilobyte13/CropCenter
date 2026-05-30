@@ -35,20 +35,17 @@ public final class RotationMath
 	}
 
 	/**
-	 * Forward-rotate (x, y) around (pivotX, pivotY) by `degrees` — matching Canvas.rotate's clockwise sign
-	 * convention under Android's Y-down screen coordinates. Writes the result into `out[0]` / `out[1]`
-	 * (caller-allocated length-2 array). Returns `out` for chaining.
+	 * Forward-rotate (x, y) around (pivotX, pivotY) by `degrees` — matching Canvas.rotate's clockwise sign under
+	 * Android's Y-down coordinates. Writes into out[0]/out[1] (caller-allocated length-2) and returns out.
 	 *
-	 * Identity fast path when `|degrees| < BitmapUtils.ROTATION_EPSILON`: the render pipeline already treats
-	 * sub-epsilon rotation as zero, so skipping the trig here keeps this helper consistent with that convention and
-	 * spares callers from having to pre-filter small residuals.
+	 * Identity fast path when |degrees| < BitmapUtils.ROTATION_EPSILON: the render pipeline already treats
+	 * sub-epsilon rotation as zero, so this stays consistent and spares callers from pre-filtering residuals.
 	 *
 	 * @param x       point x-coordinate to rotate
 	 * @param y       point y-coordinate to rotate
 	 * @param pivotX  pivot x-coordinate
 	 * @param pivotY  pivot y-coordinate
-	 * @param degrees clockwise rotation angle in degrees under Y-down screen coordinates; sub-epsilon values
-	 *                short-circuit to the identity transform
+	 * @param degrees clockwise rotation in degrees (Y-down); sub-epsilon short-circuits to identity
 	 * @param out     caller-allocated length-2 array; mutated with [rotatedX, rotatedY]
 	 * @return the same `out` reference for chaining
 	 */
@@ -71,20 +68,17 @@ public final class RotationMath
 	}
 
 	/**
-	 * Compute the dimensions of the axis-aligned bounding box (AABB) of an imgW × imgH rectangle rotated by
-	 * `rotationDegrees` around its center. The standard rotated-AABB formula:
+	 * Compute the AABB dimensions of an imgW × imgH rectangle rotated by `rotationDegrees` around its center:
 	 *   rotatedW = imgW · |cos θ| + imgH · |sin θ|
 	 *   rotatedH = imgW · |sin θ| + imgH · |cos θ|
 	 *
-	 * Used by viewport fit-to-view to size the rotated image into the view, and by the crop engine to size
-	 * the screen-aligned center bounds correctly when the rotated bitmap extends past the un-rotated
-	 * [0, imgW] × [0, imgH] rectangle. Sub-epsilon rotations collapse to the input dims unchanged so callers
-	 * don't have to pre-filter — the |cos θ| → 1, |sin θ| → 0 limits match the unrotated formula exactly.
+	 * Used by viewport fit-to-view and by the crop engine to size the screen-aligned center bounds when the
+	 * rotated bitmap extends past [0, imgW] × [0, imgH]. Sub-epsilon rotations collapse to the input dims (the
+	 * |cos θ| → 1, |sin θ| → 0 limits match the unrotated formula), so callers don't pre-filter.
 	 *
 	 * @param imgW            rectangle width in pixels (must be ≥ 0)
 	 * @param imgH            rectangle height in pixels (must be ≥ 0)
-	 * @param rotationDegrees rotation angle in degrees; sign is irrelevant because the AABB is invariant
-	 *                        under sign flip (cos / sin's absolute values are taken)
+	 * @param rotationDegrees rotation angle in degrees; sign is irrelevant (AABB is sign-invariant — abs values)
 	 * @param out             caller-allocated length-2 array; mutated and returned
 	 * @return the same `out` reference with out[0] = rotatedW, out[1] = rotatedH
 	 */

@@ -34,10 +34,11 @@ codebase or it's a drift bug.
 +--------------------------------------------------------------------+
 | [Select][Move]  [Both][H][V]  [Undo][Redo][Clear]                  |
 +--------------------------------------------------------------------+
-| [Auto]  Rotation ruler (scrollable, Galaxy-style)             [+]  |
-|                                                                [−] |
+| [Auto]                          0°                          [Reset]|
 +--------------------------------------------------------------------+
-| Info: image size | crop size | rotation | zoom                     |
+| [−]   Rotation ruler (scrollable, Galaxy-style)                 [+]|
++--------------------------------------------------------------------+
+| Info: formats | image size | crop size | zoom                      |
 +--------------------------------------------------------------------+
 ```
 
@@ -160,7 +161,7 @@ that combo is uncommon and the failure aborts cleanly with the placeholder save 
 | Crop Math | `crop/CropEngine` | Computes crop from center + AR + lock + rotation; keeps cropX continuous mid-rotation, with parity-snap applied at drag-release in `CropEditorView.onPanRelease` |
 | Rotated Clamp | `util/RotatedCropClamp` + `util/CropFitContext` | Clamp candidate crop centers against a rotated image's bounds via 25-iter binary search. CropFitContext bundles the pre-computed sin/cos/halfWidth/halfHeight that the binary search and corner-check share. Both moved from `crop/` to `util/` so `model/CropState.setCenter` can call them without inverting the model → crop layering |
 | Render Geometry | `model/CropRender` | Final class bundling (centerX, centerY, cropW, cropH, imgW, imgH, rotation) + derived `srcX()` / `srcY()`. Private constructor + public `of(...)` factory in (W, H) order — record-style storage was rejected because a positional canonical constructor would force (H, W) alphabetical order, a transposable footgun against the codebase's (W, H) convention. Lives in `model/` (moved from `crop/`) so `util/UltraHdrCompat` can import it without `util/ → crop/` inversion |
-| Export Result | `crop/ExportResult` | Record bundling encoded bytes + structurally-derived `hdrAttached` flag, returned by `CropExporter.export`. Threaded through `ExportPipeline.encodePhase` to `reportSuccess` so the [HDR OK] / [HDR dropped] toast is driven by `GainMapComposer.ComposeResult.hdrAttached()` — an explicit boolean set true only when the gain map was successfully appended AND MPF offsets were patched to point at it. The structural flag is required because reference-inequality on the byte[] is unreliable (GainMapComposer returns an XMP-patched primary on the MPF-fail path, distinct from the input array) and a full-file substring scan for `hdrgm` false-positives on preserved trailers and Extended-XMP segments |
+| Export Result | `crop/ExportResult` | Record bundling encoded bytes + structurally-derived `hdrAttached` flag, returned by `CropExporter.export`. Threaded through `ExportPipeline.encodePhase` to `reportSuccess` so the [HDR OK] / [HDR dropped] toast is driven by the composer's `hdrAttached` boolean (`GainMapComposer.composeFileToFile`'s return in the production path) — set true only when the gain map was successfully appended AND MPF offsets were patched to point at it. The structural flag is required because reference-inequality on the byte[] is unreliable (GainMapComposer returns an XMP-patched primary on the MPF-fail path, distinct from the input array) and a full-file substring scan for `hdrgm` false-positives on preserved trailers and Extended-XMP segments |
 | Horizon | `util/HorizonDetector` | Auto-rotation: metadata pass first, fallback to painted-region Hough transform |
 | Export | `crop/CropExporter` | Full pipeline: crop, rotate, compress, HDR, EXIF, SEFT |
 | Editor | `view/CropEditorView` | Custom View: rendering + gestures + undo/redo |
@@ -212,6 +213,7 @@ that combo is uncommon and the failure aborts cleanly with the placeholder save 
 | `util/HorizonDetector` | XMP-roll-tag parse first, then Canny edges + two-pass Hough transform (coarse 80–100° at 0.1° / fine ±2° at 0.01°) over the user-painted horizon region; used by the auto-rotate fallback |
 | `util/AiRegionDetector` | Identifies the AI-edited region in a graft by diffing source vs aligned-edit at sampleSize=4. Output `AiMask` record drives the gain-map inpaint at save time |
 | `util/GainMapInpainter` | Frontier-tracked grow-from-boundary inpaint that fills the AI-masked region of the source's gain-map Bitmap with the average of unmasked 8-neighbors. Mutates in place from `Gainmap.getGainmapContents()` so the single-channel container survives the save's `Bitmap.compress(JPEG)` call |
+| `util/GridGeometry` | Mirror-symmetric grid-line pixel positions (`mirroredLinePos`) shared by `view/GridRenderer` (preview) and `crop/CropExporter` (export) so the saved rule-of-thirds grid aligns byte-for-byte with the in-editor preview |
 | `util/RotationMath` | `rotate(x, y, pivotX, pivotY, deg, out)` / `inverse(x, y, pivotX, pivotY, deg, out)` helpers — single source of truth for rotation math. Both write the rotated point into the caller-allocated length-2 `out` array (no allocation per call) and return `out` for chaining; sub-`ROTATION_EPSILON` rotations short-circuit to identity |
 | `util/SafFileHelper` | SAF/MediaStore URI helpers: copy (`transferTo`-based), derive sibling (handles both nested `primary:Pictures/foo.jpg` and root-level `primary:foo.jpg` document IDs), file-from-URI, query size, content-readback verify, create-sibling-placeholder, full bytes read via `readUriBytes` (routes direct-file → SAF-stream with per-call temp cache) |
 | `util/SafPaths` | Pure-string helpers extracted from SafFileHelper: `parentDocIdOf`, `lastSegmentSeparatorEnd`, `hasImageSignature`, `hasParentTraversalSegment` (segment-aware `..` check, replacing the substring `String.contains("..")` that rejected legit "IMG..edited.jpg" filenames). Static, no Context — testable directly without an Android runtime |
@@ -262,7 +264,7 @@ that combo is uncommon and the failure aborts cleanly with the placeholder save 
    Bg-thread mutations to the state become visible to the queued runnable via the Handler.post happens-before;
    concurrent UI-thread reads (e.g., a stray onDraw) see either pre-reset state (still consistent) or unwritten state
    (the renderer's null-source-image guard handles it). The UI runnable also resets non-state-backed UI affordances that
-   don't auto-sync from CropState — the Pin toolbar checkbox and the per-mode lock-axis prefs, and any active
+   don't auto-sync from CropState — the Pin toolbar chip and the per-mode lock-axis prefs, and any active
    horizon paint mode (discards the in-progress stroke and reverts the Auto button label / color so the new image's
    first touch routes to Select / Move instead of paint).
 
@@ -340,8 +342,8 @@ like `savePending`):
 
 Dialog producers register through `host.registerTransientDialog(dialog)`, which installs an `OnDismissListener` that
 clears the tracked reference on normal dismissal. `dismissTransientDialogs` calls `dialog.cancel()` (not
-`dialog.dismiss()`) so the dialog's `OnCancelListener` fires too — Custom AR's spinner-position restore, Replace
-dialog's placeholder cleanup, and SaveDialog's `priorSnapshot` clear all live in `OnCancelListener` and would leak /
+`dialog.dismiss()`) so the dialog's `OnCancelListener` fires too — the Replace
+dialog's placeholder cleanup and SaveDialog's `priorSnapshot` clear both live in `OnCancelListener` and would leak /
 stick on a plain `dismiss()`. `SettingsDialog`'s `OnCancelListener` AND `OnDismissListener` both cancel any open
 `ColorPickerDialog` it parented, since the picker is a separate AlertDialog that mutates gridConfig through its own OK
 button. The `OnDismissListener` is load-bearing: it fires on the "Done" button path AND on Activity-destroyed-mid-dialog
@@ -383,7 +385,7 @@ activity teardown.
 
 ### 3. Lock Modes
 
-The lock-axis row at the bottom of the editor has three buttons (Both / H / V). The toolbar **Pin** checkbox modulates
+The lock-axis row at the bottom of the editor has three buttons (Both / H / V). The toolbar **Pin** chip modulates
 that row's behavior:
 
 | Mode (lock-axis button) | Select Behavior | Move Behavior |
@@ -406,7 +408,7 @@ source of truth for "is Pin on" — `MainActivity.isPanning()` reads `btnPin.isS
   un-rotated one) drives the center under non-zero rotation
 
 Per-mode lock preferences (Both/H/V) are remembered independently for Move and Select. Defaults are **V** in Move and
-**Both** in Select. "Both" button is only visible in Select mode.
+**Both** in Select. The "Both" button is only enabled in Select mode (visible-but-disabled in Move mode).
 
 ### 4. Aspect Ratio
 
@@ -493,9 +495,9 @@ path that previously let the ruler land on a value the rest of the pipeline roun
 readout, but the bypass disabled and forced a needless re-encode). The 0.005° epsilon sits a half-step below the ruler's
 0.01° finest tick so every value the ruler / horizon detector can produce is honored end-to-end.
 
-**Auto-rotate button** (in the rotation row on the left, opposite the stacked ruler-zoom +/− buttons
-on the right; always visible, disabled until an image is loaded — see "Disabled-controls-stay-visible
-principle" above):
+**Auto-rotate button** (in the rotation actions row on the left, opposite the Reset button; the ruler-density
+−/+ buttons flank the ruler in the row below. Always visible, disabled until an image is loaded — see
+"Disabled-controls-stay-visible principle" above):
 - First attempts horizon detection from JPEG metadata via `HorizonDetector.detectFromMetadata` — three passes in
   priority order: (1) standard XMP APP1 segments (canonical Adobe namespace prefix) searched for `Roll` / `Tilt`
   attributes; (2) Adobe Extended XMP chunks (the secondary-segment shape that carries XMP overflow past the ~64 KB APP1
@@ -559,11 +561,13 @@ Zoom ceiling is `ViewportMath.maxZoom() = MAX_PIXEL_RATIO / baseScale`, so a lar
 baseScale gets a high zoom cap (e.g., a 200 MP source fit on a phone caps near 1000×) while a small image fit near 1:1
 caps at 64×. `ScaleGestureDetector`'s onScale is gated by a 1.5% scaleFactor deadzone so sub-percent finger-distance
 jitter (hand tremor, sensor noise) doesn't drift-zoom when the user is just holding two fingers down. Viewport clamped
-to prevent panning image off screen. Bitmap filtering disabled at 4x+ zoom for crisp pixels.
+to prevent panning image off screen. At 4×+ zoom the renderer switches from the filtered display proxy to unfiltered
+source pixels for a crisp peek — but only when the source fits the render budget (`MAX_SOURCE_RENDER_PIXELS` /
+`MAX_SOURCE_RENDER_AXIS`); past either cap it keeps drawing the filtered proxy (soft pixels at high zoom).
 
 ### 7. Grid Overlay
 
-- Toggle via toolbar `Grid` checkbox
+- Toggle via toolbar `Grid` chip
 - Settings dialog opens via the toolbar settings icon (cards alphabetised: build, grid, permissions,
   pixel-grid, selection/paint)
 - Grid-count presets: 2x2 through 8x8; arbitrary cols/rows via numeric input
@@ -786,7 +790,7 @@ embedded preview rather than the source's stale one.
 PNG export pulls EXIF from one of two sources, depending on the source format:
 - **PNG sources** use `state.pngExifTiff` (raw TIFF, uncapped) wrapped through `CropExporter.patchPngExifTiff` —
   synthesizes a transient APP1 only to run `ExifPatcher.patch` for orientation/dimension normalisation, then unwraps the
-  patched TIFF and writes via `injectPngExifFromTiff`. The PNG eXIf chunk has a u31 length field, so a > 64KB EXIF block
+  patched TIFF and writes via `injectPngExifFromTiffFileToFile`. The PNG eXIf chunk has a u31 length field, so a > 64KB EXIF block
   (camera with extensive MakerNote / GPS metadata) round-trips on PNG → PNG. The IFD1 thumbnail itself is still bounded
   by the JPEG APP1 u16 cap that `ExifPatcher.spliceExistingThumbnail` enforces internally; `patchPngExifTiff` predicts a
   too-large rebuild via `ExifPatcher.maxThumbnailBytes` (which subtracts the OLD thumbnail's bytes before measuring
@@ -795,7 +799,7 @@ PNG export pulls EXIF from one of two sources, depending on the source format:
   preview. PNG eXIf keeps using `maxThumbnailBytes` (20 KB conservative fallback) rather than the JPEG path's byte-exact
   `patchedNonThumbBytes` — its u31 cap and uncapped-TIFF tolerance need the older estimation-with-margin semantics. When
   `ExifPatcher` rejects a malformed source TIFF, the export branches by TIFF size: > 64 KB TIFFs ship VERBATIM through
-  `CropExporter.forceTiffOrientationToUpright` + `injectPngExifFromTiff` (preserves metadata that would otherwise be
+  `CropExporter.forceTiffOrientationToUpright` + `injectPngExifFromTiffFileToFile` (preserves metadata that would otherwise be
   truncated by the u16-capped synthetic-APP1 fallback; orientation is rewritten to 1 because the saved pixels are
   already upright after BitmapUtils.applyOrientation ran at load — without the rewrite, EXIF-aware viewers would
   double-rotate); ≤ 64 KB TIFFs fall through to the synthetic-APP1 path below.
@@ -890,9 +894,9 @@ path when applicable.
      thumbnail length so decoders read only the real thumbnail bytes and the padding is unreached. Without this, every
      Samsung HDR save stripped the thumbnail because the splice bailed on length mismatch with trailing data and
      `appendFresh`'s APP1-cap check also rejected on the already-near-full segment.
-  4. Empty input segment list — `patch` synthesises a fresh APP1 EXIF via `buildMinimalExifSegment` so a
-     freshly-generated thumbnail still lands in the saved file when the source carries no EXIF (screenshots, generated
-     images, files re-encoded by minimal tools).
+  4. No EXIF segment in the input (the list may be non-empty — e.g. XMP-only) — `patch` synthesises a fresh APP1
+     EXIF via `buildMinimalExifSegment` so a freshly-generated thumbnail still lands in the saved file when the source
+     carries no EXIF (screenshots, generated images, files re-encoded by minimal tools).
 - Thumbnail regenerated from cropped bitmap via a **two-rung dim cascade** with an **8-step quality bracket** at each
   rung. Long-edge max-dim falls 512 → 256; at each rung, encode quality steps through `{ 90, 80, 75, 70, 65, 60, 55,
   50 }` and the first combo whose encoded size fits the APP1 budget wins. The 8-step bracket exhausts dim-preserving
@@ -944,7 +948,7 @@ path when applicable.
   display orientation matching JPEG behavior. Without this, a PNG with eXIf orientation=6 (rotate 90 CW) would display
   in stored pixel orientation while the export side normalises orientation to 1, baking a permanent sideways rotation
   into the saved file.
-- **Saved** via `CropExporter.injectPngExifFromTiff` — writes a fresh u31-sized eXIf chunk after IHDR carrying the
+- **Saved** via `CropExporter.injectPngExifFromTiffFileToFile` — writes a fresh u31-sized eXIf chunk after IHDR carrying the
   patched TIFF (orientation normalized to 1, dimensions rewritten to crop size by `ExifPatcher.patch`). PNG → PNG
   round-trips therefore preserve EXIF up to the eXIf chunk's u31 limit; PNG → JPEG conversions still drop > 64KB EXIF
   (with a warning log) because the JPEG APP1 segment-length field is u16. A malformed source TIFF that `ExifPatcher`
@@ -1008,12 +1012,12 @@ path when applicable.
   success. A clean SDR JPEG is strictly safer than orphaned HDR.
 - **Structural HDR-OK signal**: `CropExporter.export` returns an `ExportResult(bytes, tempfile, hdrAttached)` record
   (dual-mode — exactly one of bytes/tempfile is non-null; see §Architecture "ExportResult dual-mode");
-  `hdrAttached` is sourced from `GainMapComposer.ComposeResult.hdrAttached()` — an explicit boolean set true ONLY when
-  `GainMapComposer.compose` actually appended the gain map AND patched MPF offsets to point at it. False on every drop
+  `hdrAttached` is sourced from `GainMapComposer.composeFileToFile`'s boolean return — an explicit flag set true ONLY
+  when the composer actually appended the gain map AND patched MPF offsets to point at it. False on every drop
   path: UltraHdrCompat failure, MPF-patch rejection, malformed source MPF, or the strip-and-re-inject branch (below).
   `ExportPipeline.reportSuccess` consumes this flag directly to drive the "[HDR OK]" / "[HDR dropped]" suffix. The
   explicit flag is required because reference-inequality on the byte[] is unreliable (GainMapComposer returns the
-  XMP-patched primary on the MPF-fail path, freshly allocated and distinct from `withFullMeta`) and a full-file `hdrgm`
+  XMP-patched primary on the MPF-fail path, freshly allocated and distinct from the input primary) and a full-file `hdrgm`
   substring scan false-positives on preserved trailers, stale metadata, and Extended-XMP segments. The bypass-encode
   path reports `hdrAttached = srcHadHdr` since the source bytes carry the gain map intact.
 - **HDR-drop metadata strip**: when `hdrAttached` is false but the source carried HDR metadata (UltraHdrCompat failure
@@ -1087,7 +1091,7 @@ block and serves whatever JPEG it finds at that path. The graft preserves origin
 segment shape (substituting Adobe's MPF reliably breaks Gallery's Revert pre-flight), so any backup chain the user
 already had stays intact.
 
-**Entry point**: Tap the toolbar **Graft** button (the merge-glyph icon between Settings and Open).
+**Entry point**: Tap the toolbar **Graft** button (the merge-glyph icon between Open and Save).
 Available only when (a) an image is loaded, (b) the loaded image is JPEG, (c)
 MANAGE_EXTERNAL_STORAGE is held (the in-app picker needs it to enumerate the filesystem).
 
@@ -1133,7 +1137,7 @@ MANAGE_EXTERNAL_STORAGE is held (the in-app picker needs it to enumerate the fil
    so a no-mask graft observing that pair is correct, not a violation. A decode failure leaves the
    previously-loaded image intact and surfaces "Failed to decode" to the user. The user's saved AR preference applies
    to the post-graft crop the same way it does on a normal image load — if they want the full image, they pick "Full"
-   in the spinner.
+   from the AR chip's popup menu.
 9. Toast "External edit applied" confirms a successful apply (fired only after `applyBytes` returns true, not when the
    splice is queued). Default save name = `<original-stem>-graft.jpg`, falling back to bare `"graft.jpg"` when the
    source has no display name available (typical of content URIs that don't expose `OpenableColumns.DISPLAY_NAME`).
@@ -1316,8 +1320,8 @@ lossless MCU-level transcoding (~500 LSLOC + libjpeg-turbo NDK) isn't implemente
 - **Switch expressions**: Arrow syntax throughout (`ExifPatcher`, `BitmapUtils`, `CropExporter`, `RotationRulerView`)
 - **`Math.clamp`**: used wherever a value needs `[lo, hi]` clamping instead of hand-rolled `max(min(...))`
 - **`var`**: used sparingly where the right-hand-side type is obvious
-- **Pattern matching for `instanceof`**: `MainActivity.isCheckBoxChecked` (`view instanceof CheckBox checkBox &&
-  checkBox.isChecked()`) — used where the cast would otherwise be redundant boilerplate
+- **Pattern matching for `instanceof`**: `FolderBrowser` (`holder instanceof FileListViewHolder listVh && item
+  instanceof FileRow row`) — used where the cast would otherwise be redundant boilerplate
 - **`InputStream.transferTo` / `readNBytes`**: stdlib I/O in `SafFileHelper.copyUriContents` and `readUriBytes` instead
   of hand-rolled byte-loop / partial-read accounting
 
@@ -1388,7 +1392,7 @@ entities, etc.).
    `layoutDirection`) trigger a recreate, AND a low-memory kill (force-stop, OOM eviction) ends
    the process entirely. `MainActivity.onSaveInstanceState` persists the source URI plus the
    user's editing geometry (AR, center, cropW/H, anchor, rotation, editor mode, center mode,
-   center-locked, selection points) so a kill mid-edit doesn't lose alignment work — restore on
+   per-mode lock-axis prefs, selection points) so a kill mid-edit doesn't lose alignment work — restore on
    the next `onCreate` re-fetches bytes via `imageLoader.load(savedUri)` and `installImageOnUi`
    replays the geometry via `applyRestoreBundle`. The bitmap, originalFileBytes, gain map, SEFT
    trailer, and PNG/EXIF metadata are NOT in the Bundle — they reload from the source URI. A

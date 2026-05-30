@@ -352,33 +352,23 @@ public final class ExifPatcher
 	}
 
 	/**
-	 * Patch the EXIF dimensions to newW×newH, normalise orientation to 1 (upright — we bake rotation
-	 * into the primary JPEG), and replace / strip / preserve the IFD1 thumbnail per the documented
-	 * four-state thumbnail contract:
+	 * Patch the EXIF dimensions to newW×newH, normalise orientation to 1 (we bake rotation into the
+	 * primary), and replace / strip / preserve the IFD1 thumbnail per the four-state contract:
 	 *
-	 *   - null         → preserve the source's IFD1 thumbnail verbatim. Only safe when the saved
-	 *                    pixels are byte-identical to the source's pixels (e.g. metadata-only
-	 *                    rewrites). Cropped / rotated / grafted exports MUST NOT pass null —
-	 *                    preserving leaks pre-edit content via the embedded preview.
-	 *   - byte[0]      → strip the IFD1 thumbnail (sets next-IFD pointer to 0; the IFD1 entries
-	 *                    and thumbnail bytes are no longer reachable through the normal TIFF parse
-	 *                    chain). Use this (or the STRIP_IFD1_THUMBNAIL constant) when fresh
-	 *                    thumbnail generation fails.
-	 *   - byte[N > 0]  → replace the thumbnail with these bytes. Existing IFD1 (if any) is rewritten
-	 *                    to point at the new bytes; if no IFD1 existed a fresh one is appended.
-	 *   - no EXIF in input AND non-empty thumbnail → synthesise a fresh APP1 EXIF segment from scratch
-	 *                    via `buildMinimalExifSegment` and prepend it to the output. Sources without
-	 *                    any EXIF (screenshots, generated images, files re-encoded by minimal tools)
-	 *                    would otherwise lose the freshly-generated IFD1 preview on save.
+	 *   - null        → preserve the source's IFD1 thumbnail. Safe ONLY when saved pixels are byte-identical
+	 *                   to the source (metadata-only rewrites); cropped / rotated / grafted exports MUST NOT
+	 *                   pass null — it leaks pre-edit content via the preview.
+	 *   - byte[0]     → strip the thumbnail (next-IFD pointer → 0). Use STRIP_IFD1_THUMBNAIL when fresh
+	 *                   thumbnail generation fails.
+	 *   - byte[N > 0] → replace with these bytes; rewrites IFD1 to point at them, or appends a fresh IFD1.
+	 *   - no EXIF in input + non-empty thumbnail → synthesise a fresh APP1 EXIF via buildMinimalExifSegment,
+	 *                   so sources without EXIF (screenshots, generated images) don't lose the new preview.
 	 *
-	 * @param segments  source-file segments; EXIF entries are cloned and mutated, all others pass through
-	 *                  verbatim
+	 * @param segments  source-file segments; EXIF entries are cloned and mutated, others pass through verbatim
 	 * @param newW      post-crop EXIF width
 	 * @param newH      post-crop EXIF height
-	 * @param thumbnail null to preserve, byte[0] / STRIP_IFD1_THUMBNAIL to strip, or the new JPEG thumbnail
-	 *                  bytes to replace with
-	 * @return new list with EXIF dimensions / orientation / thumbnail action applied; non-EXIF segments are
-	 *         returned by reference
+	 * @param thumbnail null to preserve, byte[0] / STRIP_IFD1_THUMBNAIL to strip, or new JPEG bytes to replace
+	 * @return new list with EXIF dimensions / orientation / thumbnail applied; non-EXIF segments by reference
 	 */
 	public static List<JpegSegment> patch(List<JpegSegment> segments, int newW, int newH, byte[] thumbnail)
 	{
@@ -472,47 +462,24 @@ public final class ExifPatcher
 	}
 
 	/**
-	 * Predict the exact byte count of the patched EXIF APP1 segment EXCLUDING the new thumbnail —
-	 * i.e. the headroom that a freshly-generated thumbnail can fill under the JPEG APP1 cap. Used by
-	 * `CropExporter.buildEmbeddedThumbnail` to compute an exact budget without estimation slack.
+	 * Predict the exact byte count of the patched EXIF APP1 segment EXCLUDING the new thumbnail — the
+	 * headroom a freshly-generated thumbnail can fill under the APP1 cap. Used by
+	 * CropExporter.buildEmbeddedThumbnail for an exact budget with no estimation slack.
 	 *
-	 * Walks the source segments and mirrors `patch()`'s decision tree to predict which output write
-	 * path will fire (splice vs append vs from-scratch synthesise), returning the corresponding
-	 * post-patch non-thumbnail size:
+	 * Mirrors patch()'s decision tree to predict which write path fires and its non-thumbnail size:
+	 *   - splice (source has a valid IFD1 with both JPEGInterchangeFormat[+Length] tags and a non-zero
+	 *     offset): data.length minus the old thumbnail bytes (EXIF cloned verbatim, only thumb swapped).
+	 *   - append (no IFD1, or missing a thumbnail tag, or zero / out-of-bounds offset): data.length + 42 —
+	 *     appendFreshIfd1WithThumbnail adds a 42-byte IFD1 header at end-of-segment.
+	 *   - synthesise (no EXIF segment at all): 102 — marker(2) + segLen(2) + "Exif\0\0"(6) + TIFF(8) +
+	 *     IFD0(42) + IFD1(42).
 	 *
-	 *   - splice (source has valid IFD1 with JPEGInterchangeFormat + JPEGInterchangeFormatLength
-	 *     tags AND a non-zero JPEGInterchangeFormat offset): output non-thumb = `data.length`
-	 *     minus the old thumbnail bytes. The source EXIF gets cloned verbatim and only the
-	 *     thumbnail bytes get swapped, so the non-thumbnail layout is exactly the source minus
-	 *     the old thumbnail.
-	 *   - append (source has no IFD1, or IFD1 lacks one or both thumbnail tags, or the
-	 *     JPEGInterchangeFormat offset is zero / out-of-bounds): output non-thumb =
-	 *     `data.length + 42`. `replaceThumbnail` falls through to `appendFreshIfd1WithThumbnail`,
-	 *     which adds a fresh 42-byte IFD1 header at end-of-segment; any orphaned source IFD1
-	 *     bytes stay byte-present.
-	 *   - from-scratch synthesise (no EXIF segment in `segments` at all): output non-thumb = 102.
-	 *     `patch()` falls through to `buildMinimalExifSegment` which writes
-	 *     marker(2) + segLen(2) + "Exif\0\0"(6) + TIFF header(8) + IFD0(42) + IFD1(42) = 102 bytes
-	 *     of non-thumb overhead.
+	 * Parse failures fall through honestly: out-of-range IFD offsets → the append estimate (+42);
+	 * whole-segment failures (bad byte order / magic / too short) → the synthesise estimate (102). In the
+	 * malformed case patch() preserves the segment without a thumbnail, so the budget is unused at worst.
+	 * (maxThumbnailBytes stays for the PNG eXIf splice/strip decision, which has different invariants.)
 	 *
-	 * Parse-failure behaviour: out-of-range IFD0 / next-IFD / IFD1 offsets fall through to the
-	 * append-path estimate (`data.length + 42`) — that keeps the budget honest if the actual
-	 * patch lands on the append fallback. Whole-segment failures (malformed byte order, missing
-	 * magic, segment shorter than the TIFF header) skip past the segment and surface as the
-	 * synthesise estimate (102) when no segment is parseable. In the malformed-EXIF case the
-	 * actual `patch()` preserves the segment without embedding a thumbnail; the predicted budget
-	 * is then unused at worst, no incorrect bytes ship.
-	 *
-	 * Caller computes `exactBudget = JpegSegment.MAX_SEGMENT_BYTES - patchedNonThumbBytes(meta)`
-	 * — no defensive margin, no clamp; the prediction is byte-exact for the splice path that
-	 * Samsung/camera sources land on, and conservative-by-42-bytes for the rare append path.
-	 *
-	 * `maxThumbnailBytes` remains in place for the PNG eXIf splice/strip decision
-	 * (`CropExporter.patchPngExifTiff`) which has different invariants (uncapped source TIFF,
-	 * 20 KB conservative default fallback).
-	 *
-	 * @param segments source JPEG metadata as captured by JpegMetadataExtractor; null treated as
-	 *                 empty (no EXIF → synthesise path → 102)
+	 * @param segments source JPEG metadata from JpegMetadataExtractor; null treated as empty (→ synthesise, 102)
 	 * @return exact predicted non-thumbnail byte count of the post-patch EXIF APP1 segment
 	 */
 	public static int patchedNonThumbBytes(List<JpegSegment> segments)

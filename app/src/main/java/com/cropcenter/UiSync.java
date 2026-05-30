@@ -154,10 +154,10 @@ final class UiSync
 
 	/**
 	 * Enable / disable the top-toolbar Graft icon based on whether a JPEG image is loaded. Graft's
-	 * metadata splice can't run against a PNG. Settings / Open are always-enabled; Save lives in
-	 * MainActivity.setBusyUi which has its own hasImage + !busy gate. AR / Grid / Pin chips also
-	 * live in the top toolbar but each has its own dedicated refresh method
-	 * (updateAspectRatioButton, updateGridToggle, updateLockHighlight) that handles the
+	 * metadata splice can't run against a PNG. Settings is always enabled and Open is image-independent
+	 * (busy-gated in MainActivity.setBusyUi); Save lives in setBusyUi too with its own hasImage + !busy
+	 * gate. AR / Grid / Pin chips also live in the top toolbar but each has its own dedicated refresh
+	 * method (updateAspectRatioButton, updateGridToggle, updateLockHighlight) that handles the
 	 * hasImage-driven enable state — they don't need to ride this Graft-specific path.
 	 */
 	void updateImageDependentToolbar()

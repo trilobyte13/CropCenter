@@ -3,38 +3,26 @@ package com.cropcenter.crop;
 import java.io.File;
 
 /**
- * Bundle returned by CropExporter.export — either an in-memory byte[] payload (small / bypass-encode
- * paths) OR a tempfile reference (streaming paths that must never materialise the encoded bytes in
- * Java heap), plus a structurally-derived flag indicating whether the saved output actually carries
- * an attached HDR gain map.
+ * Bundle returned by CropExporter.export — either an in-memory byte[] payload OR a tempfile reference (for
+ * streaming paths that must never materialise the encoded bytes in heap), plus a structurally-derived flag
+ * for whether the saved output carries an attached HDR gain map.
  *
- * Dual-mode contract: EXACTLY one of `bytes` and `tempfile` is non-null. The byte[] form is used by
- * the bypass-encode path (where `state.getOriginalFileBytes()` already lives in heap as a byte[])
- * and by the JPEG streaming path's final readback (~100-150 MB fits within largeHeap). The tempfile
- * form is used by the PNG streaming path — a 200 MP ARGB bitmap compresses lossless to 400-600 MB,
- * and `Files.readAllBytes` on that file would OOM even with largeHeap (heap is typically at ~390 MB
- * used by then; the readback's contiguous allocation can't fit). Tempfile mode lets `ExportPipeline`
- * stream the encoded bytes straight from disk to the SAF / file output without ever materialising
- * them as a single contiguous byte[].
+ * Dual-mode contract: EXACTLY one of `bytes` and `tempfile` is non-null. byte[] is used by the bypass-encode
+ * path (source bytes already in heap) and the JPEG streaming readback (~100-150 MB fits largeHeap). tempfile
+ * is used by the PNG streaming path — a 200 MP ARGB compresses to 400-600 MB and Files.readAllBytes would OOM
+ * even on largeHeap — so ExportPipeline streams it disk→output without a contiguous byte[].
  *
- * Ownership: when `tempfile` is non-null, the caller of `CropExporter.export` (i.e. `ExportPipeline`)
- * is responsible for deleting it once write / verify / callback consumption finishes. The encode
- * pipeline does NOT delete its final tempfile when handing it off via this record.
+ * Ownership: when `tempfile` is non-null the caller (ExportPipeline) must delete it after write / verify /
+ * callback finishes; the encode pipeline does NOT delete the final tempfile it hands off here.
  *
- * `hdrAttached` is sourced directly from GainMapComposer.ComposeResult.hdrAttached() — the explicit
- * boolean the composer returns alongside the output bytes. True only on the full-success path (XMP
- * Item:Length patched, gain map appended, MPF offsets rewritten to point at it) and false on every
- * drop path (no gain map, XmpItemLengthPatcher refused, MpfPatcher failed). PNG's exportPng path
- * always passes false (PNG can't carry an Ultra HDR gain map; the format limitation is documented as
- * "no HDR" in §10).
+ * `hdrAttached` comes straight from GainMapComposer.ComposeResult — true only on full success (XMP Item:Length
+ * patched, gain map appended, MPF offsets rewritten), false on every drop path and always for PNG (can't carry
+ * an Ultra HDR gain map).
  *
- * @param bytes        encoded JPEG / PNG bytes ready for write; null when tempfile is non-null
- * @param tempfile     encoded JPEG / PNG bytes staged on disk; null when bytes is non-null. Caller
- *                     owns deletion.
- * @param hdrAttached  true when the output file actually carries the Ultra HDR gain map; false for
- *                     PNG output, for SDR sources, and for HDR sources where composition was dropped
- *                     on the HDR-drop path (gain-map render failed, Item:Length unpatchable, MPF
- *                     patch rejected, etc.)
+ * @param bytes        encoded bytes ready for write; null when tempfile is non-null
+ * @param tempfile     encoded bytes staged on disk; null when bytes is non-null. Caller owns deletion.
+ * @param hdrAttached  true when the output actually carries the gain map; false for PNG, SDR sources, and
+ *                     dropped HDR composition
  */
 public record ExportResult(byte[] bytes, File tempfile, boolean hdrAttached)
 {

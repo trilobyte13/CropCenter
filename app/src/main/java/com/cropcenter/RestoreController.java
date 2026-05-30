@@ -110,26 +110,20 @@ final class RestoreController
 	}
 
 	/**
-	 * Persist source URI + restore-able CropState fields + per-mode lock prefs into an Android
-	 * Bundle. Called by MainActivity.onSaveInstanceState. No-op (writes nothing) when sourceUri is
-	 * null — pendingRestoreBundle's null-check in onCreate then falls through to the normal
-	 * Share-intent handling path on the next launch. Also a no-op when a graft is applied: the
-	 * graft bytes are in-memory only (lastLoadedUri still points at the pre-graft source), so a
-	 * restore would silently reload the pre-graft image, re-apply the geometry, and present it as
-	 * if the user's external edit were still applied — they'd save a crop of the original instead.
-	 * Skipping the bundle for grafted sessions forces the next launch into the normal cold-start
-	 * path (no restore, fresh state) rather than producing a misleading restore.
+	 * Persist source URI + restore-able CropState fields + per-mode lock prefs into a Bundle. Called by
+	 * MainActivity.onSaveInstanceState. No-op when sourceUri is null (onCreate falls through to normal
+	 * Share-intent handling). Also a no-op when a graft is applied: graft bytes are in-memory only
+	 * (lastLoadedUri still points at the pre-graft source), so a restore would reload the pre-graft image,
+	 * re-apply the geometry, and present it as if the edit were still applied — the user would save a crop of
+	 * the original. Skipping forces the next launch into a fresh cold start instead.
 	 *
 	 * @param outState        destination bundle from Android lifecycle
 	 * @param sourceUri       URI of the currently-loaded source, or null when nothing is loaded
 	 * @param state           current CropState; every restore-able field is read here
-	 * @param selectLockPref  Select-mode lock-axis preference (BOTH / HORIZONTAL / VERTICAL).
-	 *                        Persisted independently of CropState.centerMode because Pin collapses
-	 *                        centerMode to LOCKED, hiding the underlying axis choice — without
-	 *                        this key, the user's prior axis pref reverts to BOTH after a
-	 *                        Pin-on-during-kill restore.
-	 * @param moveLockPref    Move-mode lock-axis preference (HORIZONTAL / VERTICAL — BOTH is
-	 *                        Select-only). Same persistence rationale as selectLockPref.
+	 * @param selectLockPref  Select-mode lock-axis pref (BOTH / HORIZONTAL / VERTICAL). Persisted separately
+	 *                        from centerMode because Pin collapses centerMode to LOCKED, hiding the axis choice
+	 *                        — without this key it reverts to BOTH after a Pin-on-during-kill restore.
+	 * @param moveLockPref    Move-mode lock-axis pref (HORIZONTAL / VERTICAL — BOTH is Select-only); same reason.
 	 */
 	static void writeTo(Bundle outState, Uri sourceUri, CropState state,
 		CenterMode selectLockPref, CenterMode moveLockPref)

@@ -31,8 +31,8 @@ public final class TiffTag
 	// TIFF magic number (always 42 = 0x002A, u16 in declared byte order). Sits at offset +2 inside the TIFF
 	// header, just after the byte-order marker (II/MM). Every TIFF-walker uses this as the second half of the
 	// "is this a valid TIFF body?" check (alongside the II/MM byte-order pair) — extracted as a constant so
-	// the literal 42 isn't repeated alongside its `// TIFF magic = 42` comment at the six call sites
-	// (BitmapUtils, ExifPatcher's four entry points, PngMetadataExtractor).
+	// the literal 42 isn't repeated alongside its `// TIFF magic = 42` comment at the seven call sites
+	// (BitmapUtils, ExifPatcher's four entry points, PngMetadataExtractor, CropExporter).
 	public static final int MAGIC = 42;
 	// MP Entry list (APP2 / MPF IFD). LONG, count = numImages.
 	public static final int MP_ENTRY = 0xB002;

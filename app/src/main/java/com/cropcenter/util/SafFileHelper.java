@@ -200,21 +200,14 @@ public final class SafFileHelper
 
 	/**
 	 * Translate a SAF or MediaStore URI to a java.io.File in shared storage. Supported docId formats:
-	 *   - "primary:relative/path/file.ext"  — ExternalStorageProvider (DCIM, Pictures, …)
-	 *   - "raw:/absolute/filesystem/path"   — DownloadStorageProvider when the file lives on the real
-	 *                                         filesystem (Download/...). The "raw" prefix is literal —
-	 *                                         the rest is an absolute path.
-	 *   - "msf:NNN"  — DownloadStorageProvider MediaStore-Files numeric ID; resolved via
-	 *                  lookupMediaStoreFilesPath against MediaStore.Files.getContentUri("external").
-	 *   - pure-numeric — legacy form of the same MediaStore.Files lookup.
-	 * Three fallbacks beyond those branches, in order:
-	 *   1. getFilePathAndId queries MediaStore's _data column for the URI directly.
-	 *   2. resolveViaProcFd opens the URI for read and readlinks /proc/self/fd/N to recover the
-	 *      filesystem path — catches Samsung's vendor `qb:NNN` doc IDs and other opaque providers.
-	 *   3. Returns null when even the proc/fd trick fails (cloud-only providers, revoked permission).
-	 * getFilePathAndId can throw SecurityException for URIs the app doesn't have active read permission
-	 * on (common post-uninstall/reinstall for non-app-owned documents) — that's expected, we just
-	 * return null from getFilePathAndId and continue with the proc/fd fallback before giving up.
+	 *   - "primary:relative/path/file.ext" — ExternalStorageProvider (DCIM, Pictures, …)
+	 *   - "raw:/absolute/path"             — DownloadStorageProvider; literal "raw" prefix + absolute path
+	 *   - "msf:NNN" / pure-numeric         — MediaStore.Files numeric ID, via lookupMediaStoreFilesPath
+	 * Then three fallbacks in order: (1) getFilePathAndId queries MediaStore's _data column; (2)
+	 * resolveViaProcFd readlinks /proc/self/fd/N after opening the URI (catches Samsung `qb:NNN` and other
+	 * opaque providers); (3) null when even that fails (cloud-only, revoked permission). getFilePathAndId
+	 * may throw SecurityException without active read permission (common post-reinstall) — expected, we
+	 * return null and continue to the proc/fd fallback.
 	 *
 	 * @param uri SAF or MediaStore URI to resolve
 	 * @return File for the resolved filesystem path, or null when the URI isn't path-addressable
@@ -915,26 +908,21 @@ public final class SafFileHelper
 	}
 
 	/**
-	 * Attempt to read the URI's bytes directly from the underlying filesystem path, bypassing the ContentProvider
-	 * stream entirely. Samsung's MediaStore openInputStream rewrites the EXIF segment as it streams (zeros out the
-	 * GPS sub-IFD's value blocks, reorders IFD0 entries, shrinks the segment by ~440 bytes — likely a
-	 * privacy-driven sanitisation pass). Direct read via FileInputStream gives the pristine on-disk bytes that
-	 * still carry GPS.
+	 * Read the URI's bytes directly from the underlying filesystem path, bypassing the ContentProvider
+	 * stream. Samsung's MediaStore openInputStream rewrites the EXIF as it streams (zeros the GPS sub-IFD,
+	 * reorders IFD0, shrinks the segment ~440 bytes — a privacy sanitisation pass); a direct FileInputStream
+	 * gives the pristine on-disk bytes that still carry GPS.
 	 *
-	 * Three-way result: returns the bytes on success, returns NULL when the URI doesn't resolve to an
-	 * accessible filesystem path (cloud / SAF-only providers, opaque-ID URIs without a DATA column, paths
-	 * under scoped storage we don't have read access to), and THROWS IOException when the resolved file is
-	 * known to exceed MAX_READ_BYTES. The null case is "cannot read directly, try the SAF stream"; the
-	 * throw case is "we measured the file and it's too big — fail fast without wasting I/O copying up to
-	 * the cap into the temp cache only to throw the same rejection there." Validates existence /
-	 * readability before returning null so a stale MediaStore row pointing at a missing file falls back
-	 * cleanly.
+	 * Three-way result: bytes on success; NULL when the URI doesn't resolve to a readable filesystem path
+	 * (cloud / SAF-only / opaque-ID / no scoped access) — caller falls back to the SAF stream; and THROWS
+	 * IOException when the resolved file exceeds MAX_READ_BYTES (fail fast rather than copy up to the cap
+	 * into temp cache only to reject it there). Validates existence / readability before returning null so a
+	 * stale MediaStore row pointing at a missing file falls back cleanly.
 	 *
 	 * @param uri SAF URI to read directly
-	 * @return raw bytes on success, or null when the URI can't be read directly (caller should fall
-	 *         back to the SAF stream copy)
-	 * @throws IOException when the resolved path exists but its length exceeds MAX_READ_BYTES — caller
-	 *                     propagates without the temp-copy fallback
+	 * @return raw bytes on success, or null when it can't be read directly (caller falls back to SAF stream)
+	 * @throws IOException when the resolved path exists but exceeds MAX_READ_BYTES — caller propagates without
+	 *                     the temp-copy fallback
 	 */
 	private byte[] tryReadDirectlyFromPath(Uri uri) throws IOException
 	{

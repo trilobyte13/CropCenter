@@ -10,41 +10,30 @@ import java.util.Collections;
 import java.util.List;
 
 /**
- * Build a "minimal pixel graft" — a JPEG that takes the external edit's primary entropy-coded scan but keeps the
- * original's identity metadata (EXIF, XMP, MPF) and HDR trailer (gain map + SEFT). Used by the "Apply External Edit"
- * feature to round-trip a Photoshop Generative Fill / Generative Remove edit through CropCenter. SEFT is copied
- * verbatim like every other identity segment, so the source's Revert chain (when present) survives the splice —
- * see CropExporter.appendSeftFileToFile for the verbatim-preservation contract.
+ * Build a "minimal pixel graft" — a JPEG taking the external edit's entropy-coded scan but keeping the
+ * original's identity metadata (EXIF, XMP, MPF) and HDR trailer (gain map + SEFT). Powers "Apply External
+ * Edit". SEFT is copied verbatim like every identity segment, so the source's Samsung Revert chain survives.
  *
- * Caller-enforced precondition: both inputs MUST be JPEGs, AND the caller MUST guarantee they already share the same
- * stored SOF0 dimensions before calling this splice — otherwise the output's metadata (from original) describes
- * different pixel counts than the SOF (from edit) carries, producing an incoherent decoder result. GraftWriter does
- * NOT verify the dimensions itself; it only checks the JPEG signature and structural well-formedness. The dimension
- * check + alignment lives in `EditAligner.align`: Photoshop tends to bake the orientation into pixels and write
- * orientation=1, which means a portrait-display source from a landscape-stored Samsung original (orient=6) and the
- * Photoshop edit (orient=1, stored portrait) will have matching DISPLAY dimensions but different STORED dimensions —
- * EditAligner decodes + re-rotates the edit back to the source's stored layout in that case before invoking
- * GraftWriter. GraftWriter throws IOException only on structural malformation (missing SOI, missing primary EOI,
- * etc.).
+ * Caller-enforced precondition: both inputs MUST be JPEGs AND already share the same stored SOF0 dimensions —
+ * else the output's metadata (from original) describes a different pixel count than the SOF (from edit),
+ * producing an incoherent decode. GraftWriter checks only the JPEG signature + structural well-formedness;
+ * the dimension check + re-rotation lives in EditAligner.align (Photoshop bakes orientation into pixels and
+ * writes orientation=1, so a portrait-display source from a landscape-stored Samsung original and the edit
+ * match in DISPLAY but not STORED dims — EditAligner re-rotates the edit to the source's stored layout first).
+ * Throws IOException only on structural malformation (missing SOI / primary EOI, etc.).
  *
  * Per-segment provenance (see SWAP_* constants):
- *   - APP1/EXIF, APP1/XMP, APP2/ICC, APP2/MPF, gain map, SEFT trailer: from original —
- *     identity, color-space coherence with the kept gain map, and Samsung Revert pre-
- *     flight all need them.
- *   - DQT, DHT, SOF, SOS+scan, EOI: from edit — the AI-edited pixels themselves.
+ *   - from original: APP1/EXIF, APP1/XMP, APP2/ICC, APP2/MPF, gain map, SEFT — identity, color coherence with
+ *     the kept gain map, and Samsung Revert pre-flight all need them.
+ *   - from edit: DQT, DHT, SOF, SOS+scan, EOI — the AI-edited pixels.
  *
- * Why ICC stays original-side: the recommended editor (Photoshop with Camera Raw disabled — see GraftController.start)
- * preserves the source's pixel values verbatim outside the AI fill, so the edit's pixels are P3-numerical even though
- * Photoshop doesn't write any ICC tag. When EditAligner.reorientEdit re-encodes the edit through Bitmap.compress to
- * fix a stored-layout mismatch, Skia injects its own synthetic 456-byte sRGB profile — that ICC describes Skia's
- * container, not the actual pixel encoding. Trusting it would tag the spliced output as sRGB while the pixels remain
- * P3-numerical and the gain map is calibrated for P3, producing washed-out HDR composition (sRGB-tagged pixels read as
- * smaller-gamut, gain map boost misaligned). Keeping the source's ICC keeps the encoding triplet (pixels, ICC, gain
- * map) self-consistent.
- *
- * Substituting the edit's MPF segment alone has been observed to hang Samsung Gallery's Revert pre-flight (Adobe writes
- * a different MPType for the gain-map entry); same for substituting the edit's gain map. Both stay original-shape; only
- * MPF entry offsets get patched for the new primary scan size.
+ * ICC stays original-side because the recommended editor (Photoshop, Camera Raw off) keeps source pixel values
+ * verbatim, so the edit's pixels are P3-numerical even with no ICC tag. When EditAligner.reorientEdit
+ * re-encodes through Bitmap.compress, Skia injects a synthetic sRGB profile describing its container, not the
+ * pixels — trusting it would tag P3 pixels as sRGB and misalign the P3-calibrated gain map (washed-out HDR).
+ * Keeping source ICC keeps (pixels, ICC, gain map) self-consistent. MPF and gain map likewise stay
+ * original-shape — substituting the edit's has been observed to hang Samsung Gallery's Revert pre-flight
+ * (Adobe writes a different MPType); only MPF entry offsets get patched for the new scan size.
  */
 public final class GraftWriter
 {

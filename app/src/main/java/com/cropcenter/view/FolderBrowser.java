@@ -62,57 +62,40 @@ import java.util.regex.Pattern;
 
 /**
  * Shared filesystem-browser UI used by both FolderPickerDialog (save flow) and OpenPickerDialog
- * (load flow). Owns the inlaid panel (title block + breadcrumb + grid/list view-mode toggle +
- * sort-direction toggle + a RecyclerView-backed content list with a draggable fast-scroll thumb),
- * the navigation state (rootDir + current folder), the bg work executor (folder enumeration +
- * thumbnail decodes), and SharedPreference-backed UI state (grid/list view mode, sort
- * direction).
+ * (load flow). Owns the inlaid panel (title + breadcrumb + grid/list and sort-direction toggles +
+ * a RecyclerView-backed content list with a draggable fast-scroll thumb), the navigation state
+ * (rootDir + current folder), the bg work executor (enumeration + thumbnail decodes), and the
+ * SharedPreference-backed view mode + sort direction.
  *
- * The RecyclerView recycles off-screen cells back to a pool, so even a 50,000-photo Camera folder
- * only materialises ~visible-window cells (~10-30) at a time. Eager-inflation of all rows is the
- * previous architecture that OOM-crashed at large folder counts.
+ * Scales to huge folders: the RecyclerView recycles off-screen cells, so a 50k-photo Camera folder
+ * only materialises the visible window (~10-30 cells) at a time. Enumeration (listFiles + sort) runs
+ * on the bg executor, never the UI thread — refresh() clears the list, posts an enumeration task
+ * (clearing the executor queue first so a rapid folder tap pre-empts the previous folder's pending
+ * decodes), then re-populates the adapter when the result arrives. A generation counter discards
+ * stale results so tapping A then B before A finishes only ever shows B.
  *
- * Folder enumeration (listFiles + sort) runs on the bg executor, not the UI thread — for the
- * Camera album (50k+ entries) the sort alone was ~200ms and listFiles another ~500ms, freezing
- * the dialog while it loaded. The refresh() flow now clears the visible list immediately,
- * posts an enumeration task to the bg executor (its queue is cleared first so a rapid folder
- * tap pre-empts whatever decodes were pending for the previous folder), then re-populates the
- * adapter on the UI thread when the bg result arrives. A generation counter discards stale
- * results so a user who taps folder A then folder B before A's enumeration finishes only sees
- * B's content.
+ * Sort direction (newest/oldest first) applies to FILES only; folders stay alphabetical, matching
+ * file-manager convention.
  *
- * Sort direction (newest first vs oldest first) applies to FILES only — folders are always
- * alphabetical regardless of sort mode, matching the convention of file managers where
- * navigation targets are name-ordered but content can be re-sorted.
+ * Fast scroller: BrowserFastScroller is a custom right-edge overlay (FrameLayout z-order) with an
+ * always-visible thumb and a 32dp minimum height, using position-based math (O(1) on
+ * GridLayoutManager). AndroidX's built-in initFastScroller is unused — its thumb has no usable
+ * minimum (collapses to a sliver on 50k folders) and its drag math is O(N).
  *
- * Fast scroller: BrowserFastScroller is a custom overlay View on the right edge of the
- * RecyclerView (FrameLayout z-order) with an always-visible draggable thumb, 32dp minimum
- * height, and position-based scroll math (findFirstVisibleItemPosition +
- * scrollToPositionWithOffset, both O(1) on GridLayoutManager). Replaces AndroidX's built-in
- * initFastScroller because the built-in thumb has no usable minimum height (collapses to a
- * sliver on 50k folders) and its drag math is O(N) on GridLayoutManager.
+ * File-tap callback: both flows wire taps via `onFileTapped` — Open selects-and-dismisses, Save
+ * populates the filename input and stays open. That callback is the only difference between them.
  *
- * File-tap callback: both flows wire taps via `onFileTapped`. The Open flow passes a callback
- * that selects-and-dismisses; the Save flow passes a callback that populates the filename input
- * (dialog stays open). The only difference between the two flows is what each callback does
- * with the picked File.
+ * Sizing: buildPanel sizes the card to a fixed height (screenHeight − `CARD_RESERVED_DP`, floored at
+ * 240dp), measured EXACTLY (not wrap-to-content, because the adapter populates async after show() —
+ * a wrap panel would measure an empty list and open squished). The file-list container is a
+ * weight=1 / height=0 flex child, so footer rows the caller appends (Save's options + filename) keep
+ * their height while the list fills the remainder and scrolls. `CARD_RESERVED_DP` is shared by all
+ * three pickers so they open at the same size.
  *
- * buildPanel sizes the whole card to a fixed height (screenHeight − `CARD_RESERVED_DP`, floored at
- * 240dp), measured EXACTLY and clamped to the dialog's available height, and makes the file-list
- * container a weight=1 / height=0 flex child, so any footer rows the caller appends (Save's options +
- * filename rows) keep their measured height while the list fills the remainder and scrolls. EXACTLY
- * (not wrap-to-content) because the adapter populates asynchronously after show() — a wrap panel
- * would measure an empty list and open squished. `CARD_RESERVED_DP` is shared by all three pickers
- * (Load / Graft / Save) so they open at the same maximum size; it's headroom for the dialog frame +
- * buttons + system bars below the card, not the footer rows themselves (those live inside the sized
- * card and are measured normally).
- *
- * Lifecycle: caller calls buildPanel() to assemble the view tree, adds it to its dialog content,
- * then funnels through attachToDialog(...) — that single method installs the composite dismiss
- * listener (which calls shutdown() so the executor's worker thread doesn't outlive the dialog),
- * calls refresh() to seed the initial folder display, and calls dialog.show() inside a try/catch
- * that shuts the executor down on BadTokenException. Callers must NOT call refresh() / show() /
- * shutdown() manually — attachToDialog owns the whole refresh + show + dismiss + shutdown chain.
+ * Lifecycle: the caller builds the tree with buildPanel(), then funnels through attachToDialog(...),
+ * which owns the whole refresh + show + dismiss + shutdown chain (the dismiss listener calls
+ * shutdown() so the executor doesn't outlive the dialog). Callers must NOT call refresh() / show() /
+ * shutdown() themselves.
  */
 final class FolderBrowser
 {
@@ -507,13 +490,11 @@ final class FolderBrowser
 			}
 			int spanIndex = layoutManager.getSpanSizeLookup()
 				.getSpanIndex(position, THUMBNAIL_GRID_COLUMNS);
-			// Proportional distribution keeps cell widths equal across columns. Without this — using
-			// `left = spanIndex == 0 ? 0 : interGap` — column 0 occupies its full slot while columns
-			// 1 and 2 lose `interGap` of width AND height (the cell's onMeasure forces height = width),
-			// so the first column ends up ~8dp taller than the other two. The (i * g / n,
-			// g - (i+1) * g / n) split distributes the inter-cell gap evenly across each cell's slot,
-			// keeping per-cell offsets summing to `interGap - interGap/n` for every column. Adjacent
-			// cells still see `interGap` between them (cell[i].right + cell[i+1].left == interGap).
+			// Proportional distribution keeps cell widths (and heights — onMeasure forces square
+			// cells) equal across columns. The naive `left = spanIndex == 0 ? 0 : interGap` lets
+			// column 0 take its full slot while columns 1-2 lose interGap, leaving column 0 ~8dp
+			// taller. The (i*g/n, g-(i+1)*g/n) split spreads the gap evenly so every column's slot
+			// is equal while adjacent cells still see exactly interGap between them.
 			int interGap = gap * 2;
 			outRect.left = spanIndex * interGap / THUMBNAIL_GRID_COLUMNS;
 			outRect.right = interGap - (spanIndex + 1) * interGap / THUMBNAIL_GRID_COLUMNS;
@@ -572,10 +553,7 @@ final class FolderBrowser
 	// 4000-pixel-wide sources, producing ~750 KB ARGB bitmaps.
 	private static final int THUMBNAIL_DECODE_DP = 110;
 	private static final int THUMBNAIL_GRID_COLUMNS = 3;
-	// Adapter view-type constants. FOLDER cells span the full row in both modes; FILE_LIST is a
-	// full-width row used in list mode; FILE_GRID is a single cell in a 3-column grid. Values are
-	// arbitrary (RecyclerView just needs them distinct); ordering here is alphabetical by name per
-	// CLAUDE.md's within-tier sort.
+	// Adapter view-type constants. Values are arbitrary — RecyclerView only needs them distinct.
 	private static final int VIEW_TYPE_FILE_GRID = 0;
 	private static final int VIEW_TYPE_FILE_LIST = 1;
 	private static final int VIEW_TYPE_FOLDER = 2;
@@ -634,31 +612,20 @@ final class FolderBrowser
 	private volatile int refreshGeneration;
 
 	/**
-	 * Walk the path chain from rootDir to current (inclusive), one File per segment. The first
-	 * element is always rootDir; if current equals rootDir, the chain has length 1. Otherwise the
-	 * chain contains rootDir plus one File per "/"-separated segment of the path relative to
-	 * rootDir. Package-private static so the breadcrumb-rendering test can exercise the
-	 * chain-building logic without spinning up an AlertDialog. buildBreadcrumb delegates to this
-	 * for the segment enumeration; the spannable formatting (ClickableSpan / StyleSpan /
-	 * ForegroundColorSpan) stays in the View layer's instance method where it can capture the
-	 * browser's mutable `current` field.
+	 * Walk the path chain from rootDir to current (inclusive), one File per segment — [rootDir] when
+	 * current equals rootDir, otherwise rootDir plus one File per "/"-separated segment below it.
+	 * Package-private static so the breadcrumb test can exercise it without an AlertDialog;
+	 * buildBreadcrumb delegates here for segment enumeration and keeps the spannable formatting.
 	 *
-	 * Both paths are canonicalized before the relative-slice so a symlink in either input produces
-	 * the same chain a direct path would. Without this, a current path like `/sdcard/Pictures`
-	 * (the /sdcard symlink to /storage/emulated/0) under rootDir = `/storage/emulated/0` would
-	 * pass isInsideRoot (which canonicalizes) but then crash here with
-	 * StringIndexOutOfBoundsException because the absolute-path prefix doesn't match. The
-	 * defensive startsWith check after canonicalization handles the residual case where a stale
-	 * `current` from a concurrent refresh is no longer a descendant — degenerates to a root-only
-	 * chain rather than throwing.
+	 * Both paths are canonicalized before the relative slice so a symlinked input (e.g. /sdcard →
+	 * /storage/emulated/0) doesn't crash the substring with StringIndexOutOfBoundsException. The
+	 * startsWith check after canonicalization covers a stale `current` from a concurrent refresh that
+	 * is no longer a descendant — it degenerates to a root-only chain rather than throwing.
 	 *
-	 * @param rootDir absolute path representing the breadcrumb's leftmost ("Internal storage")
-	 *                segment
-	 * @param current the folder currently displayed by the browser; expected to be a descendant
-	 *                of rootDir (verified at navigation time by isInsideRoot)
-	 * @return ordered list of File segments [rootDir, ..., current]; never empty (always contains
-	 *         rootDir at minimum); collapses to [rootDir] when current is not a descendant or
-	 *         either path can't be canonicalized
+	 * @param rootDir absolute path of the breadcrumb's leftmost ("Internal storage") segment
+	 * @param current folder currently displayed; expected to be a descendant of rootDir
+	 * @return ordered [rootDir, ..., current]; never empty (always at least [rootDir]); collapses to
+	 *         [rootDir] when current is not a descendant or either path can't be canonicalized
 	 */
 	static List<File> breadcrumbChain(File rootDir, File current)
 	{
@@ -705,32 +672,22 @@ final class FolderBrowser
 	}
 
 	/**
-	 * Decode a thumbnail for `file` aimed at the target display size in pixels and apply EXIF
-	 * orientation so a sideways-stored JPEG renders right-side-up. Checks the process-wide
-	 * THUMBNAIL_CACHE first — a hit returns the cached bitmap immediately (no disk I/O, no
-	 * decode), which makes repeat folder navigations effectively instant. On miss, tries
-	 * ExifInterface.getThumbnail() for JPEG sources (the embedded thumbnail decodes in
-	 * milliseconds vs. a full-image read), then falls back to a subsampled
-	 * BitmapFactory.decodeFile pass. Successful decodes are put into the cache before returning.
+	 * Decode a thumbnail for `file` at the target display size and apply EXIF orientation so a
+	 * sideways-stored JPEG (or PNG with an eXIf tag) renders upright. Checks the process-wide
+	 * THUMBNAIL_CACHE first (a hit skips all disk I/O); on miss, tries ExifInterface.getThumbnail()
+	 * for JPEGs (decodes in ms) then falls back to a subsampled BitmapFactory.decodeFile, caching
+	 * the result before returning.
 	 *
-	 * Cache key combines path + lastModified + targetSize:
-	 * - path + lastModified makes the entry invalidate when the file content changes (user
-	 *   replaces a photo at the same filename via Gallery edit, sync app overwrite, etc.).
-	 * - targetSize is part of the key for defensive correctness (a future caller passing a
-	 *   different size still gets correct cache semantics), but in practice both current callers
-	 *   pass the same THUMBNAIL_DECODE_DP value — list mode decodes at the same target as grid
-	 *   mode so the 40dp ImageView simply scales the ~500px bitmap down at GPU draw time.
-	 *   Toggling between view modes hits a single shared cache entry instead of re-decoding.
+	 * Cache key is path + lastModified + targetSize: lastModified invalidates the entry when the
+	 * file is replaced (Gallery edit, sync overwrite); targetSize is keyed defensively, though both
+	 * callers pass the same THUMBNAIL_DECODE_DP so grid and list mode share one entry.
 	 *
-	 * Caller MUST NOT recycle the returned bitmap — it lives in the LruCache and recycling
-	 * would corrupt the cache. Bitmap lifecycle is now: cache holds the strong reference until
-	 * eviction; eviction drops the cache's reference; GC reclaims when no ImageView still draws
-	 * the bitmap.
+	 * Caller MUST NOT recycle the returned bitmap — it lives in the LruCache and recycling would
+	 * corrupt it; eviction drops the cache's reference and GC reclaims once no ImageView draws it.
 	 *
 	 * @param file       image file to thumbnail
 	 * @param targetSize target display dimension in pixels
-	 * @return EXIF-oriented thumbnail bitmap (possibly cached), or null if all decode paths
-	 *         failed
+	 * @return EXIF-oriented thumbnail bitmap (possibly cached), or null if all decode paths failed
 	 */
 	static Bitmap decodeThumbnail(File file, int targetSize)
 	{
@@ -784,8 +741,6 @@ final class FolderBrowser
 			// PNG with eXIf orientation=6 doesn't render sideways in the picker grid while loading
 			// upright in the editor. The cap inside readPngOrientationCapped keeps the bg thumbnail
 			// decoder from reading a multi-MB PNG into RAM just to look up the orientation tag.
-			// PNGs without eXIf (or with eXIf placed past the cap) fall through with orientation=1,
-			// matching the pre-fix render — no regression for unaffected PNGs.
 			orientation = readPngOrientationCapped(file);
 		}
 		if (raw == null)
@@ -851,10 +806,8 @@ final class FolderBrowser
 				return null;
 			}
 		}
-		// Successful decode — put into the process-wide cache before returning so a subsequent
-		// navigation to the same folder reuses the bitmap. cacheKey was built at function entry
-		// (path + lastModified + targetSize); the cache's sizeOf override keys eviction off
-		// bitmap.getByteCount().
+		// Cache before returning so a re-navigation to this folder reuses the bitmap instead of
+		// re-decoding from disk.
 		THUMBNAIL_CACHE.put(cacheKey, result);
 		return result;
 	}
@@ -1021,27 +974,20 @@ final class FolderBrowser
 	}
 
 	/**
-	 * Install the composite OnDismissListener that both pickers need (FolderBrowser.shutdown +
-	 * onCancel-when-not-decided + host transient-dialog cleanup), call refresh() to seed the
-	 * initial folder display, and call dialog.show() inside a try/catch that shuts the executor
-	 * down on BadTokenException (the config-change race window between picker construction and
-	 * the first frame would otherwise leak the executor's worker thread).
-	 *
-	 * Caller funnels through this AFTER building the AlertDialog so the dismiss listener +
-	 * refresh + show ordering is guaranteed. Without the dismiss listener the executor leaks;
-	 * without refresh() the dialog opens empty; without the try/catch a BadTokenException
-	 * strands the executor's worker thread.
+	 * Install the composite OnDismissListener both pickers need (shutdown + onCancel-when-not-decided
+	 * + host transient-dialog cleanup), call refresh() to seed the initial display, and call
+	 * dialog.show() inside a try/catch that shuts the executor down on BadTokenException (the
+	 * config-change race between construction and first frame would otherwise leak its worker thread).
+	 * Caller funnels through this AFTER building the dialog so the listener + refresh + show ordering
+	 * is guaranteed.
 	 *
 	 * @param dialog              the dialog to attach to
-	 * @param decided             true when the user has committed a selection — drives whether
-	 *                            onCancel fires on dismiss; passed as a Supplier so callers can
-	 *                            close over a one-element array (FolderPickerDialog, set inside
-	 *                            a lambda) or a field (OpenPickerDialog, set in a method) with
-	 *                            the same shape
+	 * @param decided             true once the user has committed a selection — drives whether onCancel
+	 *                            fires on dismiss; a Supplier so callers can close over a one-element
+	 *                            array or a field with the same shape
 	 * @param onCancel            ran on dismiss when decided is still false — typically
 	 *                            `() -> onPicked.accept(null)`
-	 * @param hostDismissCallback host's transient-dialog tracking cleanup; called after the
-	 *                            other listeners; null skips this step
+	 * @param hostDismissCallback host's transient-dialog tracking cleanup; called last; null skips it
 	 * @throws RuntimeException re-thrown from dialog.show() after the executor is shut down
 	 */
 	void attachToDialog(AlertDialog dialog, BooleanSupplier decided, Runnable onCancel,
@@ -1105,10 +1051,8 @@ final class FolderBrowser
 		// the real layout governor (it's what shrinks the weighted container so the footer rows stay
 		// visible).
 		recyclerView.setMaxHeightPx(panelMaxHeightPx);
-		// GridLayoutManager always — spanCount=3 for grid mode, spanCount=1 for list mode (toggled
-		// in toggleViewMode). Folder rows always span the full row width regardless of mode (see
-		// BrowserSpanSizeLookup), so grid mode renders the folder rows as full-width headers and
-		// the file rows as 3-column cells underneath.
+		// BrowserSpanSizeLookup makes folder rows span the full width (full-width headers) while
+		// file rows flow as 1-span cells across the grid (3 columns in grid mode, 1 in list mode).
 		layoutManager = new GridLayoutManager(ctx, gridMode ? THUMBNAIL_GRID_COLUMNS : 1);
 		layoutManager.setSpanSizeLookup(new BrowserSpanSizeLookup());
 		recyclerView.setLayoutManager(layoutManager);
@@ -1144,7 +1088,7 @@ final class FolderBrowser
 		//   - Footer rows (Save's format / Export Grid / filename) keep their full measured height
 		//     and the list absorbs all the flex, so they stay on-screen below the grid. targetMax
 		//     never exceeds the offered height, so the panel can't overflow the non-scrolling
-		//     AlertDialog custom view (the reserve in scrollerReservedPxDp covers the frame + buttons
+		//     AlertDialog custom view (the CARD_RESERVED_DP reserve covers the frame + buttons
 		//     + system bars below the card).
 		LinearLayout panel = new LinearLayout(ctx)
 		{
@@ -1168,14 +1112,11 @@ final class FolderBrowser
 		panel.addView(container, new LinearLayout.LayoutParams(
 			LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
 
-		// 3-thread bg executor with an explicit queue so refresh() can clear pending decodes for
-		// the previous folder before pushing the new folder's enumeration. Without queue.clear,
-		// the new enumeration would wait behind however many decodes the user kicked off scrolling
-		// through the previous folder — on a deep Camera scroll that's seconds of stalling before
-		// the new folder even starts listing. Three threads triple decode throughput so a fast
-		// scroll through a 30-cell grid window paints in ~300ms instead of ~750ms with 2 threads;
-		// ViewHolder Future cancellation + drag-deferred submission keep the queue from filling
-		// with stale decodes for cells that have already scrolled past.
+		// 3-thread bg executor with an explicit queue so refresh() can clear pending decodes for the
+		// previous folder before pushing the new enumeration — without the clear, the new folder
+		// waits behind whatever decodes the user kicked off scrolling the previous one. Three threads
+		// keep the visible window painting quickly; ViewHolder Future cancellation + drag-deferred
+		// submission keep the queue from filling with stale decodes for cells already scrolled past.
 		bgExecutor = new ThreadPoolExecutor(3, 3, 0L, TimeUnit.MILLISECONDS,
 			new LinkedBlockingQueue<>(), task ->
 			{
@@ -1269,10 +1210,9 @@ final class FolderBrowser
 				return;
 			}
 			EnumerationResult result = sortAndAssemble(snap, targetSort);
-			// Pre-submit decodes for the top-of-list cells so their bitmaps land in
-			// THUMBNAIL_CACHE before the UI thread runs adapter.setItems below. By the time the
-			// visible cells bind, cache hits paint immediately instead of waiting on a fresh
-			// decode pass — shaves ~300ms off the initial-load "items visible but blank" gap.
+			// Pre-submit decodes for the top-of-list cells so their bitmaps land in THUMBNAIL_CACHE
+			// before adapter.setItems runs — the visible cells then paint from cache on first bind
+			// instead of flashing blank while a fresh decode pass catches up.
 			prefetchInitialThumbnails(result.items(), gen);
 			uiHandler.post(() ->
 			{

@@ -1,23 +1,17 @@
 package com.cropcenter.model;
 
 /**
- * Bundle of crop-geometry parameters that travel together to the export pipeline. Replaces the data clump that the
- * audit flagged in UltraHdrCompat.compressWithGainmap (12-param method) and the analogous threading through
- * CropExporter.export → buildCroppedGainMap → compressWithGainmap.
+ * Bundle of crop-geometry parameters that travel together to the export pipeline (replaces a 12-param method
+ * clump in UltraHdrCompat.compressWithGainmap and the threading through CropExporter.export →
+ * buildCroppedGainMap). Lives in model/ (not crop/) as a pure value object both crop/ and util/ consume —
+ * keeping it in crop/ would invert the util/ → crop/ layering.
  *
- * Lives in model/ rather than crop/ because it's a pure value object — both crop/ and util/ consume it. Keeping
- * it in crop/ forced util/UltraHdrCompat to depend on crop/ (a layering inversion: util is the lower layer).
- *
- * Implemented as a final class with a private constructor + public static `of(...)` factory, NOT a record, because a
- * record's canonical constructor must be at least as accessible as the record itself — making the all-positional raw
- * constructor reachable to every caller. The footgun: a maintainer using the codebase's (W, H) convention everywhere
- * else (CropState.getCropW() / .getCropH(), CropFitContext.of(imgW, imgH, ...), RotatedCropClamp, CropEngine,
- * EditorRenderer) would write `new CropRender(cx, cy, cropW, cropH, imgW, imgH, rot)` and silently transpose each pair
- * — all int, no compile error, but the gain-map output would carry visible HDR halos around every cropped export.
- * Converting from `public record` to `public final class` + `private` ctor closes that hole at compile time: the only
- * way to construct a CropRender is through `of(...)`, whose parameter order matches the rest of the codebase. Fields
- * are stored alphabetically (cropH before cropW, imgH before imgW); the factory accepts the canonical (W, H) order
- * and threads the swap internally.
+ * A final class with a private constructor + public static of(...) factory, NOT a record: a record's
+ * canonical constructor must be as accessible as the record, exposing the all-positional raw ctor. The
+ * footgun — a maintainer using the codebase's (W, H) convention everywhere else would write
+ * `new CropRender(cx, cy, cropW, cropH, imgW, imgH, rot)` and silently transpose each int pair (no compile
+ * error, but visible HDR halos around every cropped export). The of(...) factory takes canonical (W, H) order
+ * and threads the swap internally; fields are stored alphabetically (cropH before cropW, etc.).
  */
 public final class CropRender
 {

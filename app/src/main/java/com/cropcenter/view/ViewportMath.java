@@ -109,24 +109,20 @@ final class ViewportMath
 	}
 
 	/**
-	 * Pure-geometry overload taking image dimensions plus rotation. Clamps the viewport center against the
-	 * rotated AABB (`rotatedW = |imgW·cos θ| + |imgH·sin θ|`, `rotatedH = |imgW·sin θ| + |imgH·cos θ|`) rather
-	 * than the un-rotated rectangle, so at non-cardinal rotations the user can still pan to the rotated image's
-	 * far corners — which by definition extend past `[0, imgW] × [0, imgH]` in screen-aligned image coords.
-	 * Without this, fitToView + effectiveMinZoom + the rotation-aware crop math would all let the user fit and
-	 * compose against the rotated image while a stale clamp pinned the viewport center to the un-rotated
-	 * rectangle, making the rotated corners unreachable at high zoom.
+	 * Pure-geometry overload taking image dimensions + rotation. Clamps the viewport center against the rotated
+	 * AABB (rotatedW = |imgW·cos θ| + |imgH·sin θ|, rotatedH = |imgW·sin θ| + |imgH·cos θ|), not the un-rotated
+	 * rectangle, so at non-cardinal rotations the user can still pan to the rotated image's far corners (which
+	 * extend past [0, imgW] × [0, imgH] in screen-aligned coords). A stale un-rotated clamp would make those
+	 * corners unreachable at high zoom. Sub-epsilon rotations collapse to the un-rotated bounds via
+	 * RotationMath.rotatedAabbDimensions's identity branch. Note the center is clamped against the rotated
+	 * half-extents but the centering branch (visibleDim >= rotatedDim) pins to the UN-rotated midpoint
+	 * (imgW/2, imgH/2) — correct because the rotated AABB is symmetric about that same point.
 	 *
-	 * Sub-epsilon rotations route through `RotationMath.rotatedAabbDimensions`'s identity branch and the clamp
-	 * collapses to the un-rotated bounds exactly. The rotated AABB midpoint coincides with `(imgW/2, imgH/2)`,
-	 * so the centering branch (`visibleDim >= rotatedDim`) still pins to the same point as the legacy clamp.
+	 * Package-private so ViewportMathTest can pin the rotated clamp range.
 	 *
-	 * Package-private so ViewportMathTest can pin the rotated clamp range directly.
-	 *
-	 * @param imgW            image width in image pixels (must be ≥ 0; behavior degenerate at 0)
-	 * @param imgH            image height in image pixels (must be ≥ 0; behavior degenerate at 0)
-	 * @param rotationDegrees current image rotation; sub-epsilon values collapse to the un-rotated branch via
-	 *                        RotationMath's identity short-circuit
+	 * @param imgW            image width in image pixels (≥ 0; degenerate at 0)
+	 * @param imgH            image height in image pixels (≥ 0; degenerate at 0)
+	 * @param rotationDegrees current rotation; sub-epsilon collapses to the un-rotated branch
 	 */
 	void clampViewport(int imgW, int imgH, float rotationDegrees)
 	{
@@ -177,25 +173,19 @@ final class ViewportMath
 	}
 
 	/**
-	 * Lower bound of the zoom range as a function of the image dimensions, current `baseScale`, and rotation.
-	 * Returns 1 (= the static `MIN_ZOOM`) at zero rotation or whenever the rotated bounding box fits inside the
-	 * view at `baseScale * 1`. When the rotated AABB is bigger than what `baseScale` fits — e.g. when the user
-	 * called fit-to-view at rotation 0 and then rotated to 30° — drops the floor to `(view-fit-to-rotated) /
-	 * baseScale` so a pinch-out gesture can take the user past `zoom = 1` down to the value where the entire
-	 * rotated image fits on screen. This keeps the "the app can always be zoomed out to show the entire image"
-	 * contract regardless of the order the user fits-and-rotates in. Sub-epsilon rotations short-circuit
-	 * through `RotationMath.rotatedAabbDimensions`'s identity branch, so this returns the static minimum
-	 * exactly at the zero-rotation common case.
+	 * Lower bound of the zoom range from image dimensions, baseScale, and rotation. Returns MIN_ZOOM (1) at zero
+	 * rotation or whenever the rotated AABB fits the view at baseScale. When the rotated AABB is bigger (e.g.
+	 * fit-to-view at 0° then rotate to 30°), drops the floor to (view-fit-to-rotated) / baseScale so a pinch-out
+	 * can zoom past 1 to where the whole rotated image fits — keeping the "can always zoom out to the full image"
+	 * contract regardless of fit-then-rotate order. Sub-epsilon rotations short-circuit to the static minimum.
 	 *
-	 * Package-private so ViewportMathTest can pin the formula directly and a regression to a hard-coded
-	 * floor of 1 (which is what re-introduces the "rotated image extends past the view at fullest zoom-out"
-	 * bug) is caught immediately.
+	 * Package-private so ViewportMathTest pins the formula (a regression to a hard-coded floor of 1 reintroduces
+	 * the "rotated image extends past the view at fullest zoom-out" bug).
 	 *
 	 * @param imgW            image width in image pixels
 	 * @param imgH            image height in image pixels
 	 * @param rotationDegrees current image rotation in degrees
-	 * @return the effective zoom-floor; equal to `MIN_ZOOM` at zero rotation, lower at non-zero rotation when
-	 *         the rotated AABB exceeds the un-rotated baseScale's coverage
+	 * @return effective zoom-floor; MIN_ZOOM at zero rotation, lower when the rotated AABB exceeds baseScale's fit
 	 */
 	float effectiveMinZoom(int imgW, int imgH, float rotationDegrees)
 	{

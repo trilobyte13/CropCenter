@@ -68,27 +68,22 @@ public final class XmpItemLengthPatcher
 	/**
 	 * Patch the GContainer Item:Length attribute in primary's standard XMP packet to match gainMapSize.
 	 *
-	 * Three return classes — callers (GainMapComposer in particular) must distinguish all three:
-	 *   1. New byte array (length may differ from input by the digit-count delta of the new size) —
-	 *      the standard-XMP segment was successfully patched.
-	 *   2. Input reference unchanged — no Item:Length attribute exists in either the standard XMP
-	 *      packet or any Extended XMP chunk (e.g. SDR file, or HDR file whose source XMP simply
-	 *      omits the GContainer item-length declaration). Caller may safely append the gain map.
-	 *   3. **null (fail-closed)** — Item:Length is present somewhere but cannot be safely rewritten:
-	 *        a. lives in an Extended XMP chunk (per-chunk reassembly headers can't be patched
-	 *           in-place), OR
-	 *        b. lives in standard XMP but the segment is unpatchable — patched segLen would exceed
-	 *           the APP1 u16 cap, value is non-quoted, digit run is empty / unterminated, or closing
-	 *           quote doesn't match.
-	 *      Caller (GainMapComposer) MUST treat null as "drop HDR" — shipping the gain map with stale
-	 *      Item:Length silently truncates the gain map in strict GContainer-respecting decoders
-	 *      (Google's libUltraHdr is one).
+	 * Three return classes callers (esp. GainMapComposer) MUST distinguish:
+	 *   1. New byte array — the standard-XMP segment was patched (length may differ by the size's digit-count
+	 *      delta).
+	 *   2. Input reference unchanged — no Item:Length in standard or Extended XMP (SDR, or an HDR source that
+	 *      omits the declaration); caller may safely append the gain map.
+	 *   3. null (fail-closed) — Item:Length is present but can't be safely rewritten: it's in an Extended XMP
+	 *      chunk (per-chunk headers can't be patched in place), OR in standard XMP but unpatchable (patched
+	 *      segLen exceeds the APP1 u16 cap, non-quoted value, empty/unterminated digit run, mismatched closing
+	 *      quote). Caller MUST treat null as "drop HDR" — shipping the gain map with a stale Item:Length
+	 *      silently truncates it in strict decoders (Google's libUltraHdr).
 	 *
 	 * @param primary     primary JPEG bytes (must start with SOI); null returns null verbatim
-	 * @param gainMapSize size in bytes of the gain map JPEG that will be appended after primary;
-	 *                    negative values are treated as a caller bug and return primary unchanged
-	 * @return patched primary bytes (success); the input array reference (Item:Length absent or
-	 *         already correct); or null (fail-closed — caller must drop HDR)
+	 * @param gainMapSize size of the gain map JPEG to be appended; negative is treated as a caller bug and
+	 *                    returns primary unchanged
+	 * @return patched primary (success); the input reference (Item:Length absent / already correct); or null
+	 *         (fail-closed — caller must drop HDR)
 	 */
 	public static byte[] patch(byte[] primary, int gainMapSize)
 	{

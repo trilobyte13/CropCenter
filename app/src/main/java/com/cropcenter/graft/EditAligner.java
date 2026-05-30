@@ -60,21 +60,16 @@ public final class EditAligner
 	/**
 	 * Align edit bytes to the original's stored layout so GraftWriter's splice produces a decoder-coherent JPEG.
 	 *
-	 * Pipeline:
-	 *   1. Read both stored dimensions cheaply (BitmapFactory inJustDecodeBounds).
-	 *   2. Read both EXIF orientation tags.
-	 *   3. Compare display dimensions (stored dims after applying each side's
-	 *      orientation). Mismatch → error result; the splice can't recover.
-	 *   4. If both stored dims and orientation already match, return edit bytes
-	 *      verbatim (no re-encode).
-	 *   5. Otherwise re-encode the edit (decode → apply edit's orient → apply inverse
-	 *      of original's orient → JPEG-compress at quality 100). Costs ~1 channel-noise
-	 *      level — same noise floor the save-time canvas pass would add anyway.
+	 * Pipeline: (1) read both stored dims (inJustDecodeBounds); (2) read both EXIF orientations; (3) compare
+	 * DISPLAY dims (stored after each side's orientation) — mismatch → error, the splice can't recover; (4) if
+	 * stored dims AND orientation already match, return edit bytes verbatim; (5) else re-encode the edit (decode
+	 * → apply edit's orient → apply inverse of original's orient → JPEG q100), costing ~1 channel-noise level,
+	 * the same floor the save-time canvas pass adds anyway.
 	 *
 	 * @param originalBytes source JPEG (the metadata donor)
 	 * @param editBytes     externally-edited JPEG (the pixel donor)
-	 * @return Result.ok with the aligned bytes when the splice can proceed, or
-	 *         Result.error when dimensions don't match / either decode failed
+	 * @return Result.ok with the aligned bytes when the splice can proceed, or Result.error when display dims
+	 *         don't match / either decode failed
 	 */
 	public static Result align(byte[] originalBytes, byte[] editBytes)
 	{

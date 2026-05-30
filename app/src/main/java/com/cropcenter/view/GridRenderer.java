@@ -94,30 +94,23 @@ public final class GridRenderer
 	}
 
 	/**
-	 * Position line i of a count-N grid along one axis. Returns `cropOrigin + Math.round(...)` so the relative
-	 * offset inside the crop matches CropExporter.gridLinePixel's integer rounding byte-for-byte; the absolute
-	 * image-pixel coordinate is integer when cropOrigin is integer and fractional when it isn't, which keeps
-	 * preview and export aligned regardless of float-origin state.
+	 * Position line i of a count-N grid along one axis. Returns cropOrigin + Math.round(...) so the relative
+	 * offset matches CropExporter.gridLinePixel's rounding byte-for-byte, keeping preview and export aligned
+	 * whether cropOrigin is integer or fractional.
 	 *
-	 * Middle line (i * 2 == count) preserves cropCenter rather than snapping — this keeps single-point selection
-	 * markers at the grid intersection. Count ∈ {2, 4} with odd cropExtent is the only case where this line
-	 * disagrees with the export by 0.5 px; rule of thirds (count == 3) has no middle line.
+	 * Middle line (i*2 == count) preserves cropCenter rather than snapping, so single-point selection markers
+	 * stay on the grid intersection. (Count ∈ {2, 4} with odd cropExtent is the only case this disagrees with
+	 * export, by 0.5 px; rule of thirds has no middle line.) Second-half lines mirror through cropExtent (not
+	 * cropCenter) so rounding matches the exporter's dim - round(dim * (count - i) / count) exactly.
 	 *
-	 * Second-half lines mirror through cropExtent (not cropCenter) so the rounding matches the exporter's
-	 * `dim - round(dim * (count - i) / count)` exactly.
+	 * Package-private so GridRendererTest can pin the preview-matches-export contract without a Canvas.
 	 *
-	 * Package-private so GridRendererTest can pin the preview-matches-export contract without a Canvas — the
-	 * draw() method itself needs an Android Canvas + Paint, but the line-position math is where the
-	 * preview/export alignment is enforced.
-	 *
-	 * @param i          grid line index in [1, count - 1] (the inner lines; edges are the crop boundary)
-	 * @param count      total grid intervals (so the grid draws count - 1 inner lines along this axis)
-	 * @param cropOrigin axis origin of the crop in image-pixel space (cropImageX or cropImageY); can be
-	 *                   fractional when the crop sits at a non-integer pan offset
-	 * @param cropExtent total dimension of the crop in pixels along this axis (cropImageW or cropImageH)
-	 * @param cropCenter axis coord of the crop center in image-pixel space; only consulted on the middle
-	 *                   line so single-point selection markers sit on the intersection
-	 * @return image-space coordinate where line i sits along this axis; the (i, count - i) pair satisfies
+	 * @param i          grid line index in [1, count - 1] (inner lines; edges are the crop boundary)
+	 * @param count      total grid intervals (draws count - 1 inner lines on this axis)
+	 * @param cropOrigin axis origin of the crop in image-pixel space; may be fractional at a non-integer pan
+	 * @param cropExtent total crop dimension in pixels along this axis
+	 * @param cropCenter crop-center coord; consulted only on the middle line (single-point marker alignment)
+	 * @return image-space coordinate of line i; the (i, count - i) pair satisfies
 	 *         linePos(i) + linePos(count - i) - 2 * cropOrigin == cropExtent up to half-pixel rounding
 	 */
 	static float linePos(int i, int count, float cropOrigin, int cropExtent, float cropCenter)

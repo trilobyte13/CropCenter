@@ -111,11 +111,10 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 	public void dismissTransientDialogs()
 	{
 		AlertDialog dialog = activeTransientDialog;
-		// Use cancel() not dismiss() so the dialog's OnCancelListener fires too — Custom AR's
-		// spinner-position restore, Replace dialog's placeholder cleanup, and SaveDialog's priorSnapshot
-		// clear all live in OnCancelListener. dismiss() would only fire
-		// OnDismissListener and skip these. cancel() also fires OnDismissListener afterward, so
-		// activeTransientDialog still gets cleared via the registerTransientDialog listener.
+		// Use cancel() not dismiss() so the dialog's OnCancelListener fires too — the Replace dialog's
+		// placeholder cleanup and SaveDialog's priorSnapshot clear live in OnCancelListener. dismiss()
+		// would only fire OnDismissListener and skip these. cancel() also fires OnDismissListener
+		// afterward, so activeTransientDialog still gets cleared via the registerTransientDialog listener.
 		if (dialog != null && dialog.isShowing())
 		{
 			dialog.cancel();
@@ -297,24 +296,16 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 			txtImageInfo.setText(sizeInfo);
 			txtImageFormats.setText(metaInfo);
 			// Process-death restore: apply the saved geometry now that the bitmap is in place.
-			// RestoreController consumes + nulls the bundle so a subsequent normal load (user
-			// taps Open) doesn't re-apply the stale snapshot from the prior session. The state
-			// listener fires once at the batch end inside applyIfPending, producing one
-			// consolidated re-render.
+			// RestoreController consumes + nulls the bundle so a later normal load doesn't re-apply a
+			// stale snapshot; the listener fires once at batch end for one consolidated re-render.
 			//
-			// Outcome.consumed is true ONLY when a bundle was actually consumed; in that case the
-			// toolbar UI reset earlier in this method (Pin chip deselected, selectLockPref = BOTH,
-			// moveLockPref = VERTICAL, AR chip text on the default ratio) is now stale against the
-			// restored model, so re-derive the toolbar widgets from the freshly-restored CropState.
-			// The outcome also carries the per-mode lock-axis
-			// prefs that were stashed alongside the bundle — re-seed them BEFORE syncFromState so
-			// the toolbar resync's `host.setCurrentPref(state.getCenterMode())` writes against
-			// correct baseline values for the inactive mode. Without this, a user who had Move+H
-			// at kill time would see their Select-mode pref correctly restored but Move-mode's
-			// pref fall back to VERTICAL (and vice versa). When Pin was on at kill time
-			// (centerMode == LOCKED), BOTH prefs come from the bundle since syncFromState skips
-			// the setCurrentPref write in the LOCKED case — without this re-seed, the hidden axis
-			// preference would silently revert to defaults on Pin toggle-off.
+			// On consumed(), the toolbar reset done earlier in this method (Pin off, prefs at defaults,
+			// AR on the default ratio) is now stale against the restored model — re-derive the widgets
+			// from CropState. Re-seed the per-mode lock prefs from the outcome BEFORE syncFromState so
+			// its setCurrentPref(centerMode) writes against correct baselines for the inactive mode;
+			// without this a user at Move+H restores Select's pref but Move's falls back to VERTICAL
+			// (and when Pin was on → centerMode LOCKED, syncFromState skips setCurrentPref, so both
+			// prefs must come from the bundle or the hidden axis reverts on Pin-off).
 			RestoreController.Outcome outcome = restoreController.applyIfPending();
 			if (outcome.consumed())
 			{
@@ -355,10 +346,10 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 				}
 				state.setAspectRatio(orientationDefault);
 			}
-			// Always resync the toolbar from state so the AR spinner reflects the orientation
+			// Always resync the toolbar from state so the AR chip reflects the orientation
 			// default (fresh load) or the restored AR (restore path). Previously this only fired
 			// on the restore branch because fresh loads were guaranteed to land on the same R4_5
-			// the spinner was already showing; the orientation-aware default breaks that
+			// the chip was already showing; the orientation-aware default breaks that
 			// invariant.
 			toolbar.syncFromState();
 		}
@@ -367,8 +358,8 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 			Log.e(TAG, "installImageOnUi UI commit threw; recycling orphaned bitmaps", e);
 			// state.reset() unconditionally: the bg-side applyBytes already committed originalFileBytes,
 			// jpegMeta, gainMap, seftTrailer, pngExifTiff, and sourceFormat to state BEFORE this UI
-			// runnable posts. A throw BEFORE setSourceImage (e.g. findViewById null, ClassCastException
-			// on a checkbox lookup) would otherwise leave those metadata fields set without a matching
+			// runnable posts. A throw BEFORE setSourceImage (e.g. findViewById returning null, or a
+			// recycled-view access) would otherwise leave those metadata fields set without a matching
 			// sourceImage — inconsistent state that the next save / settings dialog could misread.
 			// reset() unwires everything atomically, matching the next-load contract.
 			state.reset();
@@ -749,25 +740,16 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 	protected void onSaveInstanceState(Bundle outState)
 	{
 		super.onSaveInstanceState(outState);
-		// Process-death persistence: write the source URI plus the user's editing geometry so a
-		// memory-pressure kill doesn't lose 5 minutes of precise alignment work. The bitmap,
-		// source bytes, gain map, SEFT trailer, and PNG/EXIF metadata are NOT persisted —
-		// those reload from the source URI on restore. Persistability is best-effort: Open and
-		// Save As paths call tryTakePersistable with warnOnFailure=true and almost always
-		// succeed; the Share / View intent path calls it with warnOnFailure=false because
-		// external intents routinely deliver SESSION-only grants that expire at process death.
-		// The restore path in onCreate handles both cases — re-takes persistable permission
-		// (idempotent for already-persistable URIs, no-op-fails for session-only) and then
-		// fires imageLoader.load(), which surfaces a SecurityException as a load failure if
-		// the session grant is gone. RestoreController.writeTo handles the actual
-		// serialisation; this method is now just the lifecycle hook. The per-mode lock prefs
-		// (selectLockPref / moveLockPref) are passed in alongside CropState because they're
-		// MainActivity-private fields, not CropState fields — and they must be persisted
-		// independently of state.centerMode because Pin collapses centerMode to LOCKED, hiding
-		// the underlying axis preference. Note: RestoreController.writeTo writes NOTHING when
-		// state.isGraftApplied() is true — graft bytes are in-memory only and a restore would
-		// silently reload the pre-graft source. The session loss on a graft-mid-kill is
-		// preferable to saving a crop of the wrong image. See REQUIREMENTS.md §8.
+		// Process-death persistence: write the source URI + editing geometry so a memory-pressure kill
+		// doesn't lose precise alignment work. Bitmap / source bytes / gain map / SEFT / PNG-EXIF are NOT
+		// persisted — they reload from the URI on restore. Persistability is best-effort: Open / Save As
+		// take it with warnOnFailure=true (almost always succeed); Share / View use warnOnFailure=false
+		// because external intents routinely grant SESSION-only access that expires at process death
+		// (restore re-takes it idempotently and surfaces a gone grant as a load failure). The per-mode
+		// lock prefs ride along because they're MainActivity fields, not CropState, and must persist
+		// independently of centerMode (Pin collapses it to LOCKED, hiding the axis pref). writeTo writes
+		// NOTHING when isGraftApplied() — graft bytes are in-memory only, so a restore would reload the
+		// pre-graft source; losing the session beats saving the wrong image. See REQUIREMENTS.md §8.
 		RestoreController.writeTo(outState, imageLoader.getLastLoadedUri(), state,
 			selectLockPref, moveLockPref);
 	}
@@ -1141,25 +1123,18 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 	}
 
 	/**
-	 * Open the in-app image picker — replaces the system SAF ACTION_OPEN_DOCUMENT picker for the
-	 * Open flow. Computes the initial folder via SaveController.loadInitialPickerFolder (last-saved
-	 * or last-loaded folder, most recent wins; falls back to primary external storage). On pick,
-	 * resolves the File to a SAF externalstorage URI via SafFileHelper.buildExternalStorageDocumentUri
-	 * (which keeps the load path's tryReadDirectlyFromPath fast-path engaged so the Samsung MediaStore
-	 * EXIF mangling stays bypassed) and routes through imageLoader.load — same path the Share / View
-	 * intents take, so the busy-gating, dialog dismissal, and progress-overlay contract is shared.
+	 * Open the in-app image picker (replaces the system ACTION_OPEN_DOCUMENT for the Open flow). Initial
+	 * folder via SaveController.loadInitialPickerFolder (last-saved / last-loaded, most recent wins; falls
+	 * back to primary external storage). On pick, resolves the File to an externalstorage SAF URI (which
+	 * keeps the load path's direct-read fast-path engaged, bypassing Samsung MediaStore EXIF mangling) and
+	 * routes through imageLoader.load — the same path Share / View intents take.
 	 *
-	 * Gated on busy so a tap during an in-flight load / save / detect / graft surfaces the busy toast
-	 * rather than opening a picker that would no-op on file tap. Also gated on MES: the in-app picker
-	 * uses File.listFiles() to enumerate folders, which returns null on most directories under
-	 * primary external storage without MANAGE_EXTERNAL_STORAGE on Android 11+ scoped storage. Without
-	 * MES the picker would open showing partial / empty contents with no signal to the user, so we
-	 * surface a directed toast pointing at the Settings card's Permissions affordance rather than
-	 * silently failing. Mirrors SaveController.showSaveDialog's MES branch (which falls back to the
-	 * legacy SAF picker for the save flow); for Open there is no equivalent fallback because the
-	 * user chose "in-app only" — the system SAF picker is gone by design. Wrapped in try/catch
-	 * (BadTokenException) for the config-change race window between the isDestroyed pre-check and
-	 * the .show() call.
+	 * Gated on busy (a tap mid load / save / detect / graft surfaces the busy toast) and on MES: the picker
+	 * uses File.listFiles() to enumerate, which returns null under Android 11+ scoped storage without
+	 * MANAGE_EXTERNAL_STORAGE, so without it the picker would show empty contents with no signal — surface a
+	 * directed toast instead. Unlike the save flow there's no SAF fallback for Open: the system picker is
+	 * gone by design. try/catch guards the config-change BadTokenException race between the isDestroyed
+	 * check and .show().
 	 */
 	private void showOpenPickerDialog()
 	{

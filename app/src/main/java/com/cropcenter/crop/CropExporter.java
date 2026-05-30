@@ -63,29 +63,23 @@ public final class CropExporter
 
 	/**
 	 * Export the cropped + rotated image as JPEG, PNG, or Ultra HDR JPEG bytes per
-	 * `state.getExportConfig().format()`. Single entry point for the entire export pipeline:
-	 * canvas-renders the primary at exact (cropW, cropH) integer pixel dimensions, generates a
-	 * fresh EXIF thumbnail of the cropped pixels, encodes to JPEG / PNG, splices the source's EXIF
-	 * (orientation normalised to 1, dimensions rewritten, IFD1 thumbnail replaced) + ICC + XMP +
-	 * MPF + Samsung SEFT trailer back in, and — for HDR sources — re-renders the gain map at the
-	 * primary's transform via UltraHdrCompat and composes it into the output via GainMapComposer.
+	 * `state.getExportConfig().format()`. Single entry point for the whole export pipeline: canvas-renders
+	 * the primary at exact (cropW, cropH), generates a fresh EXIF thumbnail of the cropped pixels, encodes,
+	 * splices the source's EXIF (orientation normalised to 1, dimensions rewritten, IFD1 thumbnail replaced)
+	 * + ICC + XMP + MPF + Samsung SEFT back in, and — for HDR sources — re-renders the gain map at the
+	 * primary's transform and composes it into the output.
 	 *
-	 * Returns an ExportResult carrying the bytes plus a structural hdrAttached flag — true when the
-	 * gain map was successfully re-composed, false when HDR was dropped (UltraHdrCompat couldn't
-	 * produce a valid output, MPF patching failed, XmpItemLengthPatcher fail-closed, etc.) so
-	 * `ExportPipeline.reportSuccess` can report "[HDR OK]" / "[HDR dropped]" without a substring
-	 * scan that false-positives on stale metadata.
+	 * The returned ExportResult carries a structural hdrAttached flag (true only when the gain map was
+	 * successfully re-composed) so ExportPipeline.reportSuccess can say "[HDR OK]" / "[HDR dropped]" without
+	 * a substring scan that false-positives on stale metadata.
 	 *
-	 * @param state    CropState with source image, crop dims, rotation, AR, grid config, jpegMeta,
-	 *                 gainMap, seftTrailer. `state.getSourceImage()` is read-only here — only the
-	 *                 internally-rendered cropped Bitmap (passed down to exportJpeg / exportPng) gets
-	 *                 recycled inside this call. The editor's source bitmap stays loaded so the user
-	 *                 can re-save with different settings without a re-decode.
-	 * @param cacheDir Activity cache dir for UltraHdrCompat's intermediate file work; may be null
-	 *                 when the platform decode path doesn't need a temp file
+	 * @param state    CropState with source image, crop dims, rotation, AR, grid config, jpegMeta, gainMap,
+	 *                 seftTrailer. getSourceImage() is read-only — only the internally-rendered cropped
+	 *                 Bitmap is recycled here, so the editor's source stays loaded for re-saves.
+	 * @param cacheDir Activity cache dir for UltraHdrCompat's intermediate file work; may be null when the
+	 *                 platform decode path needs no temp file
 	 * @return ExportResult carrying the encoded bytes and the structural hdrAttached flag
 	 * @throws IOException when no image is loaded, encoding fails, or metadata splicing rejects the input
-	 *                     as malformed
 	 */
 	public static ExportResult export(CropState state, File cacheDir)
 		throws IOException
@@ -246,29 +240,20 @@ public final class CropExporter
 	}
 
 	/**
-	 * Force the EXIF orientation tag in IFD0 inside a raw TIFF byte array to upright (value 1). Used by the
-	 * PNG export's > 64 KB verbatim-preserve fallback so a TIFF that ExifPatcher.patch rejected (and which
-	 * we therefore ship as-is to avoid u16-truncation) doesn't carry the source's pre-load orientation
-	 * tag onto the saved PNG. Pixels are already upright at this point (BitmapUtils.applyOrientation ran
-	 * at load), so emitting orientation=6/8 in the saved metadata would make EXIF-aware viewers
+	 * Force the EXIF orientation tag in a raw TIFF's IFD0 to upright (1). Used by the PNG export's > 64 KB
+	 * verbatim-preserve fallback so a TIFF that ExifPatcher.patch rejected (shipped as-is to avoid
+	 * u16-truncation) doesn't carry the source's pre-load orientation onto the saved PNG — pixels are
+	 * already upright (applyOrientation ran at load), so emitting 6/8 would make EXIF-aware viewers
 	 * double-rotate.
 	 *
-	 * Implements the minimal IFD0 walk needed to locate tag 0x0112 and overwrite its 2-byte u16 value
-	 * with `1`. Mirrors BitmapUtils.readExifOrientation's parsing semantics: byte order from "II"/"MM",
-	 * magic at offset 2, IFD0 offset at offset 4, then 12-byte entries (tag, type, count, value). On any
-	 * walk failure (malformed magic, out-of-range IFD offset, missing orientation tag) returns the input
-	 * array unchanged — the verbatim path's metadata-preserved contract holds even when orientation
-	 * can't be force-corrected, because no SAVED file ever ships pixels with the source's pre-load
-	 * orientation: the pixels themselves are upright.
-	 *
-	 * Returns a NEW byte[] when orientation was patched; returns the INPUT reference when no change was
-	 * needed (either upright already, or walk failed). Caller compares by reference identity to tell
-	 * which happened — not load-bearing here, but documented for the same reason
-	 * BitmapUtils.applyOrientation's reference-may-change return is documented.
+	 * Minimal IFD0 walk to locate tag 0x0112 and overwrite its u16 value, mirroring
+	 * BitmapUtils.readExifOrientation's parsing (byte order from "II"/"MM", magic at +2, IFD0 offset at +4,
+	 * 12-byte entries). On any walk failure returns the input unchanged — safe, because the saved pixels
+	 * are upright regardless.
 	 *
 	 * @param tiff raw TIFF bytes (PNG eXIf chunk contents); never null
-	 * @return tiff itself when orientation is already 1 or the walk failed; a fresh byte[] with
-	 *         orientation overwritten to 1 otherwise
+	 * @return tiff itself when orientation is already 1 or the walk failed; a fresh byte[] with orientation
+	 *         overwritten to 1 otherwise
 	 */
 	static byte[] forceTiffOrientationToUpright(byte[] tiff)
 	{
@@ -485,35 +470,27 @@ public final class CropExporter
 	}
 
 	/**
-	 * Run a raw TIFF through ExifPatcher.patch to normalise orientation (forced to 1 because pixels
-	 * were rotated at load time), rewrite cropped dimensions, and replace OR strip the embedded IFD1
-	 * thumbnail. Wraps the TIFF as a synthetic APP1 segment for ExifPatcher's segment-oriented API;
-	 * the wrapper's u16 length field (bytes 2..3) may be truncated for > 64KB TIFFs but ExifPatcher
-	 * reads only data().length, never the wrapped length, so the truncation is harmless. Returns the
-	 * patched TIFF bytes, or null when ExifPatcher rejected the input (malformed byte order, etc.).
+	 * Run a raw TIFF through ExifPatcher.patch to normalise orientation (forced to 1 — pixels were
+	 * rotated at load time), rewrite cropped dimensions, and replace or strip the embedded IFD1
+	 * thumbnail. Wraps the TIFF as a synthetic APP1 segment for ExifPatcher's segment API; the wrapper's
+	 * u16 length may truncate for > 64KB TIFFs but ExifPatcher reads only data().length, so that's
+	 * harmless. Returns the patched TIFF, or null when ExifPatcher rejects the input.
 	 *
-	 * Stale-thumbnail safety on huge PNG eXIf: ExifPatcher's spliceExistingThumbnail still enforces the
-	 * JPEG APP1 u16 cap (65535) on the rebuilt synthetic segment, so a too-large rebuild rejects
-	 * silently and leaves the source's IFD1 thumbnail in place — leaking pre-edit content via the
-	 * embedded preview. Predict the rejection here using `ExifPatcher.maxThumbnailBytes`, which
-	 * subtracts the OLD thumbnail's bytes from the segment size before measuring remaining APP1 room
-	 * (a naive `tiff.length + thumbnail.length` sum would force-strip many splices that actually
-	 * shrink the segment).
-	 * When the new thumbnail won't fit even after old-thumbnail removal, force-route to
-	 * `ExifPatcher.STRIP_IFD1_THUMBNAIL` so the saved PNG carries no IFD1 rather than the source's
-	 * pre-edit preview.
+	 * Stale-thumbnail footgun: spliceExistingThumbnail enforces the APP1 u16 cap on the rebuilt segment,
+	 * so a too-large rebuild rejects silently and leaves the source's IFD1 thumbnail in place — leaking
+	 * pre-edit content via the preview. Predict that here with ExifPatcher.maxThumbnailBytes (which
+	 * subtracts the OLD thumbnail's bytes before measuring remaining room) and force
+	 * STRIP_IFD1_THUMBNAIL when the new thumbnail won't fit, so the saved PNG carries no IFD1 rather
+	 * than a pre-edit preview.
 	 *
-	 * Package-private (not private) so CropExporterPngExifTest can pin the strip-vs-splice decision
-	 * directly without round-tripping through the full export pipeline.
+	 * Package-private so CropExporterPngExifTest can pin the strip-vs-splice decision directly.
 	 *
 	 * @param tiff      raw TIFF bytes from the source PNG's eXIf chunk
 	 * @param newW      cropped image width
 	 * @param newH      cropped image height
-	 * @param thumbnail fresh JPEG thumbnail of the cropped pixels — non-null is required so the IFD1
-	 *                  thumbnail doesn't carry the source's pre-crop preview; passing null here would
-	 *                  PRESERVE the original thumbnail, leaking pre-edit content. Force-overridden to
-	 *                  STRIP_IFD1_THUMBNAIL when the rebuilt segment cannot fit under APP1's cap even
-	 *                  after old-thumbnail removal
+	 * @param thumbnail fresh JPEG thumbnail of the cropped pixels; MUST be non-null (null would preserve
+	 *                  the source's pre-crop thumbnail, leaking pre-edit content). Force-overridden to
+	 *                  STRIP_IFD1_THUMBNAIL when the rebuilt segment can't fit under APP1's cap
 	 * @return patched TIFF bytes ready for the eXIf chunk, or null on parse failure
 	 */
 	static byte[] patchPngExifTiff(byte[] tiff, int newW, int newH, byte[] thumbnail)

@@ -78,7 +78,7 @@ public final class SafPaths
 	 * nested files ("primary:Pictures/foo.jpg") this is the position after the last "/", so
 	 * docId.substring(0, end) + child yields the sibling. For root-level files in a path-addressed scheme
 	 * ("primary:foo.jpg") it falls back to the position after the volume ":". Returns -1 for opaque schemes
-	 * ("msf:12345", "image:12345", pure-numeric MediaStore IDs) where the tail after ":" is an unparseable
+	 * (msf: / image: / document: / pure-numeric — see isOpaqueDocId) where the tail after ":" is an unparseable
 	 * handle — sibling URIs can't be built by string substitution, so callers route to the opaque-provider
 	 * fallback (which presents Replace/Keep/Cancel via probe rather than auto-rename).
 	 *
@@ -108,7 +108,7 @@ public final class SafPaths
 	 * Parent document ID of a PATH-ADDRESSED SAF document ID, or null when the ID is opaque. Strips the
 	 * trailing "/segment" for nested paths; for root-level files in a path-addressed scheme the parent is
 	 * the volume prefix including the ":" ("primary:foo.jpg" → "primary:"), which ExternalStorageProvider
-	 * accepts as the root document. Returns null for opaque schemes (msf:, image:, pure-numeric) because a
+	 * accepts as the root document. Returns null for opaque schemes (msf:, image:, document:, numeric) because a
 	 * "parent" of an opaque handle is meaningless — there is no sibling-creation flow on those providers
 	 * (callers handle collisions via the in-place fallback instead).
 	 *

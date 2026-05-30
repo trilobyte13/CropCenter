@@ -24,71 +24,39 @@ import java.util.Collections;
 import java.util.function.Consumer;
 
 /**
- * Always-visible draggable fast scroller used by FolderBrowser. Replaces AndroidX RecyclerView's
- * built-in fast scroller (initFastScroller) for two reasons:
+ * Always-visible draggable fast scroller for FolderBrowser. Replaces AndroidX's built-in
+ * initFastScroller for two reasons:
+ *   1. The built-in thumb height is proportional to visibleCount/itemCount with no minimum — on a
+ *      50k-item album it collapses to a 1px sliver that can't be grabbed.
+ *   2. Its position math (computeVerticalScrollOffset / Range / Extent) hits SpanSizeLookup.getSpanIndex,
+ *      O(N) per call on GridLayoutManager — every drag frame janks on huge folders.
  *
- * 1. The built-in thumb's height is proportional to (visibleCount / itemCount) with no enforced
- *    minimum — for a 50,000-item Camera album the thumb collapses to a 1px sliver that's
- *    impossible to grab.
+ * Both thumb size and position are computed in ROW space, mapping adapter positions through the
+ * GridLayoutManager.SpanSizeLookup so mixed-span layouts (folder rows span all columns, file rows span 1)
+ * get proportional travel and a stable thumb height. The row helpers (rowIndexFor / maxFirstVisibleRow /
+ * positionForRow) are O(1) for BrowserSpanSizeLookup, falling back to an O(log N) binary search for
+ * arbitrary lookups. A 32dp minimum height keeps the thumb grabbable. Seek uses scrollToPositionWithOffset
+ * (O(1) — sets the anchor, next layout fills from there), instant even at position 25,000 of 50,000.
  *
- * 2. The built-in scroller uses computeVerticalScrollOffset / Range / Extent for thumb position
- *    math. GridLayoutManager computes these by averaging laid-out child heights and extrapolating;
- *    for huge folders at deep scroll positions, the call chain hits SpanSizeLookup.getSpanIndex
- *    which is O(N) per call without an explicit cache enable. Dragging the thumb triggers these
- *    calls every frame, causing visible jank.
+ * Drag dispatch is throttled to one scrollToPositionWithOffset per frame via postOnAnimation: MOVE events
+ * arrive at 120 Hz and each requestLayout, but the coalesced layout commits to the LAST queued target, so
+ * without throttling the recycler keeps catching up to stale targets after the finger lifts — looking like
+ * fling momentum. On ACTION_UP / CANCEL the pending scroll is cancelled and the recycler is re-anchored at
+ * its current first-child via pinToCurrentScrollPosition, OVERWRITING any queued target so it can't "catch
+ * up" past the release position (a sync scroll on UP would use the flick-affected thumb coordinate and
+ * overshoot — the "auto-scroll on release" symptom). At maxed-out drag (ratio ≥ 1.0) the final-row reach
+ * delegates to scrollBy(0, Integer.MAX_VALUE) so the LayoutManager's own clamp handles per-row heights /
+ * padding / partial last row, which the position-based math undercounts in mixed-span layouts.
  *
- * This implementation drives both thumb size and thumb position in ROW space — mapping adapter
- * positions through GridLayoutManager.SpanSizeLookup so mixed-span layouts (FolderBrowser:
- * folder rows span all columns, file rows span 1) get proportional thumb travel and stable
- * thumb height regardless of which section is on screen. The row-translation helpers
- * (rowIndexFor / maxFirstVisibleRow / positionForRow) are O(1) for FolderBrowser's
- * BrowserSpanSizeLookup; mid-range positionForRow falls back to a binary search (firstItemInRow)
- * for arbitrary SpanSizeLookups, still O(log N). A 32dp minimum thumb height keeps the control
- * grabbable on the largest folders. Drag updates scroll via scrollToPositionWithOffset (also
- * O(1) for GridLayoutManager — just sets the anchor and lets the next layout fill from there)
- * rather than scrollBy with a pixel delta, so seek is instant even at scroll position 25,000
- * of 50,000.
+ * During drag the thumb follows the finger directly (decoupled from recycler scroll) for immediate
+ * feedback; between drags its position derives from the recycler scroll offset.
  *
- * Drag dispatch is throttled to one scrollToPositionWithOffset per animation frame via
- * postOnAnimation. Without throttling, ACTION_MOVE events (delivered at 120 Hz on modern phones)
- * each requestLayout — the layout pass coalesces multiple requests into one per frame, but the
- * coalesced layout commits to whichever position the LAST queued call targeted. If MOVE arrived
- * faster than layout could settle, the recycler kept catching up to stale targets after the
- * user's finger lifted, looking exactly like fling momentum. Throttling guarantees one target
- * per frame so the layout queue never holds a position more recent than the rendered viewport.
- *
- * On ACTION_UP / ACTION_CANCEL the pending throttled scroll is cancelled AND the recycler is
- * re-anchored at its currently-visible first-child position via pinToCurrentScrollPosition's
- * scrollToPositionWithOffset(firstVisible, firstChild.getTop()) call — this OVERWRITES any
- * pending scroll target the most recent throttled runnable queued so the recycler doesn't
- * "catch up" past the user's intended release position. Filters the last 0-16ms of release-flick
- * finger motion without losing the user's actual final-drag position. A sync scroll on UP would
- * instead use the flick-affected draggedThumbTop coordinates and land the recycler past the
- * intended position, which reads as "auto-scrolling on release".
- *
- * At maxed-out drag (ratio ≥ 1.0) the scroll runnable delegates the final-row reach to
- * recycler.scrollBy(0, Integer.MAX_VALUE) instead of scrollToPositionWithOffset(maxFirstVisible,
- * 0) — the LayoutManager's own clamp honours per-row span heights, padding, and the partial-
- * last-row case correctly, where the position-based math approximates row geometry from
- * spanCount and undercounts the last row in mixed-span FolderBrowser layouts (folder rows full-
- * width, file rows 1 column).
- *
- * During drag, the thumb's drawn position follows the finger directly (decoupled from the
- * recycler's actual scroll offset) so the user gets immediate visual feedback even if the
- * recycler is mid-layout. Between drags, the thumb position is derived from the recycler's
- * scroll position the standard way.
- *
- * The view sits in a FrameLayout overlay on top of the RecyclerView's right edge. When no scroll
- * is needed (content fits viewport) the thumb is suppressed and ACTION_DOWN returns false so
- * touches fall through to the cells underneath; with a thumb present, every touch in the
- * FastScroller's strip is consumed — a touch within THUMB_TOUCH_HALO_DP of the thumb starts
- * dragging immediately, a touch further away enters an awaiting-slop state that becomes a
- * snap-to-finger drag once movement exceeds the system touch slop. Consuming all in-strip
- * touches (not just those inside the visible thumb rect) is what closes the "auto-scroll after
- * release" symptom — falling off-thumb taps through to the RecyclerView reads as a swipe and
- * fling-scrolls on release. onSizeChanged additionally registers the entire strip with
- * setSystemGestureExclusionRects so Android's right-edge back-swipe gesture doesn't intercept
- * touches before they reach onTouchEvent.
+ * The view overlays the RecyclerView's right edge (FrameLayout). With no thumb (content fits) ACTION_DOWN
+ * returns false so touches reach the cells; with a thumb, every touch in the strip is consumed — within
+ * THUMB_TOUCH_HALO_DP of the thumb starts dragging, further away awaits touch-slop then snaps to finger.
+ * Consuming ALL in-strip touches (not just the visible thumb rect) stops an off-thumb tap falling through
+ * to the RecyclerView and fling-scrolling on release. onSizeChanged registers the strip with
+ * setSystemGestureExclusionRects so the edge back-swipe gesture doesn't intercept touches first.
  */
 public final class BrowserFastScroller extends View
 {
@@ -446,10 +414,10 @@ public final class BrowserFastScroller extends View
 	 * doesn't depend on per-row item count.
 	 *
 	 * @param layoutManager    LayoutManager whose row geometry drives the conversion; non-null
-	 * @param itemCount        adapter item count; &gt; 0
+	 * @param itemCount        adapter item count; > 0
 	 * @param firstVisible     first-visible adapter position (partial-aware ok); ≥ 0
 	 * @param lastVisible      last-FULLY-visible adapter position; ≥ firstVisible
-	 * @param trackHeight      FastScroller view height in pixels; &gt; 0
+	 * @param trackHeight      FastScroller view height in pixels; > 0
 	 * @param minThumbHeightPx grabbability floor — even on 50k-item folders the thumb stays this
 	 *                         tall at minimum so it can be aimed at
 	 * @return thumb height in pixels

@@ -2,8 +2,8 @@ package com.cropcenter.model;
 
 /**
  * Which axes of the crop box are locked symmetrically around the selection. In Select mode the user picks one of BOTH /
- * HORIZONTAL / VERTICAL to control how the crop frames the points. In Move mode the state is LOCKED — the crop is fixed
- * and drag events pan the viewport instead.
+ * HORIZONTAL / VERTICAL to control how the crop frames the points. When the Pin chip is engaged the state is LOCKED —
+ * the crop is fixed and drag events pan the viewport instead (independent of the Select / Move editor mode).
  */
 public enum CenterMode
 {
@@ -23,7 +23,7 @@ public enum CenterMode
 	VERTICAL,
 
 	/**
-	 * Move mode: crop fully locked, drag pans the viewport.
+	 * Pin engaged: crop fully locked, drag pans the viewport.
 	 */
 	LOCKED
 }

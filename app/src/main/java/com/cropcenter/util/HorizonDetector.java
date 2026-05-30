@@ -230,26 +230,21 @@ public final class HorizonDetector
 	}
 
 	/**
-	 * Refine the Hough winner with two iterative least-squares passes over the edge pixels that sit
-	 * on the winning line.
+	 * Refine the Hough winner with two iterative least-squares passes over the inlier edge pixels. Hough votes
+	 * into integer-distance bins, so a real horizon can sit between bins and land one or two ticks off; fitting
+	 * the actual inlier coordinates recovers the sub-bin slope while keeping Hough's outlier rejection.
 	 *
-	 * The Hough pass votes into integer-distance bins, so a real-world horizon can sit between bins
-	 * and still land one or two ruler ticks off. Once Hough has chosen the correct line, fitting the
-	 * actual inlier coordinates recovers the sub-bin slope while retaining Hough's outlier rejection.
-	 *
-	 * The first pass uses houghAngleDeg's (cos, sin) to find the densest rho bin + inliers within
-	 * ±LINE_FIT_INLIER_DISTANCE_PX of that bin, then LSQ-fits the inlier slope. The second pass uses
-	 * the first pass's refined angle to re-project, re-vote the rho histogram, re-select inliers, and
-	 * re-fit — converging away from the Hough seed's bin-quantization noise. Final result is checked
-	 * against the original houghAngleDeg with MAX_LINE_FIT_DELTA_DEGREES; large disagreement is a
-	 * sign the LSQ is locking onto a different feature than Hough found, and the caller falls back
-	 * to the Hough seed.
+	 * Pass 1 uses houghAngleDeg's (cos, sin) to find the densest rho bin + inliers within
+	 * ±LINE_FIT_INLIER_DISTANCE_PX and LSQ-fits their slope; pass 2 re-projects with that refined angle,
+	 * re-votes, re-selects, and re-fits — converging off the Hough seed's bin-quantization. The result is
+	 * checked against houghAngleDeg with MAX_LINE_FIT_DELTA_DEGREES; large disagreement means the LSQ locked
+	 * onto a different feature, and the caller falls back to the Hough seed.
 	 *
 	 * @param edgeX         edge pixel X coordinates
 	 * @param edgeY         edge pixel Y coordinates
 	 * @param edgeCount     number of valid coordinates in edgeX / edgeY
-	 * @param width         source bitmap width, used for the minimum inlier threshold
-	 * @param height        source bitmap height, used to reproduce the Hough distance-bin geometry
+	 * @param width         source bitmap width, for the minimum inlier threshold
+	 * @param height        source bitmap height, to reproduce the Hough distance-bin geometry
 	 * @param houghAngleDeg Hough normal angle in degrees
 	 * @return refined Hough normal angle in degrees, or NaN when the fit should be ignored
 	 */
@@ -763,7 +758,7 @@ public final class HorizonDetector
 
 	/**
 	 * Case-insensitive substring search without allocating a lowercased copy of the haystack. Used
-	 * by extractRollFromAppSegments' APP1 prefilter — toLowerCase on the full ~64 KB segment body
+	 * by detectFromMetadata's final APP1 fallback prefilter — toLowerCase on the full ~64 KB segment body
 	 * was bounded but allocation-heavy, and called per segment per autoRotate tap.
 	 *
 	 * @param haystack string to search inside (typically the raw APP1 XML body)

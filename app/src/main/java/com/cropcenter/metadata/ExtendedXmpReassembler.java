@@ -7,27 +7,19 @@ import java.util.Comparator;
 import java.util.List;
 
 /**
- * Reassemble Adobe Extended XMP chunks split across multiple APP1 segments. Vendors who emit XMP packets
- * larger than the JPEG APP1 ~64 KB cap split the body into "Extended XMP" chunks identified by a 32-byte
- * GUID + 4-byte total length + 4-byte offset header. Each chunk is one APP1 segment with the namespace
- * prefix `http://ns.adobe.com/xmp/extension/\0`.
+ * Reassemble Adobe Extended XMP chunks split across multiple APP1 segments. Vendors emitting XMP larger than
+ * the APP1 ~64 KB cap split the body into "Extended XMP" chunks (32-byte GUID + 4-byte total length + 4-byte
+ * offset header, namespace prefix `http://ns.adobe.com/xmp/extension/\0`).
  *
- * Single source of truth for the GUID + offset reassembly logic, used by both `HorizonDetector` (Roll /
- * Tilt scanning across chunk boundaries) and `HdrSignature` (hdrgm marker scanning). Without reassembly
- * each scanner would substring-search per chunk; an attribute that straddles a chunk boundary OR lands
- * past the chunk holding the namespace declaration would be silently missed.
+ * Single source of truth for the reassembly logic, used by HorizonDetector (Roll / Tilt scanning) and
+ * HdrSignature (hdrgm scanning). Without it each scanner would substring-search per chunk and miss an
+ * attribute that straddles a chunk boundary or lands past the namespace-declaring chunk. Pure Java (no Android
+ * deps) so any package can use it.
  *
- * Pure Java — no Android dependencies — so callers in any package can use it without dragging UI surface.
- *
- * Layout of an Extended XMP segment:
- *   [FF E1] [LL LL] [namespace prefix — 35 bytes] [32-byte ASCII GUID] [4-byte total length, big-endian]
- *   [4-byte chunk offset, big-endian] [chunk body]
- *
- * Per spec, multiple GUID groups may coexist (rare — typically one per file). Each GUID's chunks are
- * sorted by offset and concatenated; different GUIDs land contiguously after each other in GUID-string
- * order. The offset is decoded as unsigned (offsets are file positions and always >= 0; spec disallows
- * negative values, but a corrupted top-bit-set offset would otherwise sort BEFORE the legitimate offset
- * 0 under signed int comparison).
+ * Layout: [FF E1] [LL LL] [35-byte namespace prefix] [32-byte ASCII GUID] [4-byte total length BE] [4-byte
+ * chunk offset BE] [chunk body]. Multiple GUID groups may coexist (rare); each GUID's chunks sort by offset
+ * and concatenate, GUIDs in string order. Offset is decoded unsigned so a corrupted top-bit-set offset can't
+ * sort before the legitimate offset 0 under signed comparison.
  */
 public final class ExtendedXmpReassembler
 {
@@ -79,9 +71,8 @@ public final class ExtendedXmpReassembler
 			// Skip the 4-byte total-length field (we don't pre-allocate; we just concatenate).
 			int offsetStart = guidStart + 32 + 4;
 			// Decode as unsigned 32-bit so a top-bit-set offset (corrupt / adversarial input — spec
-			// disallows them) sorts AFTER zero rather than before it. Stored
-			// as long since Java has no unsigned int; the 0xFFFFFFFFL mask widens the sign-extended
-			// int to its unsigned interpretation.
+			// disallows them) sorts AFTER zero rather than before it. Assembled byte-by-byte into a
+			// long (Java has no unsigned int) so the high bit can't sign-extend to a negative value.
 			long offset = (((long) data[offsetStart] & 0xFF) << 24)
 				| (((long) data[offsetStart + 1] & 0xFF) << 16)
 				| (((long) data[offsetStart + 2] & 0xFF) << 8)

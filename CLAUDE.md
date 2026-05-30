@@ -133,8 +133,8 @@ Android build (primary gate):
 ./gradlew.bat compileDebugJavaWithJavac
 ```
 
-Must succeed with no errors. A trailing `Note: ToolbarBinder.java uses or overrides a deprecated API` is tolerated
-Android-platform noise — the warning file may shift as Android deprecates further APIs.
+Must succeed with no errors. A trailing `Note: <File>.java uses or overrides a deprecated API` (if any) is tolerated
+Android-platform noise — which file emits it shifts as Android deprecates further APIs.
 
 ## Comments
 
@@ -155,7 +155,9 @@ Android-platform noise — the warning file may shift as Android deprecates furt
     nulls a sibling field) still gets Javadoc
 
 When in doubt, write the Javadoc — and write the full block (description + every tag) per the completeness rule below.
-A one-liner `/** Returns the width. */` without `@return` is a violation, not a tasteful minimum.
+A one-liner `/** Returns the width. */` without `@return` is a violation, not a tasteful minimum. But keep the
+description TIGHT: the contract plus the non-obvious "why", not a narrated walkthrough. A method whose contract fits in
+two sentences gets two sentences — length is not thoroughness.
 
 - **When Javadoc IS present, it's a multi-line block.** Inline `/** Foo. */` on one physical line stays out; expand to:
 
@@ -203,6 +205,15 @@ A one-liner `/** Returns the width. */` without `@return` is a violation, not a 
   say is what the signature / next line already says, delete it. Counter-examples (keep): comments that name a
   JPEG-spec literal (`// SOI` before `0xFFD8`), label a magic number (`int budget = 60_000; // JPEG thumbnail cap`),
   or explain a non-obvious invariant / threading concern / defensive guard.
+- **No change-history or narration.** Comments and Javadoc describe the code as it IS, not how it got there. Drop
+  "Previously…", "the old behavior…", "earlier this was…", "pre-fix…", and performance-vs-the-old-way comparisons
+  ("~300ms instead of ~750ms") — git carries all of that, and in-source it just goes stale. State the current
+  invariant / rationale directly. Don't justify a convention the audit already enforces ("ordered alphabetically per
+  CLAUDE.md") — just follow it.
+- **Keep explanatory blocks short.** Encode the invariant, footgun, or "why not the obvious approach" in the fewest
+  lines that stay clear and accurate — not cryptically abbreviated, but not a multi-paragraph essay. A block running
+  past ~6 lines is usually restating the code or narrating; compress to the load-bearing point. High signal-to-noise
+  is the goal: the next reader (human or LLM) should trust the comment without re-deriving it from the code.
 
 ## Constants
 
@@ -236,9 +247,10 @@ stays load-bearing:
 - **`util/BitmapUtils.MAX_DISPLAY_PIXELS` + `BitmapUtils.createDisplayProxy`** — display-proxy cap (16 MP) and
   factory. `ImageLoadController.applyBytes` derives a HARDWARE-config proxy from each loaded source on the bg
   thread; `EditorRenderer` and `AutoRotateBinder` then render / detect against the proxy at zoom < 4 for smooth
-  GPU-resident gestures, while save paths (`CropExporter`, `UltraHdrCompat`) keep reading `getSourceImage()` so
-  output resolution stays at source. `CropState.setSourceImage(source, display)` is the only legal way to install
-  both bitmaps in lockstep. Companion caps `BitmapUtils.MAX_SOURCE_RENDER_PIXELS` (64 MP) and
+  GPU-resident gestures, while save paths work from full source — `CropExporter` reads `getSourceImage()` and
+  `UltraHdrCompat` re-decodes the original bytes — so output resolution stays at source.
+  `CropState.setSourceImage(source, display)` is the only legal way to install both bitmaps in lockstep.
+  Companion caps `BitmapUtils.MAX_SOURCE_RENDER_PIXELS` (64 MP) and
   `BitmapUtils.MAX_SOURCE_RENDER_AXIS` (16384 px) gate `EditorRenderer`'s zoom-≥-4 switch from proxy to source —
   past either cap the renderer keeps drawing the proxy (soft pixels at high zoom) rather than ask the GPU to
   upload an unaddressable texture.
@@ -659,11 +671,11 @@ Acronyms follow two different rules depending on where they appear:
   official casing. Plural forms use a lowercase trailing `s`: `IDs`, `JPEGs`, `URIs`.
 - **In code identifiers (class, method, variable, field names):** treat the acronym as a regular word in camelCase /
   PascalCase. Only the first letter is capitalised: `mediaStoreId`, `getExifOrientation`, `JpegSegment`, `UiSync`,
-  `uhdrInfo`, `safFileHelper`, `scanIfd`, `setupArSpinner`, `styleArLabel`, `spinnerAr`. **Never** `mediaStoreID`,
+  `uhdrInfo`, `safFileHelper`, `scanIfd`, `isXmp`, `findPrimaryEoi`. **Never** `mediaStoreID`,
   `scanIFD`, or `getURL()` — those read as separate letters and break the camelCase word boundary that IDEs and humans
   parse on.
-- **Constants (`SCREAMING_SNAKE_CASE`):** acronyms stay all-caps because the whole name is — `JPEG_SOI`,
-  `APP1_MAX_SEGMENT_BYTES`, `FORMAT_JPEG`, `COL_ID`, `TIFF_HEADER_OFFSET`.
+- **Constants (`SCREAMING_SNAKE_CASE`):** acronyms stay all-caps because the whole name is —
+  `APP1_MAX_TIFF_PAYLOAD`, `XMP_HEADER`, `TIFF_HEADER_OFFSET`.
 - **Protocol / spec literals** in comments keep the casing the spec uses even when it disagrees with this rule:
   `"Exif\0\0"` (the EXIF header string), `eXIf` (PNG chunk name), `JPEGInterchangeFormat` (EXIF/TIFF tag name). Leave
   them alone.

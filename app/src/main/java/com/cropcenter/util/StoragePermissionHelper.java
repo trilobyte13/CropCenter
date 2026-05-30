@@ -46,22 +46,17 @@ public final class StoragePermissionHelper
 	}
 
 	/**
-	 * Launch the system Settings page where the user can grant MANAGE_EXTERNAL_STORAGE for this app.
-	 * Callers documented at the class level. Tries three intents in priority order:
-	 *   1. ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION with a package URI — opens the per-app
-	 *      "All files access" toggle. Heavily-skinned OEMs (One UI, MIUI, ColorOS) sometimes don't
-	 *      handle this exact action with the package URI.
-	 *   2. ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION without a package URI — opens the system-wide
-	 *      "All files access" app list, where the user can scroll to find this app.
-	 *   3. ACTION_APPLICATION_DETAILS_SETTINGS — opens this app's general settings page, from
-	 *      which the user navigates to "Permissions > Files and media" manually.
+	 * Launch the system Settings page where the user can grant MANAGE_EXTERNAL_STORAGE for this app. Tries
+	 * three intents in priority order:
+	 *   1. ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION + package URI — the per-app "All files access" toggle.
+	 *      Heavily-skinned OEMs (One UI, MIUI, ColorOS) sometimes don't handle this with the package URI.
+	 *   2. ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION (no package URI) — the system-wide app list to scroll.
+	 *   3. ACTION_APPLICATION_DETAILS_SETTINGS — this app's settings page (user finds Permissions manually).
 	 *
-	 * The FLAG_ACTIVITY_NEW_TASK is set because the call site can be a dialog whose Activity context
-	 * is mid-dismiss, and the launched Settings activity needs its own task stack. The intent chain
-	 * silently advances to the next fallback on ActivityNotFoundException or SecurityException.
+	 * FLAG_ACTIVITY_NEW_TASK because the call site can be a mid-dismiss dialog context needing its own task
+	 * stack. The chain advances to the next fallback on ActivityNotFoundException / SecurityException.
 	 *
-	 * @return true when one of the intents succeeded; false when all three failed (caller can toast
-	 *         a "Cannot open settings" message, which is rare enough we don't post one ourselves)
+	 * @return true when one intent succeeded; false when all three failed (caller may toast; rare enough we don't)
 	 */
 	public boolean openStoragePermissionSettings()
 	{
