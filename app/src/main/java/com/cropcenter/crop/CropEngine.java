@@ -148,9 +148,9 @@ public final class CropEngine
 		centerX = clampedCenter[0];
 		centerY = clampedCenter[1];
 
-		// Sub-epsilon rotation is drawn / exported as zero by the render pipeline, so skip the rotation-fit
-		// shrink here too — otherwise a residual 0.01° would needlessly shrink a crop the user sees as
-		// unrotated.
+		// Sub-epsilon rotation (below ROTATION_EPSILON = 0.005°) is drawn / exported as zero by the render
+		// pipeline, so skip the rotation-fit shrink here too — otherwise a residual sub-epsilon angle would
+		// needlessly shrink a crop the user sees as unrotated.
 		boolean effectiveRotation = Math.abs(rotation) >= BitmapUtils.ROTATION_EPSILON;
 		if (effectiveRotation && cropW > 0 && cropH > 0)
 		{

@@ -477,6 +477,16 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 	@Override
 	public void setBusyUi(boolean busy)
 	{
+		if (busy && rotationRuler != null)
+		{
+			// Freeze ruler momentum the instant any bg op claims busy. The fling advances on Choreographer
+			// frame callbacks, not touch, so the touch-blocking progress overlay doesn't stop it — without
+			// this, momentum frames keep mutating CropState rotation (and the crop geometry recomputed from
+			// it) while the bg save reads the primary angle and the HDR gain-map angle at separate times,
+			// which can encode the two at different rotations (misaligned HDR). Every busy-acquiring entry
+			// point routes through setBusyUi(true), so cancelling here covers save / load / graft / detect.
+			rotationRuler.cancelMomentum();
+		}
 		View btnSave = findViewById(R.id.btnSave);
 		View btnOpen = findViewById(R.id.btnOpen);
 		boolean hasImage = state.getSourceImage() != null;
@@ -500,8 +510,8 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 		if (btnGraft != null)
 		{
 			// Mirror UiSync.updateImageDependentToolbar's isJpeg gate plus the busy factor so the graft
-			// icon dims during background work like Save / Open do (it used to live on btnOpen, which
-			// dimmed). On busy=false this lands on the same value UiSync sets, so there's no conflict.
+			// icon dims during background work like Save / Open do. On busy=false this lands on the same
+			// value UiSync sets, so there's no conflict.
 			boolean graftEnabled = !busy && hasImage && state.getSourceFormat() == Format.JPEG;
 			btnGraft.setEnabled(graftEnabled);
 			btnGraft.setAlpha(graftEnabled ? 1f : 0.4f);
@@ -612,7 +622,7 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 		// pre-filled filename ends in .png so the picker shows the right extension. No
 		// EXTRA_INITIAL_URI seeding — SAF DocumentsUI tracks the user's last-navigated location
 		// across launches itself. Open and Graft both route through the in-app OpenPickerDialog
-		// instead; the prior SAF-based graft picker was removed when graft was unified with the
+		// instead; no separate SAF-based graft picker is needed; graft is unified with the
 		// load flow's picker (see onGraftClicked / launchGraftPicker below).
 		saveAsLauncher = registerForActivityResult(
 			new ActivityResultContracts.CreateDocument(Format.JPEG.mimeType())
@@ -839,12 +849,10 @@ public final class MainActivity extends AppCompatActivity implements ImageLoadHo
 		}
 		finally
 		{
-			busy.set(false);
-			runOnUiThread(() ->
-			{
-				setBusyUi(false);
-				hideProgress();
-			});
+			// Clear busy LAST, on the UI thread, after the UI teardown — see EditorHost.finishBusy. A
+			// bg-thread busy.set(false) followed by a posted teardown would let an onNewIntent load
+			// acquire busy and show its overlay in the gap, then get unmasked by this op's teardown.
+			finishBusy();
 		}
 	}
 

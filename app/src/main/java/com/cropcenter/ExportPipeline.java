@@ -37,7 +37,7 @@ final class ExportPipeline
 	/**
 	 * Result of phase 2. exception is non-null when openOutputStream / write / close threw; writeReturned is true
 	 * when close() succeeded (close-after-write is the final barrier between "written" and "thrown"). directPath
-	 * is non-null when phase 2 took the direct java.io.FileOutputStream branch — set so verifyPhase can confirm
+	 * is non-null when phase 2 took the direct FileOutputStream branch — set so verifyPhase can confirm
 	 * the write via the resolved filesystem path instead of querying SAF provider metadata that may not have
 	 * flushed yet: a direct write that bypassed the provider would otherwise verify against a stale
 	 * provider-cached SIZE / cached input stream, false-failing a correct write and then deleting it.
@@ -537,9 +537,10 @@ final class ExportPipeline
 						+ result.tempfile());
 				}
 			}
-			host.getBusy().set(false);
-			host.runOnUiThread(() -> host.setBusyUi(false));
-			host.hideProgress();
+			// Clear busy LAST, on the UI thread, after the UI teardown — see EditorHost.finishBusy.
+			// Clearing on the bg thread before the posted teardown would let an onNewIntent load acquire
+			// busy in the gap and then get unmasked by this save's pending teardown.
+			host.finishBusy();
 		}
 	}
 
@@ -786,7 +787,7 @@ final class ExportPipeline
 	}
 
 	/**
-	 * Phase 2 — write. Tries direct java.io.FileOutputStream first when the URI resolves to a real path via
+	 * Phase 2 — write. Tries a direct FileOutputStream first when the URI resolves to a real path via
 	 * SafFileHelper.fileFromSafUri (needs MANAGE_EXTERNAL_STORAGE), bypassing the SAF stream. On Samsung the
 	 * SAF stream path silently corrupts writes: openOutputStream("w") returns success and the correct byte
 	 * count, but the disk content never changes (the provider buffers and never flushes), so Replace then

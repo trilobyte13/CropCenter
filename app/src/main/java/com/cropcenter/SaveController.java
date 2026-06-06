@@ -1179,7 +1179,7 @@ final class SaveController
 	/**
 	 * Show the merged in-app save dialog (format + Export Grid + folder picker + thumbnail grid). Used as
 	 * the primary Save flow when MANAGE_EXTERNAL_STORAGE is granted — bypasses Samsung's broken One UI
-	 * ACTION_CREATE_DOCUMENT picker by browsing the filesystem via java.io.File and writing directly.
+	 * ACTION_CREATE_DOCUMENT picker by browsing the filesystem via File I/O and writing directly.
 	 * Initial folder is the last folder the user saved into (SharedPreferences) — falls back to primary
 	 * external storage root on first save / cleared app data / when the previously-used folder no longer
 	 * exists. Initial format + grid pre-populate from the current CropState's exportConfig / gridConfig.

@@ -2,7 +2,7 @@ package com.cropcenter.util;
 
 /**
  * Catppuccin Mocha palette — UI colors shared across views and dialogs. Mirrors res/values/colors.xml for code paths
- * that don't have an android.content.Context handy (static helpers, Paint setup, custom View construction, etc.).
+ * that don't have a Context handy (static helpers, Paint setup, custom View construction, etc.).
  *
  * When a Context is available, prefer getResources().getColor(R.color.X, null) — the XML definition is the single
  * source of truth. This class exists to avoid forcing a Context parameter through code that's otherwise context-free.

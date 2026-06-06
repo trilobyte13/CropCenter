@@ -307,7 +307,7 @@ final class ReplaceStrategy
 	}
 
 	/**
-	 * Replace via plain java.io.File. Writes `data` directly to the target path.
+	 * Replace via plain File I/O. Writes `data` directly to the target path.
 	 *
 	 * Write-verify-swap shape: bytes land in a temp sibling first, temp is length-verified, then an atomic rename
 	 * swaps it onto the target. A direct FileOutputStream(target) would truncate the target the moment the stream
@@ -624,8 +624,8 @@ final class ReplaceStrategy
 				// collision), fall back to the destructive delete-then-rename path. Rename-first
 				// preserves the original when both attempts fail: user still has the colliding original
 				// on disk AND their verified save at the auto-suffixed name, and verifyReplace's "two
-				// files" branch surfaces the situation — strictly better than the old order, which
-				// destroyed the original before finding out if the rename would succeed. NO final
+				// files" branch surfaces the situation. Rename-first (not delete-first) so a failed
+				// rename never destroys the original before the swap is known to succeed. NO final
 				// cleanup of `colliding` after success: `colliding` was derived from requestedName as a
 				// sibling path URI, and after a successful rename the placeholder lives AT that path.
 				// For path-addressed providers (the common case where deriveSiblingUri works at all),

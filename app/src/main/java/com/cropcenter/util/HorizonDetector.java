@@ -335,6 +335,12 @@ public final class HorizonDetector
 	 * Stroke-to-mask rasterization. The paint stroke is rasterized at 1/4 source resolution into a boolean grid —
 	 * enough precision to localize which source pixels belong to the horizon region, 16× cheaper in memory than a
 	 * full-res mask.
+	 *
+	 * @param paintPoints stroke points in source-pixel coordinates
+	 * @param maskWidth   mask grid width (source width / 4)
+	 * @param maskHeight  mask grid height (source height / 4)
+	 * @param brushRadius brush radius in source pixels (scaled to mask resolution internally)
+	 * @return boolean mask of length maskWidth * maskHeight, true where a stroke point falls within brushRadius
 	 */
 	static boolean[] rasterizePaintMask(List<float[]> paintPoints,
 		int maskWidth, int maskHeight, float brushRadius)
@@ -381,6 +387,15 @@ public final class HorizonDetector
 	 * silently filter every horizon edge out. Returns {edgeX[], edgeY[]} packed as a 2-element array,
 	 * or null when fewer than MIN_MASKED_EDGE_PIXELS qualify (not enough signal for the Hough pass to
 	 * produce a trustworthy angle).
+	 *
+	 * @param edges      per-pixel edge-strength map (length width * height)
+	 * @param mask       painted-region mask at 1/4 resolution (length maskWidth * maskHeight)
+	 * @param width      source-resolution edge-map width
+	 * @param height     source-resolution edge-map height
+	 * @param maskWidth  mask grid width (width / 4)
+	 * @param maskHeight mask grid height (height / 4)
+	 * @return {edgeX[], edgeY[]} packed as a 2-element array, or null when fewer than
+	 *         MIN_MASKED_EDGE_PIXELS qualify
 	 */
 	static int[][] gatherMaskedEdges(float[] edges, boolean[] mask,
 		int width, int height, int maskWidth, int maskHeight)
@@ -476,6 +491,13 @@ public final class HorizonDetector
 	 * coarse peak at 0.01° steps), converted to a rotation angle the editor can apply directly. Returns NaN when
 	 * the tilt is beyond ±30° (the detector is too unreliable at larger angles), 0 when the tilt is effectively
 	 * zero, or the rounded-to-0.01° rotation otherwise.
+	 *
+	 * @param edgeX     x-coordinates of masked edge pixels
+	 * @param edgeY     y-coordinates of masked edge pixels (parallel to edgeX)
+	 * @param edgeCount number of valid entries in edgeX / edgeY (arrays may be over-allocated)
+	 * @param width     source-image width (for the Hough distance range)
+	 * @param height    source-image height
+	 * @return rotation in degrees rounded to 0.01°, 0 when effectively level, or NaN when tilt exceeds ±30°
 	 */
 	static float runHoughAndConvertToRotation(int[] edgeX, int[] edgeY,
 		int edgeCount, int width, int height)
@@ -547,6 +569,16 @@ public final class HorizonDetector
 	/**
 	 * Hough transform: find the angle of the single strongest near-horizontal line. Uses max-single-bin (longest
 	 * line wins) rather than sum-of-squares (all edges).
+	 *
+	 * @param edgeX     x-coordinates of masked edge pixels
+	 * @param edgeY     y-coordinates of masked edge pixels (parallel to edgeX)
+	 * @param edgeCount number of valid entries in edgeX / edgeY
+	 * @param width     source-image width (for the Hough distance range)
+	 * @param height    source-image height
+	 * @param minDeg    inclusive lower bound of the angle sweep, in degrees
+	 * @param maxDeg    inclusive upper bound of the angle sweep, in degrees
+	 * @param stepDeg   angular resolution of the sweep, in degrees
+	 * @return the peak-bin angle in degrees, or NaN when no bin accumulates enough votes
 	 */
 	static float houghPass(int[] edgeX, int[] edgeY, int edgeCount,
 		int width, int height, float minDeg, float maxDeg, float stepDeg)

@@ -13,9 +13,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * sub-interface (SaveHost / UiHost / ToolbarHost / ImageLoadHost) that extends this base so each
  * sees only what it needs. EditorHost itself bundles the operations every helper genuinely
  * touches: Activity plumbing, the CropState snapshot, background-executor dispatch, AND the
- * progress / busy / toast / transient-dialog plumbing that previously was redeclared on each
- * sub-interface (SaveHost + ToolbarHost both had identical busy/dialog/progress declarations
- * with identical Javadoc — a real DRY violation).
+ * progress / busy / toast / transient-dialog plumbing — kept here rather than on each sub-interface
+ * so the shared busy / dialog / progress contract has a single declaration site.
  *
  * The narrower role-specific interfaces still exist (SaveHost / UiHost / ToolbarHost /
  * ImageLoadHost) so a helper that ONLY needs busy + dialog plumbing can take an EditorHost
@@ -24,6 +23,25 @@ import java.util.concurrent.atomic.AtomicBoolean;
 interface EditorHost
 {
 	<T extends View> T findViewById(int id);
+
+	/**
+	 * Release busy ownership to the fully-idle state, correctly ordered. Re-enables the busy-gated controls,
+	 * hides the progress overlay, THEN clears the busy flag — all inside one UI-thread runnable so the clear
+	 * is atomic with the teardown. Background tails must release through here rather than clearing busy on
+	 * the bg thread before posting the UI teardown: that window lets an onNewIntent Share/View load acquire
+	 * busy for a new op, show its overlay, and then be unmasked by this op's still-pending teardown runnable.
+	 * Clearing busy last, on the UI thread, means the next op can't acquire until this op's UI is fully torn
+	 * down. Safe to call from any thread (runOnUiThread runs inline when already on the UI thread).
+	 */
+	default void finishBusy()
+	{
+		runOnUiThread(() ->
+		{
+			setBusyUi(false);
+			hideProgress();
+			getBusy().set(false);
+		});
+	}
 
 	/**
 	 * Hosting Activity, surfaced so helpers can reach Context-shaped dialog / toast / SAF / MediaScanner APIs

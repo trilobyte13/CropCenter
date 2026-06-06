@@ -1,18 +1,22 @@
 package com.cropcenter.util;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
 
 import java.io.ByteArrayInputStream;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 
 /**
  * Tests for SafFileHelper.readbackByteCountFromStream — the post-write read-back checker that distinguishes a clean
  * full match (returns expected.length only after EOF), a divergence offset on mismatch, a short stream return, and the
- * overflow / EOF-check error paths. Pure-string SafPaths parsing chokepoints (parentDocIdOf,
+ * overflow / EOF-check error paths — plus the isUnderStorageRoot trust gate that anchors provider-supplied _data paths
+ * under /storage/ before a direct MES-backed read/write. Pure-string SafPaths parsing chokepoints (parentDocIdOf,
  * lastSegmentSeparatorEnd, hasImageSignature) are covered in SafPathsTest; the Context-bound parts of SafFileHelper
  * (createDocument, openInputStream) need an Android runtime and aren't tested here.
  */
@@ -66,6 +70,99 @@ public final class SafFileHelperTest
 		assertEquals("primary:Pictures/foo.jpg",
 			SafFileHelper.buildExternalStorageDocId(
 				"/storage/emulated/0/Pictures/foo.jpg", "/storage/emulated/0"));
+	}
+
+	@Test
+	public void canonicalUnderStorageAcceptsCleanMediaPath()
+	{
+		// Real media path — must pass so the direct (GPS-preserving) read/write still runs.
+		File f = new File("/storage/emulated/0/DCIM/Camera/20240101_120000.jpg");
+		assertEquals(f, SafFileHelper.canonicalUnderStorage(f));
+	}
+
+	@Test
+	public void canonicalUnderStorageRejectsNull()
+	{
+		assertNull(SafFileHelper.canonicalUnderStorage(null));
+	}
+
+	@Test
+	public void canonicalUnderStorageRejectsOutsideStorage()
+	{
+		// Path that anchors elsewhere entirely — must be rejected so the caller uses the SAF stream.
+		assertNull(SafFileHelper.canonicalUnderStorage(new File("/data/data/com.victim/db.sqlite")));
+	}
+
+	@Test
+	public void canonicalUnderStorageRejectsTraversalEscape()
+	{
+		// The injection this gate exists for: a _data / raw path that prefix-matches /storage/ but walks
+		// out via ".." segments. Lexical segment check rejects it before any direct I/O.
+		assertNull(SafFileHelper.canonicalUnderStorage(
+			new File("/storage/emulated/0/../../data/data/com.victim/db.sqlite")));
+	}
+
+	@Test
+	public void isTrustedFileAuthorityAcceptsPlatformProviders()
+	{
+		// MediaStore + the three SAF document providers are the only authorities whose _data is trusted
+		// for direct File I/O.
+		assertTrue(SafFileHelper.isTrustedFileAuthority("media"));
+		assertTrue(SafFileHelper.isTrustedFileAuthority("com.android.externalstorage.documents"));
+		assertTrue(SafFileHelper.isTrustedFileAuthority("com.android.providers.downloads.documents"));
+		assertTrue(SafFileHelper.isTrustedFileAuthority("com.android.providers.media.documents"));
+	}
+
+	@Test
+	public void isTrustedFileAuthorityRejectsNull()
+	{
+		assertFalse(SafFileHelper.isTrustedFileAuthority(null));
+	}
+
+	@Test
+	public void isTrustedFileAuthorityRejectsThirdPartyProvider()
+	{
+		// A hostile / unknown DocumentsProvider must NOT have its _data trusted for direct I/O — this is
+		// the gate that forces the access-checked SAF stream fallback for it.
+		assertFalse(SafFileHelper.isTrustedFileAuthority("com.evil.app.documents"));
+		assertFalse(SafFileHelper.isTrustedFileAuthority("com.android.providers.media"));
+	}
+
+	@Test
+	public void isUnderStorageRootAcceptsPrimaryMediaPath()
+	{
+		// Real camera _data — must pass so the direct read/write path (GPS-preserving) still runs.
+		assertTrue(SafFileHelper.isUnderStorageRoot("/storage/emulated/0/DCIM/Camera/20240101_120000.jpg"));
+	}
+
+	@Test
+	public void isUnderStorageRootAcceptsRemovableVolumePath()
+	{
+		// SD-card / USB volume media also lives under /storage/ — must pass.
+		assertTrue(SafFileHelper.isUnderStorageRoot("/storage/AAAA-BBBB/Pictures/foo.jpg"));
+	}
+
+	@Test
+	public void isUnderStorageRootRejectsAppPrivatePath()
+	{
+		// The attack this gate exists for: a malicious Share/VIEW provider returning a _data column
+		// pointing into another app's private dir. With MANAGE_EXTERNAL_STORAGE a direct read/write would
+		// otherwise reach it; rejection forces the access-checked SAF stream fallback.
+		assertFalse(SafFileHelper.isUnderStorageRoot("/data/data/com.victim/databases/secrets.db"));
+	}
+
+	@Test
+	public void isUnderStorageRootRejectsNull()
+	{
+		assertFalse(SafFileHelper.isUnderStorageRoot(null));
+	}
+
+	@Test
+	public void isUnderStorageRootRejectsSneakyPrefix()
+	{
+		// "/storageX/..." shares the literal prefix "/storage" but isn't under the "/storage/" root — the
+		// trailing slash in the constant prevents a sibling-dir bypass.
+		assertFalse(SafFileHelper.isUnderStorageRoot("/storageX/evil/foo.jpg"));
 	}
 
 	@Test

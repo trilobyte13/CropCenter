@@ -43,14 +43,12 @@ import java.util.zip.CRC32;
  * gain map and fix MPF offsets.
  *
  * Cohesion note: this class also hosts package-private byte-arithmetic helpers (forceTiffOrientationToUpright,
- * stripHdrSegments, patchPngExifTiff, injectPngExifFromTiffFileToFile, appendSeftFileToFile) that the audit
- * flagged as candidates for extraction to metadata/. They stay here because each is exclusively called from one
- * branch of exportJpeg / exportPng and the byte logic is tightly coupled to the surrounding pipeline state
- * (cropW/cropH, encoded-file lifecycle, the temp-file chain). Extracting would force every helper to take a
- * dozen pipeline parameters, OR to live in metadata/ while still being conceptually pipeline-stage logic. The
- * streaming *FileToFile variants are the production API; an earlier byte[] in-memory pair (appendSeft,
- * injectPngExifFromTiff) was deleted in favour of the streaming variants. Future split point: if a NEW caller
- * outside CropExporter needs one of these helpers, that's the signal to extract — until then, locality wins.
+ * stripHdrSegments, patchPngExifTiff, injectPngExifFromTiffFileToFile, appendSeftFileToFile). They stay here
+ * rather than in metadata/ because each is exclusively called from one branch of exportJpeg / exportPng and the
+ * byte logic is tightly coupled to the surrounding pipeline state (cropW/cropH, encoded-file lifecycle, the
+ * temp-file chain) — extracting would force every helper to take a dozen pipeline parameters while still being
+ * conceptually pipeline-stage logic. Split point: if a caller outside CropExporter ever needs one of these,
+ * that's the signal to extract; until then, locality wins.
  */
 public final class CropExporter
 {
@@ -921,8 +919,8 @@ public final class CropExporter
 			// MPF can't survive a non-HDR re-encode (Samsung "Best Photo" burst groups, focus-stacked
 			// panoramas). hdrAttempted is driven off the local croppedGainMap reference —
 			// buildCroppedGainMap returns null on the no-HDR / drop paths and non-null length > 0
-			// otherwise, so the != null check alone classifies correctly. (The earlier "&& length > 0"
-			// duplicated buildCroppedGainMap's own gate — dead defensive code.)
+			// otherwise, so the != null check alone classifies correctly (a length > 0 check would just
+			// duplicate buildCroppedGainMap's own gate).
 			boolean hdrAttempted = croppedGainMap != null;
 			List<JpegSegment> initialMeta = hdrAttempted ? meta : metaWithHdrStripped;
 			List<JpegSegment> initialPatched = ExifPatcher.patch(initialMeta, cropW, cropH, thumbnail);

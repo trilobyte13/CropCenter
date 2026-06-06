@@ -11,7 +11,7 @@ a Gallery-edited file keeps its Revert chain across CropCenter re-edits).
 **Target/Compile SDK**: 36
 **Language**: Java 21
 **Build**: AGP 9.1.1, Gradle 9.3.1
-**LSLOC**: 19,294 total (10,594 main + 8,700 test) — UCC-style logical SLOC via `scripts/audit.py lsloc` (counts
+**LSLOC**: 19,548 total (10,631 main + 8,917 test) — UCC-style logical SLOC via `scripts/audit.py lsloc` (counts
 `;`-terminated statements, control-flow openers, type declarations, and method signatures; excludes blanks, comments,
 and bare-brace-only lines). **Numbers must be exact** — every change that adds, removes, or restructures Java code must
 refresh this line via `python scripts/audit.py lsloc` in the same commit. No tolerance band; the spec matches the
@@ -58,11 +58,11 @@ loaded image (or a specific source format, or an editor mode) renders disabled w
 isn't met rather than vanishing from the layout. Concretely: AR / Grid / Pin chips / Mode buttons /
 H / V lock-axis / Auto-rotate all disable when no image is loaded; Both disables in Move mode
 (Move-mode lock-axis pref is V or H only); Graft disables when no image OR the loaded source isn't
-JPEG; Undo / Redo / Clear disable in Move mode AND when their history-state condition isn't met;
+JPEG OR a bg op is busy; Undo / Redo / Clear disable in Move mode AND when their history-state condition isn't met;
 ruler-zoom +/− disable at min/max pixels-per-degree AND when no image is loaded; Save disables when
 no image is loaded OR a bg op is busy. Disabled controls render at the same alpha / surface1 text
-tint as Undo/Redo/Clear's disabled state for a uniform look. Settings / Open are always enabled
-(both work pre-image). The Auto button has `minWidth=56dp` so the Auto↔Cancel text swap during
+tint as Undo/Redo/Clear's disabled state for a uniform look. Settings is always enabled; Open works
+pre-image but disables while a bg op is busy (`setBusyUi` gates Save / Open / Graft together). The Auto button has `minWidth=56dp` so the Auto↔Cancel text swap during
 horizon-paint mode doesn't shift adjacent controls.
 
 The toolbar's `Pin` chip is the freeze-crop ("CenterMode.LOCKED") gate — tap to toggle; when on
@@ -303,8 +303,13 @@ save.
 full-screen modal overlay (`progressOverlay` in the layout, `clickable=true focusable=true`) for the duration of the bg
 work. Without it the editor and toolbar above would still accept taps / drags / AR changes / rotation while CropState is
 being reset and re-populated underneath, leaking inputs onto an in-flight-replaced state. `setBusyUi(true)` only
-disables Save/Open; the overlay is what gates everything else. The overlay is hidden in `finally` blocks of every
-busy-release path so a thrown bg task never strands the user behind a permanently-modal overlay.
+disables Save / Open / Graft; the overlay is what gates everything else. The overlay is hidden in `finally` blocks of
+every busy-release path so a thrown bg task never strands the user behind a permanently-modal overlay. The release
+ordering invariant: busy clears LAST, after the UI teardown (re-enable controls, hide overlay). Background-thread tails
+MUST route through `EditorHost.finishBusy`, which posts the teardown then clears busy inside one UI-thread runnable, so
+a Share/View `onNewIntent` can't acquire busy for a new op in a bg-clear-then-post gap and then be unmasked by the prior
+op's pending teardown. Paths already on the UI thread (the pre-enqueue rollback branches, `AutoRotateBinder`'s
+detection-result tail) may inline the same teardown-then-clear sequence directly, since no cross-thread gap exists.
 
 **Pre-enqueue cleanup contract**: every busy-acquiring entry point (`ImageLoadController.load`,
 `GraftController.onEditPicked`, `ExportPipeline.exportTo`, `AutoRotateBinder.onHorizonPaintComplete`) wraps the busy
@@ -471,16 +476,17 @@ The gain map is **not** snapped — it stays at its natural rounded quarter-reso
 - Full range: -180.0 to +180.0 degrees, finest snap step 0.01° at maximum zoom
 - Drag to scroll with momentum fling via OverScroller; pinch to zoom the ruler scale
 - **Interrupted-gesture cleanup**: when Android dispatches `ACTION_CANCEL` (system back, parent-view intercept,
-  multi-touch disambiguation), the ruler recycles the velocity tracker and bails without committing a fling, snap, or
-  listener notify. Rotation stays at its pre-gesture value rather than applying the partial gesture's velocity. Distinct
+  multi-touch disambiguation), the ruler recycles the velocity tracker and restores the pre-gesture angle — it never
+  commits a fling or snap. Because drag deltas are published live during the gesture, restoring fires one corrective
+  listener notify back to the pre-gesture value, so an interrupted gesture leaves rotation where it started. Distinct
   from `ACTION_UP`, which commits the fling / snap / tap as the user-completed release.
 - Tick configuration scales with visible-degrees-per-screen; 8 tiers with minor steps in {10, 5, 1, 0.5, 0.1, 0.05,
   0.01} degrees (the `1°` tier appears twice with different major-tick groupings: `{minor=1°, major=10°}` and
   `{minor=1°, major=5°}` — picked at different zoom levels)
 - Snap-to-detent at 0, ±45, ±90, ±180 degrees within `min(currentMinorTick × 0.5, 0.8°)`. The 0.8° cap matters most at
-  the coarsest zoom where ±45/±90 aren't part of the tick grid; at deeper zooms the threshold shrinks proportionally to
-  the visible minor tick so fine values near a detent (like 0.01°-0.79° near 0°) remain selectable rather than getting
-  pulled into a fixed dead zone.
+  the coarsest zoom (minor=10°) where ±45° isn't part of the tick grid (±90° and ±180° divide 10° so they stay on-grid);
+  at deeper zooms the threshold shrinks proportionally to the visible minor tick so fine values near a detent (like
+  0.01°-0.79° near 0°) remain selectable rather than getting pulled into a fixed dead zone.
 - Center indicator: mauve triangle + line; zero marker in red
 - Ruler disabled (30% opacity, no touch) when no image loaded
 - Ruler-zoom −/+ buttons (in the rotation row alongside the ruler) disable when (a) no image is loaded OR (b) the
@@ -575,16 +581,20 @@ source pixels for a crisp peek — but only when the source fits the render budg
 - **Line positions match `CropExporter.gridLinePixel`'s rounded relative-offsets**: first-half lines at `cropOrigin +
   Math.round(cropExtent * i / count)`, second-half lines mirror through `cropExtent`. The intra-crop positions agree
   with the export byte-for-byte; the absolute image-pixel coordinate is integer when `cropOrigin` is integer and
-  fractional when it isn't (float-origin export keeps the two in lockstep). The middle line at count ∈ {2, 4} keeps
-  `cropCenter` (half-integer for odd cropExtent) so single-point selection markers sit at the grid intersection — the
-  only case where preview diverges from export by 0.5 px
+  fractional when it isn't (float-origin export keeps the two in lockstep). The middle line of any even grid count
+  (2, 4, 6, 8…) keeps `cropCenter` (half-integer for odd cropExtent) so single-point selection markers sit at the grid
+  intersection — the only case where preview diverges from export, by ≤ 0.5 px
 - Line width scales by image-to-screen ratio (preview matches export)
-- Pixel grid activates when each source pixel renders at ≥ `EditorRenderer.MIN_PIXEL_PEEP_DP` (3dp) on
-  screen — density-normalised so visibility is consistent across screens (the prior raw-pixel threshold
-  rendered as ~2dp on a 3× phone, barely visible). Lowered from 6dp to 3dp so the grid activates at half
-  the previous zoom level — each source pixel only needs to render at ~3dp instead of ~6dp before the
-  grid shows. Separate toggle + configurable color in Settings; same threshold drives the per-pixel
-  selection-marker style in `EditorRenderer.drawSelectionMarkers`
+- Pixel grid activates only when BOTH conditions hold: each source pixel renders at ≥
+  `EditorRenderer.MIN_PIXEL_PEEP_DP` (3dp) on screen, AND the renderer has switched to the full-source
+  bitmap (`shouldRenderSource`, i.e. scale ≥ 4f and within the GPU texture budget). Gating on the
+  source-switch keeps the grid's source-coordinate lines aligned with the pixels actually shown — on a
+  low-density (mdpi) screen the dp threshold alone would fire in the 3 ≤ scale < 4 band while the display
+  proxy is still drawn, painting a grid that doesn't match the on-screen pixels. The dp threshold is
+  density-normalised so visibility is consistent across screens. Separate toggle + configurable color in
+  Settings; the same dp threshold drives the per-pixel selection-marker style in
+  `EditorRenderer.drawSelectionMarkers` (which keys off the dp threshold alone, so it can lead the grid by
+  the 3 ≤ scale < 4 band on mdpi)
 - Selection points, polygon fill, and horizon paint use the shared selection / paint color (`GridConfig.selectionColor`,
   configurable in the Settings card per §11) — kept separate from grid color so the paint surface stays visible against
   the grid overlay

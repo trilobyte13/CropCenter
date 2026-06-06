@@ -39,6 +39,7 @@ import androidx.recyclerview.widget.RecyclerView;
 
 import com.cropcenter.R;
 import com.cropcenter.metadata.PngMetadataExtractor;
+import com.cropcenter.model.Format;
 import com.cropcenter.util.BitmapUtils;
 import com.cropcenter.util.DpToPx;
 import com.cropcenter.util.ThemeColors;
@@ -132,10 +133,9 @@ final class FolderBrowser
 	 * @param file     image file as returned by File.listFiles + isImageFile filter
 	 * @param sortKey  file.getName().toLowerCase(Locale.ROOT) snapshot — used as the sort key
 	 *                 so files prefixed with date strings (20240101_*, PXL_20240101_*,
-	 *                 IMG-20240101-WA0001.jpg, etc.) sort chronologically. Switching from
-	 *                 lastModified to filename-based sort fixes the "restored years cluster at
-	 *                 top because copy reset their mtime" issue users hit with restored
-	 *                 Camera albums.
+	 *                 IMG-20240101-WA0001.jpg, etc.) sort chronologically. Filename-based (not
+	 *                 lastModified) so a restore/copy that rewrites mtime can't cluster restored
+	 *                 files at the top of a Camera album.
 	 */
 	private record FileEntry(File file, String sortKey) {}
 
@@ -452,10 +452,10 @@ final class FolderBrowser
 	}
 
 	/**
-	 * RecyclerView spacing decoration for grid-mode file cells. Adds the inter-cell gap that
-	 * the old eager-inflation path expressed via LinearLayout margin params. Skips folder rows
-	 * (they span the full width — adding side margins would shrink the row asymmetrically)
-	 * and skips all rows in list mode (list rows have their own vertical padding).
+	 * RecyclerView spacing decoration for grid-mode file cells. Adds the inter-cell gap between
+	 * grid thumbnails. Skips folder rows (they span the full width — adding side margins would
+	 * shrink the row asymmetrically) and skips all rows in list mode (list rows have their own
+	 * vertical padding).
 	 */
 	private final class GridSpacingDecoration extends RecyclerView.ItemDecoration
 	{
@@ -698,11 +698,11 @@ final class FolderBrowser
 			return cached;
 		}
 		String path = file.getAbsolutePath();
-		String lower = file.getName().toLowerCase(Locale.ROOT);
 		Bitmap raw = null;
 		int orientation = ExifInterface.ORIENTATION_NORMAL;
-		boolean isJpeg = lower.endsWith(".jpg") || lower.endsWith(".jpeg");
-		boolean isPng = lower.endsWith(".png");
+		Format format = Format.fromExtension(file.getName());
+		boolean isJpeg = format == Format.JPEG;
+		boolean isPng = format == Format.PNG;
 		if (isJpeg)
 		{
 			try
@@ -844,8 +844,7 @@ final class FolderBrowser
 	 */
 	static boolean isJpegSourceFormat(File file)
 	{
-		String name = file.getName().toLowerCase(Locale.ROOT);
-		return name.endsWith(".jpg") || name.endsWith(".jpeg");
+		return Format.fromExtension(file.getName()) == Format.JPEG;
 	}
 
 	/**
@@ -857,20 +856,16 @@ final class FolderBrowser
 	 * on load — confusing UX. Now the unsupported formats render at half alpha with no click
 	 * handler, communicating "visible but not selectable" at a glance.
 	 *
-	 * Routes through `ImageLoadController.isJpegSignature` / `isPngSignature`? No — those
-	 * inspect bytes, not extensions. Magic-byte inspection here would require reading the
-	 * file head (slow for grid mode with 60+ files). Extension match is fast and matches the
-	 * loader's accepted formats in practice (mismatch only on a JPEG masquerading as
-	 * `.heic` — pathological).
+	 * Matches on extension via `Format.fromExtension` (the JPEG/PNG chokepoint), not magic bytes:
+	 * byte inspection would mean reading every file head, slow for a 60+ file grid, and the
+	 * extension matches the loader's accepted formats except for a file under a wrong suffix.
 	 *
-	 * @param file candidate file (only the name's lowercase suffix is inspected)
-	 * @return true when the filename's lowercase suffix matches an extension the load
-	 *         pipeline accepts (`.jpg` / `.jpeg` / `.png`); false otherwise
+	 * @param file candidate file (only the name's extension is inspected)
+	 * @return true when the extension maps to a Format the load pipeline accepts (JPEG / PNG)
 	 */
 	static boolean isSupportedSourceFormat(File file)
 	{
-		String name = file.getName().toLowerCase(Locale.ROOT);
-		return name.endsWith(".jpg") || name.endsWith(".jpeg") || name.endsWith(".png");
+		return Format.fromExtension(file.getName()) != null;
 	}
 
 	/**
@@ -1771,11 +1766,12 @@ final class FolderBrowser
 	 * ~500ms+ disk read. This is the fast half that runs on every refresh; enumerateFolder is
 	 * the slow half that runs only on a cache miss (folder change).
 	 *
-	 * Sort key is the lowercase filename — for camera-app naming conventions that prefix
-	 * filenames with capture date (20240101_*, PXL_20240101_*, IMG-20240101-WA0001.jpg),
-	 * alphabetical filename order ≈ true chronological order. Switching to filename sort
-	 * (away from lastModified) fixes the "restored years cluster at top because the restore
-	 * touched their mtime" issue on backed-up Camera albums.
+	 * Sort key is the lowercase filename, NOT lastModified — for camera-app naming conventions that
+	 * prefix filenames with capture date (20240101_*, PXL_20240101_*, IMG-20240101-WA0001.jpg),
+	 * alphabetical filename order ≈ true chronological order, and unlike mtime it survives a
+	 * restore/copy that rewrites timestamps (which would otherwise cluster restored files at the
+	 * top). The approximation only holds for date-prefixed names; renamed / downloaded / grafted
+	 * files sort by name, not capture time.
 	 *
 	 * @param snap cached folder snapshot from enumerateFolder
 	 * @param mode active sort direction for FILE rows (folders are unaffected)
@@ -1801,9 +1797,10 @@ final class FolderBrowser
 	}
 
 	/**
-	 * Resolve the sort-toggle icon resource. The icon shows the OTHER sort direction (the one
-	 * that a tap will switch into), matching the grid/list toggle convention. So when sorting
-	 * newest first, the icon depicts oldest-first to advertise the tap action.
+	 * Resolve the sort-toggle icon resource. The icon shows the direction a tap will switch INTO
+	 * (the inverse of the current mode), matching the grid/list toggle convention. NEWEST_FIRST is
+	 * descending filename order (name Z-to-A), OLDEST_FIRST ascending (A-to-Z); the icons read as
+	 * up/down arrows so the literal newest/oldest drawable names are just the asset labels.
 	 *
 	 * @return drawable resource ID for the inverse of the current sortMode
 	 */
@@ -1823,9 +1820,12 @@ final class FolderBrowser
 	 */
 	private String sortToggleDescriptionForCurrentMode()
 	{
+		// Name-based wording (not "newest/oldest") because the comparator sorts by filename, not file
+		// timestamp — honest for renamed / downloaded / non-date-prefixed files. NEWEST_FIRST is
+		// descending filename order (Z-A), which approximates newest-first for date-prefixed camera names.
 		return sortMode == SortMode.NEWEST_FIRST
-			? "Sort by oldest first"
-			: "Sort by newest first";
+			? "Sort by name A to Z"
+			: "Sort by name Z to A";
 	}
 
 	/**

@@ -364,9 +364,9 @@ final class ImageLoadController
 			// executor is single-threaded so these writes are serialized; UI-thread reads see them via
 			// the Handler.post happens-before edge below. EditorRenderer / tap paths null-check
 			// getSourceImage so a null-during-load snapshot is handled as "no image loaded".
-			// installLoadedImage inlines what were previously 7 per-field setters and wraps the field
-			// writes in beginBatch/endBatch; the field writes themselves don't call notifyChanged
-			// today, so the batch is structural insurance against a future maintainer adding one
+			// installLoadedImage performs the per-field state writes wrapped in beginBatch/endBatch; the
+			// field writes themselves don't call notifyChanged today, so the batch is structural
+			// insurance against a future maintainer adding one
 			// rather than a current listener-coalescing measure.
 			CropState state = host.getState();
 			state.reset();
@@ -490,8 +490,8 @@ final class ImageLoadController
 			// Show the touch-blocking overlay during the bg read+decode+metadata-extract pass. The editor
 			// view and toolbar widgets above otherwise still accept taps / drags / AR changes / rotation
 			// while CropState is being reset and re-populated underneath, which can leak inputs onto an
-			// in-flight-replaced state. setBusyUi only disables Save/Open; the overlay is what gates
-			// everything else.
+			// in-flight-replaced state. setBusyUi only disables Save / Open / Graft; the overlay is what
+			// gates everything else.
 			host.showProgress("Loading…");
 			host.runInBackground(() -> runLoadBg(uri));
 		}
@@ -608,12 +608,10 @@ final class ImageLoadController
 		}
 		finally
 		{
-			host.getBusy().set(false);
-			host.runOnUiThread(() ->
-			{
-				host.setBusyUi(false);
-				host.hideProgress();
-			});
+			// Clear busy LAST, on the UI thread, after teardown — see EditorHost.finishBusy. Clearing it
+			// here on the bg thread before posting the teardown would let an onNewIntent Share/View load
+			// acquire busy in the gap and then be unmasked by this load's still-pending teardown runnable.
+			host.finishBusy();
 		}
 	}
 }

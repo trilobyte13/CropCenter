@@ -17,9 +17,10 @@ import com.cropcenter.util.GridGeometry;
  *
  * The rounding formula mirrors CropExporter.gridLinePixel exactly: first-half lines round `cropExtent * i / count`;
  * second-half lines mirror through `cropExtent - round(cropExtent * (count - i) / count)` (relative to cropExtent,
- * matching the export's mirror-through-dim). The middle line for count == 2 or 4 stays on cropCenter so single-point
- * selection markers still sit at the grid intersection; the 0.5-pixel export divergence for odd cropExtent + count ∈
- * {2, 4} is accepted as the only remaining mismatch, and rule-of-thirds (count == 3, the common case) has no middle.
+ * matching the export's mirror-through-dim). The middle line of any even count (i * 2 == count) stays on cropCenter so
+ * single-point selection markers still sit at the grid intersection; the ≤0.5-pixel export divergence for odd
+ * cropExtent at any even count is accepted as the only remaining mismatch, and odd counts (e.g. rule-of-thirds
+ * count == 3) have no middle line.
  *
  * Side effect: during a rotation sweep, as CropEngine.recomputeCrop changes cropW by integer amounts, the rounded
  * relative offsets can jump by one pixel at cropW parity boundaries. The rotation ruler moves in discrete ticks so
@@ -98,10 +99,10 @@ public final class GridRenderer
 	 * offset matches CropExporter.gridLinePixel's rounding byte-for-byte, keeping preview and export aligned
 	 * whether cropOrigin is integer or fractional.
 	 *
-	 * Middle line (i*2 == count) preserves cropCenter rather than snapping, so single-point selection markers
-	 * stay on the grid intersection. (Count ∈ {2, 4} with odd cropExtent is the only case this disagrees with
-	 * export, by 0.5 px; rule of thirds has no middle line.) Second-half lines mirror through cropExtent (not
-	 * cropCenter) so rounding matches the exporter's dim - round(dim * (count - i) / count) exactly.
+	 * Middle line (i*2 == count, any even count) preserves cropCenter rather than snapping, so single-point
+	 * selection markers stay on the grid intersection. (Odd cropExtent at any even count is the only case this
+	 * disagrees with export, by ≤0.5 px; odd counts have no middle line.) Second-half lines mirror through
+	 * cropExtent (not cropCenter) so rounding matches the exporter's dim - round(dim * (count - i) / count).
 	 *
 	 * Package-private so GridRendererTest can pin the preview-matches-export contract without a Canvas.
 	 *

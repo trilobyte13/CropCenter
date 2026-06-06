@@ -10,8 +10,8 @@ package com.cropcenter.model;
  * fields (batchDepth, batchDirty, listener) and methods (beginBatch, endBatch, notify, setListener) form a closed
  * cohesive sub-system that can be reasoned about and tested in isolation.
  *
- * CropState holds a single StateBus instance and delegates to it. Setters call bus.notifyChanged() instead of the
- * private notifyChanged method that previously lived on CropState.
+ * CropState holds a single StateBus instance and delegates to it: setters call bus.notifyChanged() so the
+ * listener-dispatch + batch-suppression protocol lives in one place rather than inline on CropState.
  */
 final class StateBus
 {

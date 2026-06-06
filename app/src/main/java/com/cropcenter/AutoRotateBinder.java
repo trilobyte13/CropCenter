@@ -363,13 +363,10 @@ final class AutoRotateBinder
 		{
 			// HARDWARE→ARGB readback failed (GPU memory exhausted or driver bug). Surface a clean
 			// detection-failure toast rather than crashing on src.getPixels() inside the detector.
-			host.getBusy().set(false);
-			host.runOnUiThread(() ->
-			{
-				host.setBusyUi(false);
-				host.hideProgress();
-				host.toastIfAlive(DETECTION_FAILED_TOAST, Toast.LENGTH_SHORT);
-			});
+			// Clear busy LAST, on the UI thread, after teardown (see EditorHost.finishBusy). The toast is a
+			// separate post — it doesn't gate state, so landing after busy is released is fine.
+			host.finishBusy();
+			host.runOnUiThread(() -> host.toastIfAlive(DETECTION_FAILED_TOAST, Toast.LENGTH_SHORT));
 			return;
 		}
 		float angle;
@@ -384,13 +381,10 @@ final class AutoRotateBinder
 			// (OutOfMemoryError, LinkageError, ThreadDeath) would let the recovery handler itself fail or
 			// worsen the situation. HorizonDetector already catches OutOfMemoryError internally.
 			Log.w(TAG, "horizon detection failed", e);
-			host.getBusy().set(false);
-			host.runOnUiThread(() ->
-			{
-				host.setBusyUi(false);
-				host.hideProgress();
-				host.toastIfAlive(DETECTION_FAILED_TOAST, Toast.LENGTH_SHORT);
-			});
+			// Clear busy LAST, on the UI thread, after teardown (see EditorHost.finishBusy). The toast is a
+			// separate post — it doesn't gate state, so landing after busy is released is fine.
+			host.finishBusy();
+			host.runOnUiThread(() -> host.toastIfAlive(DETECTION_FAILED_TOAST, Toast.LENGTH_SHORT));
 			return;
 		}
 		finally

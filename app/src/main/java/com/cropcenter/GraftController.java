@@ -184,8 +184,8 @@ final class GraftController
 		{
 			host.setBusyUi(true);
 			// Touch-blocking overlay during read+align+detect+splice. Without it the editor + toolbar still
-			// accept input while CropState is mid-replacement; setBusyUi only disables Save/Open. The
-			// overlay gates everything else.
+			// accept input while CropState is mid-replacement; setBusyUi only disables Save / Open / Graft.
+			// The overlay gates everything else.
 			host.showProgress("Applying edit…");
 			host.runInBackground(() -> assembleGraftOnBg(editUri));
 		}
@@ -445,15 +445,11 @@ final class GraftController
 			// early return), and unexpected throw.
 			pendingSource = null;
 			// Release busy on every failure path. The success path leaves it held because applyGraftedBytes
-			// is about to claim it transitively.
+			// is about to claim it transitively. Clear busy LAST, on the UI thread, after teardown (see
+			// EditorHost.finishBusy) so an onNewIntent load can't acquire it in a bg-clear-then-post gap.
 			if (!handedOff)
 			{
-				host.getBusy().set(false);
-				host.runOnUiThread(() ->
-				{
-					host.setBusyUi(false);
-					host.hideProgress();
-				});
+				host.finishBusy();
 			}
 		}
 	}
@@ -474,7 +470,7 @@ final class GraftController
 	 */
 	private void confirmOversizedThenApply(Graft graft, int maskedPixelCount, int maskTotal)
 	{
-		Runnable releaseBusy = this::releaseBusyAndHideProgress;
+		Runnable releaseBusy = host::finishBusy;
 		if (host.isDestroyed())
 		{
 			Log.w(TAG, "skipping oversized-edit dialog on destroyed activity");
@@ -565,7 +561,7 @@ final class GraftController
 		// oversized-edit and normal paths route through applyConfirmedGraft so the isDestroyed + try/catch
 		// cleanup applies uniformly — a separate `onGraftReady.onReady(graft)` direct call would leave the
 		// normal path missing the cleanup applyConfirmedGraft provides.
-		Runnable releaseBusy = this::releaseBusyAndHideProgress;
+		Runnable releaseBusy = host::finishBusy;
 		if (host.isDestroyed())
 		{
 			Log.w(TAG, "skipping graft handoff on destroyed activity");
@@ -580,21 +576,6 @@ final class GraftController
 		{
 			applyConfirmedGraft(graft, releaseBusy);
 		}
-	}
-
-	/**
-	 * Release the held busy flag, clear the UI's busy indicator, and hide the progress overlay. Used as the
-	 * cleanup tail by the graft pipeline whenever an Activity-destroyed guard fires, the user cancels the
-	 * oversized-edit confirm dialog, or the dialog plumbing throws — anywhere the busy ownership the graft
-	 * pipeline holds must be relinquished without proceeding to applyBytes. Hoisted out of two parallel
-	 * lambda bodies in confirmOversizedThenApply / dispatchGraftToUi so the three-step cleanup
-	 * contract (busy flag, busy UI, progress overlay) lives at one chokepoint.
-	 */
-	private void releaseBusyAndHideProgress()
-	{
-		host.getBusy().set(false);
-		host.setBusyUi(false);
-		host.hideProgress();
 	}
 
 	/**

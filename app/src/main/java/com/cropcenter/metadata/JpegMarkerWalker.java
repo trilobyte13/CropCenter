@@ -3,12 +3,11 @@ package com.cropcenter.metadata;
 import com.cropcenter.util.ByteBufferUtils;
 
 /**
- * Canonical JPEG marker walker. Consolidates the SOS / EOI / RST / segment-length / overflow-guard logic that
- * previously lived as three separate near-identical implementations across CropExporter, GraftWriter, and
- * GainMapExtractor. A bug class fixed in one site now applies to all three by construction.
+ * Canonical JPEG marker walker. The single SOS / EOI / RST / segment-length / overflow-guard implementation shared by
+ * CropExporter, GraftWriter, and GainMapExtractor, so a bug fixed here applies to all three by construction.
  *
- * Static, no state — every call carries its own (file, endBound) pair. The endBound parameter generalises the earlier
- * "scan to file.length" vs "scan to SEFT-aware boundary" split: callers that don't need to bound past a trailer pass
+ * Static, no state — every call carries its own (file, endBound) pair. The endBound parameter covers both the
+ * "scan to file.length" and "scan to SEFT-aware boundary" cases: callers that don't need to bound past a trailer pass
  * file.length; callers that strip a known trailer (GainMapExtractor) pass the trailer's start.
  *
  * Per the JPEG spec (ITU-T T.81 / ISO/IEC 10918-1):

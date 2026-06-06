@@ -31,10 +31,8 @@ final class EditorRenderer
 {
 	// Pixel-peep threshold in DP (density-independent units): once each source pixel renders at
 	// MIN_PIXEL_PEEP_DP or more dp on screen, the pixel grid + per-pixel selection markers become
-	// visible. Specified in dp (not raw screen pixels) so the threshold yields the same visual size
-	// across screen densities — 3dp ≈ 0.75–1mm on phones, half the previous 6dp threshold so the
-	// pixel grid activates at half the zoom level (each source pixel only needs to render at ~3dp
-	// instead of ~6dp before the grid shows). Multiplied by display density at use site.
+	// visible. Specified in dp (not raw screen pixels) so visibility is consistent across screen
+	// densities (3dp ≈ 0.75–1mm on phones). Multiplied by display density at use site.
 	private static final float MIN_PIXEL_PEEP_DP = 3f;
 
 	private static final int DIM_OVERLAY = 0xAA000000;    // 66% black — dims area outside crop
@@ -79,6 +77,32 @@ final class EditorRenderer
 		polygonPaint.setStyle(Paint.Style.FILL);
 		infoPaint.setColor(ThemeColors.TEXT);
 		infoPaint.setTextSize(24f);
+	}
+
+	/**
+	 * Decide whether the renderer draws the full source bitmap (crisp pixels) or the display proxy at the
+	 * current zoom. True only when zoom has reached the pixel-peep transition (scale ≥ 4) AND the source fits
+	 * the GPU texture budget on BOTH axes: total pixels ≤ MAX_SOURCE_RENDER_PIXELS (64 MP) and each axis ≤
+	 * MAX_SOURCE_RENDER_AXIS (16384 px). Either cap failing keeps the renderer on the proxy — the documented
+	 * "soft pixels rather than a frozen / crashed GPU upload" fallback for out-of-budget sources (a 200 MP
+	 * capture exceeds the pixel cap; a 32767×1000 panorama passes the pixel cap at 32 MP but exceeds the axis
+	 * cap). The pixel product uses long arithmetic so a 200 MP source can't overflow int and spuriously pass.
+	 *
+	 * Package-private static so EditorRendererTest can pin the cap boundaries without a Canvas; the draw pass
+	 * calls it with the live source bitmap's dimensions.
+	 *
+	 * @param srcW  source bitmap width in pixels
+	 * @param srcH  source bitmap height in pixels
+	 * @param scale current on-screen scale (baseScale × zoom); each source pixel covers `scale` screen pixels
+	 * @return true to render the full source, false to keep rendering the display proxy
+	 */
+	static boolean shouldRenderSource(int srcW, int srcH, float scale)
+	{
+		long sourcePixels = (long) srcW * srcH;
+		boolean sourceFitsBudget = sourcePixels <= BitmapUtils.MAX_SOURCE_RENDER_PIXELS
+			&& srcW <= BitmapUtils.MAX_SOURCE_RENDER_AXIS
+			&& srcH <= BitmapUtils.MAX_SOURCE_RENDER_AXIS;
+		return scale >= 4f && sourceFitsBudget;
 	}
 
 	/**
@@ -137,11 +161,7 @@ final class EditorRenderer
 		// the user trades crisp pixel-grid pixels for a non-freezing app on those out-of-budget sources.
 		// drawPixelGridIfZoomed below still reads source.getWidth/getHeight directly so the grid LINE
 		// spacing stays in source coords either way; only the bitmap-render path is gated.
-		long sourcePixels = (long) source.getWidth() * source.getHeight();
-		boolean sourceFitsBudget = sourcePixels <= BitmapUtils.MAX_SOURCE_RENDER_PIXELS
-			&& source.getWidth() <= BitmapUtils.MAX_SOURCE_RENDER_AXIS
-			&& source.getHeight() <= BitmapUtils.MAX_SOURCE_RENDER_AXIS;
-		boolean useSource = scale >= 4f && sourceFitsBudget;
+		boolean useSource = shouldRenderSource(source.getWidth(), source.getHeight(), scale);
 		Bitmap bmp = useSource ? source : display;
 		// Filtering hint: nearest-neighbor when actually drawing the full source above 4× (the user wants
 		// crisp pixel-grid pixels), bilinear otherwise. The proxy path above MAX_SOURCE_RENDER_PIXELS /
@@ -172,7 +192,7 @@ final class EditorRenderer
 		}
 		canvas.drawBitmap(bmp, bitmapMatrix, imagePaint);
 
-		drawPixelGridIfZoomed(canvas, state, grid, source, scale);
+		drawPixelGridIfZoomed(canvas, state, grid, source, scale, useSource);
 
 		float gridImgX;
 		float gridImgY;
@@ -336,7 +356,7 @@ final class EditorRenderer
 	 * Draw a 1-pixel-per-image-pixel grid when the GridConfig flag is on AND each source pixel renders
 	 * at MIN_PIXEL_PEEP_DP or more dp on screen. Below the threshold the grid lines would be sub-pixel
 	 * and unreadable. The threshold is dp-normalised so visibility is consistent across screen
-	 * densities (the prior raw-pixel threshold rendered as ~2dp on a 3x phone, barely visible).
+	 * densities (a raw-pixel threshold would render at ~2dp on a 3x phone, barely visible).
 	 * Computes a rotation-aware axis-aligned bounding box of the visible image area and only draws
 	 * lines inside that AABB to avoid the O(W * H) full-image walk.
 	 *
@@ -347,13 +367,22 @@ final class EditorRenderer
 	 *               — at the pixel-peep threshold the renderer's bmp variable already holds the source,
 	 *               but passing the proxy here would scale the pixel grid to proxy resolution and the
 	 *               per-pixel lines would no longer land on source-coord pixel boundaries
-	 * @param scale  current screen-pixels-per-image-pixel (baseScale * zoom); below
-	 *               MIN_PIXEL_PEEP_DP * density short-circuits to no-op
+	 * @param scale     current screen-pixels-per-image-pixel (baseScale * zoom); below
+	 *                  MIN_PIXEL_PEEP_DP * density short-circuits to no-op
+	 * @param useSource whether the frame is rendering the full source bitmap (shouldRenderSource) rather
+	 *                  than the display proxy; the grid only draws when true so its source-coordinate
+	 *                  lines land on pixels actually shown
 	 */
 	private void drawPixelGridIfZoomed(Canvas canvas, CropState state, GridConfig grid, Bitmap source,
-		float scale)
+		float scale, boolean useSource)
 	{
-		if (!grid.showPixelGrid() || scale < MIN_PIXEL_PEEP_DP * density)
+		// Gate on the SAME source-switch decision the bitmap render used (useSource), not scale alone. On
+		// mdpi (density 1) the dp threshold (3) sits below the source-switch scale (4), so without this the
+		// grid would paint source-coordinate lines over the bilinear display proxy in the 3 <= scale < 4
+		// band — lines that wouldn't land on the pixels the user sees. For an out-of-budget source that
+		// never switches (over MAX_SOURCE_RENDER_PIXELS / _AXIS) useSource stays false, so the grid stays
+		// off rather than drawing misaligned over a permanent proxy.
+		if (!grid.showPixelGrid() || !useSource || scale < MIN_PIXEL_PEEP_DP * density)
 		{
 			return;
 		}
@@ -385,10 +414,9 @@ final class EditorRenderer
 		int endX = bounds[2];
 		int endY = bounds[3];
 
-		// Hoist endpoint screen coordinates outside the loops — they're constant per draw, but the
-		// prior code recomputed them on every iteration. At full zoom on a 10000×10000 source the
-		// vertical loop alone makes ~10000 redundant imageToScreenY calls per frame (2 per
-		// iteration × 4096 iterations on a 4096-wide visible AABB).
+		// Hoist endpoint screen coordinates outside the loops — they're constant per draw. At full
+		// zoom on a 10000×10000 source the vertical loop alone would otherwise make ~10000 redundant
+		// imageToScreenY calls per frame (2 per iteration × 4096 iterations on a 4096-wide AABB).
 		float screenTop = viewport.imageToScreenY(startY);
 		float screenBottom = viewport.imageToScreenY(endY);
 		float screenLeft = viewport.imageToScreenX(startX);
@@ -457,8 +485,9 @@ final class EditorRenderer
 	 * Draw the per-selection-point marker. Filled image-pixel square when each source pixel renders at
 	 * MIN_PIXEL_PEEP_DP or more dp on screen (marker visibly follows the rotated pixel grid, becoming a
 	 * rotated quadrilateral at non-cardinal angles); a 10-px circle when zoomed out (single pixel is too
-	 * small to see). Same dp-normalised threshold as drawPixelGridIfZoomed so the marker style switches
-	 * exactly when the pixel grid becomes visible.
+	 * small to see). Keyed off the same MIN_PIXEL_PEEP_DP dp threshold as the pixel grid; the grid
+	 * additionally requires the zoom-≥-4 source switch, so on mdpi the grid can trail the marker style by
+	 * the 3..4 scale band.
 	 *
 	 * @param canvas target Canvas; runs inside the caller's rotated save layer when the image is rotated
 	 * @param points selection points in image-space coordinates; read-only
@@ -576,8 +605,9 @@ final class EditorRenderer
 	 * @param state CropState supplying rotation; forwarded to viewport.screenToImagePixelInto
 	 * @param imgW  bitmap width in pixels; used to clamp the AABB to the image's right edge
 	 * @param imgH  bitmap height in pixels; used to clamp the AABB to the image's bottom edge
-	 * @return new int[]{startX, startY, endX, endY} — integer AABB of visible image coords, clamped to
-	 *         [0, imgW] × [0, imgH]
+	 * @return the shared per-renderer aabbScratch array filled as [startX, startY, endX, endY] — integer AABB of
+	 *         visible image coords clamped to [0, imgW] × [0, imgH]; caller must read it immediately and must NOT
+	 *         retain it (the next call overwrites the same buffer — reused to avoid per-frame allocation)
 	 */
 	private int[] visibleImageBoundsAabb(CropState state, int imgW, int imgH)
 	{

@@ -120,12 +120,38 @@ public final class SaveControllerTest
 	}
 
 	@Test
+	public void autoRenameBaseNameReturnsNullForWhitespaceOnlyStem()
+	{
+		// Whitespace-only stem before "(N)": baseStem.stripTrailing() collapses to empty, so no real base
+		// name (null). Unlike the "(1).jpg" suffix-alone case the leading chars exist but are all spaces —
+		// exercises the stripTrailing-then-isEmpty guard rather than the openParen<=0 guard.
+		assertNull(SaveController.autoRenameBaseName("   (1).jpg"));
+	}
+
+	@Test
 	public void autoRenameBaseNameStripsTrailingWhitespaceFromBase()
 	{
 		// Multiple spaces between stem and "(N)" — exercises stripTrailing distinctly from the canonical
 		// single-space test (autoRenameBaseNameDetectsClassicalCollision). A regression that switched
 		// stripTrailing for a single-char trim would still pass the canonical test but fail this one.
 		assertEquals("crop.jpg", SaveController.autoRenameBaseName("crop   (1).jpg"));
+	}
+
+	@Test
+	public void nextAvailableNumberedNameHandlesEmptyStemLeadingDot() throws IOException
+	{
+		// Degenerate ".jpg" (leading dot, no stem): autoRenameBaseName returns null, so the loop runs with
+		// ".jpg" as the stem and an EMPTY ext — lastIndexOf('.')==0 fails the dot>0 guard, so it's NOT split
+		// as stem=""/ext=".jpg". Suggestion is ".jpg (1)" — a leading-dot name is an extensionless stem.
+		File dir = Files.createTempDirectory("cc-test").toFile();
+		try
+		{
+			assertEquals(".jpg (1)", SaveController.nextAvailableNumberedName(dir, ".jpg"));
+		}
+		finally
+		{
+			deleteRecursively(dir);
+		}
 	}
 
 	@Test

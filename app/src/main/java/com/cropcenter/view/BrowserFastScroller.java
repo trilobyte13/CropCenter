@@ -1,5 +1,6 @@
 package com.cropcenter.view;
 
+import android.annotation.SuppressLint;
 import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Paint;
@@ -60,11 +61,9 @@ import java.util.function.Consumer;
  */
 public final class BrowserFastScroller extends View
 {
-	// 32dp floor — comfortable Material-spec aim target. 24dp (the prior value) was just
-	// inside the "easy to miss" zone on tall folders where the thumb floors at the minimum;
-	// 32dp keeps it grabbable at a glance without losing the proportional thumb-size feedback
-	// on smaller folders. The earlier 48dp floor was over-generous and pegged on anything past
-	// ~2 viewports of content, hiding the size cue entirely.
+	// 32dp floor — comfortable Material-spec aim target that stays grabbable at a glance on tall
+	// folders (where the thumb floors at the minimum) without swamping the proportional thumb-size
+	// feedback on smaller folders.
 	private static final int MIN_THUMB_HEIGHT_DP = 32;
 	private static final int THUMB_RADIUS_DP = 4;
 	// Vertical halo around the visible thumb that ALSO grabs immediately. Without it the user has
@@ -77,12 +76,11 @@ public final class BrowserFastScroller extends View
 	private static final int THUMB_TOUCH_HALO_DP = 24;
 	// Visible thumb width; the View itself is wider (40dp via layout XML) so the touch target
 	// stays Material-spec generous with extra slack for fingerpad-sized aim, but the painted
-	// thumb is only this many dp wide on the right edge so it doesn't crowd the cells
-	// underneath. Without the wider touch target users miss the narrow thumb and their touch
-	// falls through to the RecyclerView, which interprets the missed grab as a swipe and
-	// fling-scrolls on release (the "autoscroll after drag" symptom). 8dp is wide enough to be
-	// visually findable without crowding the rightmost cell column; the prior 6dp read as a
-	// hairline against the sidebar background and was hard to aim at.
+	// thumb is only this many dp wide on the right edge so it doesn't crowd the cells underneath.
+	// Without the wider touch target users miss the narrow thumb and their touch falls through to
+	// the RecyclerView, which interprets the missed grab as a swipe and fling-scrolls on release
+	// (the "autoscroll after drag" symptom). 8dp stays visually findable without crowding the
+	// rightmost cell column.
 	private static final int THUMB_WIDTH_DP = 8;
 
 	private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -165,6 +163,11 @@ public final class BrowserFastScroller extends View
 		thumbWidthPx = DpToPx.toPx(THUMB_WIDTH_DP, density);
 		thumbRadiusPx = DpToPx.toPx(THUMB_RADIUS_DP, density);
 		touchSlopPx = ViewConfiguration.get(context).getScaledTouchSlop();
+		// The thumb is a sighted-user scrubbing shortcut layered over the RecyclerView, which already
+		// exposes item navigation and scroll-forward / scroll-backward actions to TalkBack / Switch
+		// Access. Mark the overlay non-important so a11y focus skips a redundant, position-only control
+		// instead of advertising a click contract the thumb doesn't honour.
+		setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
 	}
 
 	/**
@@ -197,6 +200,7 @@ public final class BrowserFastScroller extends View
 		invalidate();
 	}
 
+	@SuppressLint("ClickableViewAccessibility") // drag scrubber, not a click target — see constructor
 	@Override
 	public boolean onTouchEvent(MotionEvent event)
 	{
@@ -482,7 +486,7 @@ public final class BrowserFastScroller extends View
 			// feedback even if the recycler is still mid-layout from the previous frame's
 			// scrollToPositionWithOffset. Without this the thumb visibly lags behind the finger
 			// on huge folders, then jumps to the catch-up position when the user releases.
-			thumbTop = Math.max(0f, Math.min(trackHeight - thumbHeight, draggedThumbTop));
+			thumbTop = Math.clamp(draggedThumbTop, 0f, Math.max(0f, trackHeight - thumbHeight));
 		}
 		else
 		{
@@ -759,11 +763,10 @@ public final class BrowserFastScroller extends View
 	 *
 	 * NOT called after dragging ends — onUpOrCancel removes any pending runnable and instead
 	 * routes through pinToCurrentScrollPosition, which re-anchors the recycler at its current
-	 * visible position. The earlier behaviour of "settle to where the finger left" used the
-	 * release-frame draggedThumbTop, which captured the incidental flick motion at finger lift
-	 * and overshot the user's intended position; the pin-instead-of-resync replaces that final
-	 * sync scroll so the recycler stays at the last animation frame's target (the user's actual
-	 * pre-release drag position).
+	 * visible position. Pinning (rather than a final sync scroll to the release-frame
+	 * draggedThumbTop) avoids overshoot: the release frame captures the incidental flick motion at
+	 * finger lift, so the recycler stays at the last animation frame's target — the user's actual
+	 * pre-release drag position.
 	 */
 	private void scrollRecyclerToDraggedPosition()
 	{
@@ -792,8 +795,8 @@ public final class BrowserFastScroller extends View
 		int trackHeight = getHeight();
 		float thumbHeight = rowProportionalThumbHeight(linearLm, itemCount,
 			firstVisible, lastVisible, trackHeight, thumbMinHeightPx);
-		float clampedTop = Math.max(0f, Math.min(trackHeight - thumbHeight, draggedThumbTop));
 		float scrollableTrack = trackHeight - thumbHeight;
+		float clampedTop = Math.clamp(draggedThumbTop, 0f, Math.max(0f, scrollableTrack));
 		float ratio = scrollableTrack <= 0 ? 0f : clampedTop / scrollableTrack;
 		if (ratio >= 1.0f)
 		{
@@ -809,7 +812,7 @@ public final class BrowserFastScroller extends View
 		// Map ratio through row index so a folder-list + file-grid mixed layout scrolls
 		// proportionally to user-perceived rows instead of compressing folder rows into a tiny
 		// fraction of the track travel.
-		int targetRow = Math.max(0, Math.min(maxFirstRow, Math.round(ratio * maxFirstRow)));
+		int targetRow = Math.clamp(Math.round(ratio * maxFirstRow), 0, maxFirstRow);
 		int targetPosition = positionForRow(linearLm, targetRow, itemCount);
 		// scrollToPositionWithOffset is O(1) on GridLayoutManager — just sets the anchor; the
 		// next layout fills the viewport from there without iterating every position in between.

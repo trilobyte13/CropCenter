@@ -258,6 +258,20 @@ public final class RotationRulerView extends View
 		return pixelsPerDegree > basePixelsPerDegree * MIN_PPD_FACTOR;
 	}
 
+	/**
+	 * Cancel any in-flight fling immediately, freezing the ruler at its current reading. The host calls
+	 * this when a background op (save / load / graft / auto-rotate) claims the busy gate: the fling runs
+	 * on Choreographer frame callbacks rather than touch, so the touch-blocking progress overlay does not
+	 * stop it, and momentum frames would otherwise keep mutating CropState's rotation while the bg thread
+	 * reads geometry and the HDR gain-map angle at separate times — encoding the primary and gain map at
+	 * two different rotations. The last fling frame already notified the listener, so the frozen reading
+	 * is the one CropState holds. Idempotent — safe when no fling is active.
+	 */
+	public void cancelMomentum()
+	{
+		stopFling();
+	}
+
 	@Override
 	public boolean onTouchEvent(MotionEvent event)
 	{
@@ -278,15 +292,17 @@ public final class RotationRulerView extends View
 		{
 			case MotionEvent.ACTION_DOWN -> handleTouchDown(event);
 			case MotionEvent.ACTION_MOVE -> handleTouchMove(event);
-			case MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL ->
+			case MotionEvent.ACTION_UP ->
 			{
 				handleTouchRelease(event);
-				// Standard accessibility hook — any view consuming touch must route ACTION_UP
-				// through performClick so a11y services can replicate the gesture programmatically.
-				// ACTION_CANCEL also lands here because the user's release intent was real even when
-				// the OS / parent gesture handler intercepted before the up event reached us.
+				// Accessibility hook — a view consuming touch must route a completed release
+				// through performClick so a11y services can replicate the gesture and the click
+				// sound fires. Only ACTION_UP: a CANCEL is a stolen/aborted gesture that
+				// handleTouchRelease discards without snapping, so emitting a click there would
+				// announce an action that never committed.
 				performClick();
 			}
+			case MotionEvent.ACTION_CANCEL -> handleTouchRelease(event);
 		}
 		return true;
 	}
@@ -434,7 +450,6 @@ public final class RotationRulerView extends View
 
 		// Multiplier to convert minor intervals to major check (integer comparison)
 		int majorEvery = Math.round(tickConfig.major / tickConfig.minor);
-		int detentEvery = Math.round(45f / tickConfig.minor);
 
 		for (int i = iStart; i <= iEnd; i++)
 		{
@@ -450,7 +465,11 @@ public final class RotationRulerView extends View
 				continue;
 			}
 
-			boolean isDetent = detentEvery > 0 && i % detentEvery == 0;
+			// Heavy-mark a tick only when it IS a detent on the current grid — never promote a neighbour.
+			// Off-grid detents (only ±45° at minor=10°, which sits between the 40° and 50° ticks) are drawn
+			// separately below at their exact position, so the marker always lands where release-snap
+			// (snapToDetentOrTick) pulls instead of on the nearest tick.
+			boolean isDetent = isDetentTick(deg, tickConfig.minor());
 			boolean isMajor = majorEvery > 0 && i % majorEvery == 0;
 
 			if (isDetent)
@@ -473,6 +492,25 @@ public final class RotationRulerView extends View
 			}
 		}
 
+		// Off-grid detent markers. At the coarsest zoom (minor=10°) the ±45° detents fall between the 40°
+		// and 50° ticks, so the tick loop above (which marks on-grid detents only) skips them. Draw them
+		// here at their exact degree position so the heavy marker + label sit on the value release-snap
+		// pulls to — the only off-grid detents in the whole zoom range are ±45° at minor=10°.
+		for (float detent : DETENTS)
+		{
+			if (isDetentOnGrid(detent, tickConfig.minor()))
+			{
+				continue;
+			}
+			float detentX = centerX + (detent - currentDegrees) * pixelsPerDegree;
+			if (detentX < -OFF_SCREEN_MARGIN || detentX > width + OFF_SCREEN_MARGIN)
+			{
+				continue;
+			}
+			canvas.drawLine(detentX, tickTop, detentX, tickBot, detentTickPaint);
+			canvas.drawText(TextFormat.degrees(detent), detentX, labelY, labelPaint);
+		}
+
 		// Zero marker
 		float zeroX = centerX - currentDegrees * pixelsPerDegree;
 		if (zeroX > -ZERO_MARKER_MARGIN && zeroX < width + ZERO_MARKER_MARGIN && currentDegrees != 0f)
@@ -493,6 +531,30 @@ public final class RotationRulerView extends View
 	}
 
 	/**
+	 * True when the tick at `deg` is exactly a detent on the current grid. Off-grid detents (only ±45° at
+	 * minor=10°, between the 40°/50° ticks) return false — onDraw renders those at their exact position so
+	 * the marker never lands on a promoted neighbour. Compares by signed tick index (tolerates float
+	 * residue in `deg`); the isDetentOnGrid guard rejects the off-grid case the index alone would accept
+	 * (45° and 50° share index 5 at minor=10°). Package-private so the test can pin placement Canvas-free.
+	 *
+	 * @param deg   degree value of the tick being drawn (an integer multiple of minor)
+	 * @param minor minor-tick spacing in degrees at the current zoom
+	 * @return true when this tick is exactly an on-grid detent
+	 */
+	static boolean isDetentTick(float deg, float minor)
+	{
+		long tickIndex = signedTickIndex(deg, minor);
+		for (float detent : DETENTS)
+		{
+			if (isDetentOnGrid(detent, minor) && signedTickIndex(detent, minor) == tickIndex)
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
 	 * Choose tick intervals based on how many degrees are visible on screen. Walks TICK_THRESHOLDS in order; the
 	 * first threshold strictly below degreesVisible picks that index's TickConfig. The last threshold is 0 so the
 	 * loop always terminates.
@@ -507,6 +569,35 @@ public final class RotationRulerView extends View
 			}
 		}
 		return TICK_CONFIGS[TICK_CONFIGS.length - 1];
+	}
+
+	/**
+	 * True when `detent` lands exactly on the tick grid at `minor` spacing — i.e. detent / minor is a
+	 * whole number. The only off-grid case in the whole zoom range is ±45° at minor=10° (4.5); every
+	 * other detent divides every minor spacing. onDraw uses this to decide whether a detent is already
+	 * drawn by the tick loop or needs its own standalone marker.
+	 *
+	 * @param detent detent value in degrees
+	 * @param minor  minor-tick spacing in degrees at the current zoom
+	 * @return true when the detent coincides with a grid tick
+	 */
+	private static boolean isDetentOnGrid(float detent, float minor)
+	{
+		float index = detent / minor;
+		return Math.abs(index - Math.round(index)) < 0.001f;
+	}
+
+	/**
+	 * Tick index of `deg` at `minor` spacing, rounding the magnitude and reapplying the sign so the grid
+	 * is symmetric about zero (round-half-away-from-zero, not Math.round's round-half-up).
+	 *
+	 * @param deg   degree value
+	 * @param minor minor-tick spacing in degrees
+	 * @return signed nearest-tick index
+	 */
+	private static long signedTickIndex(float deg, float minor)
+	{
+		return (long) Math.signum(deg) * Math.round(Math.abs(deg) / minor);
 	}
 
 	private static float snapTo(float val, float step)
@@ -590,10 +681,11 @@ public final class RotationRulerView extends View
 	 * ACTION_UP / ACTION_CANCEL: classify the gesture as tap / drag-release-slow / drag-release-fast and dispatch
 	 * accordingly. Recycles the velocity tracker on every exit so the next gesture starts fresh.
 	 *
-	 * ACTION_CANCEL takes the cleanup-only path — Android dispatches CANCEL when the OS / a parent view
-	 * claims the gesture (system back, multi-touch disambiguation, scroll-container intercept), which is
-	 * NOT a user-completed release. Treating CANCEL as if it were ACTION_UP would commit a fling or
-	 * snap-and-notify rotation the user never intended.
+	 * ACTION_CANCEL is an interrupted gesture, not a user-completed release — Android dispatches it when the OS
+	 * or a parent view claims the gesture (system back, multi-touch disambiguation, scroll-container intercept).
+	 * handleTouchMove commits each drag delta live, so the cancel path rolls currentDegrees back to the
+	 * pre-gesture value (gestureStartDegrees) and fires one corrective notify, leaving no partial rotation. It
+	 * never flings or snaps, which would apply a rotation the user never committed.
 	 */
 	private void handleTouchRelease(MotionEvent event)
 	{
@@ -608,10 +700,18 @@ public final class RotationRulerView extends View
 		}
 		if (event.getActionMasked() == MotionEvent.ACTION_CANCEL)
 		{
-			// Cleanup only — recycle the tracker and bail. No fling, no snap, no notify: any of the three
-			// would apply unintended rotation off an interrupted gesture.
+			// Interrupted gesture: roll the live-committed drag back to the pre-gesture angle so the
+			// interrupt leaves no partial rotation (REQUIREMENTS.md interrupted-gesture cleanup).
+			// handleTouchMove publishes each delta immediately, so currentDegrees holds the mid-drag value
+			// here; restoring gestureStartDegrees and notifying undoes it. No fling, no snap.
 			velocityTracker.recycle();
 			velocityTracker = null;
+			if (currentDegrees != gestureStartDegrees)
+			{
+				currentDegrees = gestureStartDegrees;
+				notifyChanged();
+				invalidate();
+			}
 			return;
 		}
 		// If a pinch-zoom occurred during this gesture, skip the angle fling / snap entirely. onScaleEnd fires
@@ -719,6 +819,10 @@ public final class RotationRulerView extends View
 	 */
 	private void startFling(float xVelocity)
 	{
+		// The int scroller bounds stay well inside Integer.MAX_VALUE: maxX = MAX_DEG(180) * pixelsPerDegree *
+		// SCROLL_SUBPIXEL_SCALE(1000), and pixelsPerDegree caps at 12*density*MAX_PPD_FACTOR(120). At density 4
+		// (xxxhdpi, the highest real bucket) that's ~1.04e9 < 2.15e9. A future MAX_PPD_FACTOR bump or a >8x
+		// density would overflow and corrupt the fling decode — clamp `scaled` if either ever changes.
 		float scaled = pixelsPerDegree * SCROLL_SUBPIXEL_SCALE;
 		int startX = (int) (currentDegrees * scaled);
 		int minX = (int) (MIN_DEG * scaled);

@@ -142,6 +142,10 @@ public final class GainMapComposer
 			return false;
 		}
 		long inFileSize = inFile.length();
+		// When inFileSize > HEAD_READ_LIMIT the patchers see only the first 16 MB — byte-identical to the
+		// full-buffer path as long as SOS (hence every APP segment) sits within 16 MB, true for every
+		// realistic JPEG. A >16 MB APP cluster (unreachable in practice) could straddle the boundary, but
+		// the only caller re-injects from the encoded primary on any compose anomaly, so nothing ships corrupt.
 		int headTarget = (int) Math.min(inFileSize, HEAD_READ_LIMIT);
 		byte[] head = new byte[headTarget];
 		try (FileInputStream fis = new FileInputStream(inFile))

@@ -57,11 +57,10 @@ final class HorizonPaintOverlay
 	 * asked for, so the detection callback is NOT invoked.
 	 *
 	 * Paint mode is exited (`active=false`) and the caller's `onCancel` runnable is fired so it can
-	 * reset external UI (e.g. AutoRotateBinder's "Cancel" → "Auto" button label). Earlier behaviour kept
-	 * `active=true` "so the user can try painting again without re-tapping Auto" — that left every
-	 * subsequent touch consumed by `HorizonPaintOverlay`, stranding the user in a stuck-paint-mode
-	 * state until they noticed the Cancel button. Exiting cleanly on CANCEL is the safer default;
-	 * the user can re-tap Auto if they want to retry.
+	 * reset external UI (e.g. AutoRotateBinder's "Cancel" → "Auto" button label). Exiting on CANCEL
+	 * (rather than staying active) avoids stranding the user in paint mode — where every subsequent
+	 * touch is consumed by the overlay — until they notice the Cancel button; they can re-tap Auto to
+	 * retry.
 	 */
 	void cancelStroke()
 	{

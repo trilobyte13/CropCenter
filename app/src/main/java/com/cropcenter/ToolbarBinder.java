@@ -509,10 +509,9 @@ final class ToolbarBinder
 	 * applyCustomAspectRatio. The result triggers a recompute via setAspectRatio. Triggered by selecting
 	 * the "Custom" row in the AR chip's preset popup.
 	 *
-	 * Cancel is a pure no-op: with the chip layout there's no spinner position to restore (the popup is
-	 * built fresh on each open). The prior implementation had to suppress a synthetic onItemSelected
-	 * fire that re-committed a stale preset over an in-memory custom AR; the popup-based pattern doesn't
-	 * have that hazard because the popup doesn't carry persistent selection state.
+	 * Cancel is a pure no-op: the popup is built fresh on each open and carries no persistent selection
+	 * state, so there's no spinner position to restore and no synthetic onItemSelected fire that could
+	 * re-commit a stale preset over an in-memory custom AR.
 	 */
 	private void showCustomArDialog()
 	{

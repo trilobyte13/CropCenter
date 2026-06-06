@@ -2,16 +2,12 @@ package com.cropcenter.util;
 
 /**
  * Shared grid-line position chokepoint. Mirror-symmetric integer position for inner line `i` in a
- * grid of `count` intervals spanning `dim` pixels. Used by both the on-screen renderer
- * (`view/GridRenderer.linePos`) and the export pipeline (`crop/CropExporter.gridLinePixel`) so a
- * grid drawn at preview time aligns byte-for-byte with the same grid baked into the saved image at
- * export.
- *
- * Independent rounding in two places previously sat in two different files; per CLAUDE.md
- * §Canonical helpers, a recurring pattern should have one chokepoint — a regression in either
- * file's rounding (e.g., switching from Math.round to truncating int cast) would have produced
- * half-pixel drift on odd dims, visible as a "ghost grid" mismatch when zooming a fresh save
- * compared to the in-editor preview.
+ * grid of `count` intervals spanning `dim` pixels. The single rounding site for both the on-screen
+ * renderer (`view/GridRenderer.linePos`) and the export pipeline (`crop/CropExporter.gridLinePixel`),
+ * so off-center grid lines round identically in preview and in the baked save — no half-pixel "ghost
+ * grid" drift on odd dims. The one preview/export exception (the middle line of an even-count grid
+ * keeps the half-integer crop center for marker alignment, diverging by ≤0.5 px) lives in
+ * `GridRenderer`, not here — this helper always returns the integer mirror position.
  */
 public final class GridGeometry
 {
