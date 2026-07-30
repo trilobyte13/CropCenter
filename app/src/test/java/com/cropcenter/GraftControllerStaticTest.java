@@ -30,8 +30,7 @@ public final class GraftControllerStaticTest
 		// silently shifts the threshold and changes which edits prompt the confirm dialog.
 		assertFalse("exactly 10% must not trip the strict-greater gate",
 			GraftController.isOversizedEdit(10, 100));
-		assertTrue("11 / 100 = 11% must trip the > 10% gate",
-			GraftController.isOversizedEdit(11, 100));
+		assertTrue("11 / 100 = 11% must trip the > 10% gate", GraftController.isOversizedEdit(11, 100));
 	}
 
 	@Test
@@ -64,8 +63,8 @@ public final class GraftControllerStaticTest
 	@Test
 	public void suggestedFilenameAppendsGraftSuffixBeforeExtension()
 	{
-		// Canonical case: "foo.jpg" → "foo-graft.jpg". The suffix lands BEFORE the extension so MIME-by-
-		// extension inference + the user's at-a-glance "this is a graft" recognition both work.
+		// Canonical case: "foo.jpg" → "foo-graft.jpg". The suffix lands BEFORE the extension so
+		// MIME-by-extension inference + the user's at-a-glance "this is a graft" recognition both work.
 		assertEquals("foo-graft.jpg", GraftController.suggestedFilename("foo.jpg"));
 		// Stem with dots in it — only the LAST dot is the extension boundary.
 		assertEquals("photo.2024.01-graft.jpg", GraftController.suggestedFilename("photo.2024.01.jpg"));
@@ -83,17 +82,17 @@ public final class GraftControllerStaticTest
 	@Test
 	public void suggestedFilenameHandlesLeadingDot()
 	{
-		// ".hidden" (dotfile, no real extension before the dot) — the dot is at index 0, so dot > 0 is
-		// false → use whole name as stem → ".hidden-graft.jpg". This is consistent (preserves the leading
-		// dot rather than treating it as a missing-stem extension).
+		// ".hidden" (dotfile, no real extension before the dot) — the dot is at index 0, so dot > 0 is false →
+		// use whole name as stem → ".hidden-graft.jpg". This is consistent (preserves the leading dot rather
+		// than treating it as a missing-stem extension).
 		assertEquals(".hidden-graft.jpg", GraftController.suggestedFilename(".hidden"));
 	}
 
 	@Test
 	public void suggestedFilenameHandlesNoExtension()
 	{
-		// "img" (no dot) → "img-graft.jpg". The fallback adds the .jpg extension explicitly so the saved
-		// file has a recognisable MIME hint even when the source did not.
+		// "img" (no dot) → "img-graft.jpg". The fallback adds the .jpg extension explicitly so the saved file
+		// has a recognisable MIME hint even when the source did not.
 		assertEquals("img-graft.jpg", GraftController.suggestedFilename("img"));
 	}
 }

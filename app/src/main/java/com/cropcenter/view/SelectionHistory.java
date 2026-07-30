@@ -39,8 +39,8 @@ final class SelectionHistory
 	}
 
 	/**
-	 * Push the current state as a new undo frame and clear the redo stack. Trims the oldest frame when
-	 * the stack exceeds MAX_DEPTH.
+	 * Push the current state as a new undo frame and clear the redo stack. Trims the oldest frame when the stack
+	 * exceeds MAX_DEPTH.
 	 *
 	 * @param current selection-point list to snapshot onto the undo stack
 	 */
@@ -50,15 +50,15 @@ final class SelectionHistory
 		redoStack.clear();
 		if (undoStack.size() > MAX_DEPTH)
 		{
-			undoStack.remove(0);
+			undoStack.removeFirst();
 		}
 	}
 
 	/**
-	 * Pop a redo frame and return its snapshot. Pushes the current state onto undoStack. No trim needed
-	 * on the undo-side push: redo() only fires when redoStack is non-empty, which means the most recent
-	 * op was an undo() that decreased undoStack — so undoStack is at most MAX_DEPTH−1 going in and at
-	 * most MAX_DEPTH after the push, never tripping a trim.
+	 * Pop a redo frame and return its snapshot. Pushes the current state onto undoStack. No trim needed on the
+	 * undo-side push: redo() only fires when redoStack is non-empty, which means the most recent op was an undo()
+	 * that decreased undoStack — so undoStack is at most MAX_DEPTH−1 going in and at most MAX_DEPTH after the push,
+	 * never tripping a trim.
 	 *
 	 * @param current selection-point list to snapshot onto the undo stack before popping redo
 	 * @return the popped redo snapshot, or null when the redo stack is empty
@@ -70,14 +70,13 @@ final class SelectionHistory
 			return null;
 		}
 		undoStack.add(snapshot(current));
-		return redoStack.remove(redoStack.size() - 1);
+		return redoStack.removeLast();
 	}
 
 	/**
-	 * Pop an undo frame and return its snapshot. Pushes the current state onto redoStack. No trim needed
-	 * on the redo-side push: push() clears redoStack and caps undoStack at MAX_DEPTH, so the maximum
-	 * consecutive undos before undoStack drains is MAX_DEPTH — redoStack tops out at MAX_DEPTH and never
-	 * exceeds it.
+	 * Pop an undo frame and return its snapshot. Pushes the current state onto redoStack. No trim needed on the
+	 * redo-side push: push() clears redoStack and caps undoStack at MAX_DEPTH, so the maximum consecutive undos
+	 * before undoStack drains is MAX_DEPTH — redoStack tops out at MAX_DEPTH and never exceeds it.
 	 *
 	 * @param current selection-point list to snapshot onto the redo stack before popping undo
 	 * @return the popped undo snapshot, or null when the undo stack is empty
@@ -89,7 +88,7 @@ final class SelectionHistory
 			return null;
 		}
 		redoStack.add(snapshot(current));
-		return undoStack.remove(undoStack.size() - 1);
+		return undoStack.removeLast();
 	}
 
 	private static List<SelectionPoint> snapshot(List<SelectionPoint> src)

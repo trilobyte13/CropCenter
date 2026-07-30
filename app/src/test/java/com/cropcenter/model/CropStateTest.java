@@ -6,18 +6,22 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
-import org.junit.Test;
-
 import com.cropcenter.util.AiRegionDetector.AiMask;
 import com.cropcenter.util.BitmapUtils;
+import com.cropcenter.util.RotatedCropClamp;
+
+import org.junit.Test;
 
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.concurrent.CountDownLatch;
 
 /**
- * Tests for the CropState behaviour that doesn't touch a Bitmap. The big-leverage one is setRotationDegrees: NaN /
+ * Tests for the CropState behaviour that doesn't touch a Bitmap. The big-leverage ones: setRotationDegrees (NaN /
  * infinity sanitization, ±180° clamp, and the sub-epsilon snap-to-zero that's the chokepoint for every rotation entry
- * point in the app. A bug in any of these would let a malformed input poison the rotation pipeline.
+ * point in the app) and the load-epoch guard, which the tests drive deterministically through the package-private
+ * preCommitHook seam — reset() runs inside a mutator's capture-to-commit window, exactly where a bg image load races an
+ * in-flight UI gesture.
  */
 public final class CropStateTest
 {
@@ -67,7 +71,7 @@ public final class CropStateTest
 		// flag and EVERY rotation entry point is expected to flow through this setter so the flag is set
 		// uniformly. A regression that bypassed it would leave a stale crop visible after a rotation.
 		CropState state = new CropState();
-		state.setCropSizeDirty(false);
+		state.clearCropSizeDirty();
 		assertFalse(state.isCropSizeDirty());
 		state.setRotationDegrees(15f);
 		assertTrue(state.isCropSizeDirty());
@@ -183,10 +187,10 @@ public final class CropStateTest
 	@Test
 	public void clearSelectionPointsOnEmptyListIsNoOp()
 	{
-		// Documented short-circuit: an already-empty list skips the clear() + notifyChanged() to avoid
-		// spurious listener fires. Pin so a regression that drops the empty-check would surface here as a
-		// 1-fire vs 0-fire mismatch — and the editor would gain noisy redraws every time a no-op clear runs
-		// (e.g., loading two images in a row).
+		// Documented short-circuit: an already-empty list skips the clear() + notifyChanged() to avoid spurious
+		// listener fires. Pin so a regression that drops the empty-check would surface here as a 1-fire vs
+		// 0-fire mismatch — and the editor would gain noisy redraws every time a no-op clear runs (e.g.,
+		// loading two images in a row).
 		CropState state = new CropState();
 		int[] fireCount = { 0 };
 		state.setListener(() -> fireCount[0]++);
@@ -200,9 +204,9 @@ public final class CropStateTest
 	@Test
 	public void getCropImageXFloatReturnsZeroBeforeCenterIsPlaced()
 	{
-		// Documented contract: with no center placed, the float-precision crop origin reads as 0 — not
-		// centerX - cropW/2 evaluated on the uninitialized fields. Without this guard the renderer would
-		// read NaN/inf during the load gap between sourceImage = bmp and the first applyStateToUi tick.
+		// Documented contract: with no center placed, the float-precision crop origin reads as 0 — not centerX
+		// - cropW/2 evaluated on the uninitialized fields. Without this guard the renderer would read NaN/inf
+		// during the load gap between sourceImage = bmp and the first applyStateToUi tick.
 		CropState state = new CropState();
 		assertFalse(state.hasCenter());
 		assertEquals(0f, state.getCropImageXFloat(), 0f);
@@ -212,17 +216,52 @@ public final class CropStateTest
 	@Test
 	public void getCropImageXFloatReturnsCenterMinusHalfWidth()
 	{
-		// Sub-pixel precision is the whole point of getCropImageXFloat — a smoothly rotating selection
-		// midpoint produces smooth crop motion on screen instead of integer-snapped jitter. Pin the formula
-		// so a refactor to integer arithmetic surfaces here.
+		// Sub-pixel precision is the whole point of getCropImageXFloat — a smoothly rotating selection midpoint
+		// produces smooth crop motion on screen instead of integer-snapped jitter. Pin the formula so a
+		// refactor to integer arithmetic surfaces here.
 		CropState state = new CropState();
 		state.setCropSizeSilent(101, 73);
 		state.setCenterUnclamped(150.25f, 200.75f);
 		assertTrue(state.hasCenter());
-		assertEquals("centerX - cropW / 2f = 150.25 - 50.5 = 99.75",
-			99.75f, state.getCropImageXFloat(), 0f);
-		assertEquals("centerY - cropH / 2f = 200.75 - 36.5 = 164.25",
-			164.25f, state.getCropImageYFloat(), 0f);
+		assertEquals("centerX - cropW / 2f = 150.25 - 50.5 = 99.75", 99.75f, state.getCropImageXFloat(), 0f);
+		assertEquals("centerY - cropH / 2f = 200.75 - 36.5 = 164.25", 164.25f, state.getCropImageYFloat(), 0f);
+	}
+
+	// ── removeSelectionPoint ──
+
+	@Test
+	public void removeSelectionPointAbsentReturnsFalseWithoutFire()
+	{
+		// Absent point: false, list untouched, zero listener fires. A notify-on-absent regression would run a
+		// full recompute pass for a no-op; a boolean inversion would make onTap / onLongPress treat a failed
+		// removal as a successful destructive edit.
+		CropState state = new CropState();
+		state.addSelectionPoint(new SelectionPoint(10f, 20f));
+		int[] fireCount = { 0 };
+		state.setListener(() -> fireCount[0]++);
+		assertFalse("no equal point exists — must report false",
+			state.removeSelectionPoint(new SelectionPoint(99f, 99f)));
+		assertEquals("list must be unchanged", 1, state.getSelectionPoints().size());
+		assertEquals("listener must not fire for a no-op removal", 0, fireCount[0]);
+	}
+
+	@Test
+	public void removeSelectionPointPresentRemovesAndFiresOnce()
+	{
+		// Happy path of the only selection mutator without one: a present point reports true, the list shrinks
+		// by exactly that point, and the listener fires exactly once — the fire drives the crop recompute that
+		// follows every removal, so remove-without-notify desynchronizes the crop from the selection.
+		CropState state = new CropState();
+		SelectionPoint kept = new SelectionPoint(10f, 20f);
+		SelectionPoint target = new SelectionPoint(30f, 40f);
+		state.addSelectionPoint(kept);
+		state.addSelectionPoint(target);
+		int[] fireCount = { 0 };
+		state.setListener(() -> fireCount[0]++);
+		assertTrue("present point must report removed", state.removeSelectionPoint(target));
+		assertEquals("exactly one point removed", 1, state.getSelectionPoints().size());
+		assertEquals("the surviving point is the one NOT removed", kept, state.getSelectionPoints().get(0));
+		assertEquals("listener fires exactly once", 1, fireCount[0]);
 	}
 
 	// ── replaceSelectionPoints ──
@@ -292,19 +331,12 @@ public final class CropStateTest
 	{
 		// Source-image-related state: source bytes, filename, format, gain map, SEFT trailer, jpegMeta,
 		// pngExifTiff. Seeding via installLoadedImage matches the single production entry-point
-		// ImageLoadController.applyBytes uses to publish the load-commit; the per-field setters that
-		// previously seeded these were deleted in favour of this single atomic write. pngExifTiff is
-		// included with a non-null seed so reset()'s pngExifTiff = null line is observably tested —
-		// the earlier version of this test passed null on that argument, leaving the clear unverifiable.
+		// ImageLoadController.applyBytes uses to publish the load-commit (there are no per-field setters for
+		// these). pngExifTiff is seeded non-null so reset()'s pngExifTiff = null line is observably tested — a
+		// null seed would leave the clear unverifiable.
 		CropState state = new CropState();
-		state.installLoadedImage(
-			new byte[] { 0x10 },
-			"foo.jpg",
-			Format.PNG,
-			Collections.emptyList(),
-			new byte[] { 0x40 },
-			new byte[] { 0x20 },
-			new byte[] { 0x30 });
+		state.installLoadedImage(new byte[] { 0x10 }, "foo.jpg", Format.PNG,
+			Collections.emptyList(), new byte[] { 0x40 }, new byte[] { 0x20 }, new byte[] { 0x30 });
 		state.reset();
 		assertNull(state.getOriginalFileBytes());
 		assertNull(state.getOriginalFilename());
@@ -320,22 +352,42 @@ public final class CropStateTest
 	@Test
 	public void setCenterWithNullSourceImageSkipsClampAndDoesNotNpe()
 	{
-		// CropState.setCenter snapshots the volatile sourceImage at method entry. The snapshot exists
-		// because a bg-thread reset() can null the field between this read and the getWidth()/Height()
-		// reads inside the clamp branch — without the snapshot the UI thread NPEs on
-		// snapshot.getWidth(). Pin the contract: setCenter with sourceImage == null must (a) NOT
-		// throw, (b) NOT apply the clamp (the (x, y) pass through), (c) still set hasCenter and fire
-		// the listener.
+		// Passthrough contract with no image loaded: setCenter must (a) not throw, (b) skip the clamp so the
+		// (x, y) pass through verbatim, (c) still set hasCenter, and (d) fire the listener exactly once. The
+		// clamp branch itself is unreachable here — the JVM test source set can't construct a Bitmap — so the
+		// clamp dispatch is pinned separately via the pure clampCenterToImage helper (its own section below);
+		// the NPE-avoidance snapshot inside setCenter is documented at the call site and covered by the
+		// load-epoch abandon tests.
 		CropState state = new CropState();
-		// sourceImage stays null (default).
-		// cropW/cropH stay 0 (default), so the clamp branch would be skipped even with a non-null
-		// snapshot — but the test still exercises the snapshot path. Pre-fix the NPE was inside the
-		// snapshot != null && cropW > 0 && cropH > 0 branch's sourceImage.getWidth() call; the
-		// snapshot prevents it.
+		int[] fireCount = { 0 };
+		state.setListener(() -> fireCount[0]++);
 		state.setCenter(500f, 700f);
 		assertEquals("centerX accepted without clamp (no source)", 500f, state.getCenterX(), 0f);
 		assertEquals("centerY accepted without clamp (no source)", 700f, state.getCenterY(), 0f);
 		assertTrue("hasCenter flips true regardless of source presence", state.hasCenter());
+		assertEquals("committed setCenter fires the listener once", 1, fireCount[0]);
+	}
+
+	// ── setAspectRatio / mode setters (cropSizeDirty truth table) ──
+
+	@Test
+	public void setAspectRatioMarksCropSizeDirtyButModeSettersDoNot()
+	{
+		// Both sides of the dirty-flag truth table. setAspectRatio MUST mark the crop size dirty — without the
+		// mark, aspect-ratio picks stop resizing the crop (the size-locked recompute branch keeps stale dims)
+		// until the next rotation re-arms the flag. setCenterMode / setEditorMode deliberately do NOT dirty:
+		// the lock-button handler calls recomputeForLockChange explicitly, and a dirty-mark in the setter would
+		// race that handler's recompute with a listener-driven one using the wrong center (documented at both
+		// setters). Pin the two directions together so neither half can silently flip.
+		CropState state = new CropState();
+		state.clearCropSizeDirty();
+		state.setAspectRatio(AspectRatio.R16_9);
+		assertTrue("setAspectRatio must mark crop size dirty", state.isCropSizeDirty());
+		state.clearCropSizeDirty();
+		state.setCenterMode(CenterMode.HORIZONTAL);
+		assertFalse("setCenterMode must not mark crop size dirty", state.isCropSizeDirty());
+		state.setEditorMode(EditorMode.MOVE);
+		assertFalse("setEditorMode must not mark crop size dirty", state.isCropSizeDirty());
 	}
 
 	// ── installLoadedImage() ──
@@ -344,11 +396,9 @@ public final class CropStateTest
 	public void installLoadedImageJpegAfterPngOverridesPriorExportSeed()
 	{
 		// Subsequent JPEG load after PNG must update the export seed. Split from
-		// installLoadedImagePngSeedsExportConfig so a regression in JPEG-override behaviour fails this
-		// test specifically rather than being masked by the prior PNG-seed assertion. The
-		// setSourceFormat seed-logic that pinned this contract was inlined into installLoadedImage when
-		// the per-field setter was deleted; the assertion is identical, the path through the model is
-		// the only thing that changed.
+		// installLoadedImagePngSeedsExportConfig so a regression in JPEG-override behaviour fails this test
+		// specifically rather than being masked by the prior PNG-seed assertion. The seed logic lives inline in
+		// installLoadedImage — the model's only load-commit path.
 		CropState state = new CropState();
 		state.installLoadedImage(null, null, Format.PNG, null, null, null, null);
 		state.installLoadedImage(null, null, Format.JPEG, null, null, null, null);
@@ -358,17 +408,15 @@ public final class CropStateTest
 	@Test
 	public void installLoadedImageNullFormatPreservesPriorExportSeed()
 	{
-		// Null source format is a no-op for exportConfig — happens when ImageLoadController's format
-		// detection bails on a loaded blob that's neither JPEG nor PNG. The export seed must NOT
-		// regress just because the next load couldn't classify itself; the user's prior session's
-		// exportConfig stays in place. Split from installLoadedImagePngSeedsExportConfig so this
-		// no-op contract has its own failure isolation.
-		//
-		// Note: the second installLoadedImage call DOES wipe originalFileBytes / originalFilename /
-		// jpegMeta / pngExifTiff / gainMap / seftTrailer back to (null, null, [], null, null, null) —
-		// those writes are intentional in the contract (every load commits its own bundle). This test
-		// only asserts the exportConfig invariant. resetClearsSourceAndMetadataFields above pins the
-		// field-clearing behaviour separately.
+		// Null source format is a no-op for exportConfig — happens when ImageLoadController's format detection
+		// bails on a loaded blob that's neither JPEG nor PNG. The export seed must NOT regress just because the
+		// next load couldn't classify itself; the user's prior session's exportConfig stays in place. Split
+		// from installLoadedImagePngSeedsExportConfig so this no-op contract has its own failure isolation.
+		// Note: the second installLoadedImage call DOES wipe originalFileBytes / originalFilename / jpegMeta /
+		// pngExifTiff / gainMap / seftTrailer back to (null, null, [], null, null, null) — those writes are
+		// intentional in the contract (every load commits its own bundle). This test only asserts the
+		// exportConfig invariant. resetClearsSourceAndMetadataFields above pins the field-clearing behaviour
+		// separately.
 		CropState state = new CropState();
 		state.installLoadedImage(null, null, Format.PNG, null, null, null, null);
 		state.installLoadedImage(null, null, null, null, null, null, null);
@@ -377,14 +425,26 @@ public final class CropStateTest
 	}
 
 	@Test
+	public void installLoadedImageNullJpegMetaCoercesToEmptyList()
+	{
+		// The documented "null tolerated" contract for jpegMeta: a null must be coerced to an empty list
+		// (List.of), preserving the field's never-null immutable-list contract that every downstream
+		// jpegMeta read relies on. Production's sole caller never passes null today; this pins the contract
+		// the parameter Javadoc promises to future callers.
+		CropState state = new CropState();
+		state.installLoadedImage(null, null, null, null, null, null, null);
+		assertNotNull("getJpegMeta must never return null", state.getJpegMeta());
+		assertTrue("null jpegMeta must coerce to an empty list", state.getJpegMeta().isEmpty());
+	}
+
+	@Test
 	public void installLoadedImagePngSeedsExportConfig()
 	{
-		// `installLoadedImage(..., PNG, ...)` must seed `exportConfig.format()` to PNG so the
-		// SaveDialog's format toggle defaults to "save as PNG" for PNG sources without an intervening
-		// `updateExportConfig` call. A regression that drops the seed (only stores `sourceFormat` and
-		// forgets the `withFormat`) would silently change the user's save format from PNG to JPEG —
-		// alpha loss + format conversion on save. The seed logic was previously inside setSourceFormat;
-		// it was inlined into installLoadedImage when the per-field setter was deleted.
+		// `installLoadedImage(..., PNG, ...)` must seed `exportConfig.format()` to PNG so the SaveDialog's
+		// format toggle defaults to "save as PNG" for PNG sources without an intervening `updateExportConfig`
+		// call. A regression that drops the seed (only stores `sourceFormat` and forgets the `withFormat`)
+		// would silently change the user's save format from PNG to JPEG — alpha loss + format conversion on
+		// save. The seed logic lives inline in installLoadedImage.
 		CropState state = new CropState();
 		assertEquals("default exportConfig is JPEG", Format.JPEG, state.getExportConfig().format());
 		state.installLoadedImage(null, null, Format.PNG, null, null, null, null);
@@ -393,6 +453,32 @@ public final class CropStateTest
 	}
 
 	// ── reset() (additional invariants) ──
+
+	@Test
+	public void resetClearsCropGeometryRotationAnchorAndSelection()
+	{
+		// The crop-session fields a new image must never inherit: center (hasCenter + coords), crop dims,
+		// rotation, anchor, selection points, plus the cropSizeDirty re-arm. Deleting any single clear from
+		// reset() — most critically `hasCenter = false`, which gates MainActivity.ensureCropCenter's midpoint
+		// seed for the new image — must fail here.
+		CropState state = new CropState();
+		state.setCenter(500f, 700f);
+		state.setAnchor(11f, 22f);
+		state.setCropSizeSilent(101, 73);
+		state.setRotationDegrees(15f);
+		state.addSelectionPoint(new SelectionPoint(10f, 20f));
+		state.reset();
+		assertFalse("hasCenter must clear so ensureCropCenter re-seeds the midpoint", state.hasCenter());
+		assertEquals(0f, state.getCenterX(), 0f);
+		assertEquals(0f, state.getCenterY(), 0f);
+		assertEquals(0, state.getCropW());
+		assertEquals(0, state.getCropH());
+		assertEquals(0f, state.getRotationDegrees(), 0f);
+		assertEquals(0f, state.getAnchorX(), 0f);
+		assertEquals(0f, state.getAnchorY(), 0f);
+		assertTrue("selection points must clear", state.getSelectionPoints().isEmpty());
+		assertTrue("crop size must be marked dirty for the next image", state.isCropSizeDirty());
+	}
 
 	@Test
 	public void resetReturnsExportConfigToDefaults()
@@ -494,5 +580,241 @@ public final class CropStateTest
 		state.setRotationDegrees(15f);
 		state.setAspectRatio(AspectRatio.R16_9);
 		assertEquals("each setter outside a batch fires the listener", 2, fireCount[0]);
+	}
+
+	// ── reset() vs in-flight mutators (load-epoch guard) ──
+
+	@Test
+	public void setCenterAbandonsCommitWhenResetInterleaves()
+	{
+		// Deterministic interleaving via the preCommitHook seam: reset() runs after setCenter captures the load
+		// epoch but before its commit — the shape of a bg image load racing an in-flight gesture callback. The
+		// commit must be abandoned wholesale: no center writes, hasCenter stays false, and the listener does
+		// not fire (a fire would run a recompute pass against the half-initialized new-image state).
+		CropState state = new CropState();
+		int[] fireCount = { 0 };
+		state.setListener(() -> fireCount[0]++);
+		state.preCommitHook = state::reset;
+		state.setCenter(500f, 700f);
+		assertFalse("stale commit must not set hasCenter on the reset state", state.hasCenter());
+		assertEquals(0f, state.getCenterX(), 0f);
+		assertEquals(0f, state.getCenterY(), 0f);
+		assertEquals("abandoned commit must not fire the listener", 0, fireCount[0]);
+	}
+
+	@Test
+	public void setCenterEnteredAfterResetCommitsAgainstTheNewEpoch()
+	{
+		// Counter-test: the guard rejects only commits whose epoch capture predates reset(). A setCenter
+		// entered after reset() completes captures the new epoch and commits normally.
+		CropState state = new CropState();
+		state.preCommitHook = state::reset;
+		state.setCenter(500f, 700f);
+		state.preCommitHook = null;
+		state.setCenter(42f, 43f);
+		assertTrue(state.hasCenter());
+		assertEquals(42f, state.getCenterX(), 0f);
+		assertEquals(43f, state.getCenterY(), 0f);
+	}
+
+	@Test
+	public void setCenterUnclampedAbandonsCommitWhenResetInterleaves()
+	{
+		// Same guard as setCenter — recomputeCrop's silent pre-pass write must not re-assert the previous
+		// image's center over a fresh reset either.
+		CropState state = new CropState();
+		state.preCommitHook = state::reset;
+		state.setCenterUnclamped(500f, 700f);
+		assertFalse(state.hasCenter());
+		assertEquals(0f, state.getCenterX(), 0f);
+		assertEquals(0f, state.getCenterY(), 0f);
+	}
+
+	@Test
+	public void addSelectionPointAbandonsCommitWhenResetInterleaves()
+	{
+		// The copy-swap shape of the stale commit: the mutator copies the OLD image's list, reset() swaps in a
+		// fresh empty list, and the stale copy (old points + new point) would clobber it. The guard must leave
+		// reset()'s empty list in place and skip the listener fire.
+		CropState state = new CropState();
+		state.addSelectionPoint(new SelectionPoint(10f, 20f));
+		int[] fireCount = { 0 };
+		state.setListener(() -> fireCount[0]++);
+		state.preCommitHook = state::reset;
+		state.addSelectionPoint(new SelectionPoint(30f, 40f));
+		assertTrue("reset()'s fresh empty list must survive the stale swap",
+			state.getSelectionPoints().isEmpty());
+		assertEquals("abandoned commit must not fire the listener", 0, fireCount[0]);
+	}
+
+	@Test
+	public void removeSelectionPointAbandonsCommitAndReturnsFalseWhenResetInterleaves()
+	{
+		// The boolean contract folds the abandon into "nothing was removed": the point WAS in the pre-reset
+		// copy, but the commit never landed, so callers must see false and no listener fire.
+		CropState state = new CropState();
+		SelectionPoint point = new SelectionPoint(10f, 20f);
+		state.addSelectionPoint(point);
+		int[] fireCount = { 0 };
+		state.setListener(() -> fireCount[0]++);
+		state.preCommitHook = state::reset;
+		assertFalse("superseded removal must report false", state.removeSelectionPoint(point));
+		assertEquals("abandoned commit must not fire the listener", 0, fireCount[0]);
+	}
+
+	@Test
+	public void clearSelectionPointsAbandonsCommitWhenResetInterleaves()
+	{
+		// reset() already emptied the list; the superseded clear must not fire the listener on top of it — a
+		// spurious fire would run a recompute pass against the half-initialized new-image state.
+		CropState state = new CropState();
+		state.addSelectionPoint(new SelectionPoint(10f, 20f));
+		int[] fireCount = { 0 };
+		state.setListener(() -> fireCount[0]++);
+		state.preCommitHook = state::reset;
+		state.clearSelectionPoints();
+		assertTrue(state.getSelectionPoints().isEmpty());
+		assertEquals("abandoned commit must not fire the listener", 0, fireCount[0]);
+	}
+
+	@Test
+	public void replaceSelectionPointsAbandonsCommitWhenResetInterleaves()
+	{
+		// An undo/redo restore snapshotted from the previous image must not repopulate the reset state.
+		CropState state = new CropState();
+		int[] fireCount = { 0 };
+		state.setListener(() -> fireCount[0]++);
+		state.preCommitHook = state::reset;
+		state.replaceSelectionPoints(Arrays.asList(new SelectionPoint(50f, 60f)));
+		assertTrue("stale restore must not land on the reset state", state.getSelectionPoints().isEmpty());
+		assertEquals("abandoned commit must not fire the listener", 0, fireCount[0]);
+	}
+
+	@Test
+	public void setRotationDegreesAbandonsCommitWhenResetInterleaves()
+	{
+		// A ruler fling callback carrying the previous image's angle must not rotate the freshly reset state.
+		// The commit must be abandoned wholesale: rotation stays at reset()'s 0 and the listener does not fire
+		// (a fire would run a recompute pass against the half-initialized new-image state).
+		CropState state = new CropState();
+		int[] fireCount = { 0 };
+		state.setListener(() -> fireCount[0]++);
+		state.preCommitHook = state::reset;
+		state.setRotationDegrees(15f);
+		assertEquals("stale rotation must not land on the reset state", 0f, state.getRotationDegrees(), 0f);
+		assertEquals("abandoned commit must not fire the listener", 0, fireCount[0]);
+	}
+
+	@Test
+	public void setAnchorAbandonsCommitWhenResetInterleaves()
+	{
+		// setAnchor never fires the listener, so the abandon is observable only through the anchor fields:
+		// reset()'s zeroed anchor must survive the stale write.
+		CropState state = new CropState();
+		state.preCommitHook = state::reset;
+		state.setAnchor(11f, 22f);
+		assertEquals("stale anchor X must not land on the reset state", 0f, state.getAnchorX(), 0f);
+		assertEquals("stale anchor Y must not land on the reset state", 0f, state.getAnchorY(), 0f);
+	}
+
+	@Test
+	public void setCropSizeSilentAbandonsCommitWhenResetInterleaves()
+	{
+		// A recompute or restore pass sized against the previous image must not install its dims onto the reset
+		// state. Like setAnchor, the setter is silent — the abandon is observable only through the crop dims
+		// staying at reset()'s 0.
+		CropState state = new CropState();
+		state.preCommitHook = state::reset;
+		state.setCropSizeSilent(101, 73);
+		assertEquals("stale crop width must not land on the reset state", 0, state.getCropW());
+		assertEquals("stale crop height must not land on the reset state", 0, state.getCropH());
+	}
+
+	@Test
+	public void concurrentResetVsSetCenterNeverCommitsTornState() throws Exception
+	{
+		// Probabilistic companion to the deterministic hook tests above: reset() (bg load executor
+		// role) races setCenter (UI gesture role) with no seam. The commit section and reset()
+		// synchronize on one lock, so every trial must end in exactly one of the two clean outcomes:
+		// setCenter won (or entered after reset) and the full (centerX, centerY, hasCenter) triple is
+		// live, or reset superseded it and the triple is fully cleared. Torn states — hasCenter true
+		// with zeroed coordinates — must never appear.
+		int trials = 1000;
+		int tornTrials = 0;
+		for (int trial = 0; trial < trials; trial++)
+		{
+			CropState state = new CropState();
+			CountDownLatch ready = new CountDownLatch(2);
+			CountDownLatch go = new CountDownLatch(1);
+			Thread bg = new Thread(() -> raceStep(ready, go, state::reset));
+			Thread ui = new Thread(() -> raceStep(ready, go, () -> state.setCenter(500f, 700f)));
+			bg.start();
+			ui.start();
+			ready.await();
+			go.countDown();
+			bg.join();
+			ui.join();
+			boolean committed = state.hasCenter()
+				&& state.getCenterX() == 500f && state.getCenterY() == 700f;
+			boolean cleared = !state.hasCenter() && state.getCenterX() == 0f && state.getCenterY() == 0f;
+			if (!committed && !cleared)
+			{
+				tornTrials++;
+			}
+		}
+		assertEquals("reset vs setCenter must never commit a torn/partial state", 0, tornTrials);
+	}
+
+	// ── clampCenterToImage ──
+
+	@Test
+	public void clampCenterToImageAxisAlignedClampsToValidCenterRange()
+	{
+		// Zero rotation dispatches to RotatedCropClamp.clampAxisAligned: a 100×100 crop in a 200×300 image
+		// confines the center to [50, 150] × [50, 250], so an out-of-range request pins to the range maximum on
+		// both axes.
+		float[] clamped = CropState.clampCenterToImage(500f, 700f, 100, 100, 0f, 200, 300);
+		assertEquals(150f, clamped[0], 0f);
+		assertEquals(250f, clamped[1], 0f);
+	}
+
+	@Test
+	public void clampCenterToImageRotatedDispatchesToClampRotated()
+	{
+		// 45° must dispatch to clampRotated, whose result on this fixture differs observably from
+		// clampAxisAligned's (the rotated 200×200 image's AABB lets the center run past the axis-aligned 150
+		// cap). Pin dispatch by identity with the canonical helper — its exact math is RotatedCropClampTest's
+		// job — plus the observable divergence from the axis-aligned path.
+		float[] clamped = CropState.clampCenterToImage(200f, 200f, 100, 100, 45f, 200, 200);
+		float[] rotated = RotatedCropClamp.clampRotated(200f, 200f, 100, 100, 45f, 200, 200);
+		float[] axisAligned = RotatedCropClamp.clampAxisAligned(200f, 200f, 100, 100, 200, 200);
+		assertEquals("dispatch must route through clampRotated", rotated[0], clamped[0], 0f);
+		assertEquals("dispatch must route through clampRotated", rotated[1], clamped[1], 0f);
+		assertTrue("fixture must distinguish the two paths, or the dispatch pin is vacuous",
+			clamped[0] != axisAligned[0]);
+	}
+
+	/**
+	 * Race-trial thread body: signal readiness, wait for the shared go latch, run the step.
+	 *
+	 * @param ready counted down once this thread is staged at the start line
+	 * @param go    released by the test body to start both racers as close together as scheduling allows
+	 * @param step  the racing operation (reset or setCenter)
+	 */
+	private static void raceStep(CountDownLatch ready, CountDownLatch go, Runnable step)
+	{
+		ready.countDown();
+		try
+		{
+			go.await();
+		}
+		catch (InterruptedException ignored)
+		{
+			// Unreachable in JUnit flow — checked-exception escape only. A force-kill aborts the trial
+			// without its step; the outcome assertion then flags the unusual run.
+			Thread.currentThread().interrupt();
+			return;
+		}
+		step.run();
 	}
 }

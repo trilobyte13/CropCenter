@@ -8,6 +8,7 @@ import com.cropcenter.metadata.JpegMarker;
 import com.cropcenter.util.BitmapUtils;
 
 import java.io.ByteArrayOutputStream;
+import java.util.Optional;
 
 /**
  * Pure-function image alignment for the graft pipeline. Decodes both inputs at the dimension level, compares display
@@ -18,10 +19,6 @@ import java.io.ByteArrayOutputStream;
  */
 public final class EditAligner
 {
-	private static final String TAG = "EditAligner";
-
-	private EditAligner() {}
-
 	/**
 	 * Outcome of an alignment attempt. Either alignedBytes is non-null (success — caller uses these bytes for the
 	 * splice) or errorMessage is non-null (failure — caller surfaces this exact string as a toast and aborts the
@@ -57,6 +54,10 @@ public final class EditAligner
 		}
 	}
 
+	private static final String TAG = "EditAligner";
+
+	private EditAligner() {}
+
 	/**
 	 * Align edit bytes to the original's stored layout so GraftWriter's splice produces a decoder-coherent JPEG.
 	 *
@@ -84,7 +85,7 @@ public final class EditAligner
 		{
 			return Result.error("Selected file is not a JPEG");
 		}
-		int[] originalStoredDims = decodeStoredDims(originalBytes);
+		int[] originalStoredDims = decodeStoredDims(originalBytes).orElse(null);
 		if (originalStoredDims == null)
 		{
 			// Source bytes are something we previously loaded successfully — if dim probe fails now, the
@@ -93,7 +94,7 @@ public final class EditAligner
 			// the just-picked file; saying "original" would be ambiguous (which one?).
 			return Result.error("Source image is corrupt — reload it");
 		}
-		int[] editStoredDims = decodeStoredDims(editBytes);
+		int[] editStoredDims = decodeStoredDims(editBytes).orElse(null);
 		if (editStoredDims == null)
 		{
 			// Edit has a valid SOI (passed the check above) but BitmapFactory rejected it. The edit JPEG is
@@ -114,23 +115,22 @@ public final class EditAligner
 		}
 
 		boolean perfectMatch = originalOrientation == editOrientation
-			&& originalStoredDims[0] == editStoredDims[0]
-			&& originalStoredDims[1] == editStoredDims[1];
+			&& originalStoredDims[0] == editStoredDims[0] && originalStoredDims[1] == editStoredDims[1];
 		if (perfectMatch)
 		{
 			return Result.ok(editBytes);
 		}
-		byte[] reoriented = reorientEdit(editBytes, editOrientation, originalOrientation);
+		byte[] reoriented = reorientEdit(editBytes, editOrientation, originalOrientation).orElse(null);
 		if (reoriented == null)
 		{
-			// reorientEdit returns null only when BitmapFactory.decodeByteArray rejects the bytes — same
-			// failure mode as the edit-decode-null branch above, so route the user to the same remediation.
+			// reorientEdit returns empty when the decode fails / throws OR when Bitmap.compress rejects the
+			// re-encode — all edit-side processing failures, so route the user to the same remediation as
+			// the edit-decode-failure branch above.
 			return Result.error("Couldn't decode the edit during reorientation — try exporting again");
 		}
 		Log.d(TAG, "Reoriented edit (originalOrientation=" + originalOrientation
 			+ " editOrientation=" + editOrientation
-			+ ") from " + editStoredDims[0] + "x" + editStoredDims[1]
-			+ " to original's stored layout ("
+			+ ") from " + editStoredDims[0] + "x" + editStoredDims[1] + " to original's stored layout ("
 			+ originalStoredDims[0] + "x" + originalStoredDims[1] + ")");
 		return Result.ok(reoriented);
 	}
@@ -149,8 +149,8 @@ public final class EditAligner
 	}
 
 	/**
-	 * Inverse of an EXIF orientation transform — applying orient then inverseOrientation gives identity.
-	 * Only the 90° rotations form an inverse pair (6 ↔ 8); others are involutions.
+	 * Inverse of an EXIF orientation transform — applying orient then inverseOrientation gives identity. Only the
+	 * 90° rotations form an inverse pair (6 ↔ 8); others are involutions.
 	 *
 	 * @param orient EXIF orientation tag (1..8)
 	 * @return the orientation tag whose composition with orient is identity
@@ -170,21 +170,21 @@ public final class EditAligner
 
 	/**
 	 * Decode-cheap dimension probe: returns the JPEG's stored width and height without allocating pixel data.
-	 * Returns null when BitmapFactory rejects the byte array.
+	 * Returns empty when BitmapFactory rejects the byte array.
 	 *
 	 * @param bytes raw JPEG bytes
-	 * @return [width, height] in stored coordinates, or null on decode failure
+	 * @return [width, height] in stored coordinates, or empty on decode failure
 	 */
-	private static int[] decodeStoredDims(byte[] bytes)
+	private static Optional<int[]> decodeStoredDims(byte[] bytes)
 	{
 		BitmapFactory.Options opts = new BitmapFactory.Options();
 		opts.inJustDecodeBounds = true;
 		BitmapFactory.decodeByteArray(bytes, 0, bytes.length, opts);
 		if (opts.outWidth <= 0 || opts.outHeight <= 0)
 		{
-			return null;
+			return Optional.empty();
 		}
-		return new int[] { opts.outWidth, opts.outHeight };
+		return Optional.of(new int[] { opts.outWidth, opts.outHeight });
 	}
 
 	/**
@@ -198,22 +198,22 @@ public final class EditAligner
 	 * @param editBytes  raw JPEG bytes of the externally-edited file
 	 * @param editOrientation edit's EXIF orientation tag
 	 * @param originalOrientation original's EXIF orientation tag (the target stored orientation)
-	 * @return re-encoded JPEG bytes, or null when the decode fails (corrupt edit)
+	 * @return re-encoded JPEG bytes, or empty on any of three failures: the decode fails (corrupt edit),
+	 *         the decode throws (Skia RuntimeException / OutOfMemoryError on a 200 MP-class pair), or
+	 *         Bitmap.compress returns false (Skia encoder rejection)
 	 */
-	private static byte[] reorientEdit(byte[] editBytes, int editOrientation, int originalOrientation)
+	private static Optional<byte[]> reorientEdit(byte[] editBytes, int editOrientation, int originalOrientation)
 	{
-		// Full-resolution decode — NOT subsampled. GraftWriter.graft splices the edit's primary scan into
-		// the original's full-resolution EXIF / MPF / gainmap / SEFT package — if reorientEdit
-		// downsampled the primary while the original's metadata still described the full-resolution
-		// gainmap, the assembled file would have SOF dimensions disagreeing with EXIF, and (for HDR
-		// sources) the MPF entries pointing at a gainmap whose pixel coordinates no longer match the
-		// spliced primary. The result is silent HDR misalignment with no failure toast.
-		//
-		// The trade-off: on a 200 MP source + edit pair, this decode CAN OOM. The OutOfMemoryError catch
-		// below converts it into a clean null return; align() then surfaces the same
-		// "Couldn't decode the edit during reorientation — try exporting again" toast that the
-		// decode-null path produces, which is the right user-facing message — graft is the one workflow
-		// where downsampling would corrupt the output rather than just trade quality.
+		// Full-resolution decode — NOT subsampled. GraftWriter.graft splices the edit's primary scan into the
+		// original's full-resolution EXIF / MPF / gainmap / SEFT package — if reorientEdit downsampled the
+		// primary while the original's metadata still described the full-resolution gainmap, the assembled file
+		// would have SOF dimensions disagreeing with EXIF, and (for HDR sources) the MPF entries pointing at a
+		// gainmap whose pixel coordinates no longer match the spliced primary. The result is silent HDR
+		// misalignment with no failure toast. The trade-off: on a 200 MP source + edit pair, this decode CAN
+		// OOM. The OutOfMemoryError catch below converts it into a clean null return; align() then surfaces the
+		// same "Couldn't decode the edit during reorientation — try exporting again" toast that the decode-null
+		// path produces, which is the right user-facing message — graft is the one workflow where downsampling
+		// would corrupt the output rather than just trade quality.
 		Bitmap raw;
 		try
 		{
@@ -222,23 +222,25 @@ public final class EditAligner
 		catch (RuntimeException | OutOfMemoryError e)
 		{
 			// Catch RuntimeException too: Skia throws IllegalArgumentException / RuntimeException from
-			// decodeByteArray on bad Huffman tables, truncated DQT, etc. Returning null routes through
-			// the decode-failure toast the same way as OOM and decode-null.
+			// decodeByteArray on bad Huffman tables, truncated DQT, etc. Returning empty routes through the
+			// decode-failure toast the same way as OOM and a null decode result.
 			Log.w(TAG, "reorientEdit failed on full-resolution decode of "
 				+ editBytes.length + "-byte edit; graft will surface "
 				+ "'Couldn't decode the edit during reorientation' toast", e);
-			return null;
+			return Optional.empty();
 		}
 		if (raw == null)
 		{
-			return null;
+			return Optional.empty();
 		}
-		// Bitmap.compress(JPEG, 100, ...) emits a baseline JPEG with NO APP markers — every edit-side EXIF /
-		// XMP / ICC segment that was present in editBytes is silently discarded. GraftWriter is designed to
-		// keep original's metadata wholesale (the graft's identity is the original photo, not the edit), so
-		// this is correct by design — but for users who made an edit that wrote new metadata (tone-curve →
-		// fresh ICC profile, descriptive XMP keywords from a Lightroom round-trip), the loss is invisible.
-		// Log so the loss is at least diagnosable in bug reports rather than silent.
+		// Bitmap.compress(JPEG, 100, ...) discards every edit-side APP segment present in editBytes (EXIF / XMP
+		// / ICC all silently dropped) and emits Skia's own JFIF APP0 plus a synthetic sRGB ICC APP2 describing
+		// Skia's container, not the edit's pixels (REQUIREMENTS §12's ICC row). Both directions are correct by
+		// design: GraftWriter keeps the ORIGINAL's metadata wholesale (the graft's identity is the original
+		// photo) and splices only the primary scan from this re-encode, so Skia's synthetic segments never
+		// reach the output. But for users who made an edit that wrote new metadata (tone-curve → fresh ICC
+		// profile, descriptive XMP keywords from a Lightroom round-trip), the loss is invisible. Log so the
+		// loss is at least diagnosable in bug reports rather than silent.
 		Log.d(TAG, "reorientEdit re-encoding edit JPEG to match original's stored layout"
 			+ " (editOrientation=" + editOrientation + ", originalOrientation=" + originalOrientation + ");"
 			+ " any edit-side EXIF / XMP / ICC segments are not preserved");
@@ -257,15 +259,15 @@ public final class EditAligner
 			// Same alias logic for inDisplay → inOrigStored.
 			inDisplay = null;
 			ByteArrayOutputStream bos = new ByteArrayOutputStream();
-			// Bitmap.compress returns false on Skia encoder rejection (extreme dims, corrupt native
-			// state). Surface the failure here so the caller's toast matches the decode-failure phrasing
-			// (without this, GraftWriter would bail with a generic "Edit is not a JPEG" downstream).
+			// Bitmap.compress returns false on Skia encoder rejection (extreme dims, corrupt native state).
+			// Surface the failure here so the caller's toast matches the decode-failure phrasing (without
+			// this, GraftWriter would bail with a generic "Edit is not a JPEG" downstream).
 			if (!inOrigStored.compress(Bitmap.CompressFormat.JPEG, 100, bos))
 			{
 				Log.w(TAG, "reorientEdit Bitmap.compress(JPEG, 100) returned false");
-				return null;
+				return Optional.empty();
 			}
-			return bos.toByteArray();
+			return Optional.of(bos.toByteArray());
 		}
 		finally
 		{

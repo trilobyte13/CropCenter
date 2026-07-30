@@ -6,21 +6,21 @@ import static org.junit.Assert.assertNotSame;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
-import org.junit.Test;
-
 import com.cropcenter.model.SelectionPoint;
+
+import org.junit.Test;
 
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
 /**
- * Tests for the SelectionHistory undo/redo stack used by CropEditorView. The class is package-private and pure-Java
- * (no Bitmap / View dependencies), so the tests live in the same package and instantiate it directly.
+ * Tests for the SelectionHistory undo/redo stack used by CropEditorView. The class is package-private and pure-Java (no
+ * Bitmap / View dependencies), so the tests live in the same package and instantiate it directly.
  *
  * The contract being pinned: push() snapshots the *caller's* current list (not a reference) so subsequent caller
- * mutations don't leak into the saved frame; undo()/redo() trade frames between the two stacks; clear() drops both;
- * the depth cap of 50 trims the oldest frame (FIFO) so the most-recent 50 are preserved.
+ * mutations don't leak into the saved frame; undo()/redo() trade frames between the two stacks; clear() drops both; the
+ * depth cap of 50 trims the oldest frame (FIFO) so the most-recent 50 are preserved.
  */
 public final class SelectionHistoryTest
 {
@@ -116,10 +116,10 @@ public final class SelectionHistoryTest
 	public void redoSnapshotsCallerCurrentBeforeReturningPriorFrame()
 	{
 		// Symmetric to pushSnapshotsCallerListSubsequentMutationsDoNotLeak: redo() pushes the caller's
-		// `current` onto the undo stack so a subsequent undo can return TO it. The push must take a
-		// SNAPSHOT, not a reference; otherwise caller mutations after redo() corrupt the saved frame.
-		// A regression that swaps `snapshot(current)` for direct list reuse would silently let
-		// caller mutations leak into the just-pushed undo frame.
+		// `current` onto the undo stack so a subsequent undo can return TO it. The push must take a SNAPSHOT,
+		// not a reference; otherwise caller mutations after redo() corrupt the saved frame. A regression that
+		// swaps `snapshot(current)` for direct list reuse would silently let caller mutations leak into the
+		// just-pushed undo frame.
 		SelectionHistory history = new SelectionHistory();
 		history.push(Arrays.asList(pt(1, 1)));        // frame A on undo stack
 		List<SelectionPoint> currentB = new ArrayList<>();
@@ -135,8 +135,7 @@ public final class SelectionHistoryTest
 		currentA.clear();
 		currentA.add(pt(99, 99));
 		List<SelectionPoint> undone = history.undo(redone);
-		assertEquals("undo'd frame must reflect pre-mutation currentA snapshot",
-			1, undone.size());
+		assertEquals("undo'd frame must reflect pre-mutation currentA snapshot", 1, undone.size());
 		assertEquals("undo'd frame x must be 1 (pre-mutation), not 99 (post-mutation)",
 			1f, undone.get(0).x(), 0f);
 	}
@@ -144,21 +143,17 @@ public final class SelectionHistoryTest
 	@Test
 	public void stackSizesNeverExceedMaxDepthAcrossArbitraryOperationMix()
 	{
-		// Invariant: undoStack and redoStack are both bounded by MAX_DEPTH = 50 under ANY operation
-		// sequence. Drive a worst-case interleaving — 60 pushes (caps undoStack at 50, clears redoStack)
-		// → 60 undos (drains undoStack, fills redoStack up to 50) → 60 redos (drains redoStack, refills
-		// undoStack up to 50) → 60 more pushes (re-caps undoStack). At every observable point, drain
-		// counts must equal MAX_DEPTH. A regression that removed push()'s cap would let undoStack reach
-		// 60+ here; this test catches that without depending on the (provably unreachable) trim branches
-		// that used to live in undo()/redo() — those were dead code because push()'s cap plus the
-		// alternating-stacks dance keeps each stack at ≤ MAX_DEPTH regardless of sequence.
+		// Invariant: undoStack and redoStack are both bounded by MAX_DEPTH = 50 under ANY operation sequence —
+		// push()'s cap plus the alternating-stacks dance keeps each stack at ≤ MAX_DEPTH without undo()/redo()
+		// needing trim logic of their own. Two drives: 60 pushes must cap undoStack at 50; then 60 fresh pushes
+		// followed by 60 undos must cap redoStack at 50. A regression that removed push()'s cap would let a
+		// stack reach 60+ here.
 		SelectionHistory history = new SelectionHistory();
 		for (int i = 0; i < 60; i++)
 		{
 			history.push(Arrays.asList(pt(i, i)));
 		}
-		assertEquals("undoStack capped at MAX_DEPTH after 60 pushes",
-			50, drainStackCount(history, true));
+		assertEquals("undoStack capped at MAX_DEPTH after 60 pushes", 50, drainStackCount(history, true));
 		// Refill via pushes, then drain into redoStack via undos.
 		for (int i = 0; i < 60; i++)
 		{
@@ -213,10 +208,10 @@ public final class SelectionHistoryTest
 	@Test
 	public void undoSnapshotsCallerCurrentBeforeReturningPriorFrame()
 	{
-		// Mirror of redoSnapshotsCallerCurrentBeforeReturningPriorFrame: undo() pushes the caller's
-		// `current` onto the redo stack as a snapshot before popping the undo frame. Caller mutations
-		// to `current` after undo() must not bleed into the saved redo frame. A regression that drops
-		// the snapshot call would let undo-then-mutate-current-then-redo return a corrupted frame.
+		// Mirror of redoSnapshotsCallerCurrentBeforeReturningPriorFrame: undo() pushes the caller's `current`
+		// onto the redo stack as a snapshot before popping the undo frame. Caller mutations to `current` after
+		// undo() must not bleed into the saved redo frame. A regression that drops the snapshot call would let
+		// undo-then-mutate-current-then-redo return a corrupted frame.
 		SelectionHistory history = new SelectionHistory();
 		history.push(Arrays.asList(pt(1, 1)));        // frame A on undo stack
 		List<SelectionPoint> currentB = new ArrayList<>();
@@ -229,15 +224,14 @@ public final class SelectionHistoryTest
 		currentB.clear();
 		currentB.add(pt(99, 99));
 		List<SelectionPoint> redone = history.redo(undone);
-		assertEquals("redo'd frame must reflect pre-mutation currentB snapshot",
-			1, redone.size());
+		assertEquals("redo'd frame must reflect pre-mutation currentB snapshot", 1, redone.size());
 		assertEquals("redo'd frame x must be 2 (pre-mutation), not 99 (post-mutation)",
 			2f, redone.get(0).x(), 0f);
 	}
 
 	/**
-	 * Drain either undoStack (when undo=true) or redoStack (when undo=false) and return the count of
-	 * successful pops. Capped at 200 to avoid runaway loops in regression scenarios where the trim breaks.
+	 * Drain either undoStack (when undo=true) or redoStack (when undo=false) and return the count of successful
+	 * pops. Capped at 200 to avoid runaway loops in regression scenarios where the trim breaks.
 	 *
 	 * @param history history under test
 	 * @param undo    true to drain undoStack via undo(), false to drain redoStack via redo()

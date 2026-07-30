@@ -2,10 +2,6 @@ package com.cropcenter.view;
 
 import android.app.AlertDialog;
 import android.content.Context;
-import android.content.res.ColorStateList;
-import android.graphics.Typeface;
-import android.graphics.drawable.GradientDrawable;
-import android.view.Gravity;
 import android.widget.CheckBox;
 import android.widget.LinearLayout;
 import android.widget.TextView;
@@ -13,13 +9,12 @@ import android.widget.TextView;
 import com.cropcenter.model.CropState;
 import com.cropcenter.model.Format;
 import com.cropcenter.util.DpToPx;
-import com.cropcenter.util.ThemeColors;
 
 /**
- * Legacy (pre-MES) save options dialog — the primary Save flow uses FolderPickerDialog when
- * MANAGE_EXTERNAL_STORAGE is granted; this dialog is the fallback when it isn't. Output format
- * (JPEG/PNG) and grid-bake toggle live here; the filename and target directory are chosen by the SAF
- * picker that follows. Matches the Settings dialog visual style (Catppuccin Mocha cards).
+ * Legacy (pre-MES) save options dialog — the primary Save flow uses FolderPickerDialog when MANAGE_EXTERNAL_STORAGE is
+ * granted; this dialog is the fallback when it isn't. Output format (JPEG/PNG) and grid-bake toggle live here; the
+ * filename and target directory are chosen by the SAF picker that follows. Matches the Settings dialog visual style
+ * (Catppuccin Mocha cards).
  */
 public final class SaveDialog
 {
@@ -34,22 +29,22 @@ public final class SaveDialog
 	}
 
 	/**
-	 * Build and show the save dialog (format JPEG/PNG, bake-grid toggle, export config); onSave fires on
-	 * confirm, onCancel on every cancel path.
+	 * Build and show the save dialog (format JPEG/PNG, bake-grid toggle, export config); onSave fires on confirm,
+	 * onCancel on every cancel path.
 	 *
-	 * State mutation: applySettings commits the user's choices to CropState BEFORE onSave fires (the following
-	 * SAF picker needs the format-aware extension already on state), so a SAF cancel after Continue would bake
-	 * the choices into the next save unless rolled back — SaveController owns that via a snapshot taken before
-	 * this call and restored on every abort path.
+	 * State mutation: applySettings commits the user's choices to CropState BEFORE onSave fires (the following SAF
+	 * picker needs the format-aware extension already on state), so a SAF cancel after Continue would bake the
+	 * choices into the next save unless rolled back — SaveController owns that via a snapshot taken before this
+	 * call and restored on every abort path.
 	 *
-	 * Returns the AlertDialog so the caller registers it with SaveHost.registerTransientDialog: a Share/View
-	 * intent or graft arriving mid-dialog must dismiss it before bg state.reset(), else applySettings's commits
-	 * for image A would land on image B.
+	 * Returns the AlertDialog so the caller registers it with SaveHost.registerTransientDialog: a Share/View intent
+	 * or graft arriving mid-dialog must dismiss it before bg state.reset(), else applySettings's commits for image
+	 * A would land on image B.
 	 *
-	 * onCancel fires on Cancel (routed through dialog.cancel() so OnCancelListener is the single source of
-	 * truth), back-press, outside-touch, and forced dismissTransientDialogs — SaveController uses it to clear
-	 * priorSnapshot so an abandoned dialog doesn't pin the source bitmap. It does NOT fire on Continue (onSave
-	 * committed, and the SAF abort paths own the rollback).
+	 * onCancel fires on Cancel (routed through dialog.cancel() so OnCancelListener is the single source of truth),
+	 * back-press, outside-touch, and forced dismissTransientDialogs — SaveController uses it to clear priorSnapshot
+	 * so an abandoned dialog doesn't pin the source bitmap. It does NOT fire on Continue (onSave committed, and the
+	 * SAF abort paths own the rollback).
 	 *
 	 * @param ctx      Activity context for inflation
 	 * @param state    CropState mutated with format / grid choices before onSave — caller snapshots + rolls back
@@ -71,8 +66,9 @@ public final class SaveDialog
 		final boolean[] isJpeg = { state.getExportConfig().format() == Format.JPEG };
 		root.addView(buildFormatCard(ctx, density, isJpeg), DialogCards.topMargin(dp4));
 
-		CheckBox chkBake = new CheckBox(ctx);
-		root.addView(buildOptionsCard(ctx, state, density, chkBake), DialogCards.topMargin(dp8));
+		CheckBox chkBake = DialogCards.newMauveCheckBox(ctx, "Export Grid",
+			state.getGridConfig().includeInExport());
+		root.addView(buildOptionsCard(ctx, density, chkBake), DialogCards.topMargin(dp8));
 
 		return new AlertDialog.Builder(ctx)
 			.setTitle("Save Image")
@@ -82,36 +78,12 @@ public final class SaveDialog
 				applySettings(state, isJpeg[0], chkBake.isChecked());
 				onSave.onSave();
 			})
-			// Negative button calls dialog.cancel() so the OnCancelListener below is the single source
-			// of truth for the abandon path — back-press / outside-touch / forced cancel all funnel
-			// through the same listener instead of needing duplicated cleanup.
+			// Negative button calls dialog.cancel() so the OnCancelListener below is the single source of
+			// truth for the abandon path — back-press / outside-touch / forced cancel all funnel through
+			// the same listener instead of needing duplicated cleanup.
 			.setNegativeButton(DialogStrings.CANCEL, (dialog, which) -> dialog.cancel())
 			.setOnCancelListener(dialog -> onCancel.run())
 			.show();
-	}
-
-	/**
-	 * Apply highlight styling to the two format chips based on which is selected. Selected chip gets mauve
-	 * background + crust text; unselected gets surface1 bg + default text.
-	 *
-	 * @param jpegBtn       the JPEG chip; receives mauve fill + crust text when jpegSelected is true
-	 * @param pngBtn        the PNG chip; receives mauve fill + crust text when jpegSelected is false
-	 * @param jpegSelected  true when JPEG is the current selection; toggles the highlight assignment
-	 * @param density       display density for the dp→px corner-radius conversion
-	 */
-	private static void applyFormatChipStyle(TextView jpegBtn, TextView pngBtn, boolean jpegSelected, float density)
-	{
-		GradientDrawable jpegBackground = new GradientDrawable();
-		jpegBackground.setColor(jpegSelected ? ThemeColors.MAUVE : ThemeColors.SURFACE1);
-		jpegBackground.setCornerRadius(DpToPx.toPx(4, density));
-		jpegBtn.setBackground(jpegBackground);
-		jpegBtn.setTextColor(jpegSelected ? ThemeColors.CRUST : ThemeColors.TEXT);
-
-		GradientDrawable pngBackground = new GradientDrawable();
-		pngBackground.setColor(!jpegSelected ? ThemeColors.MAUVE : ThemeColors.SURFACE1);
-		pngBackground.setCornerRadius(DpToPx.toPx(4, density));
-		pngBtn.setBackground(pngBackground);
-		pngBtn.setTextColor(!jpegSelected ? ThemeColors.CRUST : ThemeColors.TEXT);
 	}
 
 	/**
@@ -130,8 +102,13 @@ public final class SaveDialog
 	}
 
 	/**
-	 * Build the "Format" card — two equal-weight toggle chips for JPEG / PNG. Writes to `isJpeg[0]` as the user
-	 * taps; the caller reads that on OK.
+	 * Build the "Format" card — two equal-weight toggle chips for JPEG / PNG.
+	 *
+	 * @param ctx     dialog context for view construction
+	 * @param density display density for dp→px sizing
+	 * @param isJpeg  single-element out-box: chip taps write the current selection to isJpeg[0]; the
+	 *                caller reads it on OK
+	 * @return the assembled card, ready to add to the dialog root
 	 */
 	private static LinearLayout buildFormatCard(Context ctx, float density, boolean[] isJpeg)
 	{
@@ -141,10 +118,12 @@ public final class SaveDialog
 
 		LinearLayout formatRow = new LinearLayout(ctx);
 		formatRow.setOrientation(LinearLayout.HORIZONTAL);
-		final TextView jpegBtn = formatChip(ctx, "JPEG", density);
-		final TextView pngBtn = formatChip(ctx, "PNG", density);
+		final TextView jpegBtn = DialogCards.newToggleChip(ctx, "JPEG", density, 8);
+		final TextView pngBtn = DialogCards.newToggleChip(ctx, "PNG", density, 8);
 
-		Runnable updateFormatHighlight = () -> applyFormatChipStyle(jpegBtn, pngBtn, isJpeg[0], density);
+		// 4dp corners match this dialog's tighter card styling (FolderPickerDialog uses 6dp pills).
+		Runnable updateFormatHighlight = () ->
+			DialogCards.styleChipPair(jpegBtn, pngBtn, isJpeg[0], density, 4);
 		updateFormatHighlight.run();
 
 		jpegBtn.setOnClickListener(view ->
@@ -170,33 +149,20 @@ public final class SaveDialog
 	}
 
 	/**
-	 * Build the "Options" card — single checkbox for baking the grid into the export. The passed-in CheckBox is
-	 * configured in place and added to the card; caller reads its checked state on OK.
+	 * Build the "Options" card — single checkbox for baking the grid into the export.
+	 *
+	 * @param ctx     dialog context for view construction
+	 * @param density display density for dp→px sizing
+	 * @param chkBake caller-owned pre-configured CheckBox added to the card; the caller reads its checked
+	 *                state on OK
+	 * @return the assembled card, ready to add to the dialog root
 	 */
-	private static LinearLayout buildOptionsCard(Context ctx, CropState state, float density, CheckBox chkBake)
+	private static LinearLayout buildOptionsCard(Context ctx, float density, CheckBox chkBake)
 	{
 		int dp4 = DpToPx.toPx(4, density);
 		LinearLayout card = DialogCards.newCard(ctx, density);
 		DialogCards.addCardTitle(card, "Options");
-
-		chkBake.setText("Export Grid");
-		chkBake.setTextSize(12);
-		chkBake.setTextColor(ThemeColors.TEXT);
-		chkBake.setChecked(state.getGridConfig().includeInExport());
-		chkBake.setButtonTintList(ColorStateList.valueOf(ThemeColors.MAUVE));
 		card.addView(chkBake, DialogCards.topMargin(dp4));
 		return card;
-	}
-
-	private static TextView formatChip(Context ctx, String text, float density)
-	{
-		TextView btn = new TextView(ctx);
-		btn.setText(text);
-		btn.setTextSize(13);
-		btn.setGravity(Gravity.CENTER);
-		btn.setTypeface(btn.getTypeface(), Typeface.BOLD);
-		btn.setPadding(0, DpToPx.toPx(8, density), 0, DpToPx.toPx(8, density));
-		btn.setSingleLine(true);
-		return btn;
 	}
 }

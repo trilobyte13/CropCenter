@@ -116,10 +116,9 @@
          on the immediate-interaction controls (mode toggle, axis lock, point edit).
 
          30dp height: 26dp chip + 2dp top/bottom breathing — matches the rotation actions row's
-         tightness (28dp / 26dp = 1dp pad), keeping the chip tier rhythm consistent. The prior
-         34dp left 4dp top/bottom, which read as visually heavier than the rest of the chip tier. -->
-    <LinearLayout android:id="@+id/pointControlsRow"
-        android:layout_width="match_parent" android:layout_height="30dp"
+         tightness (28dp / 26dp = 1dp pad), keeping the chip tier rhythm consistent; a taller row
+         with more vertical padding reads visually heavier than the rest of the chip tier. -->
+    <LinearLayout android:layout_width="match_parent" android:layout_height="30dp"
         android:background="@color/sidebar_bg" android:gravity="center_vertical"
         android:paddingHorizontal="4dp" android:orientation="horizontal">
 
@@ -229,7 +228,7 @@
          UiSync.updateRotationZoomButtons). 32dp wide gives a comfortable tap target while the
          ruler still owns the bulk of the row.
 
-         34dp is the tallest of the bottom-row tier — slightly more than the 30dp pointControlsRow
+         34dp is the tallest of the bottom-row tier — slightly more than the 30dp point-controls row
          and 28dp rotation-actions row above because the ruler has to fit BOTH the tick marks AND
          the degree labels stacked vertically, plus the indicator triangle at the top. The labels
          add a 3dp bottom-padding gap (see RotationRulerView.onDraw) so they don't sit flush
@@ -270,9 +269,8 @@
         android:background="@color/mantle" android:gravity="center_vertical"
         android:paddingHorizontal="10dp" android:orientation="horizontal">
 
-        <!-- Order: image formats, original size, cropped size, zoom. The rotation value used to
-             live here but moved to the rotation actions row above (where the controls that
-             change it live). -->
+        <!-- Order: image formats, original size, cropped size, zoom. The rotation readout lives in
+             the rotation actions row above, beside the controls that change it. -->
         <TextView android:id="@+id/txtImageFormats"
             android:layout_width="0dp" android:layout_height="wrap_content"
             android:layout_weight="1"

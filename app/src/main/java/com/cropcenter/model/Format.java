@@ -1,11 +1,12 @@
 package com.cropcenter.model;
 
 import java.util.Locale;
+import java.util.Optional;
 
 /**
- * Output image format supported by the export pipeline. Replaces the earlier String-typed format tag — the enum gives
- * compile-time exhaustiveness on switch dispatches in CropExporter and removes the "any string flows through to the
- * default branch" foot-gun called out in the audit.
+ * Output image format supported by the export pipeline. The enum gives compile-time exhaustiveness on switch dispatches
+ * in CropExporter and closes the "any string flows through to the default branch" foot-gun a String-typed format tag
+ * would carry.
  *
  * Each constant carries its MIME type (used by SAF picker intents and ContentResolver) and file extension (used by
  * SaveController's filename builders). The fromExtension lookup is the inverse — used by SaveController to detect when
@@ -26,36 +27,35 @@ public enum Format
 
 	/**
 	 * Map a filename's extension to a Format constant. Accepts the canonical extension (.jpg / .png) plus the
-	 * common .jpeg alias. Unknown extensions return null so callers can keep their existing
+	 * common .jpeg alias. Unknown extensions return empty so callers can keep their existing
 	 * "leave-format-unchanged" semantics.
 	 *
 	 * @param name filename to inspect (may be null)
-	 * @return the matching Format, or null when the name has no recognised image extension
+	 * @return the matching Format, or empty when the name is null or has no recognised image extension
 	 */
-	public static Format fromExtension(String name)
+	public static Optional<Format> fromExtension(String name)
 	{
 		if (name == null)
 		{
-			return null;
+			return Optional.empty();
 		}
 		String lower = name.toLowerCase(Locale.ROOT);
 		if (lower.endsWith(".png"))
 		{
-			return PNG;
+			return Optional.of(PNG);
 		}
 		if (lower.endsWith(".jpg") || lower.endsWith(".jpeg"))
 		{
-			return JPEG;
+			return Optional.of(JPEG);
 		}
-		return null;
+		return Optional.empty();
 	}
 
 	/**
-	 * Strip the trailing extension from `name`, returning everything before the last `.`. Names with no
-	 * dot OR with a leading-dot stem (".gitignore") are returned verbatim — the canonical "stem" of a
-	 * leading-dot name has no separable extension. Chokepoint for the in-app save / graft / rename
-	 * stem-extraction logic; before this lived inline at 3+ sites with subtle "dot > 0" / "dot >= 0"
-	 * variations.
+	 * Strip the trailing extension from `name`, returning everything before the last `.`. Names with no dot OR with
+	 * a leading-dot stem (".gitignore") are returned verbatim — the canonical "stem" of a leading-dot name has no
+	 * separable extension. Chokepoint for the in-app save / graft / rename stem-extraction logic — inlining it
+	 * re-opens the subtle "dot > 0" vs "dot >= 0" divergence across sites.
 	 *
 	 * @param name filename to strip; must be non-null (caller responsibility — null filenames upstream
 	 *             are a programming error, not a runtime input shape)

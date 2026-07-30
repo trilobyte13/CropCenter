@@ -4,16 +4,15 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
-import org.junit.Test;
-
 import com.cropcenter.util.AiRegionDetector.AiMask;
+
+import org.junit.Test;
 
 /**
  * Tests for the AiMask record's pure-data accessors plus the diffPixels helper that AiRegionDetector.detect uses
  * internally. The detect() method itself needs BitmapFactory and isn't unit-testable without Robolectric, but the
- * predicates and counters that callers use to make routing decisions are pure logic and easy to pin, and the
- * per-pixel max-channel-diff math now lives in a package-private helper so the threshold contract is testable
- * directly.
+ * predicates and counters that callers use to make routing decisions are pure logic and easy to pin, and the per-pixel
+ * max-channel-diff math now lives in a package-private helper so the threshold contract is testable directly.
  *
  * hasMaskedPixels and maskedCount drive two important paths: the inpaint-skip when the detected mask is empty (avoids
  * wasting a JPEG re-encode of the gain map) and the GraftController.LARGE_EDIT_FRACTION sanity gate (forces a confirm
@@ -24,10 +23,10 @@ public final class AiRegionDetectorTest
 	@Test
 	public void canonicalConstructorAcceptsExplicitMaskedCount()
 	{
-		// AiRegionDetector.detect uses the canonical record constructor directly to avoid re-walking the
-		// mask post-detect. Pin the contract: the explicit count is preserved verbatim, even if it doesn't
-		// match a recount of the boolean array. This is intentional — the count is the source of truth at
-		// construction; the boolean array is just storage.
+		// AiRegionDetector.detect uses the canonical record constructor directly to avoid re-walking the mask
+		// post-detect. Pin the contract: the explicit count is preserved verbatim, even if it doesn't match a
+		// recount of the boolean array. This is intentional — the count is the source of truth at construction;
+		// the boolean array is just storage.
 		boolean[] mask = { true, false, true, false };
 		AiMask aiMask = new AiMask(mask, 2, 2, 4, 99);
 		assertEquals("explicit count is not recomputed", 99, aiMask.maskedCount());
@@ -56,10 +55,10 @@ public final class AiRegionDetectorTest
 	@Test
 	public void hasMaskedPixelsTrueWhenAiMaskOfCountedFirstPositionFlag()
 	{
-		// AiMask.of walks the input mask to compute maskedCount; hasMaskedPixels then returns
-		// `maskedCount > 0`. Pin that a single flagged pixel at position 0 of a long array is counted
-		// (a regression in AiMask.of that started the walk at index 1 instead of 0 would surface here
-		// as maskedCount=0 → hasMaskedPixels=false).
+		// AiMask.of walks the input mask to compute maskedCount; hasMaskedPixels then returns `maskedCount >
+		// 0`. Pin that a single flagged pixel at position 0 of a long array is counted (a regression in
+		// AiMask.of that started the walk at index 1 instead of 0 would surface here as maskedCount=0 →
+		// hasMaskedPixels=false).
 		boolean[] mask = new boolean[1000];
 		mask[0] = true;
 		AiMask aiMask = AiMask.of(mask, 10, 100, 4);
@@ -151,8 +150,8 @@ public final class AiRegionDetectorTest
 	@Test
 	public void diffPixelsFlagsRedChannelDifferenceAboveThreshold()
 	{
-		// Single pixel with a 50-LSB red-channel diff — well above the 30 threshold. Pin the channel mask
-		// (>>16 & 0xFF) so a regression that swapped red/blue would surface here.
+		// Single pixel with a 50-LSB red-channel diff — well above the 30 threshold. Pin the channel mask (>>16
+		// & 0xFF) so a regression that swapped red/blue would surface here.
 		int[] source = { 0xFF200000 };  // red = 0x20
 		int[] edit   = { 0xFF600000 };  // red = 0x60 → diff 0x40 = 64
 		boolean[] mask = new boolean[1];
@@ -164,8 +163,8 @@ public final class AiRegionDetectorTest
 	@Test
 	public void diffPixelsFlagsGreenChannelDifferenceAboveThreshold()
 	{
-		// Same as above but for green channel — pin the >>8 & 0xFF shift / mask. A swap of red/green would
-		// pass the red-channel test alone.
+		// Same as above but for green channel — pin the >>8 & 0xFF shift / mask. A swap of red/green would pass
+		// the red-channel test alone.
 		int[] source = { 0xFF002000 };
 		int[] edit   = { 0xFF006000 };
 		boolean[] mask = new boolean[1];
@@ -190,9 +189,9 @@ public final class AiRegionDetectorTest
 	@Test
 	public void diffPixelsIgnoresAlphaChannelEntirely()
 	{
-		// Alpha differs by 0xFF but no RGB diff — must not flag. The diff loop intentionally ignores alpha
-		// (the gain map's HDR boost only cares about RGB content); a regression that included alpha would
-		// over-mask every PNG-with-alpha source.
+		// Alpha differs by 0xFF but no RGB diff — must not flag. The diff loop intentionally ignores alpha (the
+		// gain map's HDR boost only cares about RGB content); a regression that included alpha would over-mask
+		// every PNG-with-alpha source.
 		int[] source = { 0x00112233 };
 		int[] edit   = { 0xFF112233 };
 		boolean[] mask = new boolean[1];
@@ -204,8 +203,8 @@ public final class AiRegionDetectorTest
 	@Test
 	public void diffPixelsRejectsEqualToThreshold()
 	{
-		// The threshold check is strict greater-than (> threshold), not >=. A diff exactly at threshold
-		// must NOT flag. Pin both edges of the boundary so a refactor that swapped > for >= is caught.
+		// The threshold check is strict greater-than (> threshold), not >=. A diff exactly at threshold must
+		// NOT flag. Pin both edges of the boundary so a refactor that swapped > for >= is caught.
 		int[] source = { 0xFF000000 };
 		int[] edit   = { 0xFF001E00 };  // green diff = 0x1E = 30
 		boolean[] mask = new boolean[1];
@@ -229,10 +228,10 @@ public final class AiRegionDetectorTest
 	@Test
 	public void diffPixelsUsesMaxAcrossChannels()
 	{
-		// Channel diffs: red 5, green 10, blue 40. Max = 40 → flagged at threshold 30. Pin that the
-		// algorithm picks max, not sum — a regression to "sum > threshold" would also pass for this input
-		// (5+10+40=55), but the dedicated red-only and blue-only tests above would catch sum-vs-max drift
-		// at the per-channel boundary. This case pins the max-aggregation when multiple channels move.
+		// Channel diffs: red 5, green 10, blue 40. Max = 40 → flagged at threshold 30. Pin that the algorithm
+		// picks max, not sum — a regression to "sum > threshold" would also pass for this input (5+10+40=55),
+		// but the dedicated red-only and blue-only tests above would catch sum-vs-max drift at the per-channel
+		// boundary. This case pins the max-aggregation when multiple channels move.
 		int[] source = { 0xFF000000 };
 		int[] edit   = { 0xFF050A28 };  // r=5, g=10, b=40
 		boolean[] mask = new boolean[1];
@@ -258,9 +257,9 @@ public final class AiRegionDetectorTest
 	@Test
 	public void diffPixelsCountMatchesMaskTrueEntries()
 	{
-		// Multi-pixel mixed input — pin that the returned count is exactly the number of true entries
-		// written to mask[]. The cached count drives hasMaskedPixels() and the LARGE_EDIT_FRACTION sanity
-		// gate, so a miscount here would silently mis-route the inpaint skip / confirm dialog.
+		// Multi-pixel mixed input — pin that the returned count is exactly the number of true entries written
+		// to mask[]. The cached count drives hasMaskedPixels() and the LARGE_EDIT_FRACTION sanity gate, so a
+		// miscount here would silently mis-route the inpaint skip / confirm dialog.
 		int[] source = { 0xFF000000, 0xFF000000, 0xFF000000, 0xFF000000 };
 		int[] edit   = { 0xFF000000, 0xFFFF0000, 0xFF000000, 0xFF00FF00 };  // pixels 1 and 3 differ
 		boolean[] mask = new boolean[4];
@@ -275,12 +274,12 @@ public final class AiRegionDetectorTest
 	@Test
 	public void diffPixelsCountIncludesPreSetMaskBitsRegardlessOfPriorState()
 	{
-		// Documented contract: the returned count is the number of pixels whose diff exceeds threshold,
-		// NOT the number of false → true transitions. With a pre-populated mask whose entries overlap
-		// the diff-flagged indices, the count includes the overlap pixels. Production always passes a
-		// fresh boolean[] so the two counts coincide there, but the documented contract diverges for
-		// pre-populated input — pin it so a future refactor that "fixed" the implementation to count
-		// only transitions would have to update the documented contract here too.
+		// Documented contract: the returned count is the number of pixels whose diff exceeds threshold, NOT the
+		// number of false → true transitions. With a pre-populated mask whose entries overlap the diff-flagged
+		// indices, the count includes the overlap pixels. Production always passes a fresh boolean[] so the two
+		// counts coincide there, but the documented contract diverges for pre-populated input — pin it so a
+		// future refactor that "fixed" the implementation to count only transitions would have to update the
+		// documented contract here too.
 		int[] source = { 0xFF000000, 0xFF000000 };
 		int[] edit   = { 0xFFFF0000, 0xFFFF0000 };  // both pixels differ in red
 		boolean[] mask = { true, false };           // pre-populated: index 0 was already true

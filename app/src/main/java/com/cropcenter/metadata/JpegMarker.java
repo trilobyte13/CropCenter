@@ -13,8 +13,8 @@ public final class JpegMarker
 	public static final int APP0 = 0xE0;
 
 	// APP1 — FF E1. Carries EXIF (`Exif\0\0` payload prefix) plus Adobe standard XMP (namespace
-	// `http://ns.adobe.com/xap/1.0/`) and Adobe Extended XMP. Centralised here so the half-dozen sites that
-	// test `marker == 0xE1` route through the constant.
+	// `http://ns.adobe.com/xap/1.0/`) and Adobe Extended XMP. Centralised here so the half-dozen sites that test
+	// `marker == 0xE1` route through the constant.
 	public static final int APP1 = 0xE1;
 
 	// APP2 — FF E2. Carries ICC profile (`ICC_PROFILE\0` payload prefix), MPF (`MPF\0`), and the ISO 21496-1 Ultra
@@ -36,10 +36,10 @@ public final class JpegMarker
 	// forward for the primary's terminator.
 	public static final int EOI = 0xD9;
 
-	// Marker prefix — the 0xFF byte that introduces every JPEG marker pair. Every marker in this file is the
-	// SECOND byte of a (PREFIX, X) pair; centralised here so test fixtures (and any byte-walking caller that
-	// synthesises markers rather than scanning existing bytes) can write `(byte) JpegMarker.PREFIX, (byte)
-	// JpegMarker.SOI` instead of repeating the 0xFF hex literal with an explanatory comment.
+	// Marker prefix — the 0xFF byte that introduces every JPEG marker pair. Every marker in this file is the SECOND
+	// byte of a (PREFIX, X) pair; centralised here so test fixtures (and any byte-walking caller that synthesises
+	// markers rather than scanning existing bytes) can write `(byte) JpegMarker.PREFIX, (byte) JpegMarker.SOI`
+	// instead of repeating the 0xFF hex literal with an explanatory comment.
 	public static final int PREFIX = 0xFF;
 
 	// Lowest restart marker (FF D0).

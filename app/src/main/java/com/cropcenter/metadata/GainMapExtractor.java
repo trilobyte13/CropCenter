@@ -2,6 +2,9 @@ package com.cropcenter.metadata;
 
 import android.util.Log;
 
+import java.util.Arrays;
+import java.util.Optional;
+
 /**
  * Extracts the HDR gain map from a Samsung Ultra HDR JPEG file. The gain map is a secondary JPEG stored between the
  * primary image's EOI and any trailing data (e.g., Samsung SEFT trailer).
@@ -21,20 +24,20 @@ public final class GainMapExtractor
 	 * @param file        raw bytes of the full Samsung Ultra HDR JPEG
 	 * @param isHdrSource true when the file carries the XMP hdrgm namespace marker. Required to avoid
 	 *                    mis-extracting a SEFT thumbnail's FF D8 as a gain map.
-	 * @return gain map JPEG bytes (starting with FFD8), or null if not found
+	 * @return gain map JPEG bytes (starting with FFD8), or empty when no gain map is found
 	 */
-	public static byte[] extract(byte[] file, boolean isHdrSource)
+	public static Optional<byte[]> extract(byte[] file, boolean isHdrSource)
 	{
 		if (file == null || file.length < 10)
 		{
-			return null;
+			return Optional.empty();
 		}
 		if (!isHdrSource)
 		{
 			// No HDR signature (caller said so) — even if FF D8 follows primary EOI, those bytes are SEFT
 			// data (embedded thumbnail / history blob), not a gain map. Trusting the FF D8 alone would
 			// mis-extract a thumbnail as a gain map.
-			return null;
+			return Optional.empty();
 		}
 
 		// Walk primary's marker chain to find its EOI. The walker handles SOS entropy, RST / STUFFING / TEM
@@ -42,45 +45,31 @@ public final class GainMapExtractor
 		int primaryEnd = JpegMarkerWalker.findPrimaryEoi(file, file.length);
 		if (primaryEnd < 0)
 		{
-			return null;
+			return Optional.empty();
 		}
 
-		// Gain map (when present) starts immediately after primary's EOI with its own SOI. Absence here
-		// means there's no gain map — only primary plus possibly a SEFT trailer.
-		if (primaryEnd + 1 >= file.length
-			|| (file[primaryEnd] & 0xFF) != JpegMarker.PREFIX
-			|| (file[primaryEnd + 1] & 0xFF) != JpegMarker.SOI)
+		// Walk the gain map's own marker chain forward to find ITS EOI. SeftExtractor.gainMapEndAfterPrimary
+		// owns the FF D8 probe, the SEFT-aware slice cap, and the forward walk (required because SEFT data can
+		// short-circuit a backward FF D9 scan — see JpegMarkerWalker.findEoi Javadoc) — shared with
+		// SeftExtractor so the two extractors can't drift on the boundary math. Return value is absolute, so
+		// gain-map length is (gainMapEoiAbs - primaryEnd).
+		int gainMapEoiAbs = SeftExtractor.gainMapEndAfterPrimary(file, primaryEnd);
+		if (gainMapEoiAbs == SeftExtractor.GAIN_MAP_WALK_FAILED)
 		{
-			return null;
+			Log.w(TAG, "gain map after primary EOI " + primaryEnd
+				+ " doesn't parse as a JPEG; treating as no-gain-map");
+			return Optional.empty();
 		}
-
-		// Walk the gain map's own marker chain forward to find ITS EOI. Cap the slice end at len-8 when
-		// the file carries a SEFT footer; without SEFT, the slice runs to file end. (Forward marker-chain
-		// walking required because SEFT data can short-circuit a backward FF D9 scan — see
-		// JpegMarkerWalker.findEoi Javadoc.)
-		int sliceEnd = SeftExtractor.hasSeftFooter(file)
-			? file.length - SeftExtractor.FOOTER_SIZE
-			: file.length;
-		if (sliceEnd <= primaryEnd)
-		{
-			return null;
-		}
-		// Walk the gain-map's marker chain directly on file in [primaryEnd, sliceEnd) — no transient
-		// Arrays.copyOfRange (would allocate ~70 MB on a 100 MB HDR source). Return value is absolute,
-		// so gain-map length is (eoiOff - primaryEnd).
-		int gainMapEoiAbs = JpegMarkerWalker.findEoi(file, primaryEnd, sliceEnd);
 		if (gainMapEoiAbs < 0)
 		{
-			Log.w(TAG, "gain map between primary EOI " + primaryEnd + " and " + sliceEnd
-				+ " doesn't parse as a JPEG; treating as no-gain-map");
-			return null;
+			// GAIN_MAP_ABSENT (no FF D8 after primary — only primary plus possibly a SEFT trailer) or
+			// GAIN_MAP_SLICE_EMPTY (the footer-capped slice leaves no bytes to walk).
+			return Optional.empty();
 		}
 
-		int gainMapLen = gainMapEoiAbs - primaryEnd;
-		byte[] gainMap = new byte[gainMapLen];
-		System.arraycopy(file, primaryEnd, gainMap, 0, gainMapLen);
-		Log.d(TAG, "Extracted gain map: " + gainMapLen + " bytes after primary EOI");
-		return gainMap;
+		byte[] gainMap = Arrays.copyOfRange(file, primaryEnd, gainMapEoiAbs);
+		Log.d(TAG, "Extracted gain map: " + gainMap.length + " bytes after primary EOI");
+		return Optional.of(gainMap);
 	}
 
 }

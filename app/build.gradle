@@ -17,11 +17,11 @@ android {
         versionCode = 1
         versionName = "1.0"
 
-        // Expose the build timestamp so the Settings dialog can show which APK is installed.
-        // UTC (not system default) so CI builds in different zones produce identical strings for the
-        // same source state — otherwise a build from US-Pacific and a build from Europe/London would
-        // ship different BUILD_TIME values for the same commit, defeating the dialog's "which APK
-        // is this" purpose. Trailing "Z" suffix marks the timezone unambiguously in the UI.
+        // Expose the build timestamp so the Settings dialog can show which APK is installed. The value
+        // is wall-clock at build time — intentionally different for every build, even of the same
+        // commit (it identifies WHEN the installed APK was built, not which source built it), so
+        // builds are not reproducible byte-for-byte. Formatting in UTC with a trailing "Z" just keeps
+        // the displayed string unambiguous and independent of the build machine's timezone.
         def buildTime = new Date().format("yyyy-MM-dd HH:mm:ss'Z'", TimeZone.getTimeZone("UTC"))
         buildConfigField "String", "BUILD_TIME", "\"${buildTime}\""
     }
@@ -66,8 +66,8 @@ dependencies {
     implementation 'androidx.core:core:1.16.0'
     implementation 'androidx.activity:activity:1.9.0'
     // androidx ExifInterface — lint flags android.media.ExifInterface for known security bugs.
-    // Used by FolderPickerDialog.decodeThumbnail to read EXIF orientation + the embedded thumbnail.
-    implementation 'androidx.exifinterface:exifinterface:1.4.1'
+    // Used by FolderBrowser.decodeThumbnail to read EXIF orientation + the embedded thumbnail.
+    implementation 'androidx.exifinterface:exifinterface:1.4.2'
     // RecyclerView backs FolderBrowser's content list — off-screen cells recycle so a 50k-photo
     // folder doesn't OOM during View inflation. Material 1.12.0 pulls this transitively, but the
     // explicit declaration locks the version and surfaces the dep in this file.

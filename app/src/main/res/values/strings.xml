@@ -2,8 +2,7 @@
 <resources>
     <!-- Only app_name is consumed (by AndroidManifest android:label). All user-facing toasts and dialog
          strings are hardcoded as Java literals at the call site — that's the project convention; see e.g.
-         the toast text pinned in EditAlignerTest, MpfPatcherTest, and HorizonDetectorTest. The previous
-         16 entries here (open_image, save_as, etc.) had no consumers and were removed during a cleanup pass
-         so new readers wouldn't assume they're load-bearing. -->
+         the toast text pinned in EditAlignerTest, MpfPatcherTest, and HorizonDetectorTest. Don't add
+         entries here without a consumer. -->
     <string name="app_name">CropCenter</string>
 </resources>

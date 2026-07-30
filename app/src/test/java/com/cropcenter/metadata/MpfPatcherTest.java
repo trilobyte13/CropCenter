@@ -1,13 +1,17 @@
 package com.cropcenter.metadata;
 
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
+
+import com.cropcenter.util.ByteBufferUtils;
 
 import org.junit.Test;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.util.Arrays;
 
 /**
  * Tests for the MPF (Multi-Picture Format) APP2 offset patcher. Every HDR save runs this after the canvas re-encode
@@ -31,18 +35,19 @@ import java.io.IOException;
  */
 public final class MpfPatcherTest
 {
+	private record MpfFixture(byte[] bytes, int mpfStart, int entry0Off) {}
+
 	@Test
 	public void patchAcceptsExactlyMaxMpfEntriesAndRejectsOneOver() throws IOException
 	{
-		// Pin the cap boundary at MAX_MPF_ENTRIES = 64. 64 entries with the gain
-		// map at index 1 must succeed; 65 entries must be refused as overflow protection for the int cast
-		// at `numImages = (int)(byteCount / MPF_ENTRY_BYTES)`. A regression that swapped `>` to `>=` would
-		// silently drop the cap by one and slip 65-entry MPFs through — caught here.
+		// Pin the cap boundary at MAX_MPF_ENTRIES = 64. 64 entries with the gain map at index 1 must succeed;
+		// 65 entries must be refused as overflow protection for the int cast at `numImages = (int)(byteCount /
+		// MPF_ENTRY_BYTES)`. A regression that swapped `>` to `>=` would silently drop the cap by one and slip
+		// 65-entry MPFs through — caught here.
 		long[] attrsAtCap = new long[64];
 		attrsAtCap[1] = 0x00010005L;
 		MpfFixture okFx = buildMpfFile(2_000, 60, attrsAtCap);
-		assertTrue("64 entries (cap) must patch successfully",
-			MpfPatcher.patch(okFx.bytes, 2_000));
+		assertTrue("64 entries (cap) must patch successfully", MpfPatcher.patch(okFx.bytes, 2_000));
 
 		long[] attrsOverCap = new long[65];
 		attrsOverCap[1] = 0x00010005L;
@@ -54,13 +59,13 @@ public final class MpfPatcherTest
 	@Test
 	public void patchAcceptsThreeImageMpfWhenEntry0MpTypeIsRepresentative() throws IOException
 	{
-		// 3-image MPF with entry[0] MPType = 0x030000 (canonical "Representative Image" / "Baseline MP
-		// Primary" per MPF spec section 4.5). Patcher's entry[0] guard accepts 0x030000 explicitly so a
-		// strict-spec-conformant 3-image producer (Apple Portrait with a properly labelled primary) round-
-		// trips through HDR save without falling into the "non-representative entry[0]" refusal branch.
-		// Sister test patchRejectsThreeImageMpfWhenEntry0MpTypeIsNonRepresentative pins the negative
-		// case; pin the positive case here so a regression that flipped the accept/reject polarity on
-		// the entry[0] check would surface in BOTH tests rather than appearing harmless in one.
+		// 3-image MPF with entry[0] MPType = 0x030000 (canonical "Representative Image" / "Baseline MP Primary"
+		// per MPF spec section 4.5). Patcher's entry[0] guard accepts 0x030000 explicitly so a
+		// strict-spec-conformant 3-image producer (Apple Portrait with a properly labelled primary) round-trips
+		// through HDR save without falling into the "non-representative entry[0]" refusal branch. Sister test
+		// patchRejectsThreeImageMpfWhenEntry0MpTypeIsNonRepresentative pins the negative case; pin the positive
+		// case here so a regression that flipped the accept/reject polarity on the entry[0] check would surface
+		// in BOTH tests rather than appearing harmless in one.
 		int newPrimarySize = 300;
 		int gainMapSize = 80;
 		long[] attrs = {
@@ -72,21 +77,20 @@ public final class MpfPatcherTest
 		assertTrue("3-image MPF with MPType=0x030000 entry[0] must be accepted",
 			MpfPatcher.patch(fx.bytes, newPrimarySize));
 		// Verify entry[0] size and entry[1] gain-map fields were patched.
-		assertEquals(newPrimarySize, readU32Le(fx.bytes, fx.entry0Off + 4));
-		assertEquals(gainMapSize, readU32Le(fx.bytes, fx.entry0Off + 16 + 4));
-		assertEquals(newPrimarySize - fx.mpfStart, readU32Le(fx.bytes, fx.entry0Off + 16 + 8));
+		assertEquals(newPrimarySize, ByteBufferUtils.readU32LE(fx.bytes, fx.entry0Off + 4));
+		assertEquals(gainMapSize, ByteBufferUtils.readU32LE(fx.bytes, fx.entry0Off + 16 + 4));
+		assertEquals(newPrimarySize - fx.mpfStart, ByteBufferUtils.readU32LE(fx.bytes, fx.entry0Off + 16 + 8));
 	}
 
 	@Test
 	public void patchAcceptsTwoImageMpfWithArbitraryEntry0MpType() throws IOException
 	{
-		// 2-image MPF with a bogus entry[0] MPType — explicitly NOT 0x030000 or 0. The patcher gates
-		// the entry[0] MPType validation behind `numImages >= 3` because on 2-image MPFs the layout
-		// is fixed (entry[0] = primary, entry[1] = gain map) regardless of how the producer filled
-		// the MPType bits, and existing Samsung Ultra HDR fixtures use non-canonical MPType values
-		// that we don't want to start rejecting. Pin that a 2-image MPF with a fully bogus
-		// entry[0] MPType still patches cleanly — guards against a regression that lifted the
-		// numImages >= 3 gate and started rejecting these.
+		// 2-image MPF with a bogus entry[0] MPType — explicitly NOT 0x030000 or 0. The patcher gates the
+		// entry[0] MPType validation behind `numImages >= 3` because on 2-image MPFs the layout is fixed
+		// (entry[0] = primary, entry[1] = gain map) regardless of how the producer filled the MPType bits, and
+		// existing Samsung Ultra HDR fixtures use non-canonical MPType values that we don't want to start
+		// rejecting. Pin that a 2-image MPF with a fully bogus entry[0] MPType still patches cleanly — guards
+		// against a regression that lifted the numImages >= 3 gate and started rejecting these.
 		int newPrimarySize = 220;
 		int gainMapSize = 60;
 		long[] attrs = {
@@ -96,7 +100,7 @@ public final class MpfPatcherTest
 		MpfFixture fx = buildMpfFile(newPrimarySize, gainMapSize, attrs);
 		assertTrue("2-image MPF skips entry[0] MPType validation regardless of attr value",
 			MpfPatcher.patch(fx.bytes, newPrimarySize));
-		assertEquals(gainMapSize, readU32Le(fx.bytes, fx.entry0Off + 16 + 4));
+		assertEquals(gainMapSize, ByteBufferUtils.readU32LE(fx.bytes, fx.entry0Off + 16 + 4));
 	}
 
 	@Test
@@ -110,7 +114,7 @@ public final class MpfPatcherTest
 		long[] attrs = { 0x20000000L, 0x12345678L };   // bogus attr on entry[1]
 		MpfFixture fx = buildMpfFile(newPrimarySize, gainMapSize, attrs);
 		assertTrue(MpfPatcher.patch(fx.bytes, newPrimarySize));
-		assertEquals(gainMapSize, readU32Le(fx.bytes, fx.entry0Off + 16 + 4));
+		assertEquals(gainMapSize, ByteBufferUtils.readU32LE(fx.bytes, fx.entry0Off + 16 + 4));
 	}
 
 	@Test
@@ -132,18 +136,13 @@ public final class MpfPatcherTest
 
 		// Snapshot entry[2] bytes BEFORE patch.
 		int entry2Off = fx.entry0Off + 32;
-		byte[] entry2Before = new byte[16];
-		System.arraycopy(fx.bytes, entry2Off, entry2Before, 0, 16);
+		byte[] entry2Before = Arrays.copyOfRange(fx.bytes, entry2Off, entry2Off + 16);
 
 		assertTrue(MpfPatcher.patch(fx.bytes, newPrimarySize));
 
 		// entry[2] bytes after patch must match the snapshot.
-		byte[] entry2After = new byte[16];
-		System.arraycopy(fx.bytes, entry2Off, entry2After, 0, 16);
-		for (int i = 0; i < 16; i++)
-		{
-			assertEquals("entry[2] byte " + i + " mutated by patch", entry2Before[i], entry2After[i]);
-		}
+		assertArrayEquals("entry[2] mutated by patch",
+			entry2Before, Arrays.copyOfRange(fx.bytes, entry2Off, entry2Off + 16));
 	}
 
 	@Test
@@ -165,15 +164,17 @@ public final class MpfPatcherTest
 
 		// Entry[2] (the gain-map slot per MPType) should hold the new size + offset.
 		int entry2Off = fx.entry0Off + 32;
-		assertEquals(gainMapSize, readU32Le(fx.bytes, entry2Off + 4));
-		assertEquals(newPrimarySize - fx.mpfStart, readU32Le(fx.bytes, entry2Off + 8));
+		assertEquals(gainMapSize, ByteBufferUtils.readU32LE(fx.bytes, entry2Off + 4));
+		assertEquals(newPrimarySize - fx.mpfStart, ByteBufferUtils.readU32LE(fx.bytes, entry2Off + 8));
 
 		// Entry[1] (the non-gain-map "Large Thumbnail" slot) must be untouched. Capture its post-patch state
 		// and verify it still holds the original fixture values that buildMpfFile wrote (size 51 = 50 + i for
 		// i=1, dataOffset 10099 = 9999 + 100).
 		int entry1Off = fx.entry0Off + 16;
-		assertEquals("entry[1] size unexpectedly mutated", 51L, readU32Le(fx.bytes, entry1Off + 4));
-		assertEquals("entry[1] dataOffset unexpectedly mutated", 10099L, readU32Le(fx.bytes, entry1Off + 8));
+		assertEquals("entry[1] size unexpectedly mutated", 51L,
+			ByteBufferUtils.readU32LE(fx.bytes, entry1Off + 4));
+		assertEquals("entry[1] dataOffset unexpectedly mutated", 10099L,
+			ByteBufferUtils.readU32LE(fx.bytes, entry1Off + 8));
 	}
 
 	@Test
@@ -215,10 +216,9 @@ public final class MpfPatcherTest
 		int gainMapSize = 60;
 		MpfFixture fx = buildMpfFile(newPrimarySize, gainMapSize, 2);
 
-		// MPEntries IFD entry: tag(2) + type(2) + byteCount(4) + dataOffset(4) = 12 bytes total.
-		// Sibling test `patchRejectsEntryArrayPointingPastMpfSegmentIntoSosData` documents
-		// `dataOffset at mpfStart + 30`, so `byteCount` sits at mpfStart + 26 (4 bytes earlier).
-		// Write byteCount = 17 in little-endian.
+		// MPEntries IFD entry: tag(2) + type(2) + byteCount(4) + dataOffset(4) = 12 bytes total. Sibling test
+		// `patchRejectsEntryArrayPointingPastMpfSegmentIntoSosData` documents `dataOffset at mpfStart + 30`, so
+		// `byteCount` sits at mpfStart + 26 (4 bytes earlier). Write byteCount = 17 in little-endian.
 		fx.bytes[fx.mpfStart + 26] = 17;
 		fx.bytes[fx.mpfStart + 27] = 0;
 		fx.bytes[fx.mpfStart + 28] = 0;
@@ -227,23 +227,19 @@ public final class MpfPatcherTest
 		byte[] snapshot = fx.bytes.clone();
 		assertFalse("byteCount=17 floors to numImages=1 (<2) and must reject",
 			MpfPatcher.patch(fx.bytes, newPrimarySize));
-		// Confirm no bytes were mutated before the reject — same no-mutation contract as the
-		// sister out-of-bounds-offset test.
-		for (int i = 0; i < fx.bytes.length; i++)
-		{
-			assertEquals("byte " + i + " must be unchanged when patch rejected on numImages<2",
-				snapshot[i], fx.bytes[i]);
-		}
+		// Confirm no bytes were mutated before the reject — same no-mutation contract as the sister
+		// out-of-bounds-offset test.
+		assertArrayEquals("bytes must be unchanged when patch rejected on numImages<2", snapshot, fx.bytes);
 	}
 
 	@Test
 	public void patchRejectsEntryArrayPointingPastMpfSegmentIntoSosData() throws IOException
 	{
 		// Adversarial MPF: dataOffset of the MPEntries IFD entry points past the MPF segment into SOS data.
-		// Without the segment-end bound on the entry array, the patcher would have walked the SOS bytes as
-		// "MP entries" and rewritten 12 bytes of compressed scan data with attacker-controlled values,
-		// corrupting the JPEG. With the bound, patch returns false and bytes are untouched. Pin both: the
-		// rejection AND the no-mutation invariant.
+		// Without the segment-end bound on the entry array, the patcher would have walked the SOS bytes as "MP
+		// entries" and rewritten 12 bytes of compressed scan data with attacker-controlled values, corrupting
+		// the JPEG. With the bound, patch returns false and bytes are untouched. Pin both: the rejection AND
+		// the no-mutation invariant.
 		int newPrimarySize = 200;
 		int gainMapSize = 60;
 		MpfFixture fx = buildMpfFile(newPrimarySize, gainMapSize, 2);
@@ -263,11 +259,8 @@ public final class MpfPatcherTest
 
 		// The rejected patch must not have mutated any byte. A regression that wrote entry[0].size before the
 		// out-of-bounds check would corrupt the scan body silently.
-		for (int i = 0; i < fx.bytes.length; i++)
-		{
-			assertEquals("byte " + i + " must be unchanged when patch rejected on segment-end bound",
-				snapshot[i], fx.bytes[i]);
-		}
+		assertArrayEquals("bytes must be unchanged when patch rejected on segment-end bound",
+			snapshot, fx.bytes);
 	}
 
 	@Test
@@ -288,10 +281,10 @@ public final class MpfPatcherTest
 	public void patchRejectsMultipleGainMapMpTypeMatches() throws IOException
 	{
 		// A spec-legal multi-gain-map MPF (composite depth + Original Preservation, some Apple Portrait
-		// variants) carries multiple 0x010005 entries. We have one post-edit gain-map size + offset, but no
-		// way to assign it across multiple entries without guessing — a single-entry write would leave the
-		// others pointing at pre-edit positions in the source file, which strict decoders reject. Refusing
-		// here lets GainMapComposer drop HDR cleanly per its design.
+		// variants) carries multiple 0x010005 entries. We have one post-edit gain-map size + offset, but no way
+		// to assign it across multiple entries without guessing — a single-entry write would leave the others
+		// pointing at pre-edit positions in the source file, which strict decoders reject. Refusing here lets
+		// GainMapComposer drop HDR cleanly per its design.
 		int newPrimarySize = 280;
 		int gainMapSize = 70;
 		long[] attrs = {
@@ -304,13 +297,9 @@ public final class MpfPatcherTest
 		assertFalse("multi-gain-map MPF must be refused, not silently single-patched",
 			MpfPatcher.patch(fx.bytes, newPrimarySize));
 
-		// No bytes mutated — a regression that wrote into entry[1] or entry[2] before checking the count
-		// would trip this assertion.
-		for (int i = 0; i < fx.bytes.length; i++)
-		{
-			assertEquals("byte " + i + " must be unchanged when patch refused on multi-match",
-				snapshot[i], fx.bytes[i]);
-		}
+		// No bytes mutated — a regression that wrote into entry[1] or entry[2] before checking the count would
+		// trip this assertion.
+		assertArrayEquals("bytes must be unchanged when patch refused on multi-match", snapshot, fx.bytes);
 	}
 
 	@Test
@@ -339,14 +328,14 @@ public final class MpfPatcherTest
 	@Test
 	public void patchRejectsThreeImageMpfWhenEntry0MpTypeIsNonRepresentative() throws IOException
 	{
-		// 3-image MPF where entry[0]'s MPType is a recognised non-primary value (Large Thumbnail =
-		// 0x010003). MPF spec section 4.5 says entry[0] is FirstIndividualImage with MPType 0x030000
-		// (Representative Image); some firmware writers omit the field (MPType=0), which the patcher
-		// also tolerates. Any other MPType on entry[0] in a 3+ image MPF means the producer used a
-		// non-standard ordering — patching entry[0].size would corrupt the wrong slot. Pin the refusal
-		// AND the no-byte-mutation invariant (same contract as the multi-match / no-match rejection
-		// branches — sister test patchRejectsThreeImageMpfWhenNoMpTypeMatch pins the analogous
-		// no-mutation invariant on the entry[1]-MPType branch).
+		// 3-image MPF where entry[0]'s MPType is a recognised non-primary value (Large Thumbnail = 0x010003).
+		// MPF spec section 4.5 says entry[0] is FirstIndividualImage with MPType 0x030000 (Representative
+		// Image); some firmware writers omit the field (MPType=0), which the patcher also tolerates. Any other
+		// MPType on entry[0] in a 3+ image MPF means the producer used a non-standard ordering — patching
+		// entry[0].size would corrupt the wrong slot. Pin the refusal AND the no-byte-mutation invariant (same
+		// contract as the multi-match / no-match rejection branches — sister test
+		// patchRejectsThreeImageMpfWhenNoMpTypeMatch pins the analogous no-mutation invariant on the
+		// entry[1]-MPType branch).
 		int newPrimarySize = 320;
 		int gainMapSize = 80;
 		long[] attrs = {
@@ -358,11 +347,7 @@ public final class MpfPatcherTest
 		byte[] snapshot = fx.bytes.clone();
 		assertFalse("3-image MPF with non-representative entry[0] MPType must be refused",
 			MpfPatcher.patch(fx.bytes, newPrimarySize));
-		for (int i = 0; i < fx.bytes.length; i++)
-		{
-			assertEquals("byte " + i + " mutated on rejected patch (non-representative entry[0])",
-				snapshot[i], fx.bytes[i]);
-		}
+		assertArrayEquals("bytes mutated on rejected patch (non-representative entry[0])", snapshot, fx.bytes);
 	}
 
 	@Test
@@ -371,14 +356,13 @@ public final class MpfPatcherTest
 		// 3-image MPF whose attr fields are all bogus / non-gain-map MPTypes — patcher must refuse rather than
 		// blindly patch entry[1] (which could land the gain-map size into a depth map or thumbnail slot).
 		// Falling back to entry[1] is only safe when numImages == 2, where the Samsung Ultra HDR pattern
-		// guarantees the gain map lives at index 1 even when its MPType field is malformed.
-		//
-		// Pin BOTH the false return AND the no-byte-mutation invariant. The patch function reorders the
-		// gain-map walk before the entry[0] / gain-map writes specifically so a refused patch leaves the
-		// JPEG byte buffer in its pre-call state — a regression that wrote entry[0].size before the refusal
-		// check would silently corrupt the file while still returning false. Sister test
-		// patchRejectsMultipleGainMapMpTypeMatches pins the same invariant on the multi-match branch; this
-		// test pins it on the no-match-with-numImages-not-2 branch.
+		// guarantees the gain map lives at index 1 even when its MPType field is malformed. Pin BOTH the false
+		// return AND the no-byte-mutation invariant. The patch function reorders the gain-map walk before the
+		// entry[0] / gain-map writes specifically so a refused patch leaves the JPEG byte buffer in its
+		// pre-call state — a regression that wrote entry[0].size before the refusal check would silently
+		// corrupt the file while still returning false. Sister test patchRejectsMultipleGainMapMpTypeMatches
+		// pins the same invariant on the multi-match branch; this test pins it on the
+		// no-match-with-numImages-not-2 branch.
 		int newPrimarySize = 320;
 		int gainMapSize = 80;
 		long[] attrs = {
@@ -389,11 +373,7 @@ public final class MpfPatcherTest
 		MpfFixture fx = buildMpfFile(newPrimarySize, gainMapSize, attrs);
 		byte[] snapshot = fx.bytes.clone();
 		assertFalse(MpfPatcher.patch(fx.bytes, newPrimarySize));
-		for (int i = 0; i < fx.bytes.length; i++)
-		{
-			assertEquals("byte " + i + " mutated on rejected patch (no-MPType-match branch)",
-				snapshot[i], fx.bytes[i]);
-		}
+		assertArrayEquals("bytes mutated on rejected patch (no-MPType-match branch)", snapshot, fx.bytes);
 	}
 
 	@Test
@@ -418,62 +398,68 @@ public final class MpfPatcherTest
 		MpfFixture fx = buildMpfFile(newPrimarySize, gainMapSize, 2);
 		assertTrue(MpfPatcher.patch(fx.bytes, newPrimarySize));
 		// entry[0] size patched to newPrimarySize.
-		assertEquals(newPrimarySize, readU32Le(fx.bytes, fx.entry0Off + 4));
+		assertEquals(newPrimarySize, ByteBufferUtils.readU32LE(fx.bytes, fx.entry0Off + 4));
 		// entry[1] size = gainMapSize, offset = newPrimarySize - mpfStart.
-		assertEquals(gainMapSize, readU32Le(fx.bytes, fx.entry0Off + 16 + 4));
-		assertEquals(newPrimarySize - fx.mpfStart, readU32Le(fx.bytes, fx.entry0Off + 16 + 8));
+		assertEquals(gainMapSize, ByteBufferUtils.readU32LE(fx.bytes, fx.entry0Off + 16 + 4));
+		assertEquals(newPrimarySize - fx.mpfStart, ByteBufferUtils.readU32LE(fx.bytes, fx.entry0Off + 16 + 8));
 	}
 
 	@Test
 	public void patchThreeArgUsesExplicitGainMapSizeRatherThanBufferLength() throws IOException
 	{
-		// Streaming-pipeline regression. `GainMapComposer.composeFileToFile` calls the 3-arg overload
-		// with the primary's APP-marker HEAD (a few hundred bytes for MPF/XMP) as `jpeg`, while
-		// `primarySize` is the FULL primary size (which can be > head.length on any non-trivial save).
-		// The 2-arg overload would compute `gainMapSize = jpeg.length - primarySize` and write a
-		// negative u32 into the MPF size field. The 3-arg overload takes gainMapSize explicitly so
-		// the patched bytes are byte-identical to what the in-memory `compose` produces.
+		// Streaming-pipeline regression. `GainMapComposer.composeFileToFile` calls the 3-arg overload with the
+		// primary's APP-marker HEAD (a few hundred bytes for MPF/XMP) as `jpeg`, while `primarySize` is the
+		// FULL primary size (which can be > head.length on any non-trivial save). The 2-arg overload would
+		// compute `gainMapSize = jpeg.length - primarySize` and write a negative u32 into the MPF size field.
+		// The 3-arg overload takes gainMapSize explicitly so the patched bytes are byte-identical to what the
+		// in-memory `compose` produces.
 		int primarySize = 1000;      // claimed full primary size (post-XMP-patch + tail concatenation)
 		int gainMapSize = 60;
 		MpfFixture fx = buildMpfFile(primarySize, gainMapSize, 2);
-		// Truncate the bytes to the HEAD ONLY: keep just enough to cover the MPF segment, drop the
-		// scan body and gain-map tail that the in-memory variant would also see. Verifies the patcher
-		// no longer relies on `jpeg.length` past the MPF segment.
+		// Truncate the bytes to the HEAD ONLY: keep just enough to cover the MPF segment, drop the scan body
+		// and gain-map tail that the in-memory variant would also see. Verifies the patcher doesn't rely on
+		// `jpeg.length` past the MPF segment.
 		int headLen = fx.mpfStart + 38 + 2 * 16; // mpfStart + IFD + 2 entries
 		byte[] headOnly = new byte[headLen];
 		System.arraycopy(fx.bytes, 0, headOnly, 0, headLen);
 		assertTrue("3-arg patch should succeed on head-only buffer when gainMapSize given explicitly",
 			MpfPatcher.patch(headOnly, primarySize, gainMapSize));
 		// entry[0] size patched to primarySize.
-		assertEquals(primarySize, readU32Le(headOnly, fx.entry0Off + 4));
-		// entry[1] size = gainMapSize (the explicit arg, NOT jpeg.length - primarySize which would be
-		// negative for headLen < primarySize). Without the 3-arg overload + GainMapComposer's switch
-		// to it, this assertion fails with the negative-as-u32 value ~0xFFFFFx (e.g. 4 294 966 296
-		// when primarySize=1000 and headLen=300, instead of the expected 60).
+		assertEquals(primarySize, ByteBufferUtils.readU32LE(headOnly, fx.entry0Off + 4));
+		// entry[1] size = gainMapSize (the explicit arg, NOT jpeg.length - primarySize which would be negative
+		// for headLen < primarySize). Without the 3-arg overload + GainMapComposer's switch to it, this
+		// assertion fails with the negative-as-u32 value ~0xFFFFFx (e.g. 4 294 966 296 when primarySize=1000
+		// and headLen=300, instead of the expected 60).
 		assertEquals("gain-map entry size must come from the explicit arg, not buffer length",
-			gainMapSize, readU32Le(headOnly, fx.entry0Off + 16 + 4));
+			gainMapSize, ByteBufferUtils.readU32LE(headOnly, fx.entry0Off + 16 + 4));
 		// Offset still derived from primarySize - mpfStart (no buffer-length dependency).
-		assertEquals(primarySize - fx.mpfStart, readU32Le(headOnly, fx.entry0Off + 16 + 8));
+		assertEquals(primarySize - fx.mpfStart, ByteBufferUtils.readU32LE(headOnly, fx.entry0Off + 16 + 8));
 	}
 
 	@Test
 	public void patchTwoArgBackwardCompatStillUsesBufferLengthDerivation() throws IOException
 	{
-		// Backward-compatible 2-arg entry point — the in-memory `compose` and existing test fixtures
-		// pass the full `[primary][gainMap]` buffer, so gainMapSize derived from `jpeg.length -
-		// primarySize` is correct. Pin the contract that the 2-arg overload still derives the size
-		// from the buffer (no behavior change for the byte[] callers).
+		// Backward-compatible 2-arg entry point — the in-memory `compose` and existing test fixtures pass the
+		// full `[primary][gainMap]` buffer, so gainMapSize derived from `jpeg.length -primarySize` is correct.
+		// Pin the contract that the 2-arg overload still derives the size from the buffer (no behavior change
+		// for the byte[] callers).
 		int primarySize = 200;
 		int gainMapSize = 60;
 		MpfFixture fx = buildMpfFile(primarySize, gainMapSize, 2);
 		assertTrue(MpfPatcher.patch(fx.bytes, primarySize));
 		assertEquals("2-arg derives gainMapSize from buffer length", gainMapSize,
-			readU32Le(fx.bytes, fx.entry0Off + 16 + 4));
+			ByteBufferUtils.readU32LE(fx.bytes, fx.entry0Off + 16 + 4));
 	}
 
 	/**
 	 * Convenience overload that gives every entry the same placeholder `attr` value. Used by tests that don't care
 	 * which entry carries the gain-map MPType (the patcher's fall-through to entry[1] handles that case).
+	 *
+	 * @param primarySize total primary-JPEG byte count the fixture pads out to
+	 * @param gainMapSize byte count of the gain-map-shaped block appended after the primary
+	 * @param numImages   MP Entry count; every entry gets attr 0x12345678, which matches no MPType
+	 * @return fixture bytes plus the mpfStart / entry[0] offsets the assertions need
+	 * @throws IOException never from the in-memory streams; declared by the OutputStream write contract
 	 */
 	private static MpfFixture buildMpfFile(int primarySize, int gainMapSize, int numImages)
 		throws IOException
@@ -487,69 +473,35 @@ public final class MpfPatcherTest
 	}
 
 	/**
-	 * Build a JPEG byte array with a plausible MPF segment carrying `attrs.length` entries. Returns the bytes plus
-	 * the offsets the test needs (mpfStart and entry[0] base).
+	 * Build a JPEG byte array with a plausible MPF segment carrying `attrs.length` entries via MpfFixtures'
+	 * canonical layout (FF E2 [segLen:2] "MPF\0" + "II*\0" endian header + 2-entry IFD + MP Entries table at
+	 * relative offset 38).
 	 *
-	 * MPF layout (little-endian for portability with the MPF "II" form):
-	 *   FF E2 [segLen:2] "MPF\0"
-	 *   "II*\0" + IFD offset (= 8, points right after the header)
-	 *   IFD: numEntries=2, entries: { tag=0xB000 version, tag=0xB002 entries }
-	 *   MP Entries: numImages * 16 bytes (attr, size, dataOff, two reserved)
+	 * @param primarySize total primary-JPEG byte count; the fixture zero-pads past the EOI to reach it
+	 * @param gainMapSize byte count of the gain-map-shaped 0x42 block appended after the primary
+	 * @param attrs       one MP Entry attr value per image; plant 0x00010005 to mark the gain-map slot
+	 * @return fixture bytes plus the mpfStart / entry[0] offsets the assertions need
+	 * @throws IOException never from the in-memory streams; declared by the OutputStream write contract
 	 */
 	private static MpfFixture buildMpfFile(int primarySize, int gainMapSize, long[] attrs)
 		throws IOException
 	{
-		int numImages = attrs.length;
-		ByteArrayOutputStream payload = new ByteArrayOutputStream();
-		// MP Endian header (8 bytes from "MPF\0" — the patcher's mpfStart):
-		// "II*\0" + IFD offset 8.
-		payload.write('I');
-		payload.write('I');
-		payload.write('*');
-		payload.write(0);
-		writeU32Le(payload, 8);
-
-		// IFD: 2 entries (Version + MPEntries), then 4-byte next-IFD-offset = 0.
-		writeU16Le(payload, 2);
-
-		// Entry 1: tag 0xB000 Version (4 bytes data inline)
-		writeU16Le(payload, 0xB000);
-		writeU16Le(payload, 7);                  // type UNDEFINED
-		writeU32Le(payload, 4);                  // count
-		payload.write(new byte[]{ '0', '1', '0', '0' });   // value "0100"
-
-		// Entry 2: tag 0xB002 MPEntries (numImages * 16 bytes referenced via offset)
-		writeU16Le(payload, 0xB002);
-		writeU16Le(payload, 7);                  // UNDEFINED
-		writeU32Le(payload, numImages * 16L);    // byte count
-		// dataOffset = relative to mpfStart. Header is 8 bytes; IFD entries follow:
-		// 2-byte count + 12-byte version entry + 12-byte mpentries entry + 4-byte
-		// next-IFD = 8 + 30 = 38 bytes. MP Entries table starts at offset 38.
-		writeU32Le(payload, 38);
-
-		// next-IFD offset = 0
-		writeU32Le(payload, 0);
-
-		// MP Entries table: numImages * 16 bytes (attr, size, dataOff, dependents:2). First entry stub values
-		// are immaterial — the patcher overwrites them. Use recognisable junk for the second entry's pre-patch
-		// bytes so we can verify they got rewritten, and for the third entry use values that should NOT be
-		// touched.
-		for (int i = 0; i < numImages; i++)
+		// First entry stub values are immaterial — the patcher overwrites them. Recognisable junk on the later
+		// entries lets the not-touched assertions verify against the exact pre-patch values.
+		MpfFixtures.MpfEntry[] entries = new MpfFixtures.MpfEntry[attrs.length];
+		for (int i = 0; i < attrs.length; i++)
 		{
-			writeU32Le(payload, attrs[i]);                      // attr (caller-controlled)
-			writeU32Le(payload, i == 0 ? 999 : 50 + i);         // size
-			writeU32Le(payload, i == 0 ? 0 : 9999 + i * 100);   // dataOffset
-			writeU32Le(payload, 0);                             // dependents
+			entries[i] = new MpfFixtures.MpfEntry(attrs[i], i == 0 ? 999 : 50 + i,
+				i == 0 ? 0 : 9999 + i * 100);
 		}
-
-		byte[] mpfPayload = payload.toByteArray();
+		byte[] mpfPayload = MpfFixtures.ultraHdrMpfPayload(entries);
 
 		ByteArrayOutputStream out = new ByteArrayOutputStream();
 		out.write(JpegFixtures.soi());
 
 		// Track the offset where the MPF APP2 segment starts.
 		int mpfApp2Off = out.size();
-		out.write(JpegFixtures.appSegment(0xE2, prefixMpfMagic(mpfPayload)));
+		out.write(JpegFixtures.appSegment(0xE2, MpfFixtures.prefixMpfMagic(mpfPayload)));
 
 		// mpfStart = (FF E2) + (length:2) + (MPF\0) = mpfApp2Off + 4 + 4 = mpfApp2Off + 8.
 		int mpfStart = mpfApp2Off + 8;
@@ -569,43 +521,9 @@ public final class MpfPatcherTest
 
 		byte[] bytes = out.toByteArray();
 
-		// entry[0] base = mpfStart + 38 (the dataOffset value we wrote above).
+		// entry[0] base = mpfStart + 38 (the MP Entries dataOffset MpfFixtures writes).
 		int entry0Off = mpfStart + 38;
 
 		return new MpfFixture(bytes, mpfStart, entry0Off);
 	}
-
-	private static byte[] prefixMpfMagic(byte[] body)
-	{
-		// String literal "MPF\0" through getBytes drops the trailing null, so build the 4-byte signature
-		// explicitly. The function is hardcoded to MPF magic because every caller in this test file builds an
-		// MPF segment.
-		byte[] sig = { 'M', 'P', 'F', 0 };
-		byte[] out = new byte[sig.length + body.length];
-		System.arraycopy(sig, 0, out, 0, sig.length);
-		System.arraycopy(body, 0, out, sig.length, body.length);
-		return out;
-	}
-
-	private static long readU32Le(byte[] bytes, int off)
-	{
-		return ((bytes[off] & 0xFFL)) | ((bytes[off + 1] & 0xFFL) << 8)
-			| ((bytes[off + 2] & 0xFFL) << 16) | ((bytes[off + 3] & 0xFFL) << 24);
-	}
-
-	private static void writeU16Le(ByteArrayOutputStream out, int value)
-	{
-		out.write(value & 0xFF);
-		out.write((value >> 8) & 0xFF);
-	}
-
-	private static void writeU32Le(ByteArrayOutputStream out, long value)
-	{
-		out.write((int) (value & 0xFF));
-		out.write((int) ((value >> 8) & 0xFF));
-		out.write((int) ((value >> 16) & 0xFF));
-		out.write((int) ((value >> 24) & 0xFF));
-	}
-
-	private record MpfFixture(byte[] bytes, int mpfStart, int entry0Off) {}
 }

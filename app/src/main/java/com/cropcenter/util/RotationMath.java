@@ -72,9 +72,9 @@ public final class RotationMath
 	 *   rotatedW = imgW · |cos θ| + imgH · |sin θ|
 	 *   rotatedH = imgW · |sin θ| + imgH · |cos θ|
 	 *
-	 * Used by viewport fit-to-view and by the crop engine to size the screen-aligned center bounds when the
-	 * rotated bitmap extends past [0, imgW] × [0, imgH]. Sub-epsilon rotations collapse to the input dims (the
-	 * |cos θ| → 1, |sin θ| → 0 limits match the unrotated formula), so callers don't pre-filter.
+	 * Used by viewport fit-to-view and by the crop engine to size the screen-aligned center bounds when the rotated
+	 * bitmap extends past [0, imgW] × [0, imgH]. Sub-epsilon rotations collapse to the input dims (the |cos θ| → 1,
+	 * |sin θ| → 0 limits match the unrotated formula), so callers don't pre-filter.
 	 *
 	 * @param imgW            rectangle width in pixels (must be ≥ 0)
 	 * @param imgH            rectangle height in pixels (must be ≥ 0)

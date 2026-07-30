@@ -2,17 +2,12 @@ package com.cropcenter.util;
 
 /**
  * Endian-aware read/write helpers for raw byte arrays. Used throughout the metadata pipeline for JPEG / TIFF / MPF
- * parsing. EXIF / TIFF fields set the endianness in the IFD header; downstream reads dispatch through
- * readU16 / readU32 / writeU16 / writeU32 to avoid branching at every call site. u32 reads return long so the full
- * range fits without sign-bit issues. All methods validate bounds and throw IndexOutOfBoundsException on overflow.
+ * parsing. EXIF / TIFF fields set the endianness in the IFD header; downstream reads dispatch through readU16 / readU32
+ * / writeU16 / writeU32 to avoid branching at every call site. u32 reads return long so the full range fits without
+ * sign-bit issues. All methods validate bounds and throw IndexOutOfBoundsException on overflow.
  */
 public final class ByteBufferUtils
 {
-	// Default buffer size for streaming copies (URI → cache file, cache file → byte[], etc.). 8 KiB is the
-	// conventional InputStream.DEFAULT_BUFFER_SIZE and matches what filesystems and content providers tend to serve
-	// per read.
-	public static final int IO_BUFFER = 8192;
-
 	private ByteBufferUtils() {}
 
 	// ── Endian-dispatched ──
@@ -32,8 +27,8 @@ public final class ByteBufferUtils
 	}
 
 	/**
-	 * Read a 32-bit unsigned integer at offset, dispatching on the IFD-declared byte order. Returns long so
-	 * the full u32 range fits without sign-bit issues.
+	 * Read a 32-bit unsigned integer at offset, dispatching on the IFD-declared byte order. Returns long so the
+	 * full u32 range fits without sign-bit issues.
 	 *
 	 * @param data           byte buffer to read from
 	 * @param offset         start of the 4-byte field

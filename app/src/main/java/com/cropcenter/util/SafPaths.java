@@ -2,8 +2,10 @@ package com.cropcenter.util;
 
 import com.cropcenter.metadata.JpegMarker;
 
+import java.util.Optional;
+
 /**
- * Pure-string helpers for SAF document IDs. Extracted from SafFileHelper so the path-vs-volume-vs-opaque parsing logic
+ * Pure-string helpers for SAF document IDs. Separate from SafFileHelper so the path-vs-volume-vs-opaque parsing logic
  * is testable and reusable without instantiating a Context-bound SafFileHelper. Static, no state.
  *
  * SAF document IDs come in two flavors: path-addressed ("primary:Pictures/foo.jpg" — provider is
@@ -26,9 +28,9 @@ public final class SafPaths
 	 */
 	public static boolean hasImageSignature(byte[] bytes)
 	{
-		// Null-safe entry: callers may pass null when a MediaStore / SAF read returned no bytes
-		// (deleted file, permission denied mid-stream). Returning false routes the caller through
-		// the SAF-stream fallback rather than NPE-crashing the bg save / load thread.
+		// Null-safe entry: callers may pass null when a MediaStore / SAF read returned no bytes (deleted file,
+		// permission denied mid-stream). Returning false routes the caller through the SAF-stream fallback
+		// rather than NPE-crashing the bg save / load thread.
 		if (bytes == null || bytes.length < 4)
 		{
 			return false;
@@ -46,8 +48,8 @@ public final class SafPaths
 	 * `String.contains("..")` which rejected legitimate filenames whose characters happened to include `..` —
 	 * `IMG..edited.jpg` is a single legitimate segment, not a parent-directory escape, so callers like Samsung's
 	 * ExternalStorageProvider relPath were losing the direct-filesystem path and falling back to provider streams
-	 * onto provider streams. Segments around the substring keep their literal text; only an exact `..` between
-	 * `/` boundaries (or as the whole string) trips the guard.
+	 * onto provider streams. Segments around the substring keep their literal text; only an exact `..` between `/`
+	 * boundaries (or as the whole string) trips the guard.
 	 *
 	 * @param relativePath SAF docId tail or relPath to check ("DCIM/Camera/IMG.jpg",
 	 *                     "Pictures/IMG..edited.jpg", "../etc/passwd")
@@ -61,8 +63,7 @@ public final class SafPaths
 		{
 			if (i == len || relativePath.charAt(i) == '/')
 			{
-				if (i - start == 2
-					&& relativePath.charAt(start) == '.'
+				if (i - start == 2 && relativePath.charAt(start) == '.'
 					&& relativePath.charAt(start + 1) == '.')
 				{
 					return true;
@@ -74,13 +75,13 @@ public final class SafPaths
 	}
 
 	/**
-	 * Index just past the separator that ends the parent's segment of a PATH-ADDRESSED SAF document ID. For
-	 * nested files ("primary:Pictures/foo.jpg") this is the position after the last "/", so
-	 * docId.substring(0, end) + child yields the sibling. For root-level files in a path-addressed scheme
-	 * ("primary:foo.jpg") it falls back to the position after the volume ":". Returns -1 for opaque schemes
-	 * (msf: / image: / document: / pure-numeric — see isOpaqueDocId) where the tail after ":" is an unparseable
-	 * handle — sibling URIs can't be built by string substitution, so callers route to the opaque-provider
-	 * fallback (which presents Replace/Keep/Cancel via probe rather than auto-rename).
+	 * Index just past the separator that ends the parent's segment of a PATH-ADDRESSED SAF document ID. For nested
+	 * files ("primary:Pictures/foo.jpg") this is the position after the last "/", so docId.substring(0, end) +
+	 * child yields the sibling. For root-level files in a path-addressed scheme ("primary:foo.jpg") it falls back
+	 * to the position after the volume ":". Returns -1 for opaque schemes (msf: / image: / document: / qb: /
+	 * pure-numeric — see isOpaqueDocId) where the tail after ":" is an unparseable handle — sibling URIs can't be
+	 * built by string substitution, so callers route to the opaque-provider fallback (which presents
+	 * Replace/Keep/Cancel via probe rather than auto-rename).
 	 *
 	 * @param docId document ID to parse
 	 * @return index just past the separator, or -1 for opaque schemes / docIds without a parent separator
@@ -105,61 +106,63 @@ public final class SafPaths
 	}
 
 	/**
-	 * Parent document ID of a PATH-ADDRESSED SAF document ID, or null when the ID is opaque. Strips the
-	 * trailing "/segment" for nested paths; for root-level files in a path-addressed scheme the parent is
-	 * the volume prefix including the ":" ("primary:foo.jpg" → "primary:"), which ExternalStorageProvider
-	 * accepts as the root document. Returns null for opaque schemes (msf:, image:, document:, numeric) because a
-	 * "parent" of an opaque handle is meaningless — there is no sibling-creation flow on those providers
-	 * (callers handle collisions via the in-place fallback instead).
+	 * Parent document ID of a PATH-ADDRESSED SAF document ID, or empty when the ID is opaque. Strips the trailing
+	 * "/segment" for nested paths; for root-level files in a path-addressed scheme the parent is the volume prefix
+	 * including the ":" ("primary:foo.jpg" → "primary:"), which ExternalStorageProvider accepts as the root
+	 * document. Returns empty for opaque schemes (msf:, image:, document:, qb:, numeric) because a "parent" of an
+	 * opaque handle is meaningless — there is no sibling-creation flow on those providers (callers handle
+	 * collisions via the in-place fallback instead).
 	 *
 	 * @param docId document ID to parse
-	 * @return parent document ID, or null when no parent is derivable
+	 * @return parent document ID, or empty when no parent is derivable
 	 */
-	public static String parentDocIdOf(String docId)
+	public static Optional<String> parentDocIdOf(String docId)
 	{
 		if (isOpaqueDocId(docId))
 		{
-			return null;
+			return Optional.empty();
 		}
 		int slash = docId.lastIndexOf('/');
 		if (slash > 0)
 		{
-			return docId.substring(0, slash);
+			return Optional.of(docId.substring(0, slash));
 		}
 		int colon = docId.indexOf(':');
 		if (colon >= 0)
 		{
-			return docId.substring(0, colon + 1);
+			return Optional.of(docId.substring(0, colon + 1));
 		}
-		return null;
+		return Optional.empty();
 	}
 
 	/**
-	 * Recognise opaque document-ID schemes whose tail after ":" is an unparseable handle, not a path
-	 * segment. Three known opaque scheme prefixes: "msf:" (DownloadStorageProvider MediaStore-Files numeric
-	 * ID), "image:" (media.documents provider MediaStore-Images numeric ID), and "document:" (recent
-	 * Samsung Files behaviour — the provider returns "document:12345" with the numeric MediaStore handle
-	 * as the tail). A pure-numeric docId (no colon, all digits) is the legacy form of the same MediaStore
-	 * reference.
+	 * Recognise opaque document-ID schemes whose tail after ":" is an unparseable handle, not a path segment. Four
+	 * known opaque scheme prefixes: "msf:" (DownloadStorageProvider MediaStore-Files numeric ID), "image:"
+	 * (media.documents provider MediaStore-Images numeric ID), "document:" (recent Samsung Files behaviour —
+	 * the provider returns "document:12345" with the numeric MediaStore handle as the tail), and "qb:" (Samsung's
+	 * modified DownloadStorageProvider — a vendor-specific numeric handle, resolvable to a filesystem path only via
+	 * SafFileHelper's proc-fd fallback). A pure-numeric docId (no colon, all digits) is the legacy form of the same
+	 * MediaStore reference.
 	 *
-	 * The distinction matters for sibling-URI derivation: a path-addressed docId ("primary:foo.jpg")
-	 * lets `deriveSiblingUri` build `primary:bar.jpg` as a sibling, but `msf:12345` swapped to
-	 * `msf:bar.jpg` is a bogus URI pointing at no document. Without this check, SaveController's Case-B
-	 * collision flow on Downloads / Samsung Files providers can synthesize bogus sibling URIs and silently
-	 * auto-rename instead of surfacing the Replace/Keep/Cancel dialog.
+	 * The distinction matters for sibling-URI derivation: a path-addressed docId ("primary:foo.jpg") lets
+	 * `deriveSiblingUri` build `primary:bar.jpg` as a sibling, but `msf:12345` swapped to `msf:bar.jpg` is a bogus
+	 * URI pointing at no document. Without this check, SaveController's Case-B collision flow on Downloads /
+	 * Samsung Files providers can synthesize bogus sibling URIs and silently auto-rename instead of surfacing the
+	 * Replace/Keep/Cancel dialog.
 	 *
 	 * @param docId document ID to classify
 	 * @return true when docId is one of the recognised opaque schemes
 	 */
 	private static boolean isOpaqueDocId(String docId)
 	{
-		if (docId.startsWith("msf:") || docId.startsWith("image:") || docId.startsWith("document:"))
+		if (docId.startsWith("msf:") || docId.startsWith("image:") || docId.startsWith("document:")
+			|| docId.startsWith("qb:"))
 		{
 			return true;
 		}
-		// Pure-numeric (no colon, all digits) — legacy MediaStore numeric ID. Empty string isn't
-		// numeric in the meaningful sense; fall through to the existing path-addressed parse which
-		// returns -1 / null on it anyway.
+		// Pure-numeric (no colon, all digits) — legacy MediaStore numeric ID. Empty string isn't numeric in the
+		// meaningful sense; fall through to the existing path-addressed parse which returns -1 / null on it
+		// anyway.
 		if (docId.isEmpty() || docId.indexOf(':') >= 0)
 		{
 			return false;

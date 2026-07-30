@@ -9,21 +9,20 @@ import java.io.File;
 import java.util.function.Consumer;
 
 /**
- * In-app image picker — replaces the system SAF ACTION_OPEN_DOCUMENT picker for the Open flow on
- * devices where Samsung One UI's DocumentsUI doesn't persist user sort preferences across launches.
- * Delegates the actual filesystem-browser UI (title block + breadcrumb + thumbnail grid/list +
- * folder navigation + thumbnail decode) to FolderBrowser; this file owns just the AlertDialog
- * frame, the file-tap → dismiss-and-callback lifecycle, and the OnDismissListener composition.
+ * In-app image picker — replaces the system SAF ACTION_OPEN_DOCUMENT picker for the Open flow on devices where Samsung
+ * One UI's DocumentsUI doesn't persist user sort preferences across launches. Delegates the actual filesystem-browser
+ * UI (title block + breadcrumb + thumbnail grid/list + folder navigation + thumbnail decode) to FolderBrowser; this
+ * file owns just the AlertDialog frame, the file-tap → dismiss-and-callback lifecycle, and the OnDismissListener
+ * composition.
  *
- * The FolderBrowser is constructed with a non-null onFileTapped callback (this::onFilePicked), so
- * file rows / grid cells are tap-to-select with ripple feedback. The card height is governed by the
- * shared `FolderBrowser.CARD_RESERVED_DP`, so the Open / Graft / Save dialogs all open at the same
- * maximum size. The Open dialog simply has no options / filename row, so its card devotes that space
- * to the file list instead.
+ * The FolderBrowser is constructed with a non-null onFileTapped callback (this::onFilePicked), so file rows / grid
+ * cells are tap-to-select with ripple feedback. The card height is governed by the shared
+ * `FolderBrowser.CARD_RESERVED_DP`, so the Open / Graft / Save dialogs all open at the same maximum size. The Open
+ * dialog simply has no options / filename row, so its card devotes that space to the file list instead.
  *
- * Transient-dialog tracking uses host.setActiveTransientDialog (not registerTransientDialog) plus
- * a hostDismissCallback because the dialog installs its own composite OnDismissListener for
- * FolderBrowser.shutdown — same shape as FolderPickerDialog.
+ * Transient-dialog tracking uses host.setActiveTransientDialog (not registerTransientDialog) plus a hostDismissCallback
+ * because the dialog installs its own composite OnDismissListener for FolderBrowser.shutdown — same shape as
+ * FolderPickerDialog.
  */
 public final class OpenPickerDialog
 {
@@ -31,8 +30,8 @@ public final class OpenPickerDialog
 
 	private final Consumer<File> onPicked;
 	private final Context ctx;
-	// Use the Android-native DialogInterface.OnDismissListener (instead of Consumer<DialogInterface>)
-	// so the type matches SettingsDialog / FolderPickerDialog's equivalent callback shape.
+	// Use the Android-native DialogInterface.OnDismissListener (instead of Consumer<DialogInterface>) so the type
+	// matches SettingsDialog / FolderPickerDialog's equivalent callback shape.
 	private final DialogInterface.OnDismissListener hostDismissCallback;
 	private final FolderBrowser browser;
 	private AlertDialog dialog;
@@ -62,32 +61,29 @@ public final class OpenPickerDialog
 	}
 
 	/**
-	 * Build and show the in-app Open picker. Returns the AlertDialog so the caller can pass it to
-	 * the host's setActiveTransientDialog (NOT registerTransientDialog — the latter would
-	 * overwrite the composite OnDismissListener installed here).
+	 * Build and show the in-app Open picker. Returns the AlertDialog so the caller can pass it to the host's
+	 * setActiveTransientDialog (NOT registerTransientDialog — the latter would overwrite the composite
+	 * OnDismissListener installed here).
 	 *
 	 * @return the dialog after .show() has been called
 	 */
 	public AlertDialog show()
 	{
-		// No positive button — selection happens on file tap (forwarded by FolderBrowser into
-		// onFilePicked via the constructor's onFileTapped callback). Cancel is the only explicit
-		// button; back-press and external dismiss also route through the OnDismissListener that
-		// FolderBrowser.attachToDialog installs below.
+		// No positive button — selection happens on file tap (forwarded by FolderBrowser into onFilePicked via
+		// the constructor's onFileTapped callback). Cancel is the only explicit button; back-press and external
+		// dismiss also route through the OnDismissListener that FolderBrowser.attachToDialog installs below.
 		dialog = new AlertDialog.Builder(ctx)
 			.setView(browser.wrapInDialogMargins(browser.buildPanel()))
 			.setNegativeButton(DialogStrings.CANCEL, null)
 			.create();
-		browser.attachToDialog(dialog, () -> decided, () -> onPicked.accept(null),
-			hostDismissCallback);
+		browser.attachToDialog(dialog, () -> decided, () -> onPicked.accept(null), hostDismissCallback);
 		return dialog;
 	}
 
 	/**
-	 * Commit the user's file selection. Sets `decided` BEFORE calling onPicked so the
-	 * OnDismissListener doesn't double-fire onPicked(null) on the subsequent dismiss(). Errors
-	 * from the callback are caught + logged so a misbehaving consumer can't strand the dialog
-	 * half-dismissed.
+	 * Commit the user's file selection. Sets `decided` BEFORE calling onPicked so the OnDismissListener doesn't
+	 * double-fire onPicked(null) on the subsequent dismiss(). Errors from the callback are caught + logged so a
+	 * misbehaving consumer can't strand the dialog half-dismissed.
 	 *
 	 * @param file file the user tapped — never null (FolderBrowser only forwards non-null files)
 	 */

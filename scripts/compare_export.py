@@ -1,14 +1,14 @@
 """
-Compare an original JPEG against the cropped output to spot regressions in the
-export pipeline. Pure-Python — no exiftool, no PIL — uses struct + raw JPEG
-marker walking, in the same style as verify_pipeline.py.
+Compare an original JPEG against the cropped output to spot regressions in the export pipeline. Pure-Python — no
+exiftool, no PIL — uses struct + raw JPEG marker walking, in the same style as verify_pipeline.py.
 
 Usage:
     py scripts/compare_export.py original.jpg cropped.jpg
 
 Exit codes:
     0  No suspicious differences detected
-    1  Suspicious differences (potential regression)
+    1  Suspicious differences (potential regression) — every row printed with '!!' counts toward this
+       verdict; rows meant as informational always print OK
     2  Bad input (missing file, not a JPEG, etc.)
 
 Compared categories:
@@ -17,11 +17,13 @@ Compared categories:
     - Image dimensions (cropped strictly <= original on each axis)
     - JPEG quality estimate (from luma DQT[0][0] via IJG formula)
     - Chroma subsampling (4:4:4 / 4:2:2 / 4:2:0 from SOF0 sampling factors)
-    - EXIF orientation (cropped should be 1 or 0; 2-8 means un-baked rotation)
+    - EXIF orientation (cropped must be exactly 1 when the original carried an Orientation entry — CropExporter
+      normalizes every export to 1, so 0/absent fail too; without one on the original, absent passes but any
+      written value other than 1 fails — 0 is never a valid EXIF orientation)
     - EXIF tag presence (Make/Model/Lens/DateTime/MakerNote/Software)
     - EXIF GPS block preservation
     - EXIF IFD1 thumbnail (present + valid SOI/EOI in cropped)
-    - ICC profile (presence, first-N-bytes match, data color space, PCS, version)
+    - ICC profile (chunk numbering, presence, length + full-byte match, data color space, PCS, version)
     - XMP hdrgm namespace + Version attribute (Ultra HDR spec compliance)
     - MPF (Multi-Picture Format) secondary-image count
     - Secondary JPEG (gain map) validation: SOI/EOI, dimensions vs primary
@@ -31,6 +33,9 @@ Compared categories:
 
 import struct
 import sys
+
+import jpeg_lib
+import seft_lib
 
 
 # ── Low-level helpers ────────────────────────────────────────────────────────
@@ -54,66 +59,25 @@ def r32(d, o, le):
 # ── JPEG segment walker ──────────────────────────────────────────────────────
 
 def find_seft_end(data):
-    """If data ends with the SEFT trailer, return the offset of the byte AFTER
-    the last FF D9 before the SEFT footer. For files with a gain map between
-    the primary and SEFT, this is the SECONDARY JPEG's EOI, not the primary's —
-    which is what we want for APP-segment walking (stays within the outer
-    boundary) but NOT what we want for gain-map discovery (use
-    find_primary_eoi for that)."""
-    if data[-4:] != b'SEFT':
+    """If data ends with the SEFT trailer, return the offset of the byte AFTER the last FF D9 before the trailer start
+    (SEFH-directory-aware via seft_lib — SEF data blocks can embed whole JPEGs, so a raw backward FFD9 scan from the
+    footer could land inside the trailer). Returns None when the SEFT footer is present but the SEFH directory doesn't
+    parse — the trailer start is unresolvable, and callers must fail closed (bound header walks at the primary EOI and
+    skip gain-map scans) rather than scan unlocatable SEF data blocks. For files with a gain map between the primary and
+    SEFT, this is the SECONDARY JPEG's EOI, not the primary's — which is what we want for APP-segment walking (stays
+    within the outer boundary) but NOT what we want for gain-map discovery (use jpeg_lib.find_primary_eoi for that)."""
+    end = seft_lib.content_end(data)
+    if end is None:
+        return None
+    if end == len(data):
         return len(data)
-    for i in range(len(data) - 5, 1, -1):
-        if data[i] == 0xFF and data[i + 1] == 0xD9:
-            return i + 2
-    return len(data)
-
-
-def find_primary_eoi(data):
-    """Forward-walk the JPEG structure to find the primary's EOI (first FF D9
-    reached after parsing through SOS + entropy data). Returns the offset of
-    the byte immediately after the FF D9, or None if no EOI reached.
-    Entropy data uses FF 00 byte-stuffing and may contain RST markers
-    (FF D0-D7) between restart intervals; any other FF xx ends the scan."""
-    off = 2
-    n = len(data)
-    while off < n - 1:
-        if data[off] != 0xFF:
-            off += 1
-            continue
-        m = data[off + 1]
-        if m == 0xD9:  # EOI of primary
-            return off + 2
-        if m == 0xDA:  # SOS — entropy data follows
-            if off + 4 > n:
-                return None
-            seg_len = r16be(data, off + 2)
-            if seg_len < 2:
-                return None
-            off += 2 + seg_len
-            while off < n - 1:
-                if data[off] == 0xFF:
-                    nxt = data[off + 1]
-                    if nxt == 0x00 or (0xD0 <= nxt <= 0xD7):
-                        off += 2  # stuffed FF or restart marker — keep scanning
-                        continue
-                    break  # real marker — exit entropy data
-                off += 1
-            continue
-        if m == 0x00 or m == 0x01 or 0xD0 <= m <= 0xD7 or m == 0xFF:
-            off += 2
-            continue
-        if off + 4 > n:
-            return None
-        seg_len = r16be(data, off + 2)
-        if seg_len < 2:
-            return None
-        off += 2 + seg_len
-    return None
+    eoi = seft_lib.find_last_eoi(data, 0, end)
+    return eoi if eoi > 0 else end
 
 
 def walk_segments(data, end):
-    """Yield (marker, payload_start, payload_end) for each APP/COM segment in
-    the primary JPEG up to `end` (or its own EOI / SOS)."""
+    """Yield (marker, payload_start, payload_end) for each APP/COM segment in the primary JPEG up to `end` (or its own
+    EOI / SOS)."""
     if data[0] != 0xFF or data[1] != 0xD8:
         return
     off = 2
@@ -146,10 +110,9 @@ def scan_apps(data, end):
 
 
 def find_marker_segment(data, start, end, target_markers):
-    """Scan from `start` to `end` for any marker in `target_markers`. Returns
-    (marker, segment_start_offset, seg_len) or (None, None, None). Segment
-    start offset points to the FF byte; seg_len is the segment's length
-    field (excluding the 2-byte marker, including the 2-byte length prefix)."""
+    """Scan from `start` to `end` for any marker in `target_markers`. Returns (marker, segment_start_offset, seg_len) or
+    (None, None, None). Segment start offset points to the FF byte; seg_len is the segment's length field (excluding the
+    2-byte marker, including the 2-byte length prefix)."""
     off = start
     while off < end - 3:
         if data[off] != 0xFF:
@@ -205,25 +168,16 @@ def _typ_size(t):
 
 
 def _read_ifd(tiff, off, le, out):
-    """Return (entries_dict, next_ifd_offset). Only fills entries for tags in
-    EXIF_TAG_NAMES (into `out`); returns (out, next_ifd_off) where next_ifd_off
-    is the raw pointer stored after the IFD's entry list."""
-    if off + 2 > len(tiff):
-        return out, 0
-    n = r16(tiff, off, le)
-    for i in range(n):
-        e = off + 2 + i * 12
-        if e + 12 > len(tiff):
-            break
-        tag = r16(tiff, e, le)
-        typ = r16(tiff, e + 2, le)
-        cnt = r32(tiff, e + 4, le)
-        val_or_off = r32(tiff, e + 8, le)
+    """Return (entries_dict, next_ifd_offset). Only fills entries for tags in EXIF_TAG_NAMES (into `out`); returns (out,
+    next_ifd_off) where next_ifd_off is the raw pointer stored after the IFD's entry list. Routed through jpeg_lib's
+    shared IFD walk — inline SHORTs read endian-correctly via read_short_value (a 0xFFFF mask on the u32 value field
+    reads 0 on big-endian files)."""
+    for e, tag, typ, cnt, val_or_off in jpeg_lib.walk_ifd_entries(tiff, off, le):
         name = EXIF_TAG_NAMES.get(tag)
         if not name:
             continue
         if typ == 3 and cnt == 1:
-            out[name] = val_or_off & 0xFFFF
+            out[name] = jpeg_lib.read_short_value(tiff, e, le)
         elif typ == 4 and cnt == 1:
             out[name] = val_or_off
         else:
@@ -233,18 +187,13 @@ def _read_ifd(tiff, off, le, out):
                 out[name] = tiff[data_off:data_off + sz]
             else:
                 out[name] = b'<present>'
-    next_ifd_off = 0
-    tail = off + 2 + n * 12
-    if tail + 4 <= len(tiff):
-        next_ifd_off = r32(tiff, tail, le)
-    return out, next_ifd_off
+    return out, jpeg_lib.next_ifd_offset(tiff, off, le)
 
 
 def parse_exif(payload):
-    """Return (entries_dict, ifd1_dict_or_None, tiff_bytes, little_endian_bool).
-    entries_dict aggregates IFD0 + ExifIFD + GPSIFD (for tag-name overlap fine);
-    ifd1 is a separate dict (thumbnail IFD). Returns (None, None, None, None)
-    when the payload isn't EXIF."""
+    """Return (entries_dict, ifd1_dict_or_None, tiff_bytes, little_endian_bool). entries_dict aggregates IFD0 + ExifIFD
+    + GPSIFD (for tag-name overlap fine); ifd1 is a separate dict (thumbnail IFD). Returns (None, None, None, None) when
+    the payload isn't EXIF."""
     if not payload.startswith(EXIF_HEADER):
         return None, None, None, None
     tiff = payload[len(EXIF_HEADER):]
@@ -308,10 +257,8 @@ def get_dimensions(data, end):
 
 
 def chroma_subsampling(data, end):
-    """Parse SOF0..15 component sampling factors. YCbCr Y H×V sampling tells
-    us 4:4:4 (1×1) / 4:2:2 (2×1) / 4:2:0 (2×2) / 4:1:1 (4×1). Returns the
-    shorthand string or None when we can't determine (non-YCbCr, monochrome,
-    etc.)."""
+    """Parse SOF0..15 component sampling factors. YCbCr Y H×V sampling tells us 4:4:4 (1×1) / 4:2:2 (2×1) / 4:2:0 (2×2)
+    / 4:1:1 (4×1). Returns the shorthand string or None when we can't determine (non-YCbCr, monochrome, etc.)."""
     off = 2
     while off < end - 9:
         if data[off] != 0xFF:
@@ -325,8 +272,7 @@ def chroma_subsampling(data, end):
             nf = data[off + 9]  # number of components
             if nf != 3 or off + 10 + nf * 3 > end:
                 return None
-            # Component 1 (Y): H in high nibble, V in low nibble of the
-            # sampling-factors byte.
+            # Component 1 (Y): H in high nibble, V in low nibble of the sampling-factors byte.
             samp_y = data[off + 11]
             h_y, v_y = samp_y >> 4, samp_y & 0x0F
             return {
@@ -356,10 +302,9 @@ IJG_REF_LUMA_DC = 16
 
 
 def jpeg_quality_estimate(data, end):
-    """Approximate the JPEG quality setting from the luminance DQT's first
-    coefficient, using the IJG formula's inverse. Returns an integer 1-100,
-    or None if no DQT found. Works on the first DQT encountered; subsequent
-    tables may differ in the rare multi-table case."""
+    """Approximate the JPEG quality setting from the luminance DQT's first coefficient, using the IJG formula's inverse.
+    Returns an integer 1-100, or None if no DQT found. Works on the first DQT encountered; subsequent tables may differ
+    in the rare multi-table case."""
     off = 2
     while off < end - 4:
         if data[off] != 0xFF:
@@ -368,8 +313,8 @@ def jpeg_quality_estimate(data, end):
         m = data[off + 1]
         if m == 0xDB:  # DQT
             seg_len = r16be(data, off + 2)
-            # Precision/table-id byte at off+4. Luma table has id 0; precision
-            # high nibble: 0 = 8-bit, 1 = 16-bit. We want the 8-bit luma table.
+            # Precision/table-id byte at off+4. Luma table has id 0; precision high nibble: 0 = 8-bit, 1 = 16-bit. We
+            # want the 8-bit luma table.
             pt = data[off + 4]
             if (pt >> 4) == 0 and (pt & 0x0F) == 0 and off + 5 + 64 <= end:
                 dc = data[off + 5]
@@ -412,8 +357,8 @@ def has_xmp_hdrgm(apps):
 
 
 def xmp_hdrgm_version(apps):
-    """Extract the hdrgm:Version attribute value from XMP. Ultra HDR spec
-    requires Version="1.0". Returns the version string or None."""
+    """Extract the hdrgm:Version attribute value from XMP. Ultra HDR spec requires Version="1.0". Returns the version
+    string or None."""
     for payload in apps.get(0xE1, []):
         if not payload.startswith(b'http://ns.adobe.com/xap/1.0/\x00'):
             continue
@@ -431,19 +376,47 @@ def xmp_hdrgm_version(apps):
 
 
 def icc_profile_bytes(apps):
-    """ICC_PROFILE\\0 in APP2; segments are numbered (idx, total) per spec.
-    Return concatenated payload (sans header) or None."""
-    parts = []
+    """ICC_PROFILE\\0 in APP2; chunks are numbered (seq 1..total, total) at payload[12:14] per spec. Reassemble the
+    profile in seq order regardless of physical segment order. Returns (profile_bytes_or_None, error_or_None): error
+    names truncated chunk headers, seq/total bytes outside the spec's 1 <= seq <= total <= 255 range, inconsistent
+    chunk-count bytes, and duplicate / missing seq numbers. Profile bytes are still returned best-effort alongside an
+    error so the header rows can print; the caller must flag the error as a failing row (every '!!' counts toward the
+    exit-1 verdict)."""
+    chunks = []
+    errors = []
     for payload in apps.get(0xE2, []):
-        if payload.startswith(b'ICC_PROFILE\x00'):
-            parts.append(payload[14:])
-    return b''.join(parts) if parts else None
+        if not payload.startswith(b'ICC_PROFILE\x00'):
+            continue
+        if len(payload) < 14:
+            errors.append('truncated chunk header')
+            continue
+        chunks.append((payload[12], payload[13], payload[14:]))
+    if not chunks:
+        return None, ('; '.join(errors) if errors else None)
+    # Spec range gate before any reassembly math: 1 <= seq <= total (<= 255 holds inherently for single bytes), because
+    # a zero seq or total would otherwise slip through — seq 1 / total 0 makes the missing-seq range empty,
+    # green-lighting a chunk set the spec forbids.
+    out_of_range = sorted({(seq, total) for seq, total, _ in chunks if not 1 <= seq <= total})
+    if out_of_range:
+        errors.append(f'chunk seq/total outside 1 <= seq <= total {out_of_range}')
+    totals = sorted({total for _, total, _ in chunks})
+    if len(totals) != 1:
+        errors.append(f'inconsistent chunk counts {totals}')
+    seqs = sorted(seq for seq, _, _ in chunks)
+    dupes = sorted({s for s in seqs if seqs.count(s) > 1})
+    if dupes:
+        errors.append(f'duplicate chunk seq {dupes}')
+    missing = sorted(set(range(1, totals[-1] + 1)) - set(seqs))
+    if missing:
+        errors.append(f'missing chunk seq {missing}')
+    chunks.sort(key=lambda chunk: chunk[0])
+    profile = b''.join(body for _, _, body in chunks)
+    return profile, ('; '.join(errors) if errors else None)
 
 
 def parse_icc_header(icc):
-    """Parse the 128-byte ICC header. Returns a dict with size, version,
-    data_color_space, pcs, description (best-effort from 'desc' tag).
-    Returns None when the payload is too short."""
+    """Parse the 128-byte ICC header. Returns a dict with size, version, data_color_space, pcs, description (best-effort
+    from 'desc' tag). Returns None when the payload is too short."""
     if not icc or len(icc) < 128:
         return None
     major = icc[8]
@@ -462,9 +435,8 @@ def parse_icc_header(icc):
 
 
 def _icc_description(icc):
-    """Walk the ICC tag table for 'desc' and decode its string. ICCv2 uses the
-    'desc' type (length-prefixed ASCII); ICCv4 uses 'mluc' (multi-localized
-    UTF-16BE). Best-effort: returns a short ASCII description or None."""
+    """Walk the ICC tag table for 'desc' and decode its string. ICCv2 uses the 'desc' type (length-prefixed ASCII);
+    ICCv4 uses 'mluc' (multi-localized UTF-16BE). Best-effort: returns a short ASCII description or None."""
     if len(icc) < 132:
         return None
     try:
@@ -524,22 +496,24 @@ def mpf_secondary_count(apps):
     return 0
 
 
-def find_secondary_jpeg(data, _unused_end):
-    """Scan from just after the primary's EOI for the start of a secondary
-    JPEG (an FFD8 SOI marker). Returns (soi_offset, eoi_offset_inclusive,
-    width, height) or None. Used to validate the gain map embedded via MPF.
-    The caller's `primary_end` argument is ignored — it historically pointed
-    past the SECONDARY EOI on Ultra HDR files, which is past where the gain
-    map lives. We compute the right boundary (primary EOI) here."""
-    primary_eoi = find_primary_eoi(data)
-    if primary_eoi is None:
+def find_secondary_jpeg(data):
+    """Scan from just after the primary's EOI for the start of a secondary JPEG (an FFD8 SOI marker). Returns
+    (soi_offset, eoi_offset_inclusive, width, height) or None. Used to validate the gain map embedded via MPF. Computes
+    its own scan start (the primary EOI via jpeg_lib.find_primary_eoi) — the gain map begins there, so no caller needs
+    to supply a boundary."""
+    primary_eoi = jpeg_lib.find_primary_eoi(data)
+    if primary_eoi < 0:
         return None
     off = primary_eoi
-    limit = len(data) - 4
-    # SEFT trailer (if any) sits between primary EOI and trailer footer —
-    # the gain map, when present, is BEFORE the SEFT bytes but after primary.
-    if data[-4:] == b'SEFT':
-        limit = len(data) - 4
+    # Bound the scan at the SEFT trailer start (SEFH directory walk via seft_lib) — SEF data blocks can lead with FF D8
+    # (embedded JPEGs), which a scan bounded only by the 8-byte footer would misdetect as the gain map. A None content
+    # end means the footer is present but the SEFH directory doesn't parse: the gain-map region can't be bounded, so
+    # fail closed and report no secondary instead of scanning SEF data blocks as gain-map candidates. The len-4 cap
+    # keeps the data[off + 1] reads below in bounds on trailer-less files.
+    end = seft_lib.content_end(data)
+    if end is None:
+        return None
+    limit = min(end, len(data) - 4)
     while off < limit:
         if data[off] == 0xFF and data[off + 1] == 0xD8:
             # Found SOI candidate. Walk to EOI.
@@ -560,8 +534,7 @@ def find_secondary_jpeg(data, _unused_end):
                 if m == 0xDA:  # SOS: walk entropy data to next FFxx
                     seg_len = r16be(data, end + 2)
                     end += 2 + seg_len
-                    # Skip entropy data — look for next FFxx with xx != 0 and
-                    # not in RSTn range.
+                    # Skip entropy data — look for next FFxx with xx != 0 and not in RSTn range.
                     while end < limit - 1:
                         if data[end] == 0xFF and data[end + 1] not in (
                                 0x00, 0xFF) and not (0xD0 <= data[end + 1] <= 0xD7):
@@ -612,9 +585,12 @@ def has_seft(data):
 
 
 def seft_size(data):
+    """Trailer span in bytes: 0 when no SEFT footer, None when the footer is present but the SEFH directory doesn't
+    parse (trailer start unresolvable — fail closed rather than guessing a span)."""
     if not has_seft(data):
         return 0
-    return len(data) - find_seft_end(data)
+    end = find_seft_end(data)
+    return None if end is None else len(data) - end
 
 
 def has_gps(entries):
@@ -622,8 +598,8 @@ def has_gps(entries):
 
 
 def _peek_orientation(apps):
-    """Pull the EXIF Orientation tag without invoking the full parse_exif
-    machinery. Returns 1 (default) when absent or unreadable."""
+    """Pull the EXIF Orientation tag without invoking the full parse_exif machinery. Returns 1 (default) when absent or
+    unreadable."""
     for payload in apps.get(0xE1, []):
         entries, _, _, _ = parse_exif(payload)
         if entries and 'Orientation' in entries:
@@ -635,9 +611,8 @@ def _peek_orientation(apps):
 
 
 def _display_dims(stored, orientation):
-    """Return (W, H) as the user sees them, swapping for orientations that
-    rotate 90°/270° (5/6/7/8). Returns input unchanged for missing dims or
-    orientations 1/2/3/4 (which only flip/rotate-180, preserving aspect)."""
+    """Return (W, H) as the user sees them, swapping for orientations that rotate 90°/270° (5/6/7/8). Returns input
+    unchanged for missing dims or orientations 1/2/3/4 (which only flip/rotate-180, preserving aspect)."""
     if not stored:
         return stored
     w, h = stored
@@ -648,11 +623,20 @@ def _display_dims(stored, orientation):
 
 # ── Comparison ───────────────────────────────────────────────────────────────
 
+class BadInput(Exception):
+    """Unusable input file (missing / unreadable / not a JPEG). main() maps this to the documented exit code 2 —
+    distinct from exit 1, which means the comparison RAN and flagged suspicious differences."""
+
+
 def load(path):
-    with open(path, 'rb') as f:
-        data = f.read()
+    """Read a JPEG's bytes. Raises BadInput when the file can't be read or doesn't start with an SOI marker."""
+    try:
+        with open(path, 'rb') as f:
+            data = f.read()
+    except OSError as e:
+        raise BadInput(f'Cannot read {path}: {e}')
     if data[:2] != b'\xff\xd8':
-        sys.exit(f'Not a JPEG: {path}')
+        raise BadInput(f'Not a JPEG: {path}')
     return data
 
 
@@ -667,7 +651,17 @@ def fmt(v):
     return str(v)
 
 
+# Failing-row tally for the current comparison. diff_row increments it for every ok=False row so the '!!' marks and the
+# exit-1 verdict can never disagree; a row meant as informational must pass ok=True (see the Software row). main()
+# resets it per run.
+suspicious_rows = 0
+
+
 def diff_row(label, a, b, ok):
+    """Print one comparison row; an ok=False row prints '!!' and counts toward the exit-1 verdict."""
+    global suspicious_rows
+    if not ok:
+        suspicious_rows += 1
     mark = 'OK ' if ok else '!! '
     a_s = fmt(a) if a is not None else '<absent>'
     b_s = fmt(b) if b is not None else '<absent>'
@@ -675,31 +669,46 @@ def diff_row(label, a, b, ok):
 
 
 def main(argv):
+    global suspicious_rows
     if len(argv) != 3:
         print(__doc__)
         return 2
     orig_path, crop_path = argv[1], argv[2]
-    orig = load(orig_path)
-    crop = load(crop_path)
+    try:
+        orig = load(orig_path)
+        crop = load(crop_path)
+    except BadInput as e:
+        print(f'ERROR: {e}', file=sys.stderr)
+        return 2
 
     print(f'Original: {orig_path}  ({len(orig):,} bytes)')
     print(f'Cropped:  {crop_path}  ({len(crop):,} bytes)')
     print()
 
-    suspicious = 0
+    suspicious_rows = 0
     o_end = find_seft_end(orig)
     c_end = find_seft_end(crop)
+    # A None end means the SEFT footer is present but the SEFH directory doesn't parse — the trailer start is
+    # unresolvable. Fail closed: bound the header walks at the primary EOI (every APP segment precedes SOS, so nothing
+    # is lost) and let find_secondary_jpeg skip its scan; the SEFT size row below flags the malformed trailer toward the
+    # verdict.
+    if o_end is None:
+        print('NOTE: original: SEF trailer unparseable — gain-map scan skipped')
+        o_pe = jpeg_lib.find_primary_eoi(orig)
+        o_end = o_pe if o_pe > 0 else len(orig)
+    if c_end is None:
+        print('NOTE: cropped: SEF trailer unparseable — gain-map scan skipped')
+        c_pe = jpeg_lib.find_primary_eoi(crop)
+        c_end = c_pe if c_pe > 0 else len(crop)
     odim_raw = get_dimensions(orig, o_end)
     cdim_raw = get_dimensions(crop, c_end)
     o_apps = scan_apps(orig, o_end)
     c_apps = scan_apps(crop, c_end)
 
-    # Account for EXIF orientation flips. When the original carries Orientation
-    # 5/6/7/8, viewers see it rotated 90°/270° — CropCenter bakes that rotation
-    # into the cropped pixels and emits Orientation=1. Comparing raw stored
-    # dimensions then false-positives the "cropped <= original" check. Use
-    # display-oriented dimensions for size/area comparisons so we measure what
-    # the user actually saw before vs. after the crop.
+    # Account for EXIF orientation flips. When the original carries Orientation 5/6/7/8, viewers see it rotated 90°/270°
+    # — CropCenter bakes that rotation into the cropped pixels and emits Orientation=1. Comparing raw stored dimensions
+    # then false-positives the "cropped <= original" check. Use display-oriented dimensions for size/area comparisons so
+    # we measure what the user actually saw before vs. after the crop.
     o_orient = _peek_orientation(o_apps)
     c_orient = _peek_orientation(c_apps)
     odim = _display_dims(odim_raw, o_orient)
@@ -708,17 +717,15 @@ def main(argv):
     # ── File size + bytes-per-megapixel ──────────────────────────────────
     print('File size')
     ratio = len(crop) / len(orig)
-    # Compute quality jump up-front so the size band can widen when the export
-    # genuinely encodes at higher quality than the source (CropExporter hard-
-    # codes q=100; a source shot at q=85 will produce a noticeably larger file
-    # for the same pixel area without that being a regression).
+    # Compute quality jump up-front so the size band can widen when the export genuinely encodes at higher quality than
+    # the source (CropExporter hard-codes q=100; a source shot at q=85 will produce a noticeably larger file for the
+    # same pixel area without that being a regression).
     o_q_pre = jpeg_quality_estimate(orig, o_end)
     c_q_pre = jpeg_quality_estimate(crop, c_end)
     quality_inflate = 1.0
     if o_q_pre and c_q_pre and c_q_pre > o_q_pre:
-        # Each ~5-quality-point bump roughly doubles bytes-per-pixel near the
-        # high end (95→100 is the steepest). Cap the inflation factor at 2.5×
-        # so a wildly bloated export still flags.
+        # Each ~5-quality-point bump roughly doubles bytes-per-pixel near the high end (95→100 is the steepest). Cap the
+        # inflation factor at 2.5× so a wildly bloated export still flags.
         quality_inflate = min(2.5, 1.0 + (c_q_pre - o_q_pre) * 0.15)
     if odim and cdim:
         pix_ratio = (cdim[0] * cdim[1]) / (odim[0] * odim[1])
@@ -727,16 +734,12 @@ def main(argv):
         in_band = lower <= ratio <= max(upper, 0.05)
         diff_row('size ratio (crop/orig)', f'{ratio:.3f}',
             f'expected {lower:.3f}..{upper:.3f}', in_band)
-        if not in_band:
-            suspicious += 1
-        # Bytes per megapixel — quality/density proxy. Massive drop indicates
-        # quality regression even when metadata looks fine.
+        # Bytes per megapixel — quality/density proxy. Massive drop indicates quality regression even when metadata
+        # looks fine.
         o_bpp = len(orig) / (odim[0] * odim[1] / 1_000_000)
         c_bpp = len(crop) / (cdim[0] * cdim[1] / 1_000_000)
         bpp_ok = c_bpp >= o_bpp * 0.6
         diff_row('bytes / megapixel', f'{o_bpp:,.0f}', f'{c_bpp:,.0f}', bpp_ok)
-        if not bpp_ok:
-            suspicious += 1
     print()
 
     # ── Dimensions ──────────────────────────────────────────────────────
@@ -746,27 +749,20 @@ def main(argv):
     if odim and cdim:
         ok = cdim[0] <= odim[0] and cdim[1] <= odim[1]
         diff_row('cropped <= original', '', '', ok)
-        if not ok:
-            suspicious += 1
     print()
 
     # ── JPEG encoding quality ────────────────────────────────────────────
     print('JPEG encoding')
     o_q = jpeg_quality_estimate(orig, o_end)
     c_q = jpeg_quality_estimate(crop, c_end)
-    # Cropped should be >= 90 (CropExporter hardcodes quality=100); flag if
-    # noticeably below the original.
+    # Cropped should be >= 90 (CropExporter hardcodes quality=100); flag if noticeably below the original.
     q_ok = c_q is not None and c_q >= 90 and (o_q is None or c_q >= o_q - 5)
     diff_row('quality estimate (luma DQT)', o_q, c_q, q_ok)
-    if not q_ok:
-        suspicious += 1
     o_sub = chroma_subsampling(orig, o_end)
     c_sub = chroma_subsampling(crop, c_end)
     # Prefer cropped not to downgrade subsampling (e.g. 4:4:4 → 4:2:0).
     sub_ok = (o_sub == c_sub) or (c_sub in ('4:4:4', '4:2:2') and o_sub == '4:2:0')
     diff_row('chroma subsampling', o_sub, c_sub, sub_ok)
-    if not sub_ok:
-        suspicious += 1
     print()
 
     # ── EXIF ────────────────────────────────────────────────────────────
@@ -784,13 +780,19 @@ def main(argv):
         ov = o_exif.get(tag)
         cv = c_exif.get(tag)
         if tag == 'Orientation':
-            # Cropped should be 1 (rotation baked in). Values 2-8 mean un-
-            # baked rotation — a real regression. Value 0 is out-of-spec
-            # (viewers default to 1), flag only strict 2-8.
-            ok = cv is None or cv == 1 or not (2 <= cv <= 8)
-            diff_row(tag, ov, cv, ok)
-            if not ok:
-                suspicious += 1
+            if ov is not None:
+                # The original carried an Orientation entry, so the export ran the normalize-to-1 step (CropExporter
+                # bakes rotation into pixels and writes exactly 1). 0 or absent fails too — either means the
+                # normalization was dropped, not a benign default.
+                ok = cv == 1
+                cv_desc = cv if ok else f'{cv if cv is not None else "<absent>"} (expected 1)'
+                diff_row(tag, ov, cv_desc, ok)
+            else:
+                # No Orientation on the original: absent stays acceptable (nothing to normalize), but any written
+                # value other than 1 fails — 0 is never a valid EXIF orientation, and 2-8 would be an un-baked
+                # rotation appearing from nowhere.
+                ok = cv is None or cv == 1
+                diff_row(tag, ov, cv, ok)
         elif tag == 'Software':
             # Informational: just show whatever's there on both sides.
             diff_row(tag, ov, cv, True)
@@ -799,16 +801,12 @@ def main(argv):
                 continue
             present = cv is not None
             diff_row(tag, ov, cv, present)
-            if not present:
-                suspicious += 1
 
     # GPS presence
     o_gps = has_gps(o_exif)
     c_gps = has_gps(c_exif)
     gps_ok = (not o_gps) or c_gps
     diff_row('GPS block', o_gps, c_gps, gps_ok)
-    if not gps_ok:
-        suspicious += 1
 
     # IFD1 thumbnail
     o_thumb = None
@@ -830,14 +828,16 @@ def main(argv):
         f'{len(o_thumb)} B' if o_thumb else None,
         f'{len(c_thumb)} B valid={c_thumb_valid}' if c_thumb else None,
         thumb_ok)
-    if not thumb_ok:
-        suspicious += 1
     print()
 
     # ── ICC profile ─────────────────────────────────────────────────────
     print('ICC profile')
-    o_icc = icc_profile_bytes(o_apps)
-    c_icc = icc_profile_bytes(c_apps)
+    o_icc, o_icc_err = icc_profile_bytes(o_apps)
+    c_icc, c_icc_err = icc_profile_bytes(c_apps)
+    if o_icc_err or c_icc_err:
+        # Malformed chunk numbering on either side counts toward the verdict — silently reassembling a broken chunk set
+        # would green-light exactly the multi-chunk regressions this section exists to catch.
+        diff_row('chunk numbering', o_icc_err or 'ok', c_icc_err or 'ok', False)
     if o_icc:
         present = c_icc is not None
         head_match = present and o_icc[:128] == c_icc[:128]
@@ -846,9 +846,12 @@ def main(argv):
             f'{len(c_icc)} bytes' if c_icc else None,
             present)
         if present:
+            # The export copies the profile verbatim, so length and full bytes must both match. First-128-only matching
+            # would pass a cropped file that kept just chunk 1 of a multi-chunk profile — the 128-byte header lives
+            # entirely in chunk 1.
+            diff_row('profile length', len(o_icc), len(c_icc), len(o_icc) == len(c_icc))
+            diff_row('full profile bytes match', '', '', o_icc == c_icc)
             diff_row('first 128 bytes match', '', '', head_match)
-            if not head_match:
-                suspicious += 1
             o_hdr = parse_icc_header(o_icc) or {}
             c_hdr = parse_icc_header(c_icc) or {}
             diff_row('version', o_hdr.get('version'), c_hdr.get('version'),
@@ -861,8 +864,6 @@ def main(argv):
             if o_hdr.get('description') or c_hdr.get('description'):
                 diff_row('description', o_hdr.get('description'),
                     c_hdr.get('description'), True)
-        else:
-            suspicious += 1
     else:
         diff_row('present', '<absent>',
             f'{len(c_icc)} bytes' if c_icc else '<absent>', True)
@@ -873,16 +874,19 @@ def main(argv):
     o_hdr = has_xmp_hdrgm(o_apps)
     c_hdr = has_xmp_hdrgm(c_apps)
     diff_row('xmp:hdrgm namespace', o_hdr, c_hdr, o_hdr == c_hdr or c_hdr)
-    if o_hdr and not c_hdr:
-        suspicious += 1
     o_ver = xmp_hdrgm_version(o_apps)
     c_ver = xmp_hdrgm_version(c_apps)
-    # Ultra HDR spec requires hdrgm:Version="1.0"; flag if original had it
-    # but cropped doesn't.
-    ver_ok = (o_ver is None) or (c_ver is not None)
-    diff_row('hdrgm:Version attr', o_ver, c_ver, ver_ok)
-    if not ver_ok:
-        suspicious += 1
+    # Ultra HDR spec pins hdrgm:Version="1.0" and the export pipeline writes exactly that value. Flag a cropped
+    # attribute that carries any other value, a cropped file that carries the hdrgm namespace with no Version attribute
+    # at all (an HDR-marked file without the spec-required version is malformed even when the original lacked one too),
+    # and a cropped attribute that is missing when the original had one.
+    if c_ver is not None and c_ver != '1.0':
+        diff_row('hdrgm:Version attr', o_ver, f'{c_ver} (expected "1.0")', False)
+    elif c_hdr and c_ver is None:
+        diff_row('hdrgm:Version attr', o_ver, '<absent> (expected "1.0")', False)
+    else:
+        ver_ok = (o_ver is None) or (c_ver is not None)
+        diff_row('hdrgm:Version attr', o_ver, c_ver, ver_ok)
     print()
 
     # ── MPF / Ultra HDR secondary ───────────────────────────────────────
@@ -891,11 +895,9 @@ def main(argv):
     c_mpf = mpf_secondary_count(c_apps)
     mpf_ok = o_mpf <= c_mpf
     diff_row('image count (>=2 = HDR)', o_mpf, c_mpf, mpf_ok)
-    if o_mpf >= 2 and c_mpf < 2:
-        suspicious += 1
     # If original has a secondary, cropped should too. Inspect it for validity.
-    o_sec = find_secondary_jpeg(orig, o_end) if o_mpf >= 2 else None
-    c_sec = find_secondary_jpeg(crop, c_end) if c_mpf >= 2 else None
+    o_sec = find_secondary_jpeg(orig) if o_mpf >= 2 else None
+    c_sec = find_secondary_jpeg(crop) if c_mpf >= 2 else None
     if o_sec or c_sec:
         o_desc = (f'{o_sec[2]}x{o_sec[3]} @ off {o_sec[0]}'
             if o_sec and o_sec[2] else '<not parseable>' if o_sec else None)
@@ -903,12 +905,9 @@ def main(argv):
             if c_sec and c_sec[2] else '<not parseable>' if c_sec else None)
         sec_ok = bool(c_sec and c_sec[2] and c_sec[3])
         diff_row('secondary JPEG', o_desc, c_desc, sec_ok)
-        if not sec_ok and o_sec is not None:
-            suspicious += 1
-        # Gain map is typically half or quarter resolution of primary. The gain
-        # map's stored orientation matches its primary's, so rotate its dims by
-        # the same orientation as the primary for an apples-to-apples ratio
-        # against the display-oriented primary width.
+        # Gain map is typically half or quarter resolution of primary. The gain map's stored orientation matches its
+        # primary's, so rotate its dims by the same orientation as the primary for an apples-to-apples ratio against the
+        # display-oriented primary width.
         o_gm_disp = (_display_dims((o_sec[2], o_sec[3]), o_orient)
             if o_sec and o_sec[2] else None)
         c_gm_disp = (_display_dims((c_sec[2], c_sec[3]), c_orient)
@@ -923,19 +922,22 @@ def main(argv):
             c_r = c_gm_disp[0] / cdim[0]
             ratio_ok = abs(o_r - c_r) < 0.1
         diff_row('gain map / primary W', o_gm_ratio, c_gm_ratio, ratio_ok)
-        if not ratio_ok:
-            suspicious += 1
     print()
 
     # ── Samsung SEFT trailer ────────────────────────────────────────────
     print('Samsung SEFT trailer')
     seft_present_ok = has_seft(orig) == has_seft(crop) or has_seft(crop)
     diff_row('present', has_seft(orig), has_seft(crop), seft_present_ok)
-    if has_seft(orig) and not has_seft(crop):
-        suspicious += 1
     if has_seft(orig) or has_seft(crop):
-        size_ok = abs(seft_size(orig) - seft_size(crop)) <= seft_size(orig) * 0.5
-        diff_row('size', seft_size(orig), seft_size(crop), size_ok)
+        o_seft = seft_size(orig)
+        c_seft = seft_size(crop)
+        if o_seft is None or c_seft is None:
+            # A side whose SEFH directory doesn't parse has no establishable span — flag it instead of comparing.
+            diff_row('size', 'unparseable' if o_seft is None else o_seft,
+                'unparseable' if c_seft is None else c_seft, False)
+        else:
+            size_ok = abs(o_seft - c_seft) <= o_seft * 0.5
+            diff_row('size', o_seft, c_seft, size_ok)
     print()
 
     # ── APP segment summary ─────────────────────────────────────────────
@@ -952,10 +954,10 @@ def main(argv):
     print()
 
     # ── Verdict ─────────────────────────────────────────────────────────
-    if suspicious == 0:
+    if suspicious_rows == 0:
         print('VERDICT: clean — no suspicious differences detected.')
         return 0
-    print(f'VERDICT: {suspicious} suspicious difference(s). Inspect items '
+    print(f'VERDICT: {suspicious_rows} suspicious difference(s). Inspect items '
         'flagged with !!.')
     return 1
 

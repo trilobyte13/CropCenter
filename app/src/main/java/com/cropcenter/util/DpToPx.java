@@ -23,17 +23,4 @@ public final class DpToPx
 	{
 		return Math.round(dp * density);
 	}
-
-	/**
-	 * Float-input variant for sources where the dp value is itself a fractional measurement (e.g. text-baseline
-	 * offsets). Same rounding convention.
-	 *
-	 * @param dp      density-independent pixel value
-	 * @param density display density
-	 * @return rounded pixel value
-	 */
-	public static int toPx(float dp, float density)
-	{
-		return Math.round(dp * density);
-	}
 }

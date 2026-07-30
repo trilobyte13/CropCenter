@@ -7,10 +7,10 @@ import static org.junit.Assert.assertTrue;
 import org.junit.Test;
 
 /**
- * Tests for GridConfig.defaults() — the values applied to every freshly-loaded image. The footgun-prevention
- * rule the spec calls out is `includeInExport=false`: a regression that flipped this to true would silently
- * bake grids into every saved image even when the user hadn't checked the toggle. Pin every default value
- * so a wrong-default change is visible in test output.
+ * Tests for GridConfig.defaults() — the values applied to every freshly-loaded image. The footgun-prevention rule the
+ * spec calls out is `includeInExport=false`: a regression that flipped this to true would silently bake grids into
+ * every saved image even when the user hadn't checked the toggle. Pin every default value so a wrong-default change is
+ * visible in test output.
  */
 public final class GridConfigTest
 {
@@ -33,10 +33,10 @@ public final class GridConfigTest
 	@Test
 	public void withEnabledTogglesMasterFlagAndPreservesSiblings()
 	{
-		// The master toggle. Pin: flipping it from default-true to false rounds-trips through every
-		// sibling field (cols/rows/color/lineWidth/pixelGridColor/selectionColor) without touching them.
-		// A regression in the canonical constructor parameter order — easy with 9 boolean / int / float
-		// positional args — would silently reassign one field to another and surface here.
+		// The master toggle. Pin: flipping it from default-true to false rounds-trips through every sibling
+		// field (cols/rows/color/lineWidth/pixelGridColor/selectionColor) without touching them. A regression
+		// in the canonical constructor parameter order — easy with 9 boolean / int / float positional args —
+		// would silently reassign one field to another and surface here.
 		GridConfig original = GridConfig.defaults().withColumns(8).withSelectionColor(0xAA00FFFF);
 		GridConfig hidden = original.withEnabled(false);
 		assertFalse(hidden.enabled());
@@ -48,8 +48,8 @@ public final class GridConfigTest
 	@Test
 	public void withIncludeInExportTogglesIndependently()
 	{
-		// Bake-in is the per-save toggle that defaults() enforces off. The transformer must round-trip
-		// without affecting other fields.
+		// Bake-in is the per-save toggle that defaults() enforces off. The transformer must round-trip without
+		// affecting other fields.
 		GridConfig baked = GridConfig.defaults().withIncludeInExport(true);
 		assertTrue(baked.includeInExport());
 		assertEquals("columns must survive bake-in toggle", 4, baked.columns());
@@ -59,9 +59,9 @@ public final class GridConfigTest
 	@Test
 	public void withLineWidthReplacesStrokeAndPreservesSiblings()
 	{
-		// Grid line stroke width in image pixels. The toolbar's grid-thickness slider routes through this.
-		// Pin both the replacement (new value lands) AND the sibling preservation (cols / rows / colors
-		// don't get clobbered).
+		// Grid line stroke width in image pixels. The toolbar's grid-thickness slider routes through this. Pin
+		// both the replacement (new value lands) AND the sibling preservation (cols / rows / colors don't get
+		// clobbered).
 		GridConfig original = GridConfig.defaults().withColumns(5).withSelectionColor(0xAA00FFFF);
 		GridConfig thicker = original.withLineWidth(3.5f);
 		assertEquals(3.5f, thicker.lineWidth(), 0f);
@@ -72,9 +72,9 @@ public final class GridConfigTest
 	@Test
 	public void withSelectionColorReplacesColorAndPreservesSiblings()
 	{
-		// The shared color for selection points, polygon fill, and horizon paint. A regression that
-		// dropped this from the transformer would leave the paint color stuck at the previous value
-		// across user changes — pin so the round-trip is observable here.
+		// The shared color for selection points, polygon fill, and horizon paint. A regression that dropped
+		// this from the transformer would leave the paint color stuck at the previous value across user changes
+		// — pin so the round-trip is observable here.
 		GridConfig original = GridConfig.defaults().withColumns(7);
 		GridConfig recolored = original.withSelectionColor(0x80FF00FF);
 		assertEquals(0x80FF00FF, recolored.selectionColor());
@@ -85,9 +85,9 @@ public final class GridConfigTest
 	@Test
 	public void withShowPixelGridTogglesPixelGridFlagAndPreservesSiblings()
 	{
-		// The per-pixel grid overlay that fires at high zoom (~3dp per source pixel). Independent toggle
-		// from `enabled`. Pin that flipping it doesn't disturb the main grid's own enabled state or any
-		// color / size siblings.
+		// The per-pixel grid overlay that fires at high zoom (~3dp per source pixel). Independent toggle from
+		// `enabled`. Pin that flipping it doesn't disturb the main grid's own enabled state or any color / size
+		// siblings.
 		GridConfig original = GridConfig.defaults().withColumns(8).withColor(0xFF0000FF);
 		GridConfig hidden = original.withShowPixelGrid(false);
 		assertFalse(hidden.showPixelGrid());
@@ -99,9 +99,9 @@ public final class GridConfigTest
 	@Test
 	public void withTransformersChainCorrectly()
 	{
-		// Pin that withXxx transformers preserve all unrelated fields. Without this, a regression that
-		// dropped `pixelGridColor` from `withColumns` would silently reset the pixel-grid color back to
-		// black on every column-count change.
+		// Pin that withXxx transformers preserve all unrelated fields. Without this, a regression that dropped
+		// `pixelGridColor` from `withColumns` would silently reset the pixel-grid color back to black on every
+		// column-count change.
 		GridConfig original = GridConfig.defaults().withPixelGridColor(0xFFFF0000);
 		GridConfig changed = original.withColumns(7).withRows(9).withColor(0xFF00FF00);
 		assertEquals(7, changed.columns());

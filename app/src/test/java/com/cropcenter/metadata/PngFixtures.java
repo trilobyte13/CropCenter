@@ -6,23 +6,21 @@ import java.util.zip.CRC32;
 
 /**
  * Builders for synthetic PNG byte sequences used by the PNG metadata-extractor / load-controller tests. Mirrors
- * JpegFixtures' role on the PNG side — minimal-valid layouts that exercise the parsers' chunk walks without
- * needing real-photo fixtures (which are user-supplied and not committed).
+ * JpegFixtures' role on the PNG side — minimal-valid layouts that exercise the parsers' chunk walks without needing
+ * real-photo fixtures (which are user-supplied and not committed).
  *
- * Two consumers: PngMetadataExtractorTest (parser-direct) and ImageLoadControllerExtractMetadataTest
- * (format-routing). Before extraction each carried its own copy of the same chunk + CRC builder; centralising here
- * means a future fix to the chunk format (a new CRC seed, a different length encoding) can't drift between the two
- * test files.
+ * Two consumers: PngMetadataExtractorTest (parser-direct) and ImageLoadControllerExtractMetadataTest (format-routing).
+ * Before extraction each carried its own copy of the same chunk + CRC builder; centralising here means a future fix to
+ * the chunk format (a new CRC seed, a different length encoding) can't drift between the two test files.
  *
- * Not a runtime helper — lives only in the test source set. Public so callers outside the metadata package can
- * use it without copy-paste.
+ * Not a runtime helper — lives only in the test source set. Public so callers outside the metadata package can use it
+ * without copy-paste.
  */
 public final class PngFixtures
 {
 	/**
-	 * The canonical 8-byte PNG signature that every well-formed PNG file starts with — used by
-	 * PngMetadataExtractor to gate parsing (no signature → bail). Tests prepend this verbatim before chunk
-	 * concatenation.
+	 * The canonical 8-byte PNG signature that every well-formed PNG file starts with — used by PngMetadataExtractor
+	 * to gate parsing (no signature → bail). Tests prepend this verbatim before chunk concatenation.
 	 */
 	public static final byte[] PNG_SIGNATURE = {
 		(byte) 0x89, 'P', 'N', 'G', (byte) 0x0D, (byte) 0x0A, (byte) 0x1A, (byte) 0x0A
@@ -77,5 +75,22 @@ public final class PngFixtures
 		// interlace (1). 1×1 / 8-bit / color-type 2 (RGB) is the minimum decoders will not reject.
 		byte[] data = { 0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0 };
 		return buildChunk("IHDR", data);
+	}
+
+	/**
+	 * Minimal valid PNG: 8-byte signature + IHDR (1×1 8-bit RGB) + empty IEND — 8 + 25 + 12 = 45 bytes. The eXIf
+	 * insertion point the injection tests navigate by sits at byte 33 (after IHDR's CRC, before IEND's length
+	 * field).
+	 *
+	 * @return 45-byte PNG composed from PNG_SIGNATURE + buildIhdrChunk() + an empty IEND chunk
+	 * @throws IOException if buildChunk's US-ASCII encoding of "IEND" fails (never in practice)
+	 */
+	public static byte[] minimalPng() throws IOException
+	{
+		ByteArrayOutputStream out = new ByteArrayOutputStream();
+		out.write(PNG_SIGNATURE);
+		out.write(buildIhdrChunk());
+		out.write(buildChunk("IEND", new byte[0]));
+		return out.toByteArray();
 	}
 }

@@ -10,28 +10,28 @@ import com.cropcenter.util.GridGeometry;
  * Draws grid overlay lines within the crop rectangle at positions that match the exporter's
  * CropExporter.drawGridPixels. Each line is at `cropOrigin + Math.round(cropExtent * i / count)` — the rounded
  * relative-offset is an integer image-pixel step, so the line lands on an integer image pixel when the crop origin is
- * integer (the export's crop-output-space coordinate system) and on an equivalent fractional source-image position
- * when the preview's crop origin is fractional (centerX − cropW/2f for odd cropW with even centerX, etc.). Either way
- * the relative spacing inside the crop matches the export's baked positions byte-for-byte, so a zoomed-in preview
- * shows the grid lines at exactly the columns / rows the export will write.
+ * integer (the export's crop-output-space coordinate system) and on an equivalent fractional source-image position when
+ * the preview's crop origin is fractional (centerX − cropW/2f for odd cropW with even centerX, etc.). Either way the
+ * relative spacing inside the crop matches the export's baked positions byte-for-byte, so a zoomed-in preview shows the
+ * grid lines at exactly the columns / rows the export will write.
  *
  * The rounding formula mirrors CropExporter.gridLinePixel exactly: first-half lines round `cropExtent * i / count`;
  * second-half lines mirror through `cropExtent - round(cropExtent * (count - i) / count)` (relative to cropExtent,
  * matching the export's mirror-through-dim). The middle line of any even count (i * 2 == count) stays on cropCenter so
  * single-point selection markers still sit at the grid intersection; the ≤0.5-pixel export divergence for odd
- * cropExtent at any even count is accepted as the only remaining mismatch, and odd counts (e.g. rule-of-thirds
- * count == 3) have no middle line.
+ * cropExtent at any even count is accepted as the only remaining mismatch, and odd counts (e.g. rule-of-thirds count ==
+ * 3) have no middle line.
  *
  * Side effect: during a rotation sweep, as CropEngine.recomputeCrop changes cropW by integer amounts, the rounded
- * relative offsets can jump by one pixel at cropW parity boundaries. The rotation ruler moves in discrete ticks so
- * this happens at tick rate, not per-frame — acceptable trade for preview-matches-export fidelity.
+ * relative offsets can jump by one pixel at cropW parity boundaries. The rotation ruler moves in discrete ticks so this
+ * happens at tick rate, not per-frame — acceptable trade for preview-matches-export fidelity.
  */
 public final class GridRenderer
 {
 	/**
-	 * Single-axis image → screen coordinate mapper. Callers supply one instance for the X axis and one
-	 * for the Y axis when invoking draw(); the mapper applies the viewport's pan + zoom so an image
-	 * pixel maps to a canvas pixel. Pure function — no per-call allocation, no internal state.
+	 * Single-axis image → screen coordinate mapper. Callers supply one instance for the X axis and one for the Y
+	 * axis when invoking draw(); the mapper applies the viewport's pan + zoom so an image pixel maps to a canvas
+	 * pixel. Pure function — no per-call allocation, no internal state.
 	 */
 	public interface CoordMapper
 	{
@@ -95,9 +95,9 @@ public final class GridRenderer
 	}
 
 	/**
-	 * Position line i of a count-N grid along one axis. Returns cropOrigin + Math.round(...) so the relative
-	 * offset matches CropExporter.gridLinePixel's rounding byte-for-byte, keeping preview and export aligned
-	 * whether cropOrigin is integer or fractional.
+	 * Position line i of a count-N grid along one axis. Returns cropOrigin + Math.round(...) so the relative offset
+	 * matches CropExporter.gridLinePixel's rounding byte-for-byte, keeping preview and export aligned whether
+	 * cropOrigin is integer or fractional.
 	 *
 	 * Middle line (i*2 == count, any even count) preserves cropCenter rather than snapping, so single-point
 	 * selection markers stay on the grid intersection. (Odd cropExtent at any even count is the only case this
@@ -116,16 +116,16 @@ public final class GridRenderer
 	 */
 	static float linePos(int i, int count, float cropOrigin, int cropExtent, float cropCenter)
 	{
-		// Middle-line special case: anchor to cropCenter (the fractional float pan position) so a
-		// single-point selection marker sits exactly on the grid intersection. Delegating to
-		// GridGeometry.mirroredLinePos would lose this — that helper returns an integer offset.
+		// Middle-line special case: anchor to cropCenter (the fractional float pan position) so a single-point
+		// selection marker sits exactly on the grid intersection. Delegating to GridGeometry.mirroredLinePos
+		// would lose this — that helper returns an integer offset.
 		if (i * 2 == count)
 		{
 			return cropCenter;
 		}
-		// Off-centre lines: delegate to the shared chokepoint so the on-screen preview and the
-		// export-baked grid use byte-identical rounding (preventing the "ghost grid" mismatch
-		// that would otherwise appear at certain dims when comparing a save against the editor).
+		// Off-centre lines: delegate to the shared chokepoint so the on-screen preview and the export-baked
+		// grid use byte-identical rounding (preventing the "ghost grid" mismatch that would otherwise appear at
+		// certain dims when comparing a save against the editor).
 		return cropOrigin + GridGeometry.mirroredLinePos(i, count, cropExtent);
 	}
 }

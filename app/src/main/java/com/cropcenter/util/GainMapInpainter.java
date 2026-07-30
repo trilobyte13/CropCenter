@@ -67,11 +67,11 @@ public final class GainMapInpainter
 		}
 		int width = bmp.getWidth();
 		int height = bmp.getHeight();
-		// Guard the int multiplication before any of the three downstream `new int[width*height]` /
-		// `new boolean[width*height]` allocations (in scaleMask, inpaintAlpha8, inpaintArgb). A 50000×50000
-		// gain-map bitmap is impossible from BitmapFactory in current usage but the same overflow-guard
-		// pattern that AiRegionDetector.detect uses (Math.multiplyExact bailing on ArithmeticException)
-		// matters for defensive consistency — without it, a width*height that wraps negative would throw
+		// Guard the int multiplication before any of the three downstream `new int[width*height]` / `new
+		// boolean[width*height]` allocations (in scaleMask, inpaintAlpha8, inpaintArgb). A 50000×50000 gain-map
+		// bitmap is impossible from BitmapFactory in current usage but the same overflow-guard pattern that
+		// AiRegionDetector.detect uses (Math.multiplyExact bailing on ArithmeticException) matters for
+		// defensive consistency — without it, a width*height that wraps negative would throw
 		// NegativeArraySizeException out of the inpaint and into UltraHdrCompat's caller.
 		try
 		{
@@ -97,14 +97,13 @@ public final class GainMapInpainter
 		}
 		else
 		{
-			// Javadoc contract: "ALPHA_8 or ARGB_8888 — other configs no-op silently". Without this
-			// explicit guard the previous else-branch sent every non-ALPHA_8 bitmap through inpaintArgb,
-			// which would quantize an RGB_565 / RGBA_F16 gain map's pixels through 8-bit getPixels /
-			// setPixels and corrupt them. (HARDWARE is also unsupported but is caught earlier by the
-			// !bmp.isMutable() guard at line 63 — HARDWARE bitmaps are always immutable, so the check
-			// above this branch fires first.) The Samsung / Adobe gain-map formats we see in practice
-			// are always one of the two supported configs; hitting this branch indicates a future
-			// Android version returning an unfamiliar config and the right response is "skip inpainting;
+			// Javadoc contract: "ALPHA_8 or ARGB_8888 — other configs no-op silently". The explicit guard
+			// is load-bearing: routing any other config through inpaintArgb would quantize an RGB_565 /
+			// RGBA_F16 gain map's pixels through 8-bit getPixels / setPixels and corrupt them. (HARDWARE is
+			// also unsupported but is caught earlier by the !bmp.isMutable() guard — HARDWARE bitmaps are
+			// always immutable, so that check fires first.) The Samsung / Adobe gain-map formats we see in
+			// practice are always one of the two supported configs; hitting this branch indicates a future
+			// Android version returning an unfamiliar config, and the right response is "skip inpainting;
 			// ship the original gain map untouched", not "silently downsample the pixels to 8-bit".
 			Log.w(TAG, "Gain-map bitmap config " + config + " is not ALPHA_8 or ARGB_8888; "
 				+ "skipping inpaint to avoid quantization of unsupported pixel format");
@@ -117,6 +116,11 @@ public final class GainMapInpainter
 	 * per pass (vs reading the same array we're writing, which would race growth across the mask within a pass).
 	 *
 	 * Package-visible for unit tests — see inpaintIterative for the broader rationale.
+	 *
+	 * @param mask   row-major mask array, mutated in place; true marks a masked pixel
+	 * @param width  mask width in pixels
+	 * @param height mask height in pixels
+	 * @param radius number of one-pixel dilation rings to grow; 0 or negative is a no-op
 	 */
 	static void dilateMask(boolean[] mask, int width, int height, int radius)
 	{
@@ -172,9 +176,16 @@ public final class GainMapInpainter
 	 * The mask is mutated. Isolated masked pixels (no path to any unmasked pixel) keep their original value when
 	 * the loop exits with empty frontier.
 	 *
-	 * Package-visible for unit tests — the algorithm is pure (int[] values, boolean[] mask) and the only way to
-	 * pin the rounding-bias regression (round-half-up vs floor-toward-zero) without an Android Bitmap. The
+	 * Package-visible for unit tests — the algorithm is pure (int[] values, boolean[] mask) and the only way to pin
+	 * the rounding-bias regression (round-half-up vs floor-toward-zero) without an Android Bitmap. The
 	 * Bitmap-dispatch entry point inpaintBitmap remains the production API.
+	 *
+	 * @param values row-major single-channel values (0..255), mutated in place — masked pixels are overwritten
+	 *               with the round-half-up average of their resolved 8-neighbors
+	 * @param mask   row-major mask, mutated in place — resolved pixels flip to unmasked as the frontier advances
+	 * @param width  channel width in pixels
+	 * @param height channel height in pixels
+	 * @return number of frontier passes run until convergence (diagnostic; 0 when nothing was masked)
 	 */
 	static int inpaintIterative(int[] values, boolean[] mask, int width, int height)
 	{
@@ -296,11 +307,10 @@ public final class GainMapInpainter
 	}
 
 	/**
-	 * Nearest-neighbor mask scale to (targetWidth, targetHeight). Long arithmetic for the index multiply so 8000
-	 * x 6000 sources don't overflow int when (y * srcH) grows past 4.8e7. Package-private so
-	 * GainMapInpainterTest can pin the long-arithmetic contract and the same-dimensions clone fast-path
-	 * directly — the Bitmap-bound callers (inpaintAlpha8 / inpaintArgb) need Android infrastructure, but this
-	 * pure-boolean-array helper does not.
+	 * Nearest-neighbor mask scale to (targetWidth, targetHeight). Long arithmetic for the index multiply so 8000 x
+	 * 6000 sources don't overflow int when (y * srcH) grows past 4.8e7. Package-private so GainMapInpainterTest can
+	 * pin the long-arithmetic contract and the same-dimensions clone fast-path directly — the Bitmap-bound callers
+	 * (inpaintAlpha8 / inpaintArgb) need Android infrastructure, but this pure-boolean-array helper does not.
 	 *
 	 * @param aiMask       source AI-region mask carrying width / height and a width * height boolean array
 	 * @param targetWidth  destination width in pixels (≥ 1)
@@ -344,6 +354,13 @@ public final class GainMapInpainter
 	 * Quick check: does (x, y) have at least one 8-neighbor whose mask bit is false? Used to seed the initial
 	 * frontier for inpaintIterative — a pixel is on the frontier if it's masked AND at least one neighbor is
 	 * already unmasked. Short-circuits on the first hit.
+	 *
+	 * @param mask   row-major mask array; read only
+	 * @param x      pixel X coordinate
+	 * @param y      pixel Y coordinate
+	 * @param width  mask width in pixels
+	 * @param height mask height in pixels
+	 * @return true when at least one in-bounds 8-neighbor is unmasked
 	 */
 	private static boolean hasUnmaskedNeighbor(boolean[] mask, int x, int y, int width, int height)
 	{
@@ -383,6 +400,11 @@ public final class GainMapInpainter
 	 * width) so this works correctly for bitmaps where Skia adds row-stride padding for memory alignment —
 	 * copyPixelsToBuffer requires the buffer to hold getByteCount() bytes, and indexing as if row stride equals
 	 * width would write inpainted values into padding bytes for stridden bitmaps.
+	 *
+	 * @param bmp    ALPHA_8 gain-map bitmap, mutated in place via copyPixelsFromBuffer
+	 * @param mask   row-major mask of pixels to inpaint; mutated by the underlying inpaintIterative
+	 * @param width  bitmap width in pixels
+	 * @param height bitmap height in pixels
 	 */
 	private static void inpaintAlpha8(Bitmap bmp, boolean[] mask, int width, int height)
 	{
@@ -420,8 +442,14 @@ public final class GainMapInpainter
 	 * Multi-channel inpaint for ARGB_8888 bitmaps. Each RGB channel runs its own grow-from-boundary pass with a
 	 * fresh mask copy (the iteration mutates the mask, so the first two passes clone; the last reuses the original
 	 * since it has no successor). Alpha is preserved verbatim. Pass counts are typically within 1 of each other for
-	 * grayscale-like (R == G == B) sources but the log reports the per-channel max so non-grayscale (Adobe variant)
-	 * sources don't silently hide a channel that took longer to converge.
+	 * grayscale-like (R == G == B) sources but the log reports each channel's count so non-grayscale (Adobe
+	 * variant) sources don't silently hide a channel that took longer to converge.
+	 *
+	 * @param bmp    ARGB_8888 gain-map bitmap, mutated in place via setPixels; alpha channel preserved verbatim
+	 * @param mask   row-major mask of pixels to inpaint; the B-channel pass consumes (mutates) the original —
+	 *               callers must not reuse it
+	 * @param width  bitmap width in pixels
+	 * @param height bitmap height in pixels
 	 */
 	private static void inpaintArgb(Bitmap bmp, boolean[] mask, int width, int height)
 	{

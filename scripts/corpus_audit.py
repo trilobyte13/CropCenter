@@ -1,4 +1,4 @@
-"""Deep coherence audit of every JPEG in scripts/input/.
+"""Deep coherence audit of every JPEG under scripts/input/ (recursive; .jpg / .jpeg, case-insensitive).
 
 For each file, walks the byte stream and checks the invariants CropCenter relies on:
   - JPEG structure (SOI / EOI / valid segment chain)
@@ -11,7 +11,8 @@ For each file, walks the byte stream and checks the invariants CropCenter relies
       * If MPF claims HDR slot, gainmap must actually exist
       * If XMP carries hdrgm namespace, gainmap must be present
       * No orphan hdrgm XMP without a gainmap (CropCenter strips on HDR-drop)
-  - SEFT trailer: if present, valid magic + readable size value
+  - SEF trailer: if the SEFT footer is present, the SEFH directory must parse at end-8-dirLen
+    (the footer u32 is the DIRECTORY length only; data blocks precede the directory)
   - Cross-file consistency: spot any pattern outliers
 
 Pure stdlib. Tab=8.
@@ -20,6 +21,9 @@ import os
 import struct
 import sys
 from pathlib import Path
+
+import jpeg_lib
+import seft_lib
 
 INPUT_DIR = Path(__file__).resolve().parent / "input"
 
@@ -48,41 +52,10 @@ def walk_segments(jpeg, end_bound=None):
 		off += 2 + seglen
 
 
-def find_primary_eoi(jpeg):
-	"""First FFD9 (post SOS scan) — the primary stream's terminator."""
-	# Find SOS
-	off = 2
-	sos_off = -1
-	while off + 4 < len(jpeg):
-		if jpeg[off] != 0xFF:
-			return -1
-		marker = jpeg[off + 1]
-		if marker == 0xDA:
-			sos_off = off
-			break
-		if marker == 0xD9:
-			return -1
-		seglen = struct.unpack(">H", jpeg[off + 2:off + 4])[0]
-		off += 2 + seglen
-	if sos_off < 0:
-		return -1
-	# Walk from after SOS header looking for FFD9
-	sos_seglen = struct.unpack(">H", jpeg[sos_off + 2:sos_off + 4])[0]
-	pos = sos_off + 2 + sos_seglen
-	while pos < len(jpeg) - 1:
-		if jpeg[pos] == 0xFF:
-			m = jpeg[pos + 1]
-			if m == 0x00 or 0xD0 <= m <= 0xD7:
-				pos += 2
-				continue
-			if m == 0xD9:
-				return pos + 2
-		pos += 1
-	return -1
-
-
 def find_primary_sof(jpeg, end_bound=None):
-	"""Primary SOF dims (width, height)."""
+	"""Primary SOF dims (width, height), or None when no SOF parses before SOS / EOI / end_bound. Bounds-validated:
+	a segment length under the 2-byte spec minimum, an SOF header shorter than its fixed 8-byte body, or an SOF
+	whose dims fields run past the available bytes all return None instead of raising on a truncated file."""
 	if end_bound is None:
 		end_bound = len(jpeg)
 	off = 2
@@ -93,7 +66,11 @@ def find_primary_sof(jpeg, end_bound=None):
 		if marker == 0xDA or marker == 0xD9:
 			return None
 		seglen = struct.unpack(">H", jpeg[off + 2:off + 4])[0]
+		if seglen < 2:
+			return None
 		if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+			if seglen < 8 or off + 9 > end_bound:
+				return None
 			height = struct.unpack(">H", jpeg[off + 5:off + 7])[0]
 			width = struct.unpack(">H", jpeg[off + 7:off + 9])[0]
 			return (width, height)
@@ -113,54 +90,39 @@ def parse_exif_segment(seg_data):
 	if u16(seg_data, tiff + 2, le) != 42:
 		return None
 	ifd0 = tiff + u32(seg_data, tiff + 4, le)
-	if ifd0 + 2 > len(seg_data):
+	ifd0_n = jpeg_lib.ifd_entry_count(seg_data, ifd0, le)
+	if ifd0_n is None:
 		return None
-	ifd0_n = u16(seg_data, ifd0, le)
-	# Walk IFD0 entries
-	ifd0_entries = []
+	# Walk IFD0 entries (jpeg_lib's shared bounds-checked walk; inline SHORTs via read_short_value)
 	zeroed_count = 0
 	orientation = None
 	image_width = None
 	image_length = None
 	exif_subifd = None
-	for i in range(ifd0_n):
-		entry = ifd0 + 2 + i * 12
-		if entry + 12 > len(seg_data):
-			break
-		tag = u16(seg_data, entry, le)
-		fmt = u16(seg_data, entry + 2, le)
-		cnt = u32(seg_data, entry + 4, le)
-		val = u32(seg_data, entry + 8, le)
-		ifd0_entries.append((tag, fmt, cnt, val))
+	for entry, tag, fmt, cnt, val in jpeg_lib.walk_ifd_entries(seg_data, ifd0, le):
 		# Zeroed entries = the IFD0 sanitisation we added
 		if tag == 0 and fmt == 0 and cnt == 0 and val == 0:
 			zeroed_count += 1
 		elif tag == 0x0112:  # Orientation
-			orientation = u16(seg_data, entry + 8, le)
+			orientation = jpeg_lib.read_short_value(seg_data, entry, le)
 		elif tag == 0x0100:  # ImageWidth
-			image_width = val if fmt == 4 else u16(seg_data, entry + 8, le)
+			image_width = val if fmt == 4 else jpeg_lib.read_short_value(seg_data, entry, le)
 		elif tag == 0x0101:  # ImageLength
-			image_length = val if fmt == 4 else u16(seg_data, entry + 8, le)
+			image_length = val if fmt == 4 else jpeg_lib.read_short_value(seg_data, entry, le)
 		elif tag == 0x8769:  # ExifSubIFD
 			exif_subifd = tiff + val
 	# Walk IFD1
-	next_ifd_ptr = ifd0 + 2 + ifd0_n * 12
-	ifd1_rel = u32(seg_data, next_ifd_ptr, le) if next_ifd_ptr + 4 <= len(seg_data) else 0
+	ifd1_rel = jpeg_lib.next_ifd_offset(seg_data, ifd0, le)
 	ifd1_info = None
 	if ifd1_rel != 0:
 		ifd1 = tiff + ifd1_rel
-		if ifd1 + 2 <= len(seg_data):
-			ifd1_n = u16(seg_data, ifd1, le)
+		ifd1_n = jpeg_lib.ifd_entry_count(seg_data, ifd1, le)
+		if ifd1_n is not None:
 			thumb_off = thumb_len = 0
 			compression = None
-			for i in range(ifd1_n):
-				entry = ifd1 + 2 + i * 12
-				if entry + 12 > len(seg_data):
-					break
-				tag = u16(seg_data, entry, le)
-				val = u32(seg_data, entry + 8, le)
+			for entry, tag, fmt, cnt, val in jpeg_lib.walk_ifd_entries(seg_data, ifd1, le):
 				if tag == 0x0103:
-					compression = u16(seg_data, entry + 8, le)
+					compression = jpeg_lib.read_short_value(seg_data, entry, le)
 				elif tag == 0x0201:
 					thumb_off = val
 				elif tag == 0x0202:
@@ -172,16 +134,12 @@ def parse_exif_segment(seg_data):
 				"compression": compression,
 			}
 	# ExifSubIFD: walk for MakerNote
-	exif_n = 0
+	exif_n = jpeg_lib.ifd_entry_count(seg_data, exif_subifd, le) if exif_subifd is not None else None
 	makernote_size = 0
-	if exif_subifd is not None and exif_subifd + 2 <= len(seg_data):
-		exif_n = u16(seg_data, exif_subifd, le)
-		for i in range(exif_n):
-			entry = exif_subifd + 2 + i * 12
-			if entry + 12 > len(seg_data):
-				break
-			tag = u16(seg_data, entry, le)
-			cnt = u32(seg_data, entry + 4, le)
+	if exif_n is None:
+		exif_n = 0
+	else:
+		for entry, tag, fmt, cnt, val in jpeg_lib.walk_ifd_entries(seg_data, exif_subifd, le):
 			if tag == 0x927C:
 				makernote_size = cnt
 				break
@@ -200,7 +158,8 @@ def parse_exif_segment(seg_data):
 
 
 def parse_thumb_dims(seg_data, t_off, t_len):
-	"""Return (width, height) of the embedded IFD1 thumbnail JPEG."""
+	"""Return (width, height) of the embedded IFD1 thumbnail JPEG, or None when no SOF parses — including an SOF
+	whose dims fields would run past the thumbnail slice (truncated thumbnail) or a sub-minimum segment length."""
 	tiff = 10
 	tb = seg_data[tiff + t_off:tiff + t_off + t_len]
 	p = 0
@@ -212,19 +171,23 @@ def parse_thumb_dims(seg_data, t_off, t_len):
 			p += 2
 			continue
 		if 0xC0 <= m <= 0xCF and m not in (0xC4, 0xC8, 0xCC):
+			if p + 9 > len(tb):
+				return None
 			height = struct.unpack(">H", tb[p + 5:p + 7])[0]
 			width = struct.unpack(">H", tb[p + 7:p + 9])[0]
 			return (width, height)
 		if p + 4 > len(tb):
 			return None
 		sl = struct.unpack(">H", tb[p + 2:p + 4])[0]
+		if sl < 2:
+			return None
 		p += 2 + sl
 	return None
 
 
 def detect_features(jpeg):
 	"""Return dict with high-level feature flags."""
-	primary_eoi = find_primary_eoi(jpeg)
+	primary_eoi = jpeg_lib.find_primary_eoi(jpeg)
 	primary_dims = find_primary_sof(jpeg)
 
 	# Walk segments
@@ -252,13 +215,27 @@ def detect_features(jpeg):
 		elif marker == 0xE2 and body[:6] == b"\x00\x00\x00\x36urn:":
 			iso21496_seg = body  # ISO 21496-1 header has urn: prefix
 
-	# Detect gainmap (post-primary FFD8...FFD9)
+	# Detect the SEF trailer FIRST (SEFH directory walk via seft_lib — the footer u32 is the DIRECTORY length only;
+	# data blocks precede the directory) so gain-map detection below can be bounded at the true trailer start.
+	# seft_size is the full span; seft_dir_valid is False when the footer is present but the directory doesn't parse
+	# at end-8-dirLen (seft_lib's (None, 8) malformed signal — the trailer start is unresolvable).
+	trailer = seft_lib.find_seft_trailer(jpeg)
+	has_seft = trailer is not None
+	seft_dir_valid = trailer is not None and trailer[0] is not None
+	seft_size = trailer[1] if seft_dir_valid else 0
+
+	# Detect gainmap (post-primary FFD8...FFD9). scan_end excludes the whole SEFT trailer span, not just the 8-byte
+	# footer — SEF data blocks can start with FF D8 (embedded JPEGs) right at primary_eoi, which a footer-only bound
+	# would misdetect as a gain map (cascading into false P0 HDR-coherence anomalies). Two states leave gain-map
+	# presence UNKNOWABLE rather than absent, so both skip the scan and suppress the absence-based HDR checks: a
+	# present SEFT footer whose directory doesn't parse (trailer start unresolvable), and an unlocatable primary
+	# EOI (nothing anchors where a gain map would begin). Each has its own P0/P1 anomaly reporting the state.
 	has_gainmap = False
 	gainmap_size = 0
-	if primary_eoi > 0 and primary_eoi + 4 < len(jpeg):
+	gainmap_scan_skipped = (has_seft and not seft_dir_valid) or primary_eoi < 0
+	scan_end = trailer[0] if seft_dir_valid else len(jpeg)
+	if not gainmap_scan_skipped and primary_eoi > 0 and primary_eoi + 4 < scan_end:
 		if jpeg[primary_eoi:primary_eoi + 2] == b"\xFF\xD8":
-			# Find next FFD9 in the trailing region (excluding final SEFT bytes if present)
-			scan_end = len(jpeg) - 8 if jpeg[-4:] == b"SEFT" else len(jpeg)
 			pos = primary_eoi + 2
 			while pos < scan_end - 1:
 				if jpeg[pos] == 0xFF and jpeg[pos + 1] == 0xD9:
@@ -266,12 +243,6 @@ def detect_features(jpeg):
 					gainmap_size = pos + 2 - primary_eoi
 					break
 				pos += 1
-
-	# Detect SEFT trailer
-	has_seft = len(jpeg) >= 12 and jpeg[-4:] == b"SEFT"
-	seft_size = 0
-	if has_seft:
-		seft_size = struct.unpack("<I", jpeg[-8:-4])[0]
 
 	# Parse XMP for hdrgm + Item:Length
 	xmp_has_hdrgm = False
@@ -320,8 +291,8 @@ def detect_features(jpeg):
 		thumb_dims = parse_thumb_dims(exif_seg, exif_info["ifd1"]["thumb_off"],
 			exif_info["ifd1"]["thumb_len"])
 
-	# MPF dataOffset is relative to the MP Endian field (just past "MPF\0"). Compute the absolute
-	# expected file offset for the gainmap so we can sanity-check it against primary_eoi.
+	# MPF dataOffset is relative to the MP Endian field (just past "MPF\0"). Compute the absolute expected file
+	# offset for the gainmap so we can sanity-check it against primary_eoi.
 	mpf_gainmap_abs = None
 	if mpf_seg_off is not None and mpf_gainmap_offset is not None and mpf_gainmap_offset > 0:
 		# mpf_seg_off points at FF E2; +2 marker + 2 segLen + 4 "MPF\0" = +8 to MP Endian start
@@ -329,6 +300,7 @@ def detect_features(jpeg):
 
 	return {
 		"file_size": len(jpeg),
+		"has_soi": jpeg_lib.has_soi(jpeg),
 		"primary_eoi": primary_eoi,
 		"primary_dims": primary_dims,
 		"exif": exif_info,
@@ -345,16 +317,32 @@ def detect_features(jpeg):
 		"mpf_gainmap_size": mpf_gainmap_size,
 		"iso21496_present": iso21496_seg is not None,
 		"has_gainmap": has_gainmap,
+		"gainmap_scan_skipped": gainmap_scan_skipped,
 		"gainmap_size": gainmap_size,
 		"has_seft": has_seft,
+		"seft_dir_valid": seft_dir_valid,
 		"seft_size": seft_size,
 	}
 
 
-def find_anomalies(name, info):
+def find_anomalies(info):
 	"""Return list of (severity, description) tuples for issues in this file."""
 	issues = []
 	exif = info["exif"]
+
+	# Structural head / tail invariants first: a non-SOI head means every offset in the file is misaligned (the
+	# walkers all start at offset 2), and an unlocatable primary EOI means the entropy stream never terminates
+	# inside the content span — both are P0 rejects, never a clean pass.
+	if not info["has_soi"]:
+		issues.append(("P0", "missing SOI — file does not start with FF D8"))
+	if info["primary_eoi"] < 0:
+		issues.append(("P0", "primary EOI unlocatable — no FF D9 terminates the primary stream before the "
+			"content end"))
+
+	# Every JPEG must carry a parseable frame header before SOS — a missing / truncated SOF is a structural P0, not
+	# a silent "?" in the dims column.
+	if not info["primary_dims"]:
+		issues.append(("P0", "no parseable primary SOF (frame header absent or truncated)"))
 
 	if not exif:
 		issues.append(("P0", "no parseable EXIF segment"))
@@ -382,9 +370,11 @@ def find_anomalies(name, info):
 		if ifd1["compression"] is not None and ifd1["compression"] != 6:
 			issues.append(("P1", f"IFD1 Compression={ifd1['compression']} (expected 6 = JPEG)"))
 
-	# HDR coherence: hdrgm XMP, MPF, gainmap must agree
+	# HDR coherence: hdrgm XMP, MPF, gainmap must agree. Skipped when the gain-map scan itself was skipped
+	# (unparseable SEF trailer or unlocatable primary EOI — gain-map presence is unknown, so absence-based checks
+	# would be false alarms); the SEFT P1 below and the primary-EOI P0 above report those states.
 	hdr_signals = sum([info["xmp_has_hdrgm"], info["mpf_present"], info["has_gainmap"]])
-	if 0 < hdr_signals < 3:
+	if not info["gainmap_scan_skipped"] and 0 < hdr_signals < 3:
 		# Mixed signals — mark as inconsistent
 		signals_str = (f"xmp_hdrgm={info['xmp_has_hdrgm']} "
 			f"mpf_present={info['mpf_present']} "
@@ -397,9 +387,16 @@ def find_anomalies(name, info):
 		if info["xmp_has_hdrgm"] and not info["has_gainmap"]:
 			issues.append(("P0", f"XMP hdrgm present but no gainmap follows primary EOI ({signals_str})"))
 		if info["has_gainmap"] and not info["mpf_present"]:
-			issues.append(("P0", f"Gainmap bytes present but no MPF segment to anchor them ({signals_str})"))
+			issues.append(("P0",
+				f"Gainmap bytes present but no MPF segment to anchor them ({signals_str})"))
 		if info["has_gainmap"] and not info["xmp_has_hdrgm"]:
 			issues.append(("P1", f"Gainmap present but no hdrgm in XMP ({signals_str})"))
+
+	# SEF trailer coherence: footer magic present but SEFH directory not at end-8-dirLen means the trailer is
+	# truncated / corrupt (or the footer u32 was mis-written) — Gallery Revert would break.
+	if info["has_seft"] and not info["seft_dir_valid"]:
+		issues.append(("P1", "SEFT footer present but SEFH directory doesn't parse at end-8-dirLen — "
+			"trailer start unresolvable; gain-map scan skipped"))
 
 	# Item:Length should match actual gainmap size
 	if info["item_length"] is not None and info["has_gainmap"]:
@@ -407,8 +404,8 @@ def find_anomalies(name, info):
 			issues.append(("P1", f"XMP Item:Length={info['item_length']} != actual "
 				f"gainmap_size={info['gainmap_size']} (XmpItemLengthPatcher should match)"))
 
-	# MPF gainmap offset/size must match actual gainmap. mpf_gainmap_abs is the absolute file
-	# offset computed from MPF's relative-to-MP-Endian dataOffset.
+	# MPF gainmap offset/size must match actual gainmap. mpf_gainmap_abs is the absolute file offset computed from
+	# MPF's relative-to-MP-Endian dataOffset.
 	if info["mpf_gainmap_abs"] and info["primary_eoi"] > 0:
 		if info["mpf_gainmap_abs"] != info["primary_eoi"]:
 			issues.append(("P0", f"MPF gainmap abs offset={info['mpf_gainmap_abs']} (raw "
@@ -424,21 +421,39 @@ def find_anomalies(name, info):
 		max_dim = max(w, h)
 		if max_dim < 256:
 			issues.append(("P2", f"Thumbnail at {w}x{h} (smaller than expected 256+ maxDim)"))
-		# Note: 256 maxDim is acceptable (cascade fallback for busy content);
-		# we don't flag it as an issue per the user's leave-cascade-as-is decision
+		# Note: 256 maxDim is acceptable (cascade fallback for busy content); we don't flag it as an issue per
+		# the user's leave-cascade-as-is decision
 
 	return issues
 
 
 def main():
+	# Recursive, case-insensitive discovery — the corpus lives in nested folders and mixed-case extensions exist in
+	# the wild. Zero files is a hard failure: a success-shaped "no anomalies" verdict over an empty scan would be a
+	# false pass.
+	files = sorted(p for p in INPUT_DIR.rglob("*") if p.is_file() and p.suffix.lower() in (".jpg", ".jpeg"))
+	if not files:
+		print(f"ERROR: no .jpg/.jpeg files found under {INPUT_DIR} (searched recursively) — nothing to audit.",
+			file=sys.stderr)
+		return 1
 	rows = []
-	for path in sorted(INPUT_DIR.glob("*.jpg")):
+	for path in files:
 		with open(path, "rb") as f:
 			jpeg = f.read()
-		info = detect_features(jpeg)
-		issues = find_anomalies(path.name, info)
+		try:
+			info = detect_features(jpeg)
+			issues = find_anomalies(info)
+		except Exception as e:
+			# One malformed file (truncated segment, offsets the parsers didn't anticipate) must not abort
+			# the whole corpus scan — record it as its own P0 anomaly row (info=None renders as "?" in the
+			# summary table) and keep scanning; the verdict still reflects the bad file.
+			info = None
+			issues = [("P0", f"file unparseable: {type(e).__name__}: {e}")]
 		mtime = os.path.getmtime(path)
-		rows.append({"path": path, "info": info, "issues": issues, "mtime": mtime})
+		# rel is the scripts/input/-relative posix path — printed everywhere so rows stay unambiguous when the
+		# same basename appears in several corpus subfolders (the same shot filed under multiple folders).
+		rel = path.relative_to(INPUT_DIR).as_posix()
+		rows.append({"path": path, "rel": rel, "info": info, "issues": issues, "mtime": mtime})
 
 	# Header table
 	print(f"\n{'='*100}")
@@ -451,17 +466,26 @@ def main():
 	print("-" * 100)
 	for r in rows:
 		i = r["info"]
+		if i is None:
+			# File never produced a feature dict (unparseable — see its P0 anomaly row below).
+			print(f"{r['rel']:32} {'?':>11} {'?':>10} {'?':>8} "
+				f"{'?':>5} {'?':>5} {'?':>6} {len(r['issues']):>3}")
+			continue
 		dims = i["primary_dims"]
 		td = i["thumb_dims"]
 		exif = i["exif"]
-		hdr_str = "Y" if (i["xmp_has_hdrgm"] and i["mpf_present"] and i["has_gainmap"]) \
-			else ("part" if (i["xmp_has_hdrgm"] or i["mpf_present"] or i["has_gainmap"]) else "-")
+		if i["gainmap_scan_skipped"]:
+			# Gain-map presence is unknown (unparseable SEF trailer) — don't print a Y/part/- claim.
+			hdr_str = "?"
+		else:
+			hdr_str = "Y" if (i["xmp_has_hdrgm"] and i["mpf_present"] and i["has_gainmap"]) \
+				else ("part" if (i["xmp_has_hdrgm"] or i["mpf_present"] or i["has_gainmap"]) else "-")
 		seft_str = "Y" if i["has_seft"] else "-"
 		orient_str = str(exif["orientation"]) if exif and exif["orientation"] is not None else "-"
 		dims_str = f"{dims[0]}x{dims[1]}" if dims else "?"
 		td_str = f"{td[0]}x{td[1]}" if td else "?"
 		t_bytes = exif["ifd1"]["thumb_len"] if exif and exif["ifd1"] else 0
-		print(f"{r['path'].name:32} {dims_str:>11} {td_str:>10} {t_bytes:>8} "
+		print(f"{r['rel']:32} {dims_str:>11} {td_str:>10} {t_bytes:>8} "
 			f"{hdr_str:>5} {seft_str:>5} {orient_str:>6} {len(r['issues']):>3}")
 
 	# Anomaly section
@@ -473,7 +497,7 @@ def main():
 		if not r["issues"]:
 			continue
 		any_issues = True
-		print(f"  {r['path'].name}:")
+		print(f"  {r['rel']}:")
 		for sev, desc in r["issues"]:
 			print(f"    [{sev}] {desc}")
 	if not any_issues:
@@ -485,7 +509,7 @@ def main():
 	print(f"{'='*100}\n")
 	dim_counts = {}
 	for r in rows:
-		td = r["info"]["thumb_dims"]
+		td = r["info"]["thumb_dims"] if r["info"] else None
 		key = f"{td[0]}x{td[1]}" if td else "no-thumb"
 		dim_counts[key] = dim_counts.get(key, 0) + 1
 	for dim, count in sorted(dim_counts.items(), key=lambda x: -x[1]):
@@ -494,13 +518,16 @@ def main():
 	# Quality distribution (bytes per pixel of thumbnail)
 	print(f"\n  THUMBNAIL BYTES-PER-PIXEL (rough quality estimate; ~1-2 bpp = q90, ~3-4 bpp = q95+):")
 	for r in rows:
+		if r["info"] is None:
+			continue
 		td = r["info"]["thumb_dims"]
 		exif = r["info"]["exif"]
 		if td and exif and exif["ifd1"]:
 			t_len = exif["ifd1"]["thumb_len"]
 			bpp = t_len * 8 / (td[0] * td[1])
 			marker = "*" if td[0] * td[1] < 65000 else " "  # mark sub-410x512 falls
-			print(f"  {marker} {r['path'].name:32} {td[0]}x{td[1]:>3}  {t_len:>6}B  {bpp:.2f} bpp")
+			print(f"  {marker} {r['rel']:32} {td[0]}x{td[1]:>3}  {t_len:>6}B  {bpp:.2f} bpp")
+	return 0
 
 
 if __name__ == "__main__":
@@ -509,4 +536,4 @@ if __name__ == "__main__":
 		sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 	except (AttributeError, OSError):
 		pass
-	main()
+	sys.exit(main())

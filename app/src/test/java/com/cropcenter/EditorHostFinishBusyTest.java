@@ -17,47 +17,19 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * Pins the EditorHost.finishBusy() release-ordering contract that prevents the busy-handoff race: the
- * busy flag must clear LAST, after the UI teardown (setBusyUi(false) + hideProgress()), all inside one
- * runOnUiThread block. A regression that clears busy before the teardown reopens the window where an
- * onNewIntent load acquires busy and is then unmasked by the prior op's pending teardown. The
- * MainActivity.setBusyUi(true) -> RotationRulerView.cancelMomentum() half of the interlock needs a View
- * plus Activity and isn't reachable from plain JUnit (no Robolectric here), so it is not covered.
+ * Pins the EditorHost.finishBusy() release-ordering contract that prevents the busy-handoff race: the busy flag must
+ * clear LAST, after the UI teardown (setBusyUi(false) + hideProgress()), all inside one runOnUiThread block. A
+ * regression that clears busy before the teardown reopens the window where an onNewIntent load acquires busy and is
+ * then unmasked by the prior op's pending teardown. The MainActivity.setBusyUi(true) ->
+ * RotationRulerView.cancelMomentum() half of the interlock needs a View plus Activity and isn't reachable from plain
+ * JUnit (no Robolectric here), so it is not covered.
  */
 public final class EditorHostFinishBusyTest
 {
-	@Test
-	public void finishBusyClearsBusyFlagAfterUiTeardown()
-	{
-		FakeHost host = new FakeHost();
-		host.getBusy().set(true);
-
-		host.finishBusy();
-
-		assertFalse("busy must end cleared", host.getBusy().get());
-		assertTrue("busy must still be held when setBusyUi(false) runs (cleared last)",
-			host.busyDuringSetBusyUi);
-		assertTrue("busy must still be held when hideProgress() runs (cleared last)",
-			host.busyDuringHideProgress);
-		assertEquals("UI teardown runs re-enable then hide, before the flag clears",
-			List.of("setBusyUi(false)", "hideProgress"), host.order);
-	}
-
-	@Test
-	public void finishBusyRoutesThroughRunOnUiThread()
-	{
-		FakeHost host = new FakeHost();
-		host.getBusy().set(true);
-
-		host.finishBusy();
-
-		assertTrue("teardown must be posted through runOnUiThread", host.ranOnUiThread);
-	}
-
 	/**
-	 * Minimal EditorHost fake. Implements only the plumbing finishBusy() touches (runOnUiThread,
-	 * setBusyUi, hideProgress, getBusy); every other surface throws so an accidental code-path drift
-	 * surfaces instead of silently passing. runOnUiThread runs inline so the test asserts synchronously.
+	 * Minimal EditorHost fake. Implements only the plumbing finishBusy() touches (runOnUiThread, setBusyUi,
+	 * hideProgress, getBusy); every other surface throws so an accidental code-path drift surfaces instead of
+	 * silently passing. runOnUiThread runs inline so the test asserts synchronously.
 	 */
 	private static final class FakeHost implements EditorHost
 	{
@@ -67,6 +39,8 @@ public final class EditorHostFinishBusyTest
 		boolean busyDuringSetBusyUi;
 		boolean ranOnUiThread;
 
+		// Stub override returning null — the test never reads the result. SuppressWarnings keeps the
+		// generic-method override quiet even though `return null` doesn't strictly require it.
 		@Override
 		@SuppressWarnings("unchecked")
 		public <T extends View> T findViewById(int id) { return null; }
@@ -118,5 +92,33 @@ public final class EditorHostFinishBusyTest
 
 		@Override
 		public void toastIfAlive(String msg, int length) { throw new UnsupportedOperationException(); }
+	}
+
+	@Test
+	public void finishBusyClearsBusyFlagAfterUiTeardown()
+	{
+		FakeHost host = new FakeHost();
+		host.getBusy().set(true);
+
+		host.finishBusy();
+
+		assertFalse("busy must end cleared", host.getBusy().get());
+		assertTrue("busy must still be held when setBusyUi(false) runs (cleared last)",
+			host.busyDuringSetBusyUi);
+		assertTrue("busy must still be held when hideProgress() runs (cleared last)",
+			host.busyDuringHideProgress);
+		assertEquals("UI teardown runs re-enable then hide, before the flag clears",
+			List.of("setBusyUi(false)", "hideProgress"), host.order);
+	}
+
+	@Test
+	public void finishBusyRoutesThroughRunOnUiThread()
+	{
+		FakeHost host = new FakeHost();
+		host.getBusy().set(true);
+
+		host.finishBusy();
+
+		assertTrue("teardown must be posted through runOnUiThread", host.ranOnUiThread);
 	}
 }

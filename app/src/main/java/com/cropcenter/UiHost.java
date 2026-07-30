@@ -29,8 +29,8 @@ interface UiHost extends EditorHost
 	CropEditorView getEditorView();
 
 	/**
-	 * Move-mode lock preference, exposed separately from getCurrentPref so UiSync's mode-switch can demote
-	 * Move + BOTH → Move + VERTICAL when leaving Select mode (BOTH is Select-only).
+	 * Move-mode lock preference, exposed separately from getCurrentPref so UiSync's mode-switch can demote Move +
+	 * BOTH → Move + VERTICAL when leaving Select mode (BOTH is Select-only).
 	 *
 	 * @return the user's persisted Move-mode lock-axis preference (BOTH / HORIZONTAL / VERTICAL)
 	 */
@@ -47,8 +47,8 @@ interface UiHost extends EditorHost
 	TextView getZoomBadgeTextView();
 
 	/**
-	 * Re-entrancy guard for syncRotationUi: true while the helper is mid-write of the rotation ruler so the
-	 * ruler's own change listener doesn't bounce back into CropState.setRotationDegrees.
+	 * Re-entrancy guard for syncRotationUi: true while the helper is mid-write of the rotation ruler so the ruler's
+	 * own change listener doesn't bounce back into CropState.setRotationDegrees.
 	 *
 	 * @return true while a programmatic ruler write is in progress
 	 */

@@ -8,13 +8,12 @@ import android.provider.Settings;
 import android.util.Log;
 
 /**
- * Wraps the MANAGE_EXTERNAL_STORAGE check and the deep-link to its Settings page. MES gates the
- * in-app FolderPickerDialog flow (direct File I/O save bypassing Samsung's SAF picker) and the
- * file-I/O Replace fallback. Surfaced from three call sites: MainActivity.showAllFilesAccessPrompt
- * (up-front first-launch prompt when MES isn't granted, gated on savedInstanceState == null so it
- * doesn't reappear on every recreate), SettingsDialog's Permissions card (user-discoverable grant
- * affordance), and ReplaceStrategy.showReplaceFailureDialog (recovery path after a Replace-on-
- * collision SAF-permission failure).
+ * Wraps the MANAGE_EXTERNAL_STORAGE check and the deep-link to its Settings page. MES gates the in-app
+ * FolderPickerDialog flow (direct File I/O save bypassing Samsung's SAF picker) and the file-I/O Replace fallback.
+ * Surfaced from three call sites: MainActivity.showAllFilesAccessPrompt (up-front first-launch prompt when MES isn't
+ * granted, gated on savedInstanceState == null so it doesn't reappear on every recreate), SettingsDialog's Permissions
+ * card (user-discoverable grant affordance), and ReplaceStrategy.showReplaceFailureDialog (recovery path after a
+ * Replace-on-collision SAF-permission failure).
  */
 public final class StoragePermissionHelper
 {
@@ -34,9 +33,9 @@ public final class StoragePermissionHelper
 	}
 
 	/**
-	 * Query whether the app currently holds the MANAGE_EXTERNAL_STORAGE permission. Returns the live OS
-	 * verdict every call — no caching — so a grant/revoke that happens while the app is foregrounded
-	 * surfaces immediately on next check.
+	 * Query whether the app currently holds the MANAGE_EXTERNAL_STORAGE permission. Returns the live OS verdict
+	 * every call — no caching — so a grant/revoke that happens while the app is foregrounded surfaces immediately
+	 * on next check.
 	 *
 	 * @return true when Environment.isExternalStorageManager() reports the permission is granted
 	 */
@@ -53,8 +52,8 @@ public final class StoragePermissionHelper
 	 *   2. ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION (no package URI) — the system-wide app list to scroll.
 	 *   3. ACTION_APPLICATION_DETAILS_SETTINGS — this app's settings page (user finds Permissions manually).
 	 *
-	 * FLAG_ACTIVITY_NEW_TASK because the call site can be a mid-dismiss dialog context needing its own task
-	 * stack. The chain advances to the next fallback on ActivityNotFoundException / SecurityException.
+	 * FLAG_ACTIVITY_NEW_TASK because the call site can be a mid-dismiss dialog context needing its own task stack.
+	 * The chain advances to the next fallback on ActivityNotFoundException / SecurityException.
 	 *
 	 * @return true when one intent succeeded; false when all three failed (caller may toast; rare enough we don't)
 	 */
@@ -76,9 +75,9 @@ public final class StoragePermissionHelper
 			}
 			catch (Exception e)
 			{
-				// ActivityNotFoundException on OEMs that don't handle the action, SecurityException
-				// on policy-restricted devices. Either way, fall through to the next intent —
-				// only escalate to a log warning if ALL attempts fail.
+				// ActivityNotFoundException on OEMs that don't handle the action, SecurityException on
+				// policy-restricted devices. Either way, fall through to the next intent — only
+				// escalate to a log warning if ALL attempts fail.
 				Log.d(TAG, "intent " + intent.getAction() + " rejected: "
 					+ e.getClass().getSimpleName());
 			}

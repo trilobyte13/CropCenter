@@ -22,10 +22,10 @@ public final class ThemeColors
 	public static final int MAUVE      = 0xFFCBA6F7;
 	public static final int RED        = 0xFFF38BA8;
 
-	// App-specific — not part of the Catppuccin spec. Mirrors @color/background in res/values/colors.xml
-	// (consumed via colorBackground / windowBackground in styles.xml + android:background in activity_main.xml);
-	// the Java constant exists for context-free callers like the EditorRenderer onDraw path. Same name on both
-	// sides to avoid cross-reference confusion.
+	// App-specific — not part of the Catppuccin spec. Mirrors @color/background in res/values/colors.xml (consumed
+	// via colorBackground / windowBackground in styles.xml + android:background in activity_main.xml); the Java
+	// constant exists for context-free callers like the EditorRenderer onDraw path. Same name on both sides to
+	// avoid cross-reference confusion.
 	public static final int BACKGROUND = 0xFF111318;
 
 	private ThemeColors() {}

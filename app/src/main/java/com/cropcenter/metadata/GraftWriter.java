@@ -2,25 +2,23 @@ package com.cropcenter.metadata;
 
 import android.util.Log;
 
-import com.cropcenter.util.ByteBufferUtils;
-
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.util.Collections;
 import java.util.List;
 
 /**
- * Build a "minimal pixel graft" — a JPEG taking the external edit's entropy-coded scan but keeping the
- * original's identity metadata (EXIF, XMP, MPF) and HDR trailer (gain map + SEFT). Powers "Apply External
- * Edit". SEFT is copied verbatim like every identity segment, so the source's Samsung Revert chain survives.
+ * Build a "minimal pixel graft" — a JPEG taking the external edit's entropy-coded scan but keeping the original's
+ * identity metadata (EXIF, XMP, MPF) and HDR trailer (gain map + SEFT). Powers "Apply External Edit". SEFT is copied
+ * verbatim like every identity segment, so the source's Samsung Revert chain survives.
  *
- * Caller-enforced precondition: both inputs MUST be JPEGs AND already share the same stored SOF0 dimensions —
- * else the output's metadata (from original) describes a different pixel count than the SOF (from edit),
- * producing an incoherent decode. GraftWriter checks only the JPEG signature + structural well-formedness;
- * the dimension check + re-rotation lives in EditAligner.align (Photoshop bakes orientation into pixels and
- * writes orientation=1, so a portrait-display source from a landscape-stored Samsung original and the edit
- * match in DISPLAY but not STORED dims — EditAligner re-rotates the edit to the source's stored layout first).
- * Throws IOException only on structural malformation (missing SOI / primary EOI, etc.).
+ * Caller-enforced precondition: both inputs MUST be JPEGs AND already share the same stored SOF0 dimensions — else the
+ * output's metadata (from original) describes a different pixel count than the SOF (from edit), producing an incoherent
+ * decode. GraftWriter checks only the JPEG signature + structural well-formedness; the dimension check + re-rotation
+ * lives in EditAligner.align (Photoshop bakes orientation into pixels and writes orientation=1, so a portrait-display
+ * source from a landscape-stored Samsung original and the edit match in DISPLAY but not STORED dims — EditAligner
+ * re-rotates the edit to the source's stored layout first). Throws IOException only on structural malformation (missing
+ * SOI / primary EOI, etc.).
  *
  * Per-segment provenance (see SWAP_* constants):
  *   - from original: APP1/EXIF, APP1/XMP, APP2/ICC, APP2/MPF, gain map, SEFT — identity, color coherence with
@@ -28,12 +26,12 @@ import java.util.List;
  *   - from edit: DQT, DHT, SOF, SOS+scan, EOI — the AI-edited pixels.
  *
  * ICC stays original-side because the recommended editor (Photoshop, Camera Raw off) keeps source pixel values
- * verbatim, so the edit's pixels are P3-numerical even with no ICC tag. When EditAligner.reorientEdit
- * re-encodes through Bitmap.compress, Skia injects a synthetic sRGB profile describing its container, not the
- * pixels — trusting it would tag P3 pixels as sRGB and misalign the P3-calibrated gain map (washed-out HDR).
- * Keeping source ICC keeps (pixels, ICC, gain map) self-consistent. MPF and gain map likewise stay
- * original-shape — substituting the edit's has been observed to hang Samsung Gallery's Revert pre-flight
- * (Adobe writes a different MPType); only MPF entry offsets get patched for the new scan size.
+ * verbatim, so the edit's pixels are P3-numerical even with no ICC tag. When EditAligner.reorientEdit re-encodes
+ * through Bitmap.compress, Skia injects a synthetic sRGB profile describing its container, not the pixels — trusting it
+ * would tag P3 pixels as sRGB and misalign the P3-calibrated gain map (washed-out HDR). Keeping source ICC keeps
+ * (pixels, ICC, gain map) self-consistent. MPF and gain map likewise stay original-shape — substituting the edit's has
+ * been observed to hang Samsung Gallery's Revert pre-flight (Adobe writes a different MPType); only MPF entry offsets
+ * get patched for the new scan size.
  */
 public final class GraftWriter
 {
@@ -88,16 +86,16 @@ public final class GraftWriter
 		List<JpegSegment> editSegments = (SWAP_EXIF || SWAP_HDR_GAINMAP || SWAP_HDR_MPF || SWAP_ICC || SWAP_XMP)
 			? JpegMetadataExtractor.extract(edit)
 			: Collections.emptyList();
-		// HDR gate: MPF AND XMP-hdrgm — see HdrSignature.hasHdrgmInXmp for the rationale. hasMpf is the
-		// cheap pre-filter (segment-list scan, near-free); the XMP-only hdrgm scan runs only when MPF
-		// is present.
+		// HDR gate: MPF AND XMP-hdrgm — see HdrSignature.hasHdrgmInXmp for the rationale. hasMpf is the cheap
+		// pre-filter (segment-list scan, near-free); the XMP-only hdrgm scan runs only when MPF is present.
 		boolean origHasMpf = hasMpf(origSegments);
 		boolean editHasMpf = SWAP_HDR_GAINMAP && hasMpf(editSegments);
 		boolean origIsHdr = origHasMpf && HdrSignature.hasHdrgmInXmp(origSegments);
 		boolean editIsHdr = editHasMpf && HdrSignature.hasHdrgmInXmp(editSegments);
-		byte[] origGainMap = GainMapExtractor.extract(original, origIsHdr);
-		byte[] editGainMap = SWAP_HDR_GAINMAP ? GainMapExtractor.extract(edit, editIsHdr) : null;
-		byte[] origSeft = SeftExtractor.extract(original, origGainMap != null);
+		// Unwrap at the assembly seam — the null-vs-present distinction drives the substitution ladder below.
+		byte[] origGainMap = GainMapExtractor.extract(original, origIsHdr).orElse(null);
+		byte[] editGainMap = SWAP_HDR_GAINMAP ? GainMapExtractor.extract(edit, editIsHdr).orElse(null) : null;
+		byte[] origSeft = SeftExtractor.extract(original, origGainMap != null).orElse(null);
 
 		int editPixelStart = findFirstNonAppNonCom(edit);
 		int editPixelEnd = JpegMarkerWalker.findPrimaryEoi(edit, edit.length);
@@ -124,14 +122,14 @@ public final class GraftWriter
 		out.write(JpegMarker.PREFIX);
 		out.write(JpegMarker.SOI);
 
-		// When the assembled output won't carry a gain map (origGainMap == null AND editGainMap == null —
-		// i.e., a non-HDR original whose MPF describes a non-HDR multi-picture layout like Samsung "Best
-		// Photo" burst / focus-stacked panorama), passing source's MPF verbatim into the output leaves it
-		// pointing at secondary images that no longer exist in the grafted file. Strict decoders' MPF
-		// pre-flight rejects the orphan, lenient decoders walk past malformed entries. Drop MPF in that
-		// case so the output's metadata stays honest about what it actually carries.
-		// HDR grafts (gainMapToWrite != null) preserve MPF — MpfPatcher.patch below rewrites the entries
-		// for the post-graft primary size and gain-map offset.
+		// When the assembled output won't carry a gain map (origGainMap == null AND editGainMap == null — i.e.,
+		// a non-HDR original whose MPF describes a non-HDR multi-picture layout like Samsung "Best Photo" burst
+		// / focus-stacked panorama), passing source's MPF verbatim into the output leaves it pointing at
+		// secondary images that no longer exist in the grafted file. Strict decoders' MPF pre-flight rejects
+		// the orphan, lenient decoders walk past malformed entries. Drop MPF in that case so the output's
+		// metadata stays honest about what it actually carries. HDR grafts (gainMapToWrite != null) preserve
+		// MPF — MpfPatcher.patch below rewrites the entries for the post-graft primary size and gain-map
+		// offset.
 		boolean dropOrphanMpf = gainMapToWrite == null;
 		boolean wroteEditExif = false;
 		boolean wroteEditMpf = false;
@@ -141,12 +139,12 @@ public final class GraftWriter
 		{
 			if (editExifSeg != null && seg.isExif())
 			{
-				out.write(editExifSeg.data(), 0, editExifSeg.data().length);
+				out.writeBytes(editExifSeg.data());
 				wroteEditExif = true;
 			}
 			else if (editMpfSeg != null && seg.isMpf())
 			{
-				out.write(editMpfSeg.data(), 0, editMpfSeg.data().length);
+				out.writeBytes(editMpfSeg.data());
 				wroteEditMpf = true;
 			}
 			else if (dropOrphanMpf && seg.isMpf())
@@ -156,12 +154,12 @@ public final class GraftWriter
 			}
 			else if (editIccSeg != null && seg.isIcc())
 			{
-				out.write(editIccSeg.data(), 0, editIccSeg.data().length);
+				out.writeBytes(editIccSeg.data());
 				wroteEditIcc = true;
 			}
 			else if (editXmpSeg != null && seg.isXmp())
 			{
-				out.write(editXmpSeg.data(), 0, editXmpSeg.data().length);
+				out.writeBytes(editXmpSeg.data());
 				wroteEditXmp = true;
 			}
 			else if (STRIP_VENDOR_APPS && isVendorApp(seg))
@@ -174,33 +172,33 @@ public final class GraftWriter
 			}
 			else
 			{
-				out.write(seg.data(), 0, seg.data().length);
+				out.writeBytes(seg.data());
 			}
 		}
 		// If original lacked a segment we wanted to substitute, append edit's at the end of the segment block
 		// so downstream parsers find it before the pixel content.
 		if (editExifSeg != null && !wroteEditExif)
 		{
-			out.write(editExifSeg.data(), 0, editExifSeg.data().length);
+			out.writeBytes(editExifSeg.data());
 		}
 		if (editMpfSeg != null && !wroteEditMpf)
 		{
-			out.write(editMpfSeg.data(), 0, editMpfSeg.data().length);
+			out.writeBytes(editMpfSeg.data());
 		}
 		if (editIccSeg != null && !wroteEditIcc)
 		{
-			out.write(editIccSeg.data(), 0, editIccSeg.data().length);
+			out.writeBytes(editIccSeg.data());
 		}
 		if (editXmpSeg != null && !wroteEditXmp)
 		{
-			out.write(editXmpSeg.data(), 0, editXmpSeg.data().length);
+			out.writeBytes(editXmpSeg.data());
 		}
 
 		int primarySize = out.size() + (editPixelEnd - editPixelStart);
 		out.write(edit, editPixelStart, editPixelEnd - editPixelStart);
 		if (gainMapToWrite != null)
 		{
-			out.write(gainMapToWrite, 0, gainMapToWrite.length);
+			out.writeBytes(gainMapToWrite);
 		}
 		byte[] preSeftBytes = out.toByteArray();
 
@@ -209,11 +207,11 @@ public final class GraftWriter
 		// the assembled file. MpfPatcher rewrites entry[0] (primary size) and entry[1] (gain map offset/size)
 		// based on the actual primarySize and the gain map's position right after it. Other entry fields
 		// (attribute, dependent images) are preserved — that's where the edit's MPF differs from original's
-		// when SWAP_HDR_MPF is on.
-		// Reflect the dropOrphanMpf decision above — `hasMpf(origSegments)` looks at the source's segment
-		// list, but the output skips original's MPF when dropOrphanMpf is true. Keeping haveMpfInOutput
-		// honest matters for the MpfPatcher.patch guard below: patching an MPF that isn't in the output
-		// would fail-closed inside the patcher rather than fall through to the no-MPF warning branch.
+		// when SWAP_HDR_MPF is on. Reflect the dropOrphanMpf decision above — `hasMpf(origSegments)` looks at
+		// the source's segment list, but the output skips original's MPF when dropOrphanMpf is true. Keeping
+		// haveMpfInOutput honest matters for the MpfPatcher.patch guard below: patching an MPF that isn't in
+		// the output would fail-closed inside the patcher rather than fall through to the no-MPF warning
+		// branch.
 		boolean haveMpfInOutput = (editMpfSeg != null) || (hasMpf(origSegments) && !dropOrphanMpf);
 		if (gainMapToWrite != null && !haveMpfInOutput)
 		{
@@ -274,27 +272,21 @@ public final class GraftWriter
 		int off = 2; // skip SOI
 		while (off < file.length - 3)
 		{
-			if ((file[off] & 0xFF) != 0xFF)
+			JpegMarkerWalker.HeadSegment step = JpegMarkerWalker.nextHeadSegment(file, off, file.length);
+			if (step.kind() == JpegMarkerWalker.HeadKind.NO_MARKER)
 			{
 				return -1;
 			}
-			int markerByteOff = JpegMarkerWalker.skipFillBytes(file, off, file.length);
-			if (markerByteOff < 0)
-			{
-				return -1;
-			}
-			int marker = file[markerByteOff] & 0xFF;
-			int afterMarker = markerByteOff + 1;
+			int marker = step.marker();
 			if (marker == JpegMarker.EOI || marker == JpegMarker.SOS)
 			{
 				// EOI (impossible — we'd have only APP/COM segments) or SOS without any preceding
 				// DQT/DHT/SOF — malformed, can't proceed.
 				return -1;
 			}
-			if (marker == JpegMarker.STUFFING || marker == JpegMarker.TEM
-				|| (marker >= JpegMarker.RST_FIRST && marker <= JpegMarker.RST_LAST))
+			if (step.kind() == JpegMarkerWalker.HeadKind.STANDALONE)
 			{
-				off = afterMarker;
+				off = step.next();
 				continue;
 			}
 			boolean isAppOrCom = (marker >= JpegMarker.APP0 && marker <= JpegMarker.APP_LAST)
@@ -305,24 +297,13 @@ public final class GraftWriter
 				// fill bytes with the marker they precede — they still belong with "the next marker".
 				return off;
 			}
-			if (afterMarker + 2 > file.length)
+			if (step.kind() != JpegMarkerWalker.HeadKind.SEGMENT)
 			{
+				// BAD_LENGTH or OVERRUN on an APP/COM segment — truncated header, sub-2 segLen, or a
+				// claimed length past EOF.
 				return -1;
 			}
-			int segLen = ByteBufferUtils.readU16BE(file, afterMarker);
-			if (segLen < 2)
-			{
-				return -1;
-			}
-			// Wrap-overflow guard — same defensive pattern as JpegMarkerWalker.findPrimaryEoi. With segLen
-			// near 65535 and afterMarker near MAX_INT, the addition would wrap negative and the next loop
-			// iteration would index into negative offsets.
-			long next = (long) afterMarker + segLen;
-			if (next > file.length || next > Integer.MAX_VALUE)
-			{
-				return -1;
-			}
-			off = (int) next;
+			off = step.next();
 		}
 		return -1;
 	}
@@ -349,14 +330,12 @@ public final class GraftWriter
 
 	private static boolean isJpeg(byte[] file)
 	{
-		return file.length >= 4 && (file[0] & 0xFF) == JpegMarker.PREFIX
-			&& (file[1] & 0xFF) == JpegMarker.SOI;
+		return file.length >= 4 && (file[0] & 0xFF) == JpegMarker.PREFIX && (file[1] & 0xFF) == JpegMarker.SOI;
 	}
 
 	/**
-	 * Vendor APP segment = APP3 through APP15. APP0 carries JFIF / JFXX (treated as identity-side, kept),
-	 * APP1 carries EXIF or XMP, APP2 carries ICC or MPF — those are handled by the dedicated SWAP branches
-	 * in graft().
+	 * Vendor APP segment = APP3 through APP15. APP0 carries JFIF / JFXX (treated as identity-side, kept), APP1
+	 * carries EXIF or XMP, APP2 carries ICC or MPF — those are handled by the dedicated SWAP branches in graft().
 	 *
 	 * @param seg JPEG segment to classify
 	 * @return true when seg's marker is in the APP3..APP15 vendor range

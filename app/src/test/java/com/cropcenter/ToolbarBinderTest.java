@@ -7,12 +7,12 @@ import com.cropcenter.model.AspectRatio;
 import org.junit.Test;
 
 /**
- * Tests for ToolbarBinder.arLabel — the chokepoint that turns a model AspectRatio into the compact text shown on the
- * AR chip (and, via UiSync.updateAspectRatioButton, kept in sync with the model). The risk this pins: arLabel maps a
- * preset to its label by indexing AR_LABELS with the index of the matching entry in AR_VALUES, and those two arrays
- * are hand-maintained in parallel. A future edit that inserts or reorders one array without the other would silently
- * mislabel every chip from the edit point on — exactly the kind of pure-logic drift a unit test should catch. Also
- * pins the custom-AR numeric fallback (round, not truncate) and the FREE / null → "Full" contract.
+ * Tests for ToolbarBinder.arLabel — the chokepoint that turns a model AspectRatio into the compact text shown on the AR
+ * chip (and, via UiSync.updateAspectRatioButton, kept in sync with the model). The risk this pins: arLabel maps a
+ * preset to its label by indexing AR_LABELS with the index of the matching entry in AR_VALUES, and those two arrays are
+ * hand-maintained in parallel. A future edit that inserts or reorders one array without the other would silently
+ * mislabel every chip from the edit point on — exactly the kind of pure-logic drift a unit test should catch. Also pins
+ * the custom-AR numeric fallback (round, not truncate) and the FREE / null → "Full" contract.
  *
  * arLabel is package-private static, so this test calls it directly with no extraction; the preset-index branch
  * exercises indexOfAspectRatio (private) transitively, and the numeric branch exercises the Custom-sentinel path.

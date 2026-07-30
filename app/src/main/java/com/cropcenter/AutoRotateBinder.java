@@ -18,16 +18,17 @@ import java.util.List;
  * if active; apply XMP-embedded horizon angle if present in the source's metadata; else enter paint mode and hand off
  * to HorizonDetector when the user finishes painting.
  *
- * Extracted from ToolbarBinder so the horizon-detection orchestration (which owns its own paint-mode lifecycle, runs
- * the detector on the bg thread, and translates the result into rotation state + ruler zoom) doesn't share a class with
- * the simpler "wire button to setter" bindings. ToolbarBinder.bindAll() instantiates one of these and calls bind().
+ * A class of its own so the horizon-detection orchestration (which owns its own paint-mode lifecycle, runs the detector
+ * on the bg thread, and translates the result into rotation state + ruler zoom) doesn't share a class with
+ * ToolbarBinder's simpler "wire button to setter" bindings. ToolbarBinder.bindAll() instantiates one of these and calls
+ * bind().
  */
 final class AutoRotateBinder
 {
 	private static final String TAG = "AutoRotateBinder";
 
 	// User-facing failure toast — fires from two distinct paths (catch + NaN-result branch) inside
-	// runHorizonDetectionInBackground. Extracted so a future copy-edit lands once.
+	// runHorizonDetectionInBackground. One constant so a future copy-edit lands once.
 	private static final String DETECTION_FAILED_TOAST = "Horizon detection failed";
 
 	private final ToolbarHost host;
@@ -48,14 +49,13 @@ final class AutoRotateBinder
 	}
 
 	/**
-	 * Externally-driven exit from horizon paint mode. Used by MainActivity.installImageOnUi when a new image
-	 * loads while paint mode is active — without this hook, the new image would route the user's first touch
-	 * to horizon painting on the freshly-loaded source instead of the expected Select / Move behavior, plus
-	 * the Auto button would stay stuck on its "Cancel" label / red color from the previous load.
+	 * Externally-driven exit from horizon paint mode. Used by MainActivity.installImageOnUi when a new image loads
+	 * while paint mode is active — without this hook, the new image would route the user's first touch to horizon
+	 * painting on the freshly-loaded source instead of the expected Select / Move behavior, plus the Auto button
+	 * would stay stuck on its "Cancel" label / red color from the previous load.
 	 *
-	 * No-op when paint mode isn't active. Doesn't touch the busy flag — paint mode never holds it
-	 * (acquisition happens later in onHorizonPaintComplete after the user commits the stroke), so there's
-	 * nothing to release.
+	 * No-op when paint mode isn't active. Doesn't touch the busy flag — paint mode never holds it (acquisition
+	 * happens later in onHorizonPaintComplete after the user commits the stroke), so there's nothing to release.
 	 */
 	void cancelHorizonPaintMode()
 	{
@@ -64,10 +64,10 @@ final class AutoRotateBinder
 			return;
 		}
 		host.getEditorView().setHorizonMode(false, null);
-		// Direct deref matches the same R.id.btnAutoRotate lookup in bind() and UiSync — both trust the
-		// lookup. The view is statically declared in activity_main.xml and the call
-		// is always reached after onCreate's setContentView; a hypothetical null here would be a deeper
-		// inflation bug that a defensive guard would only mask.
+		// Direct deref matches the same R.id.btnAutoRotate lookup in bind() and UiSync — both trust the lookup.
+		// The view is statically declared in activity_main.xml and the call is always reached after onCreate's
+		// setContentView; a hypothetical null here would be a deeper inflation bug that a defensive guard would
+		// only mask.
 		resetAutoRotateButton(host.findViewById(R.id.btnAutoRotate));
 	}
 
@@ -145,8 +145,8 @@ final class AutoRotateBinder
 		// Cancel-paint-mode is allowed even when busy is held (the bg horizon detector is what holds it, and
 		// the cancel just exits the paint state without touching the bg work). Every other path enters or
 		// queries detection state, so reject during busy: a tap that lands while bg detection is in flight
-		// would otherwise (a) clear imagePoints via setHorizonMode(true,...) while the bg thread iterates
-		// the same list (CME), or (b) overwrite the rotation result the in-flight detector is about to apply.
+		// would otherwise (a) clear imagePoints via setHorizonMode(true,...) while the bg thread iterates the
+		// same list (CME), or (b) overwrite the rotation result the in-flight detector is about to apply.
 		if (host.getEditorView().isHorizonMode())
 		{
 			host.getEditorView().setHorizonMode(false, null);
@@ -169,13 +169,12 @@ final class AutoRotateBinder
 		btn.setText(DialogStrings.CANCEL);
 		btn.setTextColor(host.getActivity().getResources().getColor(R.color.red, null));
 		// Pass both callbacks: onDrawn fires on ACTION_UP (user committed the stroke); onCancel fires on
-		// ACTION_CANCEL (OS / parent view interrupted before commit, OR user never started a stroke and
-		// a CANCEL fired pre-DOWN). Without the onCancel, an interrupted paint left the overlay in a
-		// stuck-active state that consumed all subsequent touches — observed as a "frozen editor" until
-		// the user noticed the still-Cancel-labelled Auto button. resetAutoRotateButton restores the
-		// "Auto" label so the user has a clear "you're back in normal mode" cue.
-		host.getEditorView().setHorizonMode(true,
-			() -> onHorizonPaintComplete(btn),
+		// ACTION_CANCEL (OS / parent view interrupted before commit, OR user never started a stroke and a
+		// CANCEL fired pre-DOWN). Without the onCancel, an interrupted paint left the overlay in a stuck-active
+		// state that consumed all subsequent touches — observed as a "frozen editor" until the user noticed the
+		// still-Cancel-labelled Auto button. resetAutoRotateButton restores the "Auto" label so the user has a
+		// clear "you're back in normal mode" cue.
+		host.getEditorView().setHorizonMode(true, () -> onHorizonPaintComplete(btn),
 			() -> resetAutoRotateButton(btn));
 	}
 
@@ -187,10 +186,9 @@ final class AutoRotateBinder
 	 * the detector and ruler can produce all survive end-to-end (renderer rotates, readout shows, ExportPipeline
 	 * doesn't bypass). Toasts the rounded result — or a "no line detected" message when the detector returns NaN.
 	 *
-	 * Busy stays held until this point — not released in runHorizonDetectionInBackground's finally — so a load
-	 * tap racing the detection result can't apply our rotation to the new image's state. The brief window
-	 * between busy release and the next load tap is fine because applyDetectedRotation has already returned by
-	 * then.
+	 * Busy stays held until this point — not released in runHorizonDetectionInBackground's finally — so a load tap
+	 * racing the detection result can't apply our rotation to the new image's state. The brief window between busy
+	 * release and the next load tap is fine because applyDetectedRotation has already returned by then.
 	 *
 	 * @param detected the detector's reported angle, or NaN when no line was found
 	 */
@@ -226,9 +224,9 @@ final class AutoRotateBinder
 	 * Busy is acquired here — not just the touch-blocking progress overlay — because a Share/View intent that
 	 * arrives mid-detection bypasses UI taps entirely and would race the detection result: the load's "Loading…"
 	 * overlay would be dismissed early when onHorizonDetectionResult hides progress, and the detected rotation
-	 * could be applied to the newly loading image's state. Holding busy makes the load wait (or get rejected
-	 * with the busy toast if the user taps Save/Open during paint+detect). Released in onHorizonDetectionResult
-	 * after rotation is applied.
+	 * could be applied to the newly loading image's state. Holding busy makes the load wait (or get rejected with
+	 * the busy toast if the user taps Save/Open during paint+detect). Released in onHorizonDetectionResult after
+	 * rotation is applied.
 	 *
 	 * @param btn the auto-rotate button (reset to its resting state regardless of the
 	 *            detection outcome — the paint phase has ended)
@@ -236,23 +234,24 @@ final class AutoRotateBinder
 	private void onHorizonPaintComplete(TextView btn)
 	{
 		resetAutoRotateButton(btn);
-		// Early-return gates BEFORE claiming busy so a "paint too short" path doesn't lock anyone
-		// else out of the editor. These reads are pure inspection — they don't bind us to the
-		// state references below.
-		if (host.getEditorView().getHorizonPoints().size() < 2
-			|| host.getState().getSourceImage() == null
+		// Early-return gates BEFORE claiming busy so a "paint too short" path doesn't lock anyone else out of
+		// the editor. These reads are pure inspection — they don't bind us to the state references below. The
+		// stroke test measures distance, not point count: a bare tap still contributes two coincident begin /
+		// end points, so only a bounding-box span shorter than the brush radius identifies the degenerate tap /
+		// jitter stroke.
+		if (host.getEditorView().isHorizonStrokeTooShort() || host.getState().getSourceImage() == null
 			|| host.getState().getDisplayImage() == null)
 		{
 			host.toastIfAlive("Paint was too short", Toast.LENGTH_SHORT);
 			return;
 		}
 		// Acquire busy BEFORE snapshotting + transforming the points / bitmaps. The UI thread is
-		// single-threaded so an inbound Share intent can't preempt the snapshot block today, but
-		// the discipline "claim the lock before reading lock-protected state" guards against a
-		// future refactor that introduces a yielding callback or posts an intermediate UI message
-		// between the reads and the dispatch. Without busy held, a state.reset() racing in
-		// after our snapshot would leave our bitmaps detached from the in-memory state — the
-		// detection would compute against the OLD source while the new source had taken its place.
+		// single-threaded so an inbound Share intent can't preempt the snapshot block today, but the discipline
+		// "claim the lock before reading lock-protected state" guards against a future refactor that introduces
+		// a yielding callback or posts an intermediate UI message between the reads and the dispatch. Without
+		// busy held, a state.reset() racing in after our snapshot would leave our bitmaps detached from the
+		// in-memory state — the detection would compute against the OLD source while the new source had taken
+		// its place.
 		if (!host.getBusy().compareAndSet(false, true))
 		{
 			host.showBusyToast();
@@ -260,29 +259,28 @@ final class AutoRotateBinder
 		}
 		// Snapshot the live points list before dispatching to the bg detector. HorizonPaintOverlay.getPoints()
 		// returns the in-progress imagePoints ArrayList; a subsequent setHorizonMode(true, ...) (entered if a
-		// new tap reaches handleAutoRotateTap before the busy gate took effect, e.g. through a future code
-		// path that bypasses busy) would clear imagePoints while the bg detector is iterating it — CME on bg.
-		// The copy is small (typically a few hundred 2-element float arrays) and is the only correct fix
-		// because the bg detector deliberately reads outside the busy-held UI thread.
+		// new tap reaches handleAutoRotateTap before the busy gate took effect, e.g. through a future code path
+		// that bypasses busy) would clear imagePoints while the bg detector is iterating it — CME on bg. The
+		// copy is small (typically a few hundred 2-element float arrays) and is the only correct fix because
+		// the bg detector deliberately reads outside the busy-held UI thread.
 		List<float[]> rawPoints = new ArrayList<>(host.getEditorView().getHorizonPoints());
 		float brushRadius = host.getEditorView().getHorizonBrushRadius();
 		Bitmap source = host.getState().getSourceImage();
 		Bitmap display = host.getState().getDisplayImage();
-		// Re-check source/display under the busy lock — between the early-return gate above and
-		// this snapshot, the references must still be non-null. (A concurrent reset can't happen
-		// while we hold busy, so this is purely paranoid; we release busy on any failure path.)
+		// Re-check source/display under the busy lock — between the early-return gate above and this snapshot,
+		// the references must still be non-null. (A concurrent reset can't happen while we hold busy, so this
+		// is purely paranoid; we release busy on any failure path.)
 		if (source == null || display == null)
 		{
 			host.getBusy().set(false);
 			host.toastIfAlive("Source image unavailable", Toast.LENGTH_SHORT);
 			return;
 		}
-		// Zero-dimension guard. proxyScale = display.getWidth() / source.getWidth() below would divide
-		// by zero (Infinity / NaN) on a 0-width source — real Bitmaps from BitmapFactory always have
-		// positive dims, but a recycled-mid-snapshot race produces a zero-width bitmap whose NaN
-		// proxyScale would propagate into the points passed to HorizonDetector. Mirror
-		// EditorRenderer.draw's matching guard so the failure surfaces as a clean toast rather than as
-		// a silently NaN-poisoned detect.
+		// Zero-dimension guard. proxyScale = display.getWidth() / source.getWidth() below would divide by zero
+		// (Infinity / NaN) on a 0-width source. Real Bitmaps from BitmapFactory always have positive dims and
+		// no current path recycles a CropState-installed bitmap while readers exist, so this is defensive
+		// future-proofing mirroring EditorRenderer.draw's matching guard — any such failure surfaces as a clean
+		// toast rather than a silently NaN-poisoned detect.
 		if (source.getWidth() <= 0 || source.getHeight() <= 0
 			|| display.getWidth() <= 0 || display.getHeight() <= 0)
 		{
@@ -291,13 +289,13 @@ final class AutoRotateBinder
 			return;
 		}
 		// Route detection through the display proxy: buildEdgeMap allocates 3 float[] arrays at width × height,
-		// which at 192 MP source = 2.3 GB working set (multi-second compute) but at 16 MP proxy = ~192 MB
-		// (~12× faster Hough vote). Painted points are stored in source-coordinate space; rescale them to
-		// proxy-coordinate space so the bitmap passed to HorizonDetector and the points/brushRadius it
-		// consumes share a consistent coordinate frame. proxyScale = 1 in the aliased case (display ==
-		// source when the source already fit MAX_DISPLAY_PIXELS), making the rescale a no-op copy.
-		// The returned angle is scale-invariant (line slopes don't change under uniform scaling), so no
-		// post-detection rescale is needed when applying the result to source-coordinate rotation state.
+		// which at 192 MP source = 2.3 GB working set (multi-second compute) but at 16 MP proxy = ~192 MB (~12×
+		// faster Hough vote). Painted points are stored in source-coordinate space; rescale them to
+		// proxy-coordinate space so the bitmap passed to HorizonDetector and the points/brushRadius it consumes
+		// share a consistent coordinate frame. proxyScale = 1 in the aliased case (display == source when the
+		// source already fit MAX_DISPLAY_PIXELS), making the rescale a no-op copy. The returned angle is
+		// scale-invariant (line slopes don't change under uniform scaling), so no post-detection rescale is
+		// needed when applying the result to source-coordinate rotation state.
 		float proxyScale = (float) display.getWidth() / source.getWidth();
 		List<float[]> points = new ArrayList<>(rawPoints.size());
 		for (float[] point : rawPoints)
@@ -341,8 +339,8 @@ final class AutoRotateBinder
 	 * progress overlay stuck or the busy flag held.
 	 *
 	 * Failure path: releases busy, clears UI, surfaces a toast. Success path: leaves busy held — the UI runnable
-	 * onHorizonDetectionResult will release it after applying rotation, so a load tap racing the result can't
-	 * apply our rotation to the new image's state.
+	 * onHorizonDetectionResult will release it after applying rotation, so a load tap racing the result can't apply
+	 * our rotation to the new image's state.
 	 *
 	 * @param src         source bitmap (read-only here)
 	 * @param points      painted polyline in image-coordinate space
@@ -351,19 +349,19 @@ final class AutoRotateBinder
 	private void runHorizonDetectionInBackground(Bitmap src, List<float[]> points, float brushRadius)
 	{
 		// HARDWARE-config bitmaps are GPU-resident and return null from getPixels() — the path
-		// HorizonDetector.buildEdgeMap relies on. BitmapUtils.createDisplayProxy returns a HARDWARE
-		// bitmap whenever the source needed downscaling (the common large-source case) because keeping
-		// the proxy on the GPU eliminates per-frame texture re-uploads during pan/zoom gestures. The
-		// trade-off lands here: readback the HARDWARE pixels to a fresh ARGB_8888 bitmap once per
-		// detection so HorizonDetector can walk them. The readback is ~50-200 ms on a 16 MP bitmap —
-		// only fires when the user invokes auto-rotate, not per render frame. When the proxy is the
-		// aliased source (sub-cap source), getConfig() is ARGB_8888 and we skip the copy.
+		// HorizonDetector.buildEdgeMap relies on. BitmapUtils.createDisplayProxy returns a HARDWARE bitmap
+		// whenever the source needed downscaling (the common large-source case) because keeping the proxy on
+		// the GPU eliminates per-frame texture re-uploads during pan/zoom gestures. The trade-off lands here:
+		// readback the HARDWARE pixels to a fresh ARGB_8888 bitmap once per detection so HorizonDetector can
+		// walk them. The readback is ~50-200 ms on a 16 MP bitmap — only fires when the user invokes
+		// auto-rotate, not per render frame. When the proxy is the aliased source (sub-cap source), getConfig()
+		// is ARGB_8888 and we skip the copy.
 		Bitmap detectBitmap = tryReadbackArgb(src);
 		if (detectBitmap == null)
 		{
 			// HARDWARE→ARGB readback failed (GPU memory exhausted or driver bug). Surface a clean
-			// detection-failure toast rather than crashing on src.getPixels() inside the detector.
-			// Clear busy LAST, on the UI thread, after teardown (see EditorHost.finishBusy). The toast is a
+			// detection-failure toast rather than crashing on src.getPixels() inside the detector. Clear
+			// busy LAST, on the UI thread, after teardown (see EditorHost.finishBusy). The toast is a
 			// separate post — it doesn't gate state, so landing after busy is released is fine.
 			host.finishBusy();
 			host.runOnUiThread(() -> host.toastIfAlive(DETECTION_FAILED_TOAST, Toast.LENGTH_SHORT));
@@ -392,9 +390,9 @@ final class AutoRotateBinder
 			if (detectBitmap != src)
 			{
 				// Identity check separates the readback copy (recycle to release the ~64 MB native
-				// buffer promptly) from the aliased-source case (live display proxy in CropState —
-				// must not be recycled). tryReadbackArgb returns src itself for non-HARDWARE inputs;
-				// only the HARDWARE branch produces a distinct reference.
+				// buffer promptly) from the aliased-source case (live display proxy in CropState — must
+				// not be recycled). tryReadbackArgb returns src itself for non-HARDWARE inputs; only
+				// the HARDWARE branch produces a distinct reference.
 				detectBitmap.recycle();
 			}
 		}

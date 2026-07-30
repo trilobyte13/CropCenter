@@ -1,9 +1,7 @@
 """
-Run both export-verification scripts against an original/cropped JPEG pair.
-Convenience wrapper for the common case "I want to know if this export is
-clean end-to-end" — runs the structural check (compare_export.py, pure-Python,
-fast) AND the pixel check (pixel_diff.py, needs PIL + numpy, slower with
-rotation search).
+Run both export-verification scripts against an original/cropped JPEG pair. Convenience wrapper for the common case "I
+want to know if this export is clean end-to-end" — runs the structural check (compare_export.py, pure-Python, fast) AND
+the pixel check (pixel_diff.py, needs PIL + numpy, slower with rotation search).
 
 Usage:
     py scripts/verify.py original.jpg cropped.jpg
@@ -12,19 +10,28 @@ Usage:
                                                   ^^ args after `--` go to
                                                      pixel_diff.py verbatim
 
-Exit code: max of the two child processes' exit codes (so 1 if either flags).
+Exit codes (max of the two children's codes, each normalized through as_exit first):
+    0  both checks clean
+    1  either check flagged suspicious differences
+    2  bad input / usage error
+    3  checker crashed (a negative child return code — killed by a signal — normalizes to 3 so a dead
+       checker can never fold into the other checker's success)
 
-Why a thin wrapper rather than a merged script: the two underlying tools
-have different dependency profiles (compare_export is pure-stdlib; pixel_diff
-needs Pillow + numpy) and different time scales (sub-second vs minutes).
-Keeping them separate means a contributor without PIL installed can still
-sanity-check structure, and CI can run the fast structural pass on every
-build while reserving the deeper pixel pass for periodic verification.
+Why a thin wrapper rather than a merged script: the two underlying tools have different dependency profiles
+(compare_export is pure-stdlib; pixel_diff needs Pillow + numpy) and different time scales (sub-second vs minutes).
+Keeping them separate means a contributor without PIL installed can still sanity-check structure, and CI can run the
+fast structural pass on every build while reserving the deeper pixel pass for periodic verification.
 """
 
 import os
 import subprocess
 import sys
+
+
+def as_exit(rc):
+    """Normalize a child return code for exit-code math: negative values (checker killed by a signal)
+    become 3 — 'checker crashed' — so max() can never fold a crash into the other checker's pass."""
+    return rc if rc >= 0 else 3
 
 
 def main(argv):
@@ -59,8 +66,8 @@ def main(argv):
     print('=' * 70)
     print('STRUCTURAL CHECK — compare_export.py')
     print('=' * 70)
-    rc_structural = subprocess.call(
-        [sys.executable, structural, orig, crop])
+    rc_structural = as_exit(subprocess.call(
+        [sys.executable, structural, orig, crop]))
 
     if quick:
         print()
@@ -71,8 +78,8 @@ def main(argv):
     print('=' * 70)
     print('PIXEL CHECK — pixel_diff.py')
     print('=' * 70)
-    rc_pixel = subprocess.call(
-        [sys.executable, pixel, orig, crop] + extra_pixel_args)
+    rc_pixel = as_exit(subprocess.call(
+        [sys.executable, pixel, orig, crop] + extra_pixel_args))
 
     print()
     print('=' * 70)

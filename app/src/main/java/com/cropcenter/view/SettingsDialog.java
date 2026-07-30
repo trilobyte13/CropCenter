@@ -3,7 +3,6 @@ package com.cropcenter.view;
 import android.app.AlertDialog;
 import android.content.Context;
 import android.content.DialogInterface;
-import android.content.res.ColorStateList;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.text.InputFilter;
@@ -31,22 +30,26 @@ import com.cropcenter.util.ThemeColors;
  *
  * All mutations flow through CropState.updateGridConfig so each user action fires the state listener exactly once —
  * callers don't need to pass an invalidate callback.
+ *
+ * Instantiated once per Activity: the active-picker tracking is instance state, so a second MainActivity (SEND / VIEW
+ * intent in a separate task) opening its own Settings can't cross-cancel this Activity's color picker.
  */
 public final class SettingsDialog
 {
-	// Active color picker tracked across all colorRow swatches so a forced parent cancellation cancels
-	// the open picker too, and a user picking a new swatch dismisses the prior picker first. UI-thread
-	// only — cleared by the picker's OnDismissListener.
-	private static AlertDialog activePicker;
+	// Active color picker tracked across all colorRow swatches so a forced parent cancellation cancels the open
+	// picker too, and a user picking a new swatch dismisses the prior picker first. UI-thread only — cleared by the
+	// picker's OnDismissListener. Instance-scoped (one SettingsDialog per Activity) so dual MainActivity instances
+	// can't cross-cancel each other's pickers.
+	private AlertDialog activePicker;
 
 	/**
-	 * Dismiss any open ColorPickerDialog and clear the tracker. Called by the parent SettingsDialog's
-	 * OnCancelListener so the picker's OK button can't mutate gridConfig after the parent is gone, and
-	 * by MainActivity.onDestroy so a config-change destroy that races a still-showing picker doesn't
-	 * pin the destroyed Activity's window via the static field. Snapshot the field before clearing so a
-	 * re-entrant cancel from picker.cancel()'s own OnCancelListener doesn't see a half-cleared state.
+	 * Dismiss any open ColorPickerDialog and clear the tracker. Called by the parent settings dialog's
+	 * OnCancelListener so the picker's OK button can't mutate gridConfig after the parent is gone, and by
+	 * MainActivity.onDestroy so a config-change destroy that races a still-showing picker doesn't pin the destroyed
+	 * Activity's window via the tracker field. Snapshot the field before clearing so a re-entrant cancel from
+	 * picker.cancel()'s own OnCancelListener doesn't see a half-cleared state.
 	 */
-	public static void cancelActivePicker()
+	public void cancelActivePicker()
 	{
 		AlertDialog picker = activePicker;
 		activePicker = null;
@@ -65,18 +68,18 @@ public final class SettingsDialog
 	}
 
 	/**
-	 * Build and show the settings dialog. Card layout: Grid (cols/rows + line color/width), Pixel Grid
-	 * (toggle + color), Selection & Paint (shared color), Build info. Toggles and color-picker selections
-	 * commit immediately; Cols / Rows EditTexts are deferred to "Done".
+	 * Build and show the settings dialog. Card layout: Grid (cols/rows + line color/width), Pixel Grid (toggle +
+	 * color), Selection & Paint (shared color), Build info. Toggles and color-picker selections commit immediately;
+	 * Cols / Rows EditTexts are deferred to "Done".
 	 *
 	 * Returns the AlertDialog so the caller can force-dismiss it — a Share/View intent mid-dialog runs
 	 * state.reset() on bg, racing the user's in-dialog commits.
 	 *
-	 * Both OnCancel AND OnDismiss cancel any open ColorPickerDialog (a separate AlertDialog that mutates
-	 * gridConfig via its own OK): a stale picker outliving SettingsDialog could keep applying colors to the
-	 * new image. Cancel covers user cancels; dismiss covers Done, config-change destroy, and any future
-	 * dismissal. setOnDismissListener replaces rather than chains, so this installs ONE listener calling
-	 * cancelActivePicker then hostDismissListener — a caller can't add its own without clobbering the cleanup.
+	 * Both OnCancel AND OnDismiss cancel any open ColorPickerDialog (a separate AlertDialog that mutates gridConfig
+	 * via its own OK): a stale picker outliving the settings dialog could keep applying colors to the new image.
+	 * Cancel covers user cancels; dismiss covers Done, config-change destroy, and any future dismissal.
+	 * setOnDismissListener replaces rather than chains, so this installs ONE listener calling cancelActivePicker
+	 * then hostDismissListener — a caller can't add its own without clobbering the cleanup.
 	 *
 	 * @param ctx                 Activity context for inflation
 	 * @param state               CropState whose gridConfig is mutated as the user interacts
@@ -84,26 +87,13 @@ public final class SettingsDialog
 	 * @param hostDismissListener additional cleanup composed with cancelActivePicker on dismiss; may be null
 	 * @return the shown AlertDialog (caller tracks it for cross-load dismissal)
 	 */
-	public static AlertDialog show(Context ctx, CropState state, StoragePermissionHelper permissions,
+	public AlertDialog show(Context ctx, CropState state, StoragePermissionHelper permissions,
 		DialogInterface.OnDismissListener hostDismissListener)
 	{
-		// Dismiss any prior picker before resetting the tracker. A stale activePicker can outlive its
-		// parent Activity when the previous SettingsDialog closed without its dismiss listener firing
-		// (config change mid-picker, torn-down path) — the static field would hold the destroyed
-		// Activity's window through the AlertDialog → Context chain.
-		AlertDialog stalePicker = activePicker;
-		if (stalePicker != null && stalePicker.isShowing())
-		{
-			try
-			{
-				stalePicker.cancel();
-			}
-			catch (RuntimeException ignored)
-			{
-				// Stale dialog whose window was already destroyed throws on cancel; nothing to clean.
-			}
-		}
-		activePicker = null;
+		// Dismiss any prior picker before building. A stale activePicker can linger when the previous settings
+		// dialog closed without its dismiss listener firing (config change mid-picker, torn-down path) — left
+		// alone it would keep a dead dialog's window pinned through the AlertDialog → Context chain.
+		cancelActivePicker();
 		float density = ctx.getResources().getDisplayMetrics().density;
 		int dp4 = DpToPx.toPx(4, density);
 		int dp8 = DpToPx.toPx(8, density);
@@ -117,10 +107,10 @@ public final class SettingsDialog
 		root.setPadding(dp16, dp8, dp16, dp8);
 		scroll.addView(root);
 
-		// Cards in alphabetical order by title (Build, Grid, Permissions, Pixel Grid, Selection &
-		// Paint). The Permissions card is only added when the host exposes a permission helper —
-		// see the `permissions != null` guard at the show() signature. The first card uses dp4 top
-		// margin (tighter to the dialog header); subsequent cards use dp8.
+		// Cards in alphabetical order by title (Build, Grid, Permissions, Pixel Grid, Selection & Paint). The
+		// Permissions card is only added when the host exposes a permission helper — see the `permissions !=
+		// null` guard at the show() signature. The first card uses dp4 top margin (tighter to the dialog
+		// header); subsequent cards use dp8.
 		EditText[] dimensionInputs = new EditText[2];
 		root.addView(buildInfoCard(ctx, density), DialogCards.topMargin(dp4));
 		root.addView(buildGridCard(ctx, state, cfg, density, dimensionInputs), DialogCards.topMargin(dp8));
@@ -141,9 +131,9 @@ public final class SettingsDialog
 			.setPositiveButton("Done", (dialog, which) -> applyDimensions.run())
 			.setOnCancelListener(dialog -> cancelActivePicker())
 			.create();
-		// Dismiss listener covers paths the cancel listener misses: Done, the config-change destroy
-		// path, and any future dialog-API dismissal. Compose with the host's optional cleanup so a
-		// caller's host-tracking listener doesn't clobber cancelActivePicker.
+		// Dismiss listener covers paths the cancel listener misses: Done, the config-change destroy path, and
+		// any future dialog-API dismissal. Compose with the host's optional cleanup so a caller's host-tracking
+		// listener doesn't clobber cancelActivePicker.
 		settingsDialog.setOnDismissListener(dialog ->
 		{
 			cancelActivePicker();
@@ -166,8 +156,8 @@ public final class SettingsDialog
 	}
 
 	/**
-	 * Commit the Columns / Rows EditText values to state, clamping each to [1, 99]. A blank / non-numeric
-	 * field is silently ignored — preset-chip taps already synced the inputs back in.
+	 * Commit the Columns / Rows EditText values to state, clamping each to [1, 99]. A blank / non-numeric field is
+	 * silently ignored — preset-chip taps already synced the inputs back in.
 	 *
 	 * @param state    CropState whose gridConfig is mutated with the parsed values
 	 * @param editCols Columns input — text trimmed, parsed as int, clamped to [1, 99]
@@ -181,9 +171,9 @@ public final class SettingsDialog
 			int rawRows = Integer.parseInt(editRows.getText().toString().trim());
 			int newCols = Math.clamp(rawCols, 1, 99);
 			int newRows = Math.clamp(rawRows, 1, 99);
-			// Write back the clamped values so the user sees what actually got saved — without this,
-			// a "0" silently clamps to 1 with no on-screen acknowledgment, leaving the user thinking
-			// they got 0 columns (and confused when the grid renders with 1).
+			// Write back the clamped values so the user sees what actually got saved — without this, a "0"
+			// silently clamps to 1 with no on-screen acknowledgment, leaving the user thinking they got 0
+			// columns (and confused when the grid renders with 1).
 			if (rawCols != newCols)
 			{
 				editCols.setText(String.valueOf(newCols));
@@ -211,64 +201,6 @@ public final class SettingsDialog
 	}
 
 	/**
-	 * Build the "Grid" card — Cols / Rows EditTexts, presets, line color, line width.
-	 *
-	 * @param ctx             Activity context for inflation
-	 * @param state           CropState whose gridConfig is mutated as the user interacts
-	 * @param cfg             snapshot of the initial gridConfig used to seed control values
-	 * @param density         display density used by DpToPx for sizing
-	 * @param dimensionInputs OUT — Cols EditText written to index [0], Rows EditText written to index [1] so the
-	 *                        dialog's "Done" button can commit them via applyDimensionInputs. Caller must pass a
-	 *                        2-element array.
-	 * @return the assembled card LinearLayout, ready for the dialog root
-	 */
-	private static LinearLayout buildGridCard(Context ctx, CropState state, GridConfig cfg,
-		float density, EditText[] dimensionInputs)
-	{
-		int dp4 = DpToPx.toPx(4, density);
-		int dp6 = DpToPx.toPx(6, density);
-		int dp8 = DpToPx.toPx(8, density);
-		int dp12 = DpToPx.toPx(12, density);
-
-		LinearLayout card = DialogCards.newCard(ctx, density);
-		DialogCards.addCardTitle(card, "Grid");
-
-		// Cols × Rows input row
-		LinearLayout dimensionsRow = row(ctx);
-		EditText editCols = numInput(ctx, String.valueOf(cfg.columns()), density);
-		EditText editRows = numInput(ctx, String.valueOf(cfg.rows()), density);
-		dimensionInputs[0] = editCols;
-		dimensionInputs[1] = editRows;
-
-		addLabel(dimensionsRow, "Columns");
-		LinearLayout.LayoutParams colsLayoutParams = new LinearLayout.LayoutParams(
-			DpToPx.toPx(48, density), DpToPx.toPx(30, density));
-		colsLayoutParams.leftMargin = dp8;
-		dimensionsRow.addView(editCols, colsLayoutParams);
-
-		TextView times = new TextView(ctx);
-		times.setText("  \u00D7  ");
-		times.setTextColor(ThemeColors.SUBTEXT0);
-		times.setTextSize(13);
-		dimensionsRow.addView(times);
-
-		addLabel(dimensionsRow, "Rows");
-		LinearLayout.LayoutParams rowsLayoutParams = new LinearLayout.LayoutParams(
-			DpToPx.toPx(48, density), DpToPx.toPx(30, density));
-		rowsLayoutParams.leftMargin = dp8;
-		dimensionsRow.addView(editRows, rowsLayoutParams);
-		card.addView(dimensionsRow, DialogCards.topMargin(dp6));
-
-		card.addView(buildPresetRow(ctx, state, editCols, editRows, density), DialogCards.topMargin(dp8));
-
-		card.addView(colorRow(ctx, "Line color", cfg.color(), density, color ->
-			state.updateGridConfig(g -> g.withColor(color))), DialogCards.topMargin(dp12));
-
-		card.addView(buildWidthRow(ctx, state, cfg, density), DialogCards.topMargin(dp8));
-		return card;
-	}
-
-	/**
 	 * Build the "Build" info card — shows the BUILD_TIME constant from BuildConfig so testers can verify which
 	 * build is running without Logcat.
 	 *
@@ -292,12 +224,11 @@ public final class SettingsDialog
 	}
 
 	/**
-	 * Build the "Permissions" card — surfaces the MANAGE_EXTERNAL_STORAGE grant state plus a tap target to
-	 * open the system Settings page where the user actually grants it. Without this card the only path to
-	 * grant the permission was via the Replace-failure dialog, which requires the user to first hit a
-	 * collision-overwrite save failure — a path many users never reach. Mirrors the wording in
-	 * ReplaceStrategy.showReplaceFailureDialog so the user sees the same "All files access" label across
-	 * both surfaces.
+	 * Build the "Permissions" card — surfaces the MANAGE_EXTERNAL_STORAGE grant state plus a tap target to open the
+	 * system Settings page where the user actually grants it. Without this card the only path to grant the
+	 * permission was via the Replace-failure dialog, which requires the user to first hit a collision-overwrite
+	 * save failure — a path many users never reach. Mirrors the wording in ReplaceStrategy.showReplaceFailureDialog
+	 * so the user sees the same "All files access" label across both surfaces.
 	 *
 	 * @param ctx         Activity context for view inflation
 	 * @param permissions storage-permission helper used to query current grant state + open Settings
@@ -309,14 +240,14 @@ public final class SettingsDialog
 	{
 		int dp4 = DpToPx.toPx(4, density);
 		LinearLayout card = DialogCards.newCard(ctx, density);
-		// Whole card is the tap target — clicking anywhere inside the panel (title, status row, hint
-		// text, or the surrounding padding) opens the system Settings page. Adding the ripple via the
-		// selectableItemBackground theme attribute keeps tap feedback visible without overriding the
-		// card's SURFACE0 fill. setClickable + setFocusable are explicit because LinearLayout doesn't
-		// default to clickable, and without focusable the TalkBack semantics would skip the row.
+		// Whole card is the tap target — clicking anywhere inside the panel (title, status row, hint text, or
+		// the surrounding padding) opens the system Settings page. Adding the ripple via the
+		// selectableItemBackground theme attribute keeps tap feedback visible without overriding the card's
+		// SURFACE0 fill. setClickable + setFocusable are explicit because LinearLayout doesn't default to
+		// clickable, and without focusable the TalkBack semantics would skip the row.
 		TypedValue rippleAttr = new TypedValue();
 		ctx.getTheme().resolveAttribute(android.R.attr.selectableItemBackground, rippleAttr, true);
-		card.setForeground(ctx.getResources().getDrawable(rippleAttr.resourceId, ctx.getTheme()));
+		card.setForeground(ctx.getDrawable(rippleAttr.resourceId));
 		card.setClickable(true);
 		card.setFocusable(true);
 		card.setOnClickListener(view -> permissions.openStoragePermissionSettings());
@@ -342,41 +273,8 @@ public final class SettingsDialog
 	}
 
 	/**
-	 * Build the "Pixel Grid" card — checkbox to toggle the per-pixel overlay + color picker for the pixel-grid
-	 * stroke.
-	 *
-	 * @param ctx     Activity context for view inflation
-	 * @param state   CropState whose gridConfig is mutated by the toggle / color picker
-	 * @param cfg     snapshot of the initial gridConfig used to seed control values
-	 * @param density display density used by DpToPx for sizing
-	 * @return the assembled card LinearLayout
-	 */
-	private static LinearLayout buildPixelGridCard(Context ctx, CropState state, GridConfig cfg, float density)
-	{
-		int dp4 = DpToPx.toPx(4, density);
-		int dp8 = DpToPx.toPx(8, density);
-
-		LinearLayout card = DialogCards.newCard(ctx, density);
-		DialogCards.addCardTitle(card, "Pixel Grid");
-
-		CheckBox chkPixel = new CheckBox(ctx);
-		chkPixel.setText("Show when zoomed in enough to see individual pixels");
-		chkPixel.setTextSize(12);
-		chkPixel.setTextColor(ThemeColors.TEXT);
-		chkPixel.setChecked(cfg.showPixelGrid());
-		chkPixel.setButtonTintList(ColorStateList.valueOf(ThemeColors.MAUVE));
-		chkPixel.setOnCheckedChangeListener((button, isChecked) ->
-			state.updateGridConfig(g -> g.withShowPixelGrid(isChecked)));
-		card.addView(chkPixel, DialogCards.topMargin(dp4));
-
-		card.addView(colorRow(ctx, "Color", cfg.pixelGridColor(), density, color ->
-			state.updateGridConfig(g -> g.withPixelGridColor(color))), DialogCards.topMargin(dp8));
-		return card;
-	}
-
-	/**
-	 * 2×2..8×8 equal-weight preset chip row. Tapping a chip syncs both the GridConfig and the Cols / Rows
-	 * EditTexts so the user sees the new values.
+	 * 2×2..8×8 equal-weight preset chip row. Tapping a chip syncs both the GridConfig and the Cols / Rows EditTexts
+	 * so the user sees the new values.
 	 *
 	 * @param ctx      Activity context for inflation
 	 * @param state    CropState whose gridConfig is mutated on chip tap
@@ -396,7 +294,7 @@ public final class SettingsDialog
 		{
 			final int cols = presets[i][0];
 			final int rows = presets[i][1];
-			TextView btn = chipButton(ctx, cols + "\u00D7" + rows, density);
+			TextView btn = chipButton(ctx, cols + "×" + rows, density);
 			btn.setOnClickListener(view ->
 			{
 				state.updateGridConfig(g -> g.withColumns(cols).withRows(rows));
@@ -416,40 +314,9 @@ public final class SettingsDialog
 	}
 
 	/**
-	 * Build the "Selection & Paint" card — shared color for selection markers, polygon fill, and horizon paint
-	 * strokes.
-	 *
-	 * @param ctx     Activity context for view inflation
-	 * @param state   CropState whose gridConfig is mutated by the color picker
-	 * @param cfg     snapshot of the initial gridConfig used to seed the swatch
-	 * @param density display density used by DpToPx for sizing
-	 * @return the assembled card LinearLayout
-	 */
-	private static LinearLayout buildSelectionCard(Context ctx, CropState state, GridConfig cfg, float density)
-	{
-		int dp4 = DpToPx.toPx(4, density);
-		int dp8 = DpToPx.toPx(8, density);
-
-		LinearLayout card = DialogCards.newCard(ctx, density);
-		DialogCards.addCardTitle(card, "Selection & Paint");
-
-		TextView selNote = new TextView(ctx);
-		selNote.setText("Color for selection points, polygon fill, and horizon paint.");
-		selNote.setTextSize(11);
-		selNote.setTextColor(ThemeColors.OVERLAY0);
-		card.addView(selNote, DialogCards.topMargin(dp4));
-
-		card.addView(colorRow(ctx, "Color", cfg.selectionColor(), density,
-			ColorPickerDialog.PALETTE_TRANSLUCENT, color ->
-				state.updateGridConfig(g -> g.withSelectionColor(color))), DialogCards.topMargin(dp8));
-		return card;
-	}
-
-	/**
-	 * Build the "Width" seek-bar row — user drags to pick a grid stroke width (1-20 image pixels).
-	 * The seek bar is configured with `setMin(1)` so the thumb cannot land on a 0 position; the
-	 * progress-changed handler also clamps defensively to [1, 20] as a belt-and-braces guard
-	 * against any future tampering with the bar's range.
+	 * Build the "Width" seek-bar row — user drags to pick a grid stroke width (1-20 image pixels). The seek bar is
+	 * configured with `setMin(1)` so the thumb cannot land on a 0 position; the progress-changed handler also
+	 * clamps defensively to [1, 20] as a belt-and-braces guard against any future tampering with the bar's range.
 	 *
 	 * @param ctx     Activity context for inflation
 	 * @param state   CropState whose gridConfig.lineWidth is mutated as the seek-bar drags
@@ -465,9 +332,9 @@ public final class SettingsDialog
 
 		SeekBar widthSeekBar = new SeekBar(ctx);
 		// min=1 so the slider thumb can't show a position that doesn't correspond to the model. The
-		// onProgressChanged handler below clamps to [1, 20] before writing GridConfig anyway, but
-		// without setMin the thumb at the left edge would render at position 0 while the label and
-		// state both read 1 — a UI lie.
+		// onProgressChanged handler below clamps to [1, 20] before writing GridConfig anyway, but without
+		// setMin the thumb at the left edge would render at position 0 while the label and state both read 1 —
+		// a UI lie.
 		widthSeekBar.setMin(1);
 		widthSeekBar.setMax(20);
 		widthSeekBar.setProgress((int) cfg.lineWidth());
@@ -498,7 +365,13 @@ public final class SettingsDialog
 	}
 
 	/**
-	 * Compact chip-style preset button (used with layout_weight in rows).
+	 * Compact chip-style preset button. Carries no width of its own — callers size it via layout_weight in a
+	 * horizontal row.
+	 *
+	 * @param ctx     dialog context for view construction
+	 * @param text    chip label
+	 * @param density display density for dp→px sizing
+	 * @return the styled chip, ready for a weighted row slot
 	 */
 	private static TextView chipButton(Context ctx, String text, float density)
 	{
@@ -507,22 +380,202 @@ public final class SettingsDialog
 		btn.setTextSize(11);
 		btn.setTextColor(ThemeColors.SUBTEXT0);
 		btn.setGravity(Gravity.CENTER);
-		GradientDrawable bg = new GradientDrawable();
-		bg.setColor(ThemeColors.SURFACE1);
-		bg.setCornerRadius(DpToPx.toPx(4, density));
-		btn.setBackground(bg);
+		btn.setBackground(roundedSurface1(density));
 		btn.setPadding(0, DpToPx.toPx(6, density), 0, DpToPx.toPx(6, density));
 		btn.setSingleLine(true);
 		return btn;
 	}
 
-	private static LinearLayout colorRow(Context ctx, String label, int currentColor,
+	private static EditText numInput(Context ctx, String val, float density)
+	{
+		EditText edit = new EditText(ctx);
+		edit.setText(val);
+		edit.setTextSize(13);
+		edit.setGravity(Gravity.CENTER);
+		edit.setSingleLine(true);
+		edit.setInputType(InputType.TYPE_CLASS_NUMBER);
+		// Hard-cap to 2 digits at the IME layer. Mirrors the [1, 99] applyDimensionInputs clamp so the user
+		// can't type a 3-digit value (e.g. 100) that would silently clamp to 99 at Done — the soft keyboard
+		// simply refuses the third character. Both current call sites (cols, rows) want the same cap; if a
+		// future numeric input wants a different width, parameterise this.
+		edit.setFilters(new InputFilter[] { new InputFilter.LengthFilter(2) });
+		edit.setTextColor(ThemeColors.TEXT);
+		edit.setBackground(roundedSurface1(density));
+		int pad = DpToPx.toPx(4, density);
+		edit.setPadding(pad, pad, pad, pad);
+		return edit;
+	}
+
+	/**
+	 * Rounded SURFACE1 background (4dp corner radius) shared by the settings chips and inputs.
+	 *
+	 * @param density display density for dp→px sizing
+	 * @return fresh GradientDrawable per call — a Drawable instance can't back multiple views
+	 */
+	private static GradientDrawable roundedSurface1(float density)
+	{
+		GradientDrawable bg = new GradientDrawable();
+		bg.setColor(ThemeColors.SURFACE1);
+		bg.setCornerRadius(DpToPx.toPx(4, density));
+		return bg;
+	}
+
+	private static LinearLayout row(Context ctx)
+	{
+		LinearLayout row = new LinearLayout(ctx);
+		row.setOrientation(LinearLayout.HORIZONTAL);
+		row.setGravity(Gravity.CENTER_VERTICAL);
+		return row;
+	}
+
+	/**
+	 * Small rounded readout chip for numeric values. Min-width keeps the row from reflowing as the value's digit
+	 * count changes during a slider drag.
+	 *
+	 * @param ctx     dialog context for view construction
+	 * @param text    initial readout value
+	 * @param density display density for dp→px sizing
+	 * @return the styled readout chip
+	 */
+	private static TextView valueChip(Context ctx, String text, float density)
+	{
+		TextView tv = new TextView(ctx);
+		tv.setText(text);
+		tv.setTextSize(12);
+		tv.setTextColor(ThemeColors.MAUVE);
+		tv.setGravity(Gravity.CENTER);
+		tv.setMinWidth(DpToPx.toPx(32, density));
+		tv.setBackground(roundedSurface1(density));
+		int chipPadHor = DpToPx.toPx(6, density);
+		int chipPadVer = DpToPx.toPx(3, density);
+		tv.setPadding(chipPadHor, chipPadVer, chipPadHor, chipPadVer);
+		return tv;
+	}
+
+	/**
+	 * Build the "Grid" card — Cols / Rows EditTexts, presets, line color, line width.
+	 *
+	 * @param ctx             Activity context for inflation
+	 * @param state           CropState whose gridConfig is mutated as the user interacts
+	 * @param cfg             snapshot of the initial gridConfig used to seed control values
+	 * @param density         display density used by DpToPx for sizing
+	 * @param dimensionInputs OUT — Cols EditText written to index [0], Rows EditText written to index [1] so the
+	 *                        dialog's "Done" button can commit them via applyDimensionInputs. Caller must pass a
+	 *                        2-element array.
+	 * @return the assembled card LinearLayout, ready for the dialog root
+	 */
+	private LinearLayout buildGridCard(Context ctx, CropState state, GridConfig cfg,
+		float density, EditText[] dimensionInputs)
+	{
+		int dp4 = DpToPx.toPx(4, density);
+		int dp6 = DpToPx.toPx(6, density);
+		int dp8 = DpToPx.toPx(8, density);
+		int dp12 = DpToPx.toPx(12, density);
+
+		LinearLayout card = DialogCards.newCard(ctx, density);
+		DialogCards.addCardTitle(card, "Grid");
+
+		// Cols × Rows input row
+		LinearLayout dimensionsRow = row(ctx);
+		EditText editCols = numInput(ctx, String.valueOf(cfg.columns()), density);
+		EditText editRows = numInput(ctx, String.valueOf(cfg.rows()), density);
+		dimensionInputs[0] = editCols;
+		dimensionInputs[1] = editRows;
+
+		addLabel(dimensionsRow, "Columns");
+		LinearLayout.LayoutParams colsLayoutParams = new LinearLayout.LayoutParams(
+			DpToPx.toPx(48, density), DpToPx.toPx(30, density));
+		colsLayoutParams.leftMargin = dp8;
+		dimensionsRow.addView(editCols, colsLayoutParams);
+
+		TextView times = new TextView(ctx);
+		times.setText("  ×  ");
+		times.setTextColor(ThemeColors.SUBTEXT0);
+		times.setTextSize(13);
+		dimensionsRow.addView(times);
+
+		addLabel(dimensionsRow, "Rows");
+		LinearLayout.LayoutParams rowsLayoutParams = new LinearLayout.LayoutParams(
+			DpToPx.toPx(48, density), DpToPx.toPx(30, density));
+		rowsLayoutParams.leftMargin = dp8;
+		dimensionsRow.addView(editRows, rowsLayoutParams);
+		card.addView(dimensionsRow, DialogCards.topMargin(dp6));
+
+		card.addView(buildPresetRow(ctx, state, editCols, editRows, density), DialogCards.topMargin(dp8));
+
+		card.addView(colorRow(ctx, "Line color", cfg.color(), density, color ->
+			state.updateGridConfig(g -> g.withColor(color))), DialogCards.topMargin(dp12));
+
+		card.addView(buildWidthRow(ctx, state, cfg, density), DialogCards.topMargin(dp8));
+		return card;
+	}
+
+	/**
+	 * Build the "Pixel Grid" card — checkbox to toggle the per-pixel overlay + color picker for the pixel-grid
+	 * stroke.
+	 *
+	 * @param ctx     Activity context for view inflation
+	 * @param state   CropState whose gridConfig is mutated by the toggle / color picker
+	 * @param cfg     snapshot of the initial gridConfig used to seed control values
+	 * @param density display density used by DpToPx for sizing
+	 * @return the assembled card LinearLayout
+	 */
+	private LinearLayout buildPixelGridCard(Context ctx, CropState state, GridConfig cfg, float density)
+	{
+		int dp4 = DpToPx.toPx(4, density);
+		int dp8 = DpToPx.toPx(8, density);
+
+		LinearLayout card = DialogCards.newCard(ctx, density);
+		DialogCards.addCardTitle(card, "Pixel Grid");
+
+		CheckBox chkPixel = DialogCards.newMauveCheckBox(ctx,
+			"Show when zoomed in enough to see individual pixels", cfg.showPixelGrid());
+		chkPixel.setOnCheckedChangeListener((button, isChecked) ->
+			state.updateGridConfig(g -> g.withShowPixelGrid(isChecked)));
+		card.addView(chkPixel, DialogCards.topMargin(dp4));
+
+		card.addView(colorRow(ctx, "Color", cfg.pixelGridColor(), density, color ->
+			state.updateGridConfig(g -> g.withPixelGridColor(color))), DialogCards.topMargin(dp8));
+		return card;
+	}
+
+	/**
+	 * Build the "Selection & Paint" card — shared color for selection markers, polygon fill, and horizon paint
+	 * strokes.
+	 *
+	 * @param ctx     Activity context for view inflation
+	 * @param state   CropState whose gridConfig is mutated by the color picker
+	 * @param cfg     snapshot of the initial gridConfig used to seed the swatch
+	 * @param density display density used by DpToPx for sizing
+	 * @return the assembled card LinearLayout
+	 */
+	private LinearLayout buildSelectionCard(Context ctx, CropState state, GridConfig cfg, float density)
+	{
+		int dp4 = DpToPx.toPx(4, density);
+		int dp8 = DpToPx.toPx(8, density);
+
+		LinearLayout card = DialogCards.newCard(ctx, density);
+		DialogCards.addCardTitle(card, "Selection & Paint");
+
+		TextView selNote = new TextView(ctx);
+		selNote.setText("Color for selection points, polygon fill, and horizon paint.");
+		selNote.setTextSize(11);
+		selNote.setTextColor(ThemeColors.OVERLAY0);
+		card.addView(selNote, DialogCards.topMargin(dp4));
+
+		card.addView(colorRow(ctx, "Color", cfg.selectionColor(), density,
+			ColorPickerDialog.PALETTE_TRANSLUCENT, color ->
+				state.updateGridConfig(g -> g.withSelectionColor(color))), DialogCards.topMargin(dp8));
+		return card;
+	}
+
+	private LinearLayout colorRow(Context ctx, String label, int currentColor,
 		float density, ColorPickerDialog.OnColorSelectedListener onPick)
 	{
 		return colorRow(ctx, label, currentColor, density, ColorPickerDialog.PALETTE_OPAQUE, onPick);
 	}
 
-	private static LinearLayout colorRow(Context ctx, String label, int currentColor,
+	private LinearLayout colorRow(Context ctx, String label, int currentColor,
 		float density, int[] palette, ColorPickerDialog.OnColorSelectedListener onPick)
 	{
 		int swatchSize = DpToPx.toPx(26, density);
@@ -567,34 +620,11 @@ public final class SettingsDialog
 		return row;
 	}
 
-	private static EditText numInput(Context ctx, String val, float density)
-	{
-		EditText edit = new EditText(ctx);
-		edit.setText(val);
-		edit.setTextSize(13);
-		edit.setGravity(Gravity.CENTER);
-		edit.setSingleLine(true);
-		edit.setInputType(InputType.TYPE_CLASS_NUMBER);
-		// Hard-cap to 2 digits at the IME layer. Mirrors the [1, 99] applyDimensionInputs clamp so the
-		// user can't type a 3-digit value (e.g. 100) that would silently clamp to 99 at Done — the
-		// soft keyboard simply refuses the third character. Both current call sites (cols, rows) want
-		// the same cap; if a future numeric input wants a different width, parameterise this.
-		edit.setFilters(new InputFilter[] { new InputFilter.LengthFilter(2) });
-		edit.setTextColor(ThemeColors.TEXT);
-		GradientDrawable bg = new GradientDrawable();
-		bg.setColor(ThemeColors.SURFACE1);
-		bg.setCornerRadius(DpToPx.toPx(4, density));
-		edit.setBackground(bg);
-		int pad = DpToPx.toPx(4, density);
-		edit.setPadding(pad, pad, pad, pad);
-		return edit;
-	}
-
 	/**
 	 * Open a ColorPickerDialog for one of the swatch rows. Tracks the fresh picker as the active one so
-	 * SettingsDialog's OnCancelListener can cancel it on forced parent dismissal, and dismisses any prior
-	 * picker first so rapid swatch taps don't stack two pickers (the deeper one would still fire its OK
-	 * listener and mutate gridConfig).
+	 * SettingsDialog's OnCancelListener can cancel it on forced parent dismissal, and dismisses any prior picker
+	 * first so rapid swatch taps don't stack two pickers (the deeper one would still fire its OK listener and
+	 * mutate gridConfig).
 	 *
 	 * @param ctx      Activity context for inflation
 	 * @param tracked  1-element box holding the row's currently-tracked color (ARGB)
@@ -603,16 +633,16 @@ public final class SettingsDialog
 	 * @param palette  PALETTE_OPAQUE or PALETTE_TRANSLUCENT
 	 * @param onPick   listener invoked by applyPickedColor after the picker confirms
 	 */
-	private static void openColorPicker(Context ctx, int[] tracked, GradientDrawable swatchBg,
+	private void openColorPicker(Context ctx, int[] tracked, GradientDrawable swatchBg,
 		View swatch, int[] palette, ColorPickerDialog.OnColorSelectedListener onPick)
 	{
 		AlertDialog prev = activePicker;
 		if (prev != null && prev.isShowing())
 		{
 			// cancel() fires OnCancelListener AND OnDismissListener; dismiss() only fires the latter.
-			// cancelActivePicker (the other teardown site) also uses cancel(), so this matches —
-			// without consistency, a future OnCancelListener wired to the picker would silently
-			// miss firing on the swatch-tap-while-picker-open path.
+			// cancelActivePicker (the other teardown site) also uses cancel(), so this matches — without
+			// consistency, a future OnCancelListener wired to the picker would silently miss firing on the
+			// swatch-tap-while-picker-open path.
 			prev.cancel();
 		}
 		AlertDialog picker = ColorPickerDialog.show(ctx, tracked[0], palette,
@@ -625,34 +655,5 @@ public final class SettingsDialog
 				activePicker = null;
 			}
 		});
-	}
-
-	private static LinearLayout row(Context ctx)
-	{
-		LinearLayout row = new LinearLayout(ctx);
-		row.setOrientation(LinearLayout.HORIZONTAL);
-		row.setGravity(Gravity.CENTER_VERTICAL);
-		return row;
-	}
-
-	/**
-	 * Small rounded readout chip for numeric values.
-	 */
-	private static TextView valueChip(Context ctx, String text, float density)
-	{
-		TextView tv = new TextView(ctx);
-		tv.setText(text);
-		tv.setTextSize(12);
-		tv.setTextColor(ThemeColors.MAUVE);
-		tv.setGravity(Gravity.CENTER);
-		tv.setMinWidth(DpToPx.toPx(32, density));
-		GradientDrawable bg = new GradientDrawable();
-		bg.setColor(ThemeColors.SURFACE1);
-		bg.setCornerRadius(DpToPx.toPx(4, density));
-		tv.setBackground(bg);
-		int chipPadHor = DpToPx.toPx(6, density);
-		int chipPadVer = DpToPx.toPx(3, density);
-		tv.setPadding(chipPadHor, chipPadVer, chipPadHor, chipPadVer);
-		return tv;
 	}
 }

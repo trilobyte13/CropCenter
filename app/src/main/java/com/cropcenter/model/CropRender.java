@@ -1,17 +1,17 @@
 package com.cropcenter.model;
 
 /**
- * Bundle of crop-geometry parameters that travel together to the export pipeline (replaces a 12-param method
- * clump in UltraHdrCompat.compressWithGainmap and the threading through CropExporter.export →
- * buildCroppedGainMap). Lives in model/ (not crop/) as a pure value object both crop/ and util/ consume —
- * keeping it in crop/ would invert the util/ → crop/ layering.
+ * Bundle of crop-geometry parameters that travel together to the export pipeline (replaces a 12-param method clump in
+ * UltraHdrCompat.compressWithGainmap and the threading through CropExporter.export → buildCroppedGainMap). Lives in
+ * model/ (not crop/) as a pure value object both crop/ and util/ consume — keeping it in crop/ would invert the util/ →
+ * crop/ layering.
  *
- * A final class with a private constructor + public static of(...) factory, NOT a record: a record's
- * canonical constructor must be as accessible as the record, exposing the all-positional raw ctor. The
- * footgun — a maintainer using the codebase's (W, H) convention everywhere else would write
- * `new CropRender(cx, cy, cropW, cropH, imgW, imgH, rot)` and silently transpose each int pair (no compile
- * error, but visible HDR halos around every cropped export). The of(...) factory takes canonical (W, H) order
- * and threads the swap internally; fields are stored alphabetically (cropH before cropW, etc.).
+ * A final class with a private constructor + public static of(...) factory, NOT a record: a record's canonical
+ * constructor must be as accessible as the record, exposing the all-positional raw ctor. The footgun — a maintainer
+ * using the codebase's (W, H) convention everywhere else would write `new CropRender(cx, cy, cropW, cropH, imgW, imgH,
+ * rot)` and silently transpose each int pair (no compile error, but visible HDR halos around every cropped export). The
+ * of(...) factory takes canonical (W, H) order and threads the swap internally; fields are stored alphabetically (cropH
+ * before cropW, etc.).
  */
 public final class CropRender
 {
@@ -35,9 +35,9 @@ public final class CropRender
 	}
 
 	/**
-	 * Construct a CropRender using the codebase's canonical (W, H) parameter convention. The only way to
-	 * construct a CropRender — the all-int positional constructor is private so a maintainer can't accidentally
-	 * call `new CropRender(...)` with arguments transposed against the storage's (H, W) alphabetical order.
+	 * Construct a CropRender using the codebase's canonical (W, H) parameter convention. The only way to construct
+	 * a CropRender — the all-int positional constructor is private so a maintainer can't accidentally call `new
+	 * CropRender(...)` with arguments transposed against the storage's (H, W) alphabetical order.
 	 *
 	 * @param centerX  crop center X in un-rotated image coords
 	 * @param centerY  crop center Y in un-rotated image coords

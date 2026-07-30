@@ -2,6 +2,8 @@ package com.cropcenter;
 
 import android.graphics.Bitmap;
 
+import androidx.annotation.UiThread;
+
 /**
  * Host surface consumed by ImageLoadController. Extends EditorHost (which already provides busy / progress / toast /
  * registerTransientDialog plumbing) with one image-installation callback that lets the controller hand the decoded
@@ -13,15 +15,15 @@ import android.graphics.Bitmap;
 interface ImageLoadHost extends EditorHost
 {
 	/**
-	 * Dismiss whatever state-mutating dialog is currently open before a load begins. Called by
-	 * ImageLoadController on the UI thread immediately before busy.compareAndSet so any open dialog
-	 * (SettingsDialog, SaveDialog, FolderPickerDialog, the in-app collision / rename / overwrite-
-	 * confirm dialogs, Replace dialog, the Custom-AR toolbar dialog, the all-files-access prompt,
-	 * or the graft sanity-check dialog) can't keep committing to CropState while a
-	 * bg state.reset() races them. Without this forced dismissal, an open dialog at the moment a
-	 * Share/View intent fires races the reset's clears with the user's still-active widget commits.
-	 * No-op when no transient dialog is open.
+	 * Dismiss whatever state-mutating dialog is currently open before a load begins. Called by ImageLoadController
+	 * on the UI thread immediately before busy.compareAndSet so any open dialog (SettingsDialog, SaveDialog,
+	 * FolderPickerDialog, the in-app collision / rename / overwrite-confirm dialogs, Replace dialog, the Custom-AR
+	 * toolbar dialog, the all-files-access prompt, or the graft sanity-check dialog) can't keep committing to
+	 * CropState while a bg state.reset() races them. Without this forced dismissal, an open dialog at the moment a
+	 * Share/View intent fires races the reset's clears with the user's still-active widget commits. No-op when no
+	 * transient dialog is open.
 	 */
+	@UiThread
 	void dismissTransientDialogs();
 
 	/**
@@ -40,5 +42,6 @@ interface ImageLoadHost extends EditorHost
 	 * @param sizeInfo "WIDTH×HEIGHT" formatted string for the dimensions readout
 	 * @param metaInfo human-readable format string ("EXIF+ICC+HDR+Samsung", etc.)
 	 */
+	@UiThread
 	void installImageOnUi(Bitmap source, Bitmap display, String sizeInfo, String metaInfo);
 }

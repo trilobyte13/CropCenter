@@ -6,6 +6,7 @@ import android.content.SharedPreferences;
 import android.text.InputType;
 import android.util.Log;
 import android.view.Gravity;
+import android.view.MenuItem;
 import android.view.View;
 import android.widget.EditText;
 import android.widget.LinearLayout;
@@ -21,17 +22,17 @@ import com.cropcenter.view.DialogStrings;
 
 /**
  * Wires the toolbar controls (mode / lock / pin / AR / grid / undo-redo / clear / rotation / auto-rotate) and the
- * Custom AR dialog. All onClick handlers route back into the activity for crop-state manipulation and into UiSync
- * for visual updates, keeping the binder free of any direct rendering or state mutation beyond what the
- * corresponding control conceptually owns.
+ * Custom AR dialog. All onClick handlers route back into the activity for crop-state manipulation and into UiSync for
+ * visual updates, keeping the binder free of any direct rendering or state mutation beyond what the corresponding
+ * control conceptually owns.
  */
 final class ToolbarBinder
 {
 	private static final String TAG = "ToolbarBinder";
 
 	// Display order for the AR preset popup: widest-landscape → square → tallest-portrait, with Custom as the
-	// trailing sentinel. The fresh-image default is orientation-aware (MainActivity.installImageOnUi seeds R5_4
-	// for landscape / R4_5 for portrait) — this array only drives the popup's row order.
+	// trailing sentinel. The fresh-image default is orientation-aware (MainActivity.installImageOnUi seeds R5_4 for
+	// landscape / R4_5 for portrait) — this array only drives the popup's row order.
 	private static final AspectRatio[] AR_VALUES = {
 		AspectRatio.FREE, AspectRatio.R16_9, AspectRatio.R3_2, AspectRatio.R4_3,
 		AspectRatio.R5_4, AspectRatio.R1_1, AspectRatio.R4_5, AspectRatio.R3_4,
@@ -58,10 +59,10 @@ final class ToolbarBinder
 	}
 
 	/**
-	 * Compact human-readable label for an AspectRatio — matches a preset's name when one matches
-	 * ("4:5", "16:9", "Full"), or falls back to the numeric "W:H" form for custom ratios. Package-private
-	 * static so UiSync.updateAspectRatioButton (the chokepoint that writes the AR chip's text) can call
-	 * it without holding a ToolbarBinder reference.
+	 * Compact human-readable label for an AspectRatio — matches a preset's name when one matches ("4:5", "16:9",
+	 * "Full"), or falls back to the numeric "W:H" form for custom ratios. Package-private static so
+	 * UiSync.updateAspectRatioButton (the chokepoint that writes the AR chip's text) can call it without holding a
+	 * ToolbarBinder reference.
 	 *
 	 * @param ar aspect ratio to format; null treated as FREE / "Full"
 	 * @return short label suitable for the AR chip's text — preset name when ar matches one of
@@ -73,9 +74,9 @@ final class ToolbarBinder
 		{
 			return "Full";
 		}
-		// indexOfAspectRatio returns AR_VALUES.length - 1 (the Custom sentinel) on no match. Any other
-		// returned index is guaranteed to hit a non-null preset, so the single bound check below is
-		// sufficient — no need to re-check AR_VALUES[matchedIndex] != null.
+		// indexOfAspectRatio returns AR_VALUES.length - 1 (the Custom sentinel) on no match. Any other returned
+		// index is guaranteed to hit a non-null preset, so the single bound check below is sufficient — no need
+		// to re-check AR_VALUES[matchedIndex] != null.
 		int matchedIndex = indexOfAspectRatio(ar);
 		if (matchedIndex < AR_VALUES.length - 1)
 		{
@@ -101,8 +102,8 @@ final class ToolbarBinder
 	}
 
 	/**
-	 * Forward to AutoRotateBinder.cancelHorizonPaintMode — see that method for the full behaviour contract
-	 * (touch routing reset, Auto-button label / color reset) and the rationale.
+	 * Forward to AutoRotateBinder.cancelHorizonPaintMode — see that method for the full behaviour contract (touch
+	 * routing reset, Auto-button label / color reset) and the rationale.
 	 */
 	void cancelHorizonPaintMode()
 	{
@@ -110,20 +111,20 @@ final class ToolbarBinder
 	}
 
 	/**
-	 * Re-read CropState and write the dependent toolbar UI: AR chip text + visual state, Pin chip selected
-	 * state, mode + lock highlights, and the active mode's lock preference. Called by
-	 * MainActivity.installImageOnUi after a restore consumes a saved bundle — the earlier reset block unpins
-	 * and resets the lock prefs to defaults, so without this resync the toolbar would show new-load defaults
-	 * while the model holds the restored Move+H / Select+V.
+	 * Re-read CropState and write the dependent toolbar UI: AR chip text + visual state, Pin chip selected state,
+	 * mode + lock highlights, and the active mode's lock preference. Called by MainActivity.installImageOnUi after
+	 * a restore consumes a saved bundle — installImageOnUi's reset block (which runs before the restore) unpins and
+	 * resets the lock prefs to defaults, so without this resync the toolbar would show new-load defaults while the
+	 * model holds the restored Move+H / Select+V.
 	 *
 	 * No listener-suppression needed: AR is set via popup choice (no synthetic re-fire) and Pin / Grid are
 	 * MaterialButton chips driven by setSelected (no CompoundButton listener on programmatic set).
 	 *
-	 * Lock-preference reconstruction: selectLockPref / moveLockPref are re-seeded into MainActivity's fields
-	 * BEFORE this runs (via applyIfPending's Outcome), so both already match the pre-kill choices. The
-	 * setCurrentPref below is a defensive write keeping the active mode's pref consistent with
-	 * state.getCenterMode() (idempotent when already re-seeded); skipped when centerMode == LOCKED (Pin was
-	 * on) so the restored axis pref isn't overwritten with the meaningless LOCKED sentinel.
+	 * Lock-preference reconstruction: selectLockPref / moveLockPref are re-seeded into MainActivity's fields BEFORE
+	 * this runs (via applyIfPending's Outcome), so both already match the pre-kill choices. The setCurrentPref
+	 * below is a defensive write keeping the active mode's pref consistent with state.getCenterMode() (idempotent
+	 * when already re-seeded); skipped when centerMode == LOCKED (Pin was on) so the restored axis pref isn't
+	 * overwritten with the meaningless LOCKED sentinel.
 	 */
 	void syncFromState()
 	{
@@ -133,13 +134,12 @@ final class ToolbarBinder
 		btnPin.setSelected(centerMode == CenterMode.LOCKED);
 
 		// Defensive belt-and-braces: re-derive the active-mode pref from the restored centerMode.
-		// MainActivity.installImageOnUi has ALREADY re-seeded selectLockPref / moveLockPref from the
-		// bundle's STATE_SELECT_LOCK_PREF / STATE_MOVE_LOCK_PREF before calling syncFromState, so
-		// the active mode's pref already matches state.getCenterMode() when Pin was off — this write
-		// is idempotent in that case. Skip when LOCKED (Pin was on at kill time): centerMode here is
-		// the LOCKED sentinel, not a meaningful axis preference, so writing it through
-		// setCurrentPref would overwrite the underlying axis pref MainActivity correctly restored
-		// from the bundle with the meaningless LOCKED value.
+		// MainActivity.installImageOnUi has ALREADY re-seeded selectLockPref / moveLockPref from the bundle's
+		// STATE_SELECT_LOCK_PREF / STATE_MOVE_LOCK_PREF before calling syncFromState, so the active mode's pref
+		// already matches state.getCenterMode() when Pin was off — this write is idempotent in that case. Skip
+		// when LOCKED (Pin was on at kill time): centerMode here is the LOCKED sentinel, not a meaningful axis
+		// preference, so writing it through setCurrentPref would overwrite the underlying axis pref
+		// MainActivity correctly restored from the bundle with the meaningless LOCKED value.
 		if (centerMode != CenterMode.LOCKED)
 		{
 			host.setCurrentPref(centerMode);
@@ -152,9 +152,8 @@ final class ToolbarBinder
 	}
 
 	/**
-	 * Index of the given aspect ratio within AR_VALUES, or the Custom-sentinel index when ratio is null
-	 * or matches no preset. Used by arLabel to map a model AR to its preset label, and by the AR popup
-	 * builder so the user's current preset appears first.
+	 * Index of the given aspect ratio within AR_VALUES, or the Custom-sentinel index when ratio is null or matches
+	 * no preset. Sole caller is arLabel, which maps a model AR to its preset label.
 	 *
 	 * @param ratio aspect ratio to look up
 	 * @return index in AR_VALUES whose entry equals ratio; AR_VALUES.length - 1 (Custom row) when no
@@ -187,8 +186,28 @@ final class ToolbarBinder
 	}
 
 	/**
-	 * Apply the user's typed Custom AR values, persist them for next-session pre-fill, and update the
-	 * AR chip's displayed text via the standard UiSync refresh path (notifyChanged → applyStateToUi →
+	 * Commit an aspect ratio and recompute the crop — around the selection points when any exist, otherwise
+	 * centered on the image. Single chokepoint so preset and custom AR picks can't drift apart in their
+	 * post-change recompute.
+	 *
+	 * @param aspectRatio ratio to install on the state
+	 */
+	private void applyAspectRatioAndRecompute(AspectRatio aspectRatio)
+	{
+		host.getState().setAspectRatio(aspectRatio);
+		if (!host.getState().getSelectionPoints().isEmpty())
+		{
+			CropEngine.autoComputeFromPoints(host.getState());
+		}
+		else
+		{
+			host.ensureCropCenter();
+		}
+	}
+
+	/**
+	 * Apply the user's typed Custom AR values, persist them for next-session pre-fill, and update the AR chip's
+	 * displayed text via the standard UiSync refresh path (notifyChanged → applyStateToUi →
 	 * UiSync.updateAspectRatioButton picks up the new ratio).
 	 *
 	 * @param widthInput  custom-W EditText
@@ -202,36 +221,27 @@ final class ToolbarBinder
 	}
 
 	/**
-	 * Apply the already-parsed width/height pair as a custom aspect ratio. Callers are expected to
-	 * have already floored to ≥ 1 (applyCustomAr does this once via parseIntOr +
-	 * Math.max) so a stray "0" or empty input from the EditText falls back to a sane min before we
-	 * reach here. After applying, if the user has selection points the engine recomputes the crop
-	 * around them; otherwise the crop is centered on the image.
+	 * Apply the already-parsed width/height pair as a custom aspect ratio. Callers are expected to have already
+	 * floored to ≥ 1 (applyCustomAr does this once via parseIntOr + Math.max) so a stray "0" or empty input from
+	 * the EditText falls back to a sane min before we reach here. After applying, if the user has selection points
+	 * the engine recomputes the crop around them; otherwise the crop is centered on the image.
 	 *
 	 * @param ratioW width side of the ratio (≥ 1; caller is responsible for the floor)
 	 * @param ratioH height side of the ratio (≥ 1; caller is responsible for the floor)
 	 */
 	private void applyCustomAspectRatio(int ratioW, int ratioH)
 	{
-		host.getState().setAspectRatio(new AspectRatio(ratioW, ratioH));
-		// Persist the typed Custom AR so a later showCustomArDialog can pre-fill with these values
-		// rather than the post-switch current AR. Without this, the flow "type Custom 2.39:1 →
-		// switch to preset 1:1 → reopen Custom" would land on 1:1 (current AR) instead of 2.39:1
-		// (last typed), forcing the user to re-type their custom ratio. Apply-only write (NOT on
-		// Cancel) so a previewed-and-cancelled value doesn't poison the next session's default.
+		// Persist the typed Custom AR so a later showCustomArDialog can pre-fill with these values rather than
+		// the post-switch current AR. Without this, the flow "type Custom 2.39:1 → switch to preset 1:1 →
+		// reopen Custom" would land on 1:1 (current AR) instead of 2.39:1 (last typed), forcing the user to
+		// re-type their custom ratio. Apply-only write (NOT on Cancel) so a previewed-and-cancelled value
+		// doesn't poison the next session's default.
 		host.getActivity().getSharedPreferences(PREFS_NAME_CUSTOM_AR, Context.MODE_PRIVATE)
 			.edit()
 			.putInt(KEY_LAST_CUSTOM_AR_W, ratioW)
 			.putInt(KEY_LAST_CUSTOM_AR_H, ratioH)
 			.apply();
-		if (!host.getState().getSelectionPoints().isEmpty())
-		{
-			CropEngine.autoComputeFromPoints(host.getState());
-		}
-		else
-		{
-			host.ensureCropCenter();
-		}
+		applyAspectRatioAndRecompute(new AspectRatio(ratioW, ratioH));
 	}
 
 	private EditText numberInput(String initial)
@@ -244,9 +254,32 @@ final class ToolbarBinder
 	}
 
 	/**
-	 * AR-chip click handler. Builds the preset popup anchored at the chip and dispatches the picked
-	 * row to the AR model (preset rows commit immediately, the trailing Custom row opens the typed-ratio
-	 * dialog). Lives separately from setupArButton so the popup construction stays one job per method.
+	 * Menu-item handler for the AR preset popup built in onAspectRatioClick. Preset rows (item id indexes
+	 * AR_VALUES) commit the ratio immediately and recompute the crop — around the selection points when any
+	 * exist, otherwise centered on the image. The trailing Custom row (null sentinel in AR_VALUES) opens the
+	 * typed-ratio dialog instead.
+	 *
+	 * @param item picked popup row; its item id is the row's index into AR_VALUES
+	 * @return true always — the popup owns every row it shows, so the event is always consumed
+	 */
+	private boolean onArPresetPicked(MenuItem item)
+	{
+		int pos = item.getItemId();
+		if (pos < AR_VALUES.length && AR_VALUES[pos] != null)
+		{
+			applyAspectRatioAndRecompute(AR_VALUES[pos]);
+		}
+		else
+		{
+			showCustomArDialog();
+		}
+		return true;
+	}
+
+	/**
+	 * AR-chip click handler. Builds the preset popup anchored at the chip and dispatches the picked row to the AR
+	 * model (preset rows commit immediately, the trailing Custom row opens the typed-ratio dialog). Lives
+	 * separately from setupArButton so the popup construction stays one job per method.
 	 *
 	 * @param anchor the AR chip View (PopupMenu uses it as the anchor and the activity context source)
 	 */
@@ -257,27 +290,7 @@ final class ToolbarBinder
 		{
 			popup.getMenu().add(0, i, i, AR_LABELS[i]);
 		}
-		popup.setOnMenuItemClickListener(item ->
-		{
-			int pos = item.getItemId();
-			if (pos < AR_VALUES.length && AR_VALUES[pos] != null)
-			{
-				host.getState().setAspectRatio(AR_VALUES[pos]);
-				if (!host.getState().getSelectionPoints().isEmpty())
-				{
-					CropEngine.autoComputeFromPoints(host.getState());
-				}
-				else
-				{
-					host.ensureCropCenter();
-				}
-			}
-			else
-			{
-				showCustomArDialog();
-			}
-			return true;
-		});
+		popup.setOnMenuItemClickListener(this::onArPresetPicked);
 		popup.show();
 	}
 
@@ -297,10 +310,9 @@ final class ToolbarBinder
 	}
 
 	/**
-	 * Grid-toggle click handler. Flips the chip's selected state and writes the new value through to
-	 * the model's GridConfig. UiSync's applyStateToUi path picks up the change and refreshes the chip
-	 * color (mauve when on, surface2 when off) via updateGridToggle so the visual state matches the
-	 * model after every flip.
+	 * Grid-toggle click handler. Flips the chip's selected state and writes the new value through to the model's
+	 * GridConfig. UiSync's applyStateToUi path picks up the change and refreshes the chip color (mauve when on,
+	 * surface2 when off) via updateGridToggle so the visual state matches the model after every flip.
 	 *
 	 * @param view the Grid chip (selection state is read post-toggle to derive the new model value)
 	 */
@@ -322,9 +334,8 @@ final class ToolbarBinder
 	private void onLockButtonClick(View view)
 	{
 		int id = view.getId();
-		// if/else-if ladder: R.id.* in an app module is generated as non-`final int` (only library
-		// modules generate `static final int`), so case R.id.btnLockBoth fails "constant expression
-		// required".
+		// if/else-if ladder: R.id.* in an app module is generated as non-`final int` (only library modules
+		// generate `static final int`), so case R.id.btnLockBoth fails "constant expression required".
 		CenterMode pref;
 		if (id == R.id.btnLockBoth)
 		{
@@ -384,10 +395,10 @@ final class ToolbarBinder
 	}
 
 	/**
-	 * Pin-chip click handler. Toggles the chip's selected state, propagates it through applyLockMode
-	 * (which derives centerMode from MainActivity.isPinned — which now reads btnPin.isSelected),
-	 * refreshes the lock highlight, and recomputes the crop only when turning Pin OFF in Select mode —
-	 * other transitions don't change the spatial framing.
+	 * Pin-chip click handler. Toggles the chip's selected state, propagates it through applyLockMode (which derives
+	 * centerMode from MainActivity.isPinned — which now reads btnPin.isSelected), refreshes the lock highlight, and
+	 * recomputes the crop only when turning Pin OFF in Select mode — other transitions don't change the spatial
+	 * framing.
 	 *
 	 * @param view the Pin chip; selection state is read post-toggle to drive the model
 	 */
@@ -421,9 +432,9 @@ final class ToolbarBinder
 	}
 
 	/**
-	 * Wire the AR chip: install the click handler that opens the preset popup, and seed the chip's
-	 * initial text from the current model AR via UiSync.updateAspectRatioButton (no separate adapter to
-	 * configure — text is just whatever arLabel returns for the current state's AspectRatio).
+	 * Wire the AR chip: install the click handler that opens the preset popup, and seed the chip's initial text
+	 * from the current model AR via UiSync.updateAspectRatioButton (no separate adapter to configure — text is just
+	 * whatever arLabel returns for the current state's AspectRatio).
 	 */
 	private void setupArButton()
 	{
@@ -444,10 +455,9 @@ final class ToolbarBinder
 	}
 
 	/**
-	 * Wire the Grid chip's click handler. Seeds the chip's initial selected state from the current
-	 * GridConfig so a freshly-built UI reflects the persisted Grid preference; UiSync.updateGridToggle
-	 * takes over after the first applyStateToUi to keep the color in sync with the model on every
-	 * subsequent state change.
+	 * Wire the Grid chip's click handler. Seeds the chip's initial selected state from the current GridConfig so a
+	 * freshly-built UI reflects the persisted Grid preference; UiSync.updateGridToggle takes over after the first
+	 * applyStateToUi to keep the color in sync with the model on every subsequent state change.
 	 */
 	private void setupGridToggle()
 	{
@@ -463,10 +473,10 @@ final class ToolbarBinder
 	}
 
 	/**
-	 * Wire the Pin chip's click handler. Seeds the chip's initial selected state from the current
-	 * CenterMode (LOCKED ↔ pinned). Separate setup method from the Lock cluster because Pin is an
-	 * independent toggle, not a member of the mutually-exclusive Both/H/V axis cluster — keeping
-	 * the wire-up in its own method makes that semantic distinction visible at the setup site.
+	 * Wire the Pin chip's click handler. Seeds the chip's initial selected state from the current CenterMode
+	 * (LOCKED ↔ pinned). Separate setup method from the Lock cluster because Pin is an independent toggle, not a
+	 * member of the mutually-exclusive Both/H/V axis cluster — keeping the wire-up in its own method makes that
+	 * semantic distinction visible at the setup site.
 	 */
 	private void setupPinToggle()
 	{
@@ -487,11 +497,11 @@ final class ToolbarBinder
 			host.getRotationRuler().zoomBy(0.5f));
 		host.findViewById(R.id.btnRotZoomIn).setOnClickListener(view ->
 			host.getRotationRuler().zoomBy(2f));
-		// Reset-to-0° chip. Sibling of the Auto button on the rotation actions row — Auto computes
-		// a rotation from the image edges and applies it; Reset clears any user rotation back to 0
-		// without disturbing other crop state. Setting via CropState (rather than the ruler) so
-		// the change funnels through the same state-bus path as a ruler drag, keeping the ruler
-		// position, undo stack, and any listeners in lockstep.
+		// Reset-to-0° chip. Sibling of the Auto button on the rotation actions row — Auto computes a rotation
+		// from the image edges and applies it; Reset clears any user rotation back to 0 without disturbing
+		// other crop state. Setting via CropState (rather than the ruler) so the change funnels through the
+		// same state-bus path as a ruler drag, keeping the ruler position, undo stack, and any listeners in
+		// lockstep.
 		host.findViewById(R.id.btnResetRotation).setOnClickListener(view ->
 			host.getState().setRotationDegrees(0f));
 		ui.updateRotationZoomButtons();
@@ -504,14 +514,14 @@ final class ToolbarBinder
 	}
 
 	/**
-	 * Build and show the "Custom" aspect-ratio dialog with two number inputs (width, height). On Apply,
-	 * the applyCustomAr handler floors each parsed value to ≥ 1 via Math.max before calling
-	 * applyCustomAspectRatio. The result triggers a recompute via setAspectRatio. Triggered by selecting
-	 * the "Custom" row in the AR chip's preset popup.
+	 * Build and show the "Custom" aspect-ratio dialog with two number inputs (width, height). On Apply, the
+	 * applyCustomAr handler floors each parsed value to ≥ 1 via Math.max before calling applyCustomAspectRatio. The
+	 * result triggers a recompute via setAspectRatio. Triggered by selecting the "Custom" row in the AR chip's
+	 * preset popup.
 	 *
-	 * Cancel is a pure no-op: the popup is built fresh on each open and carries no persistent selection
-	 * state, so there's no spinner position to restore and no synthetic onItemSelected fire that could
-	 * re-commit a stale preset over an in-memory custom AR.
+	 * Cancel is a pure no-op: the popup is built fresh on each open and carries no persistent selection state, so
+	 * there's no spinner position to restore and no synthetic onItemSelected fire that could re-commit a stale
+	 * preset over an in-memory custom AR.
 	 */
 	private void showCustomArDialog()
 	{
@@ -564,27 +574,16 @@ final class ToolbarBinder
 		EditText editH = numberInput(initialH);
 		layout.addView(editH, new LinearLayout.LayoutParams(editWidth, LinearLayout.LayoutParams.WRAP_CONTENT));
 
-		// BadTokenException guard: a config-change race between the user tapping Custom in the popup
-		// and the dialog .show() is reachable. registerTransientDialog tracks the open dialog so an
-		// inbound Share/View intent or graft apply can dismiss it before bg state.reset().
-		if (host.isDestroyed())
-		{
-			return;
-		}
-		try
-		{
-			host.registerTransientDialog(new AlertDialog.Builder(host.getActivity())
+		// Registration lets an inbound Share/View intent or graft apply dismiss the open dialog before bg
+		// state.reset().
+		EditorHost.showTransientGuarded(host, TAG, "custom AR dialog", () -> {}, () -> {}, () ->
+			new AlertDialog.Builder(host.getActivity())
 				.setTitle("Custom Aspect Ratio")
 				.setView(layout)
 				.setPositiveButton(DialogStrings.APPLY, (dialog, which) ->
 					applyCustomAr(editW, editH))
 				.setNegativeButton(DialogStrings.CANCEL, (dialog, which) -> { })
-				.show());
-		}
-		catch (RuntimeException e)
-		{
-			Log.w(TAG, "custom AR dialog failed to show", e);
-		}
+				.create());
 	}
 
 }

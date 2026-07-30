@@ -1,12 +1,12 @@
 """Shared helpers for the graft-diagnostic scripts.
 
-Pulls the JPEG marker walker, SEFT-aware EOI scan, EXIF orientation lookup, gain-map
-extraction, and heat color ramp out of the per-script boilerplate that grew during
-the HDR-graft / inpainter investigation. Each graft_*.py script under scripts/ is a
-thin wrapper around these primitives plus a question-specific report or visualization.
+Pulls the JPEG marker walker, SEFT-aware EOI scan, EXIF orientation lookup, gain-map extraction, and heat color ramp out
+of the per-script boilerplate that grew during the HDR-graft / inpainter investigation. Each graft_*.py script under
+scripts/ is a thin wrapper around these primitives plus a question-specific report or visualization. The primary-EOI
+walk itself lives in the sibling jpeg_lib (shared with the pure-stdlib diagnostic scripts).
 
-No CropCenter imports — pure stdlib + PIL + numpy + piexif so the scripts stay runnable
-without an Android build environment.
+No CropCenter imports — pure stdlib + PIL + numpy + piexif so the scripts stay runnable without an Android build
+environment.
 """
 import io
 import os
@@ -16,10 +16,13 @@ import numpy as np
 import piexif
 from PIL import Image
 
+import jpeg_lib
+import seft_lib
 
-# Apply-EXIF transposes keyed by orientation tag value (1..8). Mirrors what
-# Image.exif_transpose does for a single tag, but lets us apply a known orientation
-# to gain-map bitmaps that PIL won't auto-rotate (no EXIF on the gain-map JPEG itself).
+
+# Apply-EXIF transposes keyed by orientation tag value (1..8). Mirrors what Image.exif_transpose does for a single tag,
+# but lets us apply a known orientation to gain-map bitmaps that PIL won't auto-rotate (no EXIF on the gain-map JPEG
+# itself).
 _TRANSPOSE = {
 	1: None,
 	2: Image.FLIP_LEFT_RIGHT,
@@ -33,10 +36,9 @@ _TRANSPOSE = {
 
 
 def diff_to_heat_image(diff_arr, max_val=30):
-	"""Render a 2D uint8 diff array as a heat-colored PIL Image (0=black, 1..max_val
-	scaled through red→yellow→white). Pixels above max_val saturate white. Matches the
-	scale we've been using for gain-map diff visualization where most non-zero pixels
-	land in the 1-2 range and the eye benefits from low-end visibility.
+	"""Render a 2D uint8 diff array as a heat-colored PIL Image (0=black, 1..max_val scaled through
+	red→yellow→white). Pixels above max_val saturate white. Matches the scale we've been using for gain-map diff
+	visualization where most non-zero pixels land in the 1-2 range and the eye benefits from low-end visibility.
 	"""
 	h, w = diff_arr.shape
 	out = np.zeros((h, w, 3), dtype=np.uint8)
@@ -50,11 +52,10 @@ def diff_to_heat_image(diff_arr, max_val=30):
 
 
 def extract_dqt_tables(jpeg_bytes):
-	"""Pull all 64-entry quantization tables out of DQT (FFDB) segments. Returns a list of
-	(table_id, precision, np.array) tuples. Used by the JPEG noise control to compare
-	source's Samsung Q tables against the graft's Skia Q tables — the all-1s Skia tables
-	confirm Skia is encoding the gain-map at effectively quality 100 regardless of the
-	primary's quality parameter.
+	"""Pull all 64-entry quantization tables out of DQT (FFDB) segments. Returns a list of (table_id, precision,
+	np.array) tuples. Used by the JPEG noise control to compare source's Samsung Q tables against the graft's Skia Q
+	tables — the all-1s Skia tables confirm Skia is encoding the gain-map at effectively quality 100 regardless of
+	the primary's quality parameter.
 	"""
 	tables = []
 	pos = 2
@@ -92,72 +93,36 @@ def extract_dqt_tables(jpeg_bytes):
 
 
 def extract_gain_map(path):
-	"""Return the gain-map JPEG bytes embedded after the primary's EOI, or None when the
-	source carries no gain map. Strips the SEFT trailer first via find_end_boundary.
+	"""Return the gain-map JPEG bytes embedded after the primary's EOI, or None when the source carries no gain map
+	or the content boundary can't be established (unparseable SEF trailer — fail closed rather than slicing SEF data
+	blocks, which can embed whole JPEGs, into the "gain map"). Strips the SEFT trailer first via find_end_boundary.
 	"""
 	data = read_bytes(path)
 	end = find_end_boundary(data)
-	pe = find_primary_eoi(data, end)
+	if end is None:
+		return None
+	pe = jpeg_lib.find_primary_eoi(data, end)
 	return data[pe:end] if pe >= 0 else None
 
 
 def find_end_boundary(data):
-	"""Return the offset just past the primary JPEG's EOI when the file carries a SEFT
-	trailer; otherwise the file length. Walks backward from the SEFT magic to the last
-	FFD9 boundary so the primary + gain-map block can be carved out without disturbing
-	Samsung's trailer bytes.
+	"""Return the offset just past the LAST FFD9 in the content span (primary + gain-map block), bounded at the SEFT
+	trailer start when a trailer is present. SEFT data blocks can embed whole JPEGs, so an unbounded backward FFD9
+	scan could land on an EOI inside the trailer — seft_lib walks the SEFH directory for the true trailer start.
+	Falls back to the trailer start (or the file length) when no EOI lands in the content span. Returns None when a
+	SEFT footer is present but the SEFH directory doesn't parse — the trailer start is unresolvable and callers must
+	fail closed (treat the gain-map region as unknown).
 	"""
-	n = len(data)
-	if n < 12 or data[-4:] != b'SEFT':
-		return n
-	for i in range(n - 9, 1, -1):
-		if data[i] == 0xFF and data[i + 1] == 0xD9:
-			return i + 2
-	return n
-
-
-def find_primary_eoi(data, end_bound):
-	"""Scan past every JPEG marker segment until the primary EOI (FFD9). Knows to skip
-	over scan data after SOS by detecting the next non-RST marker, and treats RST and
-	stuffed-zero bytes as in-scan padding. Returns the offset of the byte AFTER the EOI.
-	"""
-	pos = 2
-	while pos < end_bound - 1:
-		if data[pos] != 0xFF:
-			pos += 1
-			continue
-		marker = data[pos + 1]
-		if marker == 0xD9:
-			return pos + 2
-		if marker == 0xDA:
-			seglen = struct.unpack('>H', data[pos + 2:pos + 4])[0]
-			scan = pos + 2 + seglen
-			while scan < end_bound - 1:
-				if data[scan] != 0xFF:
-					scan += 1
-					continue
-				nxt = data[scan + 1]
-				if nxt == 0xD9:
-					return scan + 2
-				if nxt == 0x00 or (0xD0 <= nxt <= 0xD7):
-					scan += 2
-					continue
-				break
-			pos = scan
-			continue
-		if marker in (0x00, 0x01) or (0xD0 <= marker <= 0xD7):
-			pos += 2
-			continue
-		if pos + 4 > end_bound:
-			break
-		seglen = struct.unpack('>H', data[pos + 2:pos + 4])[0]
-		pos += 2 + seglen
-	return -1
+	end = seft_lib.content_end(data)
+	if end is None:
+		return None
+	eoi = seft_lib.find_last_eoi(data, 0, end)
+	return eoi if eoi > 0 else end
 
 
 def heat(value, max_val=30):
-	"""RGB triple along a black → red → yellow → white ramp scaled so 0..max_val covers
-	the range and values above saturate white. Same ramp diff_to_heat_image uses.
+	"""RGB triple along a black → red → yellow → white ramp scaled so 0..max_val covers the range and values above
+	saturate white. Same ramp diff_to_heat_image uses.
 	"""
 	v = min(value / max_val, 1.0)
 	if v < 0.33:
@@ -171,10 +136,10 @@ def heat(value, max_val=30):
 
 
 def list_jpeg_segments(data, end_bound):
-	"""Walk every APPn / SOS / EOI marker in the JPEG bytes up to end_bound and return
-	a list of (name, offset, length, payload_head_30) tuples. Used by the analyzer to
-	dump the segment shape for visual inspection — the analyzer's "Primary APP segments"
-	report relies on this to confirm UHDR APPs (XMP hdrgm, ISO 21496-1, MPF) are present.
+	"""Walk every APPn / SOS / EOI marker in the JPEG bytes up to end_bound and return a list of (name, offset,
+	length, payload_head_30) tuples. Used by the analyzer to dump the segment shape for visual inspection — the
+	analyzer's "Primary APP segments" report relies on this to confirm UHDR APPs (XMP hdrgm, ISO 21496-1, MPF) are
+	present.
 	"""
 	out = []
 	pos = 2
@@ -219,11 +184,10 @@ def list_jpeg_segments(data, end_bound):
 
 
 def load_stored_downsampled(path, sample_size):
-	"""Load an image WITHOUT applying EXIF orientation, downsampled by sample_size.
-	Mirrors what Java's BitmapFactory.decodeByteArray does with inSampleSize — used by
-	the AI mask reconstruction step where we need source coordinates aligned to the
-	stored byte stream the Java decoder sees, not the display orientation PIL would
-	auto-apply.
+	"""Load an image WITHOUT applying EXIF orientation, downsampled by sample_size. Mirrors what Java's
+	BitmapFactory.decodeByteArray does with inSampleSize — used by the AI mask reconstruction step where we need
+	source coordinates aligned to the stored byte stream the Java decoder sees, not the display orientation PIL
+	would auto-apply.
 	"""
 	img = Image.open(path)
 	w, h = img.size
@@ -233,9 +197,9 @@ def load_stored_downsampled(path, sample_size):
 
 
 def primary_orient(path):
-	"""Read the primary's EXIF Orientation tag (1..8). Defaults to 1 when piexif can't
-	parse (raw-bytes-only sources, malformed EXIF). Used to reorient gain-map bitmaps
-	for diff comparison since PIL doesn't auto-rotate gain-map data on its own.
+	"""Read the primary's EXIF Orientation tag (1..8). Defaults to 1 when piexif can't parse (raw-bytes-only
+	sources, malformed EXIF). Used to reorient gain-map bitmaps for diff comparison since PIL doesn't auto-rotate
+	gain-map data on its own.
 	"""
 	try:
 		ex = piexif.load(path)
@@ -251,8 +215,8 @@ def read_bytes(path):
 
 
 def reorient(img, orientation):
-	"""Apply an EXIF orientation transpose to a PIL Image. Returns the input unchanged
-	for orientation=1 or unrecognized values.
+	"""Apply an EXIF orientation transpose to a PIL Image. Returns the input unchanged for orientation=1 or
+	unrecognized values.
 	"""
 	op = _TRANSPOSE.get(orientation)
 	return img.transpose(op) if op is not None else img
@@ -261,18 +225,16 @@ def reorient(img, orientation):
 def reorient_to_match_source(stored_arr, src_orient, edit_orient, target_shape):
 	"""Reorient the edit's stored array so its shape matches source's stored shape.
 
-	When source is orient=6 (landscape stored) and edit is orient=1 (portrait stored),
-	or any other shape-swap pair, GraftController.alignEditToOriginalLayout has already
-	rewritten the edit JPEG to source's stored layout. The diag scripts that load the
-	original e1 (pre-graft) need to apply the same alignment locally so the per-pixel
+	When source is orient=6 (landscape stored) and edit is orient=1 (portrait stored), or any other shape-swap pair,
+	GraftController.alignEditToOriginalLayout has already rewritten the edit JPEG to source's stored layout. The
+	diag scripts that load the original e1 (pre-graft) need to apply the same alignment locally so the per-pixel
 	diff is well-defined. Returns a numpy int16 RGB array in source's stored shape.
 	"""
 	if stored_arr.shape == target_shape:
 		return stored_arr
-	# Rotation direction is determined by the orient pair. The mapping below covers the
-	# Samsung pairs we've actually hit (orient=6 landscape source vs orient=1 portrait
-	# edit, and the reverse). Other combinations fall back to a 90° CCW which matches
-	# the most common Samsung→Photoshop interaction.
+	# Rotation direction is determined by the orient pair. The mapping below covers the Samsung pairs we've actually
+	# hit (orient=6 landscape source vs orient=1 portrait edit, and the reverse). Other combinations fall back to a
+	# 90° CCW which matches the most common Samsung→Photoshop interaction.
 	if src_orient == 6 and edit_orient == 1:
 		op = Image.ROTATE_90
 	elif src_orient == 1 and edit_orient == 6:

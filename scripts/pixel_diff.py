@@ -63,9 +63,8 @@ except ImportError as e:
 # ── Loading ──────────────────────────────────────────────────────────────────
 
 def load_rgb(path):
-    """Decode JPEG to a numpy uint8 RGB array, applying EXIF orientation so
-    the array is in DISPLAY orientation (matching what users see and what
-    CropExporter bakes into the output's pixel buffer)."""
+    """Decode JPEG to a numpy uint8 RGB array, applying EXIF orientation so the array is in DISPLAY orientation
+    (matching what users see and what CropExporter bakes into the output's pixel buffer)."""
     img = Image.open(path)
     img = ImageOps.exif_transpose(img)
     return np.asarray(img.convert('RGB'))
@@ -74,9 +73,8 @@ def load_rgb(path):
 # ── Template-match search ───────────────────────────────────────────────────
 
 def _mad_at(orig, crop, x, y):
-    """Mean absolute difference (over all channels and pixels) when `crop` is
-    placed at offset (x, y) inside `orig`. Casts to int16 so the subtraction
-    doesn't underflow uint8."""
+    """Mean absolute difference (over all channels and pixels) when `crop` is placed at offset (x, y) inside `orig`.
+    Casts to int16 so the subtraction doesn't underflow uint8."""
     h, w = crop.shape[:2]
     region = orig[y:y + h, x:x + w].astype(np.int16)
     diff = np.abs(region - crop.astype(np.int16))
@@ -84,9 +82,8 @@ def _mad_at(orig, crop, x, y):
 
 
 def _brute_search(orig, crop, x_range, y_range, sample_step=1):
-    """Exhaustive search over (x, y) in the given ranges. Optionally subsample
-    pixels with `sample_step` (every Nth pixel on each axis) to make full-
-    resolution coarse passes feasible."""
+    """Exhaustive search over (x, y) in the given ranges. Optionally subsample pixels with `sample_step` (every Nth
+    pixel on each axis) to make full-resolution coarse passes feasible."""
     best_mad = float('inf')
     best_xy = (0, 0)
     if sample_step > 1:
@@ -134,8 +131,8 @@ def find_offset(orig, crop, target_dim=240):
         x_lo, x_hi = 0, Ws - ws + 1
         y_lo, y_hi = 0, Hs - hs + 1
         if x_hi <= 0 or y_hi <= 0:
-            # Edge case: cropped is essentially the same size as original at
-            # downsampled scale. Fall through to full-res refine.
+            # Edge case: cropped is essentially the same size as original at downsampled scale. Fall through to full-res
+            # refine.
             coarse_xy = (0, 0)
         else:
             (cx, cy), _ = _brute_search(orig_s, crop_s,
@@ -159,11 +156,9 @@ def find_offset(orig, crop, target_dim=240):
 # ── Rotation-aware pose search ──────────────────────────────────────────────
 
 def _rotate_full(orig_pil, angle):
-    """Rotate the original by -angle so a cropped image (presumed rotated by
-    +angle in-app) aligns as a pure translation against the rotated original.
-    expand=False keeps the array dimensions stable (corners get padded black);
-    bicubic resampling matches the quality CropExporter's canvas rotation
-    produces. Returns a numpy uint8 RGB array."""
+    """Rotate the original by -angle so a cropped image (presumed rotated by +angle in-app) aligns as a pure translation
+    against the rotated original. expand=False keeps the array dimensions stable (corners get padded black); bicubic
+    resampling matches the quality CropExporter's canvas rotation produces. Returns a numpy uint8 RGB array."""
     if abs(angle) < 1e-6:
         return np.asarray(orig_pil)
     rotated = orig_pil.rotate(-angle, resample=Image.BICUBIC,
@@ -173,8 +168,8 @@ def _rotate_full(orig_pil, angle):
 
 def find_pose(orig, crop, max_rotation=3.0, rotation_step=0.25,
         target_dim=240, refine=True):
-    """Search for the rotation + translation that best aligns `crop` inside
-    `orig`. Returns (angle_deg, (offset_x, offset_y), best_mad).
+    """Search for the rotation + translation that best aligns `crop` inside `orig`. Returns (angle_deg, (offset_x,
+    offset_y), best_mad).
 
     Search strategy:
       1. Sweep angles in [-max_rotation, +max_rotation] at `rotation_step`.
@@ -184,8 +179,7 @@ def find_pose(orig, crop, max_rotation=3.0, rotation_step=0.25,
          around the best coarse angle, with a small ±radius translation
          window from the coarse offset.
 
-    Set `max_rotation=0` to skip rotation search entirely (degenerates to the
-    pure-translation `find_offset` path).
+    Set `max_rotation=0` to skip rotation search entirely (degenerates to the pure-translation `find_offset` path).
     """
     H, W = orig.shape[:2]
     h, w = crop.shape[:2]
@@ -249,8 +243,7 @@ def find_pose(orig, crop, max_rotation=3.0, rotation_step=0.25,
 # ── Comparison metrics ──────────────────────────────────────────────────────
 
 def compute_metrics(region, crop):
-    """Return a dict of pixel-comparison metrics for two same-shape uint8 RGB
-    arrays."""
+    """Return a dict of pixel-comparison metrics for two same-shape uint8 RGB arrays."""
     r = region.astype(np.int16)
     c = crop.astype(np.int16)
     diff = np.abs(r - c)  # shape (H, W, 3), dtype int16
@@ -281,12 +274,10 @@ def compute_metrics(region, crop):
 
 PSNR_GOOD = 35.0   # dB; q=100 round-trip typical 38-45+
 MAD_GOOD = 3.0     # RGB units; q=100 round-trip typical 0.5-1.5
-# Rotated thresholds: in-app rotation is a core feature, and verifying a
-# rotated crop necessarily compares the cropped output (sampled once via
-# bilinear during CropExporter's canvas render) against an inverse-rotated
-# original (sampled again via PIL bicubic in this script). Each pass adds
-# small per-pixel sampling error — pairs that cleanly align with a non-zero
-# angle settle around 28-32 dB / 3-6 MAD even when the export is correct.
+# Rotated thresholds: in-app rotation is a core feature, and verifying a rotated crop necessarily compares the cropped
+# output (sampled once via bilinear during CropExporter's canvas render) against an inverse-rotated original (sampled
+# again via PIL bicubic in this script). Each pass adds small per-pixel sampling error — pairs that cleanly align with a
+# non-zero angle settle around 28-32 dB / 3-6 MAD even when the export is correct.
 PSNR_GOOD_ROTATED = 28.0
 MAD_GOOD_ROTATED = 6.0
 
@@ -334,9 +325,8 @@ def verdict(m):
 
 
 def save_diff_image(region, crop, path):
-    """Write a PNG where each pixel's value is the per-channel max diff between
-    the matched original region and the cropped image, scaled so the worst diff
-    in this comparison shows as full white. Black means perfect match."""
+    """Write a PNG where each pixel's value is the per-channel max diff between the matched original region and the
+    cropped image, scaled so the worst diff in this comparison shows as full white. Black means perfect match."""
     diff = np.abs(region.astype(np.int16) - crop.astype(np.int16))
     max_chan = diff.max(axis=2).astype(np.uint8)  # (H, W)
     peak = max(1, int(max_chan.max()))
@@ -415,9 +405,8 @@ def main(argv):
 
     h, w = crop.shape[:2]
     if abs(angle) > 1e-6:
-        # Final comparison region comes from the rotated original at the
-        # best angle, so the side-by-side metrics use the same pose the
-        # search settled on.
+        # Final comparison region comes from the rotated original at the best angle, so the side-by-side metrics use the
+        # same pose the search settled on.
         rotated_full = _rotate_full(Image.fromarray(orig), angle)
         region = rotated_full[offset[1]:offset[1] + h, offset[0]:offset[0] + w]
     else:
@@ -439,14 +428,11 @@ def main(argv):
     print()
     code, msg = verdict(metrics)
     print(f'VERDICT: {msg}')
-    # Heuristic for sub-pixel / rotation displacement: a clean q=100 round-trip
-    # has MAD ~0.5-1.5. MAD above 3 with low max-diff (mostly small-but-
-    # everywhere differences) usually means sub-pixel translation or a
-    # fractional in-app rotation — every pixel is sampled from a slightly
-    # different source position, so the absolute differences are small per
-    # pixel but accumulated everywhere. The diff image (saved via --save-diff)
-    # makes this visible: high-frequency texture and edges light up while flat
-    # regions stay dark.
+    # Heuristic for sub-pixel / rotation displacement: a clean q=100 round-trip has MAD ~0.5-1.5. MAD above 3 with low
+    # max-diff (mostly small-but-everywhere differences) usually means sub-pixel translation or a fractional in-app
+    # rotation — every pixel is sampled from a slightly different source position, so the absolute differences are small
+    # per pixel but accumulated everywhere. The diff image (saved via --save-diff) makes this visible: high-frequency
+    # texture and edges light up while flat regions stay dark.
     if code == 1 and metrics['mad'] > 3:
         print('  Note: the deviation pattern (small but pervasive) is '
             'consistent with sub-pixel displacement — either an in-app '
@@ -460,4 +446,13 @@ def main(argv):
 
 
 if __name__ == '__main__':
+    # Reconfigure stdout/stderr to UTF-8 with replacement before any output — the module docstring (printed by main on
+    # bad args) and the report contain characters cp1252 can't encode ('≥', '±', '°'), so without this the usage path
+    # raises UnicodeEncodeError instead of printing help on default Windows consoles. Same guarded preamble as
+    # corpus_audit.py / audit.py.
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except (AttributeError, OSError):
+        pass
     sys.exit(main(sys.argv))

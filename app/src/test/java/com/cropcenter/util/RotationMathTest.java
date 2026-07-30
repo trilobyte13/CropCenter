@@ -108,11 +108,10 @@ public final class RotationMathTest
 	@Test
 	public void nanRotationPropagatesAsNan()
 	{
-		// Pin the current contract: NaN rotation in produces NaN dimensions out. The helper has no
-		// internal NaN guard — Math.cos(NaN) = NaN and the output multiplications cascade. Callers
-		// that need a finite fallback (e.g. ViewportMath.effectiveMinZoom) must check the output
-		// before using it. Symmetric Infinity case included so a future short-circuit added for one
-		// of them surfaces here for the other.
+		// Pin the current contract: NaN rotation in produces NaN dimensions out. The helper has no internal NaN
+		// guard — Math.cos(NaN) = NaN and the output multiplications cascade. Callers that need a finite
+		// fallback (e.g. ViewportMath.effectiveMinZoom) must check the output before using it. Symmetric
+		// Infinity case included so a future short-circuit added for one of them surfaces here for the other.
 		float[] out = new float[2];
 		RotationMath.rotatedAabbDimensions(100, 200, Float.NaN, out);
 		assertEquals("NaN rotation in must propagate to first axis", Float.NaN, out[0], 0f);
@@ -171,8 +170,8 @@ public final class RotationMathTest
 	@Test
 	public void rotatedAabbDimensionsAtZeroReturnsInputDims()
 	{
-		// Zero rotation must return input dims exactly. Pin the identity case so a regression in the absCos
-		// / absSin handling doesn't silently change baseScale on every unrotated fit-to-view.
+		// Zero rotation must return input dims exactly. Pin the identity case so a regression in the absCos /
+		// absSin handling doesn't silently change baseScale on every unrotated fit-to-view.
 		float[] out = new float[2];
 		RotationMath.rotatedAabbDimensions(4000, 3000, 0f, out);
 		assertEquals(4000f, out[0], 0f);
@@ -182,14 +181,12 @@ public final class RotationMathTest
 	@Test
 	public void rotatedAabbDimensionsGeneralAngleMatchesAbsCosSinFormula()
 	{
-		// 4000x3000 rotated 30°: rotatedW = 4000*cos30 + 3000*sin30 = 3464.10 + 1500 = 4964.10;
-		// rotatedH = 4000*sin30 + 3000*cos30 = 2000 + 2598.08 = 4598.08.
+		// 4000x3000 rotated 30°: rotatedW = 4000*cos30 + 3000*sin30 = 3464.10 + 1500 = 4964.10; rotatedH =
+		// 4000*sin30 + 3000*cos30 = 2000 + 2598.08 = 4598.08.
 		float[] out = new float[2];
 		RotationMath.rotatedAabbDimensions(4000, 3000, 30f, out);
-		float expectedW = (float) (4000 * Math.cos(Math.toRadians(30))
-			+ 3000 * Math.sin(Math.toRadians(30)));
-		float expectedH = (float) (4000 * Math.sin(Math.toRadians(30))
-			+ 3000 * Math.cos(Math.toRadians(30)));
+		float expectedW = (float) (4000 * Math.cos(Math.toRadians(30)) + 3000 * Math.sin(Math.toRadians(30)));
+		float expectedH = (float) (4000 * Math.sin(Math.toRadians(30)) + 3000 * Math.cos(Math.toRadians(30)));
 		assertEquals(expectedW, out[0], TOL);
 		assertEquals(expectedH, out[1], TOL);
 	}
@@ -209,7 +206,9 @@ public final class RotationMathTest
 	@Test
 	public void snapToHundredthHandlesNegativeInputs()
 	{
-		// Negative angles round symmetrically — the horizon-detector path passes negated tilts through here.
+		// Non-tie negative angles round to the nearest tick like positives — the horizon-detector path
+		// passes negated tilts through here. Exact-halfway ties do NOT round symmetrically; that
+		// asymmetry is pinned in snapToHundredthNegativeHalfwayRoundsTowardPositiveInfinity below.
 		assertEquals(-2.34f, RotationMath.snapToHundredth(-2.341f), 0f);
 	}
 
@@ -224,6 +223,19 @@ public final class RotationMathTest
 	public void snapToHundredthMapsZeroToZero()
 	{
 		assertEquals(0f, RotationMath.snapToHundredth(0f), 0f);
+	}
+
+	@Test
+	public void snapToHundredthNegativeHalfwayRoundsTowardPositiveInfinity()
+	{
+		// Math.round adds 0.5 and floors, so ties round toward POSITIVE infinity on both signs:
+		// -1.125 → -1.12 while +1.125 → +1.13 — asymmetric, not "round away from zero". 1.125f is exactly
+		// representable in binary (9/8), so -112.5f reaches Math.round exactly and the test is
+		// deterministic. The horizon-metadata path negates roll before snapping, so the tie direction
+		// decides which ruler tick the announced angle lands on; a Math.rint or BigDecimal HALF_UP rewrite
+		// would silently shift every negative tie one tick.
+		assertEquals(-1.12f, RotationMath.snapToHundredth(-1.125f), 0f);
+		assertEquals(1.13f, RotationMath.snapToHundredth(1.125f), 0f);
 	}
 
 	@Test

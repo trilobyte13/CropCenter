@@ -8,6 +8,8 @@ import android.graphics.Rect;
 import android.os.Process;
 import android.util.Log;
 
+import androidx.annotation.WorkerThread;
+
 import com.cropcenter.metadata.ExifPatcher;
 import com.cropcenter.metadata.GainMapComposer;
 import com.cropcenter.metadata.HdrSignature;
@@ -16,14 +18,15 @@ import com.cropcenter.metadata.JpegMarkerWalker;
 import com.cropcenter.metadata.JpegMetadataInjector;
 import com.cropcenter.metadata.JpegSegment;
 import com.cropcenter.metadata.PngMetadataExtractor;
-import com.cropcenter.metadata.TiffTag;
+import com.cropcenter.metadata.TiffIfd0;
+import com.cropcenter.model.CropRender;
 import com.cropcenter.model.CropState;
 import com.cropcenter.model.Format;
 import com.cropcenter.model.GridConfig;
-import com.cropcenter.model.CropRender;
 import com.cropcenter.util.BitmapUtils;
 import com.cropcenter.util.ByteBufferUtils;
 import com.cropcenter.util.GridGeometry;
+import com.cropcenter.util.ThemeColors;
 import com.cropcenter.util.UltraHdrCompat;
 
 import java.io.ByteArrayOutputStream;
@@ -36,6 +39,7 @@ import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Optional;
 import java.util.zip.CRC32;
 
 /**
@@ -43,33 +47,30 @@ import java.util.zip.CRC32;
  * gain map and fix MPF offsets.
  *
  * Cohesion note: this class also hosts package-private byte-arithmetic helpers (forceTiffOrientationToUpright,
- * stripHdrSegments, patchPngExifTiff, injectPngExifFromTiffFileToFile, appendSeftFileToFile). They stay here
- * rather than in metadata/ because each is exclusively called from one branch of exportJpeg / exportPng and the
- * byte logic is tightly coupled to the surrounding pipeline state (cropW/cropH, encoded-file lifecycle, the
- * temp-file chain) — extracting would force every helper to take a dozen pipeline parameters while still being
- * conceptually pipeline-stage logic. Split point: if a caller outside CropExporter ever needs one of these,
- * that's the signal to extract; until then, locality wins.
+ * stripHdrSegments, patchPngExifTiff, injectPngExifFromTiffFileToFile, appendSeftFileToFile). They stay here rather
+ * than in metadata/ because each is exclusively called from one branch of exportJpeg / exportPng and the byte logic is
+ * tightly coupled to the surrounding pipeline state (cropW/cropH, encoded-file lifecycle, the temp-file chain) —
+ * extracting would force every helper to take a dozen pipeline parameters while still being conceptually pipeline-stage
+ * logic. Split point: if a caller outside CropExporter ever needs one of these, that's the signal to extract; until
+ * then, locality wins.
  */
 public final class CropExporter
 {
 	private static final String TAG = "CropExporter";
-	// Referenced by name in REQUIREMENTS.md §9 ("not filled with CANVAS_BG for PNG"). Keeping at class scope
-	// so the spec citation remains a real symbol rather than a bare hex literal in prose.
-	private static final int CANVAS_BG = 0xFF0D0E14; // opaque very-dark-navy — visible at rotation corners
 
 	private CropExporter() {}
 
 	/**
 	 * Export the cropped + rotated image as JPEG, PNG, or Ultra HDR JPEG bytes per
-	 * `state.getExportConfig().format()`. Single entry point for the whole export pipeline: canvas-renders
-	 * the primary at exact (cropW, cropH), generates a fresh EXIF thumbnail of the cropped pixels, encodes,
-	 * splices the source's EXIF (orientation normalised to 1, dimensions rewritten, IFD1 thumbnail replaced)
-	 * + ICC + XMP + MPF + Samsung SEFT back in, and — for HDR sources — re-renders the gain map at the
-	 * primary's transform and composes it into the output.
+	 * `state.getExportConfig().format()`. Single entry point for the whole export pipeline: canvas-renders the
+	 * primary at exact (cropW, cropH), generates a fresh EXIF thumbnail of the cropped pixels, encodes, splices the
+	 * source's EXIF (orientation normalised to 1, dimensions rewritten, IFD1 thumbnail replaced) + ICC + XMP + MPF
+	 * + Samsung SEFT back in, and — for HDR sources — re-renders the gain map at the primary's transform and
+	 * composes it into the output.
 	 *
-	 * The returned ExportResult carries a structural hdrAttached flag (true only when the gain map was
-	 * successfully re-composed) so ExportPipeline.reportSuccess can say "[HDR OK]" / "[HDR dropped]" without
-	 * a substring scan that false-positives on stale metadata.
+	 * The returned ExportResult carries a structural hdrAttached flag (true only when the gain map was successfully
+	 * re-composed) so ExportPipeline.reportSuccess can say "[HDR OK]" / "[HDR dropped]" without a substring scan
+	 * that false-positives on stale metadata.
 	 *
 	 * @param state    CropState with source image, crop dims, rotation, AR, grid config, jpegMeta, gainMap,
 	 *                 seftTrailer. getSourceImage() is read-only — only the internally-rendered cropped
@@ -79,6 +80,7 @@ public final class CropExporter
 	 * @return ExportResult carrying the encoded bytes and the structural hdrAttached flag
 	 * @throws IOException when no image is loaded, encoding fails, or metadata splicing rejects the input
 	 */
+	@WorkerThread
 	public static ExportResult export(CropState state, File cacheDir)
 		throws IOException
 	{
@@ -125,12 +127,12 @@ public final class CropExporter
 		//      transparent. Color-managed canvases can apply subtle filtering during rasterization,
 		//      causing grid lines to render at inconsistent widths or drop out.
 		boolean isJpeg = state.getExportConfig().format() == Format.JPEG;
-		// Must match the downstream HDR-gate at buildCroppedGainMap (gainMap AND originalBytes both present)
-		// — otherwise we'd render into the P3 canvas while the save path silently degraded to SDR, leaving
-		// the JFIF without the P3 ICC tag the canvas color space implied. state.getGainMap() set without
-		// state.getOriginalFileBytes() is currently unreachable (applyBytes commits both in one bg pass) but
-		// a future graft-only path could expose it; pin the gate here so a partial state can't drift the
-		// color profile out of step with the encoded pixels.
+		// Must match the downstream HDR-gate at buildCroppedGainMap (gainMap AND originalBytes both present) —
+		// otherwise we'd render into the P3 canvas while the save path silently degraded to SDR, leaving the
+		// JFIF without the P3 ICC tag the canvas color space implied. state.getGainMap() set without
+		// state.getOriginalFileBytes() is currently unreachable (applyBytes commits both in one bg pass) but a
+		// future graft-only path could expose it; pin the gate here so a partial state can't drift the color
+		// profile out of step with the encoded pixels.
 		boolean hasGainMap = state.getGainMap() != null && state.getGainMap().length > 0
 			&& state.getOriginalFileBytes() != null;
 		Bitmap outputBitmap;
@@ -151,24 +153,25 @@ public final class CropExporter
 			outputBitmap = Bitmap.createBitmap(cropW, cropH, Bitmap.Config.ARGB_8888);
 		}
 
-		// outputBitmap ownership transfers to exportJpeg / exportPng on the success path — both
-		// recycle in their own finally. But if drawCropped or drawGridPixels throws (OOM on huge
-		// inputs is the realistic case), or if the switch hits the encode-failure branch before
-		// ownership transfers, outputBitmap would leak its native pixel buffer to the GC finalizer.
-		// The handedOff flag flips true the moment the switch is about to delegate, so the catch /
-		// non-success paths recycle locally.
+		// outputBitmap ownership transfers to exportJpeg / exportPng on the success path — both recycle in
+		// their own finally. But if drawCropped or drawGridPixels throws (OOM on huge inputs is the realistic
+		// case), or if the switch hits the encode-failure branch before ownership transfers, outputBitmap would
+		// leak its native pixel buffer to the GC finalizer. The handedOff flag flips true the moment the switch
+		// is about to delegate, so the catch / non-success paths recycle locally.
 		boolean handedOff = false;
 		try
 		{
 			Canvas canvas = new Canvas(outputBitmap);
 			Paint paint = new Paint(Paint.FILTER_BITMAP_FLAG | Paint.ANTI_ALIAS_FLAG);
-			// JPEG can't represent alpha — fill with the editor's canvas color so rotation corners and any
-			// transparent source pixels read as the same dark navy the user saw in the preview. PNG keeps
-			// the bitmap's default transparent state so alpha sources round-trip and rotation corners stay
-			// see-through.
+			// JPEG can't represent alpha — fill with the editor preview background (ThemeColors.BACKGROUND,
+			// the same color EditorRenderer draws behind the image) so rotation corners and any transparent
+			// source pixels export exactly as previewed. PNG keeps the bitmap's default transparent state
+			// so alpha sources round-trip and rotation corners stay see-through.
+			// UltraHdrCompat.renderPrimary mirrors this fill + paint setup — the invariant is documented
+			// there.
 			if (isJpeg)
 			{
-				canvas.drawColor(CANVAS_BG);
+				canvas.drawColor(ThemeColors.BACKGROUND);
 			}
 
 			BitmapUtils.drawCropped(canvas, src, srcX, srcY, state.getRotationDegrees(), paint);
@@ -197,8 +200,8 @@ public final class CropExporter
 	}
 
 	/**
-	 * Re-append an existing SEFT trailer verbatim to a JPEG already on disk, or stream-copy the JPEG unchanged
-	 * when no trailer was captured at load. CropCenter does not generate fresh SEFTs — Samsung Gallery's Revert
+	 * Re-append an existing SEFT trailer verbatim to a JPEG already on disk, or stream-copy the JPEG unchanged when
+	 * no trailer was captured at load. CropCenter does not generate fresh SEFTs — Samsung Gallery's Revert
 	 * validates a backup path the SEFT claims, and only honors paths under Samsung-blessed locations like
 	 * `/data/sec/photoeditor/` that third-party apps cannot write to. A SEFT we generate pointing at our own
 	 * `/storage/emulated/0/.cropcenter/` write is silently rejected by Gallery, so fabricating one is a net
@@ -215,23 +218,17 @@ public final class CropExporter
 		long inSize = inFile.length();
 		if (existingSeft == null || existingSeft.length == 0)
 		{
-			Files.copy(inFile.toPath(), outFile.toPath(),
-				StandardCopyOption.REPLACE_EXISTING);
+			Files.copy(inFile.toPath(), outFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
 			return;
 		}
-		// No Integer.MAX_VALUE cap on this path — output size is bounded by disk space, not by an
-		// in-memory byte[] index. A >2 GB combined output (rare but possible on extreme HDR + large
-		// SEFT) preserves the SEFT instead of losing it.
+		// No Integer.MAX_VALUE cap on this path — output size is bounded by disk space, not by an in-memory
+		// byte[] index. A >2 GB combined output (rare but possible on extreme HDR + large SEFT) preserves the
+		// SEFT instead of losing it.
 		Log.d(TAG, "Streaming SEFT append: " + existingSeft.length + " bytes after " + inSize);
 		try (FileInputStream fis = new FileInputStream(inFile);
 			FileOutputStream fos = new FileOutputStream(outFile))
 		{
-			byte[] buf = new byte[JpegMetadataInjector.STREAM_CHUNK_SIZE];
-			int n;
-			while ((n = fis.read(buf)) > 0)
-			{
-				fos.write(buf, 0, n);
-			}
+			JpegMetadataInjector.copyRemaining(fis, fos);
 			fos.write(existingSeft);
 			fos.getFD().sync();
 		}
@@ -239,15 +236,15 @@ public final class CropExporter
 
 	/**
 	 * Force the EXIF orientation tag in a raw TIFF's IFD0 to upright (1). Used by the PNG export's > 64 KB
-	 * verbatim-preserve fallback so a TIFF that ExifPatcher.patch rejected (shipped as-is to avoid
-	 * u16-truncation) doesn't carry the source's pre-load orientation onto the saved PNG — pixels are
-	 * already upright (applyOrientation ran at load), so emitting 6/8 would make EXIF-aware viewers
-	 * double-rotate.
+	 * verbatim-preserve fallback so a TIFF that ExifPatcher.patch rejected (shipped as-is to avoid u16-truncation)
+	 * doesn't carry the source's pre-load orientation onto the saved PNG — pixels are already upright
+	 * (applyOrientation ran at load), so emitting 6/8 would make EXIF-aware viewers double-rotate.
 	 *
-	 * Minimal IFD0 walk to locate tag 0x0112 and overwrite its u16 value, mirroring
-	 * BitmapUtils.readExifOrientation's parsing (byte order from "II"/"MM", magic at +2, IFD0 offset at +4,
-	 * 12-byte entries). On any walk failure returns the input unchanged — safe, because the saved pixels
-	 * are upright regardless.
+	 * The IFD0 walk (byte order from "II"/"MM", magic at +2, IFD0 offset at +4, 12-byte entries, SHORT/count-1
+	 * shape check) is the shared TiffIfd0.findOrientationEntry — the same walker BitmapUtils and
+	 * PngMetadataExtractor read orientation through. This writer passes minIfdRel=8 (an IFD0 overlapping the
+	 * 8-byte TIFF header is rejected) and rewrites any non-1 value rather than range-validating it. On any walk
+	 * failure returns the input unchanged — safe, because the saved pixels are upright regardless.
 	 *
 	 * @param tiff raw TIFF bytes (PNG eXIf chunk contents); never null
 	 * @return tiff itself when orientation is already 1 or the walk failed; a fresh byte[] with orientation
@@ -255,67 +252,23 @@ public final class CropExporter
 	 */
 	static byte[] forceTiffOrientationToUpright(byte[] tiff)
 	{
-		if (tiff.length < 8)
+		Optional<TiffIfd0.OrientationEntry> maybeEntry = TiffIfd0.findOrientationEntry(tiff, 0, tiff.length, 8);
+		if (maybeEntry.isEmpty())
 		{
 			return tiff;
 		}
-		boolean isLittleEndian;
-		if (tiff[0] == 'I' && tiff[1] == 'I')
-		{
-			isLittleEndian = true;
-		}
-		else if (tiff[0] == 'M' && tiff[1] == 'M')
-		{
-			isLittleEndian = false;
-		}
-		else
+		TiffIfd0.OrientationEntry entry = maybeEntry.orElseThrow();
+		int valueOff = entry.entryOffset() + 8;
+		int currentValue = ByteBufferUtils.readU16(tiff, valueOff, entry.isLittleEndian());
+		if (currentValue == 1)
 		{
 			return tiff;
 		}
-		int tiffMagic = ByteBufferUtils.readU16(tiff, 2, isLittleEndian);
-		if (tiffMagic != TiffTag.MAGIC)
-		{
-			return tiff;
-		}
-		long ifdOff = ByteBufferUtils.readU32(tiff, 4, isLittleEndian);
-		if (ifdOff < 8 || ifdOff + 2 > tiff.length || ifdOff > Integer.MAX_VALUE)
-		{
-			return tiff;
-		}
-		int ifd = (int) ifdOff;
-		int count = ByteBufferUtils.readU16(tiff, ifd, isLittleEndian);
-		for (int i = 0; i < count; i++)
-		{
-			long entryLong = (long) ifd + 2 + (long) i * 12;
-			if (entryLong + 12 > tiff.length)
-			{
-				break;
-			}
-			int entry = (int) entryLong;
-			int tag = ByteBufferUtils.readU16(tiff, entry, isLittleEndian);
-			if (tag != TiffTag.ORIENTATION)
-			{
-				continue;
-			}
-			int type = ByteBufferUtils.readU16(tiff, entry + 2, isLittleEndian);
-			long entryCount = ByteBufferUtils.readU32(tiff, entry + 4, isLittleEndian);
-			if (type != TiffTag.TYPE_SHORT || entryCount != 1)
-			{
-				return tiff;
-			}
-			int valueOff = entry + 8;
-			int currentValue = ByteBufferUtils.readU16(tiff, valueOff, isLittleEndian);
-			if (currentValue == 1)
-			{
-				return tiff;
-			}
-			byte[] patched = tiff.clone();
-			ByteBufferUtils.writeU16(patched, valueOff, 1, isLittleEndian);
-			Log.d(TAG, "forceTiffOrientationToUpright: rewrote IFD0 orientation "
-				+ currentValue + " → 1 at offset " + valueOff);
-			return patched;
-		}
-		return tiff;
+		byte[] patched = tiff.clone();
+		ByteBufferUtils.writeU16(patched, valueOff, 1, entry.isLittleEndian());
+		Log.d(TAG, "forceTiffOrientationToUpright: rewrote IFD0 orientation "
+			+ currentValue + " → 1 at offset " + valueOff);
+		return patched;
 	}
 
 	/**
@@ -332,35 +285,36 @@ public final class CropExporter
 	 * anti-aliased and the eye reads its centre, not its origin.
 	 *
 	 * Package-private so CropExporterGridLineTest can pin the mirror-symmetry invariant — a regression that
-	 * collapses the mirror trick to a plain Math.round((double) dim * i / count) would silently produce
-	 * asymmetric exported grids on count=4 / dim=10-class fixtures.
+	 * collapses the mirror trick to a plain Math.round((double) dim * i / count) would silently produce asymmetric
+	 * exported grids on count=4 / dim=10-class fixtures.
 	 *
 	 * @param i     grid line index in [1, count − 1] — the integer line count from the left/top edge
 	 * @param count total number of grid intervals (so the grid draws count − 1 internal lines)
 	 * @param dim   total dimension in output pixels along this axis (cropW or cropH)
-	 * @return pixel index where line i sits in the baked export; for any i, the (i, count − i) pair
-	 *         satisfies result(i) + result(count − i) == dim
+	 * @return pixel index where line i sits in the baked export; for i * 2 != count, the (i, count − i)
+	 *         pair satisfies result(i) + result(count − i) == dim. The middle line of an even-count grid
+	 *         (i * 2 == count) is its own mirror: on odd dim its doubled value is dim + 1 (Math.round
+	 *         rounds the half-integer centre up), not dim
 	 */
 	static int gridLinePixel(int i, int count, int dim)
 	{
-		// Delegate to the shared util/GridGeometry chokepoint so the export-baked grid and the
-		// on-screen GridRenderer.linePos preview can't drift on rounding edge-cases.
+		// Delegate to the shared util/GridGeometry chokepoint so the export-baked grid and the on-screen
+		// GridRenderer.linePos preview can't drift on rounding edge-cases.
 		return GridGeometry.mirroredLinePos(i, count, dim);
 	}
 
 	/**
-	 * Write a PNG eXIf chunk carrying tiffData into the file at `inFile`, producing the eXIf-injected PNG
-	 * at `outFile`. Takes raw TIFF bytes directly with no JPEG APP1 u16 cap — used by the PNG → PNG
-	 * round-trip path so a PNG with > 64 KB EXIF (camera with extensive MakerNote / GPS metadata) keeps
-	 * its full metadata when re-saved. The PNG eXIf length field is u31 so the chunk holds anything up to
-	 * ~2 GB. Streams the file-to-file copy via FileOutputStream so the 400-600 MB PNG primary never
-	 * materialises as a single byte[]. Peak Java heap during the operation is the chunk buffer
-	 * (~64 KB) + the tiffData reference.
+	 * Write a PNG eXIf chunk carrying tiffData into the file at `inFile`, producing the eXIf-injected PNG at
+	 * `outFile`. Takes raw TIFF bytes directly with no JPEG APP1 u16 cap — used by the PNG → PNG round-trip path so
+	 * a PNG with > 64 KB EXIF (camera with extensive MakerNote / GPS metadata) keeps its full metadata when
+	 * re-saved. The PNG eXIf length field is u31 so the chunk holds anything up to ~2 GB. Streams the file-to-file
+	 * copy via FileOutputStream so the 400-600 MB PNG primary never materialises as a single byte[]. Peak Java heap
+	 * during the operation is the chunk buffer (~64 KB) + the tiffData reference.
 	 *
-	 * On any malformation (PNG too short, IHDR length signals truncation, total size overflows int, or
-	 * the eXIf chunk's CRC computation throws), the input file is stream-copied verbatim to outFile.
+	 * On any malformation (PNG too short, IHDR length signals truncation, total size overflows int, or the eXIf
+	 * chunk's CRC computation throws), the input file is stream-copied verbatim to outFile.
 	 *
-	 * @param inFile   source PNG on disk (typically the tempfile from `encodePngToTempfile`)
+	 * @param inFile   source PNG on disk (typically the tempfile from `encodeToTempfile`)
 	 * @param tiffData raw TIFF body (no APP1 wrapper, no "Exif\0\0" header); zero-length input
 	 *                 stream-copies inFile verbatim to outFile
 	 * @param outFile  destination tempfile; truncated and overwritten on every call
@@ -371,50 +325,38 @@ public final class CropExporter
 	{
 		int tiffLen = tiffData.length;
 		long inSize = inFile.length();
-		// Bail to verbatim copy when there's nothing to inject OR the input is too small to be a real
-		// PNG (signature + minimal IHDR + IEND = 8 + 25 + 12 = 45 bytes).
+		// Bail to verbatim copy when there's nothing to inject OR the input can't hold even a PNG signature +
+		// IEND chunk (8 + 12 = 20 bytes). This is a cheap floor, not a full minimal-PNG check — inputs of 20-32
+		// bytes fail the 33-byte signature + IHDR peek below and bail to the same verbatim copy.
 		if (tiffLen == 0 || inSize < 8L + 12L)
 		{
-			Files.copy(inFile.toPath(), outFile.toPath(),
-				StandardCopyOption.REPLACE_EXISTING);
+			Files.copy(inFile.toPath(), outFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
 			return;
 		}
-		// Peek the first 33 bytes: PNG signature(8) + IHDR length(4) + "IHDR"(4) + IHDR data(13) +
-		// IHDR CRC(4). That's everything we need before deciding where to splice the eXIf chunk.
-		// Anything shorter is a malformed PNG; bail to verbatim copy.
+		// Peek the first 33 bytes: PNG signature(8) + IHDR length(4) + "IHDR"(4) + IHDR data(13) + IHDR CRC(4).
+		// That's everything we need before deciding where to splice the eXIf chunk. Anything shorter is a
+		// malformed PNG; bail to verbatim copy.
 		byte[] header = new byte[33];
 		try (FileInputStream fis = new FileInputStream(inFile))
 		{
-			int read = 0;
-			while (read < header.length)
+			if (fis.readNBytes(header, 0, header.length) < header.length)
 			{
-				int n = fis.read(header, read, header.length - read);
-				if (n < 0)
-				{
-					break;
-				}
-				read += n;
-			}
-			if (read < header.length)
-			{
-				Files.copy(inFile.toPath(), outFile.toPath(),
-					StandardCopyOption.REPLACE_EXISTING);
+				Files.copy(inFile.toPath(), outFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
 				return;
 			}
 		}
-		// Long-arithmetic guard: u32 IHDR length read as long so a high-bit-set value can't sign-flip
-		// into a negative int that slips past the past-EOF check.
+		// Long-arithmetic guard: u32 IHDR length read as long so a high-bit-set value can't sign-flip into a
+		// negative int that slips past the past-EOF check.
 		long ihdrLen = ((long) (header[8] & 0xFF) << 24) | ((long) (header[9] & 0xFF) << 16)
 				| ((long) (header[10] & 0xFF) << 8) | (header[11] & 0xFF);
 		long insertPosLong = 8L + 4L + 4L + ihdrLen + 4L;
-		// `>=` rejects an IHDR-only PNG (insertPos == inSize means no IEND follows). Negative check
-		// guards the long wrap on adversarial ihdrLen near MAX_INT.
+		// `>=` rejects an IHDR-only PNG (insertPos == inSize means no IEND follows). Negative check guards the
+		// long wrap on adversarial ihdrLen near MAX_INT.
 		if (insertPosLong >= inSize || insertPosLong < 0 || insertPosLong > header.length)
 		{
-			// Malformed — IHDR length doesn't fit within our 33-byte peek, OR there's no IEND after
-			// IHDR. Bail to verbatim copy.
-			Files.copy(inFile.toPath(), outFile.toPath(),
-				StandardCopyOption.REPLACE_EXISTING);
+			// Malformed — IHDR length doesn't fit within our 33-byte peek, OR there's no IEND after IHDR.
+			// Bail to verbatim copy.
+			Files.copy(inFile.toPath(), outFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
 			return;
 		}
 		int insertPos = (int) insertPosLong;
@@ -424,8 +366,7 @@ public final class CropExporter
 		{
 			Log.w(TAG, "Streaming PNG eXIf chunk total " + chunkTotalLong + " + png " + inSize
 				+ " would overflow int; copying input unchanged");
-			Files.copy(inFile.toPath(), outFile.toPath(),
-				StandardCopyOption.REPLACE_EXISTING);
+			Files.copy(inFile.toPath(), outFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
 			return;
 		}
 		byte[] chunkType = PngMetadataExtractor.EXIF_CHUNK_TYPE;
@@ -455,12 +396,7 @@ public final class CropExporter
 			try (FileInputStream tailFis = new FileInputStream(inFile))
 			{
 				JpegMetadataInjector.skipExactly(tailFis, insertPos);
-				byte[] buf = new byte[JpegMetadataInjector.STREAM_CHUNK_SIZE];
-				int n;
-				while ((n = tailFis.read(buf)) > 0)
-				{
-					fos.write(buf, 0, n);
-				}
+				JpegMetadataInjector.copyRemaining(tailFis, fos);
 			}
 			fos.getFD().sync();
 		}
@@ -468,18 +404,17 @@ public final class CropExporter
 	}
 
 	/**
-	 * Run a raw TIFF through ExifPatcher.patch to normalise orientation (forced to 1 — pixels were
-	 * rotated at load time), rewrite cropped dimensions, and replace or strip the embedded IFD1
-	 * thumbnail. Wraps the TIFF as a synthetic APP1 segment for ExifPatcher's segment API; the wrapper's
-	 * u16 length may truncate for > 64KB TIFFs but ExifPatcher reads only data().length, so that's
-	 * harmless. Returns the patched TIFF, or null when ExifPatcher rejects the input.
+	 * Run a raw TIFF through ExifPatcher.patch to normalise orientation (forced to 1 — pixels were rotated at load
+	 * time), rewrite cropped dimensions, and replace or strip the embedded IFD1 thumbnail. Wraps the TIFF as a
+	 * synthetic APP1 segment for ExifPatcher's segment API; the wrapper's u16 length may truncate for > 64KB TIFFs
+	 * but ExifPatcher reads only data().length, so that's harmless. Returns the patched TIFF, or empty when
+	 * ExifPatcher rejects the input.
 	 *
-	 * Stale-thumbnail footgun: spliceExistingThumbnail enforces the APP1 u16 cap on the rebuilt segment,
-	 * so a too-large rebuild rejects silently and leaves the source's IFD1 thumbnail in place — leaking
-	 * pre-edit content via the preview. Predict that here with ExifPatcher.maxThumbnailBytes (which
-	 * subtracts the OLD thumbnail's bytes before measuring remaining room) and force
-	 * STRIP_IFD1_THUMBNAIL when the new thumbnail won't fit, so the saved PNG carries no IFD1 rather
-	 * than a pre-edit preview.
+	 * Stale-thumbnail footgun: spliceExistingThumbnail enforces the APP1 u16 cap on the rebuilt segment, so a
+	 * too-large rebuild rejects silently and leaves the source's IFD1 thumbnail in place — leaking pre-edit content
+	 * via the preview. Predict that here with ExifPatcher.maxThumbnailBytes (which subtracts the OLD thumbnail's
+	 * bytes before measuring remaining room) and force STRIP_IFD1_THUMBNAIL when the new thumbnail won't fit, so
+	 * the saved PNG carries no IFD1 rather than a pre-edit preview.
 	 *
 	 * Package-private so CropExporterPngExifTest can pin the strip-vs-splice decision directly.
 	 *
@@ -489,22 +424,22 @@ public final class CropExporter
 	 * @param thumbnail fresh JPEG thumbnail of the cropped pixels; MUST be non-null (null would preserve
 	 *                  the source's pre-crop thumbnail, leaking pre-edit content). Force-overridden to
 	 *                  STRIP_IFD1_THUMBNAIL when the rebuilt segment can't fit under APP1's cap
-	 * @return patched TIFF bytes ready for the eXIf chunk, or null on parse failure
+	 * @return patched TIFF bytes ready for the eXIf chunk, or empty on parse failure / null or
+	 *         oversized input
 	 */
-	static byte[] patchPngExifTiff(byte[] tiff, int newW, int newH, byte[] thumbnail)
+	static Optional<byte[]> patchPngExifTiff(byte[] tiff, int newW, int newH, byte[] thumbnail)
 	{
-		// Long-arithmetic overflow guard. PNG eXIf is u31-uncapped so an adversarial 2 GB-class TIFF would
-		// make `2 + 6 + tiff.length` overflow int and `new byte[2 + segLen]` throw
-		// NegativeArraySizeException out of the bg encode pipeline. Bail null so the caller routes through
-		// the >64 KB verbatim-preserve path at exportPng (which already handles the "too big to patch but
-		// must not be dropped" case for u31 TIFFs).
+		// Long-arithmetic overflow guard. PNG eXIf is u31-uncapped so an adversarial 2 GB-class TIFF would make
+		// `2 + 6 + tiff.length` overflow int and `new byte[2 + segLen]` throw NegativeArraySizeException out of
+		// the bg encode pipeline. Bail empty so the caller routes through the >64 KB verbatim-preserve path at
+		// exportPng (which already handles the "too big to patch but must not be dropped" case for u31 TIFFs).
 		if (tiff == null || 2L + 6L + tiff.length > Integer.MAX_VALUE)
 		{
-			return null;
+			return Optional.empty();
 		}
-		// Build a synthetic APP1 segment: FF E1 LL LL "Exif\0\0" [TIFF...]. Bytes 2..3 (segLen u16)
-		// get truncated when 2 + 6 + tiff.length > 65535, but the only consumer here is
-		// ExifPatcher.patch / maxThumbnailBytes which both read data().length directly.
+		// Build a synthetic APP1 segment: FF E1 LL LL "Exif\0\0" [TIFF...]. Bytes 2..3 (segLen u16) get
+		// truncated when 2 + 6 + tiff.length > 65535, but the only consumer here is ExifPatcher.patch /
+		// maxThumbnailBytes which both read data().length directly.
 		int segLen = 2 + 6 + tiff.length;
 		byte[] wrapped = new byte[2 + segLen];
 		wrapped[0] = (byte) JpegMarker.PREFIX;
@@ -523,11 +458,11 @@ public final class CropExporter
 		wrappedList.add(new JpegSegment(JpegMarker.APP1, wrapped));
 
 		// Predict whether spliceExistingThumbnail's APP1-cap check will reject the rebuild. Using
-		// ExifPatcher.maxThumbnailBytes (rather than a naive tiff.length + thumbnail.length sum) walks
-		// IFD0 → IFD1 → JPEGInterchangeFormatLength to find the OLD thumbnail size and returns
-		// `JpegSegment.MAX_SEGMENT_BYTES - (data.length - oldThumbLen)`, the exact post-splice budget.
-		// A naive sum would force-strip a 50KB-old + 30KB-fresh case even though the rebuilt segment
-		// (~30KB after old-thumb removal) would fit comfortably.
+		// ExifPatcher.maxThumbnailBytes (rather than a naive tiff.length + thumbnail.length sum) walks IFD0 →
+		// IFD1 → JPEGInterchangeFormatLength to find the OLD thumbnail size and returns
+		// `JpegSegment.MAX_SEGMENT_BYTES - (data.length - oldThumbLen)`, the exact post-splice budget. A naive
+		// sum would force-strip a 50KB-old + 30KB-fresh case even though the rebuilt segment (~30KB after
+		// old-thumb removal) would fit comfortably.
 		if (thumbnail.length > 0 && thumbnail.length > ExifPatcher.maxThumbnailBytes(wrappedList))
 		{
 			Log.d(TAG, "PNG eXIf rebuild after splice would exceed APP1 cap (TIFF " + tiff.length
@@ -542,33 +477,33 @@ public final class CropExporter
 				byte[] patchedData = seg.data();
 				if (patchedData.length <= 10)
 				{
-					return null;
+					return Optional.empty();
 				}
 				byte[] patchedTiff = new byte[patchedData.length - 10];
 				System.arraycopy(patchedData, 10, patchedTiff, 0, patchedTiff.length);
-				return patchedTiff;
+				return Optional.of(patchedTiff);
 			}
 		}
-		return null;
+		return Optional.empty();
 	}
 
 	/**
-	 * Drop HDR-specific segments — XMP segments containing the `hdrgm` namespace marker (standard OR
-	 * Extended XMP), and APP2/MPF segments pointing at the gain map. Used on the HDR-drop path so the
-	 * saved JPEG's metadata doesn't claim HDR that the output file doesn't actually carry.
+	 * Drop HDR-specific segments — XMP segments containing the `hdrgm` namespace marker (standard OR Extended XMP),
+	 * and APP2/MPF segments pointing at the gain map. Used on the HDR-drop path so the saved JPEG's metadata
+	 * doesn't claim HDR that the output file doesn't actually carry.
 	 *
 	 * Drops the WHOLE XMP segment when it contains hdrgm rather than surgically rewriting the XML — most camera
 	 * vendors split XMP into multiple APP1 segments anyway, so any non-hdrgm XMP typically lives in a separate
-	 * segment. The corner case (a single XMP segment carrying hdrgm + non-hdrgm metadata) loses the non-hdrgm
-	 * tags too, but that beats lying to ExportPipeline.reportSuccess about HDR presence.
+	 * segment. The corner case (a single XMP segment carrying hdrgm + non-hdrgm metadata) loses the non-hdrgm tags
+	 * too, but that beats lying to ExportPipeline.reportSuccess about HDR presence.
 	 *
-	 * Delegates to HdrSignature.isHdrgmXmpSegment so the standard-plus-extended-XMP detection stays in
-	 * lockstep with the load-time hasHdrgmInXmp gate — without that, an HDR-drop output of a source whose
-	 * hdrgm declaration was in Extended XMP would leak the HDR signature past the gain-map removal.
+	 * Delegates to HdrSignature.isHdrgmXmpSegment so the standard-plus-extended-XMP detection stays in lockstep
+	 * with the load-time hasHdrgmInXmp gate — without that, an HDR-drop output of a source whose hdrgm declaration
+	 * was in Extended XMP would leak the HDR signature past the gain-map removal.
 	 *
-	 * Package-private so CropExporterStripHdrTest can pin the strip behavior — particularly the
-	 * Extended-XMP `hdrgm` strip, where a regression that drops the Extended-XMP branch of
-	 * HdrSignature.isHdrgmXmpSegment would silently let HDR-claiming XMP survive on the HDR-drop output.
+	 * Package-private so CropExporterStripHdrTest can pin the strip behavior — particularly the Extended-XMP
+	 * `hdrgm` strip, where a regression that drops the Extended-XMP branch of HdrSignature.isHdrgmXmpSegment would
+	 * silently let HDR-claiming XMP survive on the HDR-drop output.
 	 *
 	 * @param meta source JPEG segment list
 	 * @return new list with HDR-specific segments removed; non-HDR segments preserved verbatim
@@ -594,20 +529,28 @@ public final class CropExporter
 	/**
 	 * For HDR sources, render a cropped Ultra HDR JPEG via UltraHdrCompat and extract the gain-map bytes from its
 	 * tail. The primary-image bytes still come from the canvas rendering above; this only harvests the gain map,
-	 * which must be spatially aligned to the same crop / rotation as the primary. Returns null when the source
-	 * isn't HDR or when UltraHdrCompat couldn't produce a valid output.
+	 * which must be spatially aligned to the same crop / rotation as the primary.
+	 *
+	 * @param state    source of the original bytes, gain map, crop geometry, and AI mask
+	 * @param cropW    output crop width in pixels
+	 * @param cropH    output crop height in pixels
+	 * @param cacheDir scratch directory handed to UltraHdrCompat for its tempfiles
+	 * @param quality  JPEG quality (0..100) for the Ultra HDR encode
+	 * @return gain-map bytes (everything past the rendered Ultra HDR JPEG's primary EOI); empty when the source
+	 *         isn't HDR or UltraHdrCompat couldn't produce a valid output — the caller drops to the SDR path
 	 */
-	private static byte[] buildCroppedGainMap(CropState state, int cropW, int cropH, File cacheDir, int quality)
+	private static Optional<byte[]> buildCroppedGainMap(CropState state, int cropW, int cropH, File cacheDir,
+		int quality)
 	{
 		byte[] originalBytes = state.getOriginalFileBytes();
 		// Match the gain-map presence check at the top of export() — a zero-length gain-map array means
 		// extraction succeeded structurally but produced no usable bytes (rare but observed after malformed
-		// extraction). UltraHdrCompat would silently fall back to SDR; flag here so the caller's null check
+		// extraction). UltraHdrCompat would silently fall back to SDR; flag here so the caller's presence check
 		// drops the HDR path explicitly rather than letting a degraded HDR encode go through.
 		boolean hasHdr = state.getGainMap() != null && state.getGainMap().length > 0 && originalBytes != null;
 		if (!hasHdr)
 		{
-			return null;
+			return Optional.empty();
 		}
 
 		float centerX = state.hasCenter() ? state.getCenterX() : state.getImageWidth() / 2f;
@@ -616,66 +559,71 @@ public final class CropExporter
 		CropRender render = CropRender.of(centerX, centerY, cropW, cropH,
 			state.getImageWidth(), state.getImageHeight(), state.getRotationDegrees());
 		byte[] hdrResult = UltraHdrCompat.compressWithGainmap(
-			originalBytes, quality, cacheDir, render, exifOrient, state.getAiMask());
+			originalBytes, quality, cacheDir, render, exifOrient, state.getAiMask()).orElse(null);
 		if (hdrResult == null)
 		{
 			Log.d(TAG, "HDR generation failed, falling back to non-HDR");
-			return null;
+			return Optional.empty();
 		}
 
 		int primaryEnd = JpegMarkerWalker.findPrimaryEoi(hdrResult, hdrResult.length);
 		if (primaryEnd <= 0 || primaryEnd >= hdrResult.length)
 		{
-			return null;
+			return Optional.empty();
 		}
 		byte[] gainMap = new byte[hdrResult.length - primaryEnd];
 		System.arraycopy(hdrResult, primaryEnd, gainMap, 0, gainMap.length);
 		Log.d(TAG, "Extracted gain map: " + gainMap.length + " bytes");
-		return gainMap;
+		return Optional.of(gainMap);
 	}
 
 	/**
 	 * Generate the embedded EXIF thumbnail sized to fit the available APP1 budget. Using the full remaining APP1
 	 * budget (minus IFD overhead) gives a thumbnail that matches camera-native resolution instead of being
-	 * artificially shrunk. Returns ExifPatcher.STRIP_IFD1_THUMBNAIL (a byte[0] sentinel) — never null — when the
-	 * budget is too small for a meaningful thumbnail, the retry-at-half-size still doesn't fit, or generation
-	 * throws OOM. That sentinel routes ExifPatcher through the strip-IFD1 path so the saved file carries no
-	 * embedded preview, rather than preserving the SOURCE's pre-edit thumbnail (passing null here would
-	 * leave the source thumbnail in place, leaking pre-edit content via any EXIF-thumbnail-aware viewer).
+	 * artificially shrunk.
+	 *
+	 * @param meta source JPEG segment list; ExifPatcher.patchedNonThumbBytes predicts the post-patch
+	 *             non-thumbnail byte count from it
+	 * @param bmp  rendered output bitmap the thumbnail is scaled down from; not recycled here
+	 * @return thumbnail JPEG bytes fitting the budget, or ExifPatcher.STRIP_IFD1_THUMBNAIL (a byte[0] sentinel —
+	 *         never null) when the budget is too small, the retry-at-half-size still doesn't fit, or generation
+	 *         throws OOM. The sentinel routes ExifPatcher through the strip-IFD1 path so the saved file carries
+	 *         no embedded preview, rather than preserving the SOURCE's pre-edit thumbnail (null would leave the
+	 *         source thumbnail in place, leaking pre-edit content via any EXIF-thumbnail-aware viewer)
 	 */
 	private static byte[] buildEmbeddedThumbnail(List<JpegSegment> meta, Bitmap bmp)
 	{
-		// Exact-budget formulation: ask ExifPatcher to predict the post-patch segment's non-thumbnail
-		// byte count (mirrors patch's decision tree — splice / append / synthesise), then subtract from
-		// the APP1 segment cap to know precisely how many bytes the new thumbnail can occupy. No
-		// estimation margin, no upper clamp; the prediction is byte-exact for the splice path that
-		// camera sources hit and conservative-by-42-bytes for the append fallback. Floor at 0 because
-		// `data.length + 42` from the append-path predictor can exceed the cap on pathological
-		// already-near-full source EXIF (corrupt or near-MAX_INT lengths) — a negative budget would
-		// propagate to generateThumbnail's `maxBytes <= 0` short-circuit and we'd fall through to
-		// STRIP_IFD1_THUMBNAIL, same outcome as if every cascade rung failed.
+		// Exact-budget formulation: ask ExifPatcher to predict the post-patch segment's non-thumbnail byte
+		// count (mirrors patch's decision tree — splice / append / synthesise), then subtract from the APP1
+		// segment cap to know precisely how many bytes the new thumbnail can occupy. No estimation margin, no
+		// upper clamp; the prediction is byte-exact for the splice path that camera sources hit and
+		// conservative-by-42-bytes for the append fallback. Floor at 0 because `data.length + 42` from the
+		// append-path predictor can exceed the cap on pathological already-near-full source EXIF (corrupt or
+		// near-MAX_INT lengths) — a negative budget would propagate to generateThumbnail's `maxBytes <= 0`
+		// short-circuit and we'd fall through to STRIP_IFD1_THUMBNAIL, same outcome as if every cascade rung
+		// failed.
 		int outputNonThumb = ExifPatcher.patchedNonThumbBytes(meta);
-		// Defensive double-clamp. patchedNonThumbBytes is contracted to return ≥ 0, but no test pins
-		// that invariant directly; a future regression returning negative would make
-		// `MAX_SEGMENT_BYTES - negative` wrap positive past int range — Math.max(0, hugeWrap) would
-		// then admit a thumbnail too big for any segment cap. Pre-clamp outputNonThumb to [0, ∞) so
-		// the subtraction stays in honest territory regardless of upstream contract drift.
+		// Defensive double-clamp. patchedNonThumbBytes is contracted to return ≥ 0, but no test pins that
+		// invariant directly; a future regression returning negative would make `MAX_SEGMENT_BYTES - negative`
+		// wrap positive past int range — Math.max(0, hugeWrap) would then admit a thumbnail too big for any
+		// segment cap. Pre-clamp outputNonThumb to [0, ∞) so the subtraction stays in honest territory
+		// regardless of upstream contract drift.
 		outputNonThumb = Math.max(0, outputNonThumb);
 		int thumbBudget = Math.max(0, JpegSegment.MAX_SEGMENT_BYTES - outputNonThumb);
-		byte[] thumb = generateThumbnail(bmp, thumbBudget);
-		if (thumb == null)
+		return generateThumbnail(bmp, thumbBudget).orElseGet(() ->
 		{
-			Log.w(TAG, "Thumbnail generation returned null at budget " + thumbBudget
+			Log.w(TAG, "Thumbnail generation came back empty at budget " + thumbBudget
 				+ "; falling back to STRIP_IFD1_THUMBNAIL — saved file will have no preview");
 			return ExifPatcher.STRIP_IFD1_THUMBNAIL;
-		}
-		return thumb;
+		});
 	}
 
 	/**
-	 * Best-effort tempfile delete with a logged warning on failure. Used by the streaming pipeline's
-	 * finally block to clean up every intermediate file we created — accepts null so the caller can
-	 * pass uninitialised slots without a null-check at every call site.
+	 * Best-effort tempfile delete with a logged warning on failure. Used by the streaming pipeline's finally block
+	 * to clean up every intermediate file we created.
+	 *
+	 * @param file tempfile to delete; null and already-deleted files are silently tolerated so callers can pass
+	 *             uninitialised slots without a null-check at every call site
 	 */
 	private static void deleteIfExists(File file)
 	{
@@ -690,6 +638,11 @@ public final class CropExporter
 	 * to produce exact line widths regardless of bitmap color space or Canvas rendering quirks. Line positions are
 	 * computed as continuous float offsets from the crop's top-left and then rounded to the nearest output pixel,
 	 * matching what GridRenderer.linePos produces on the preview canvas.
+	 *
+	 * @param bmp    output bitmap, mutated in place via setPixels
+	 * @param width  bitmap width in pixels (crop width)
+	 * @param height bitmap height in pixels (crop height)
+	 * @param grid   line count, width, and color configuration
 	 */
 	private static void drawGridPixels(Bitmap bmp, int width, int height, GridConfig grid)
 	{
@@ -698,9 +651,9 @@ public final class CropExporter
 		int color = grid.color();
 
 		// Allocate one full-size band per axis up front (sized for the WIDEST possible line); reuse the same
-		// buffer for every line by passing the actual stride to setPixels. The previous version allocated
-		// a fresh int[] for any line clipped at the image edge — on a 16K-wide crop with a 7×7 grid and
-		// lineWidth=20, that was up to 14 fresh allocations totaling ~18 MB of transient int[] per save.
+		// buffer for every line by passing the actual stride to setPixels. Per-line allocation for edge-clipped
+		// lines would cost up to 14 fresh int[] totaling ~18 MB of transient allocation per save on a 16K-wide
+		// crop with a 7×7 grid and lineWidth=20.
 		int[] vertColumn = new int[lineWidth * height];
 		Arrays.fill(vertColumn, color);
 		for (int i = 1; i < grid.columns(); i++)
@@ -709,10 +662,10 @@ public final class CropExporter
 			int left = Math.max(0, x - halfLineWidth);
 			// Right bound is computed from the un-clipped line center (x + lineWidth - halfLineWidth) so a
 			// line whose left edge clipped against image x=0 doesn't extend its width by halfLineWidth-x to
-			// the right. The previous `left + lineWidth` form drew the full lineWidth even after the left
-			// portion was lost, producing visibly thicker grid lines on the image's left edge at thick
-			// widths. The right-edge case has always been correct because the clamp catches it; this aligns
-			// the left-edge case with the same "render only the visible pixels" semantics.
+			// the right. A `left + lineWidth` bound would draw the full lineWidth even after the left
+			// portion is lost, producing visibly thicker grid lines on the image's left edge at thick
+			// widths; this keeps both edges on the same "render only the visible pixels" semantics (the
+			// right edge via the Math.min clamp).
 			int right = Math.min(width, x + lineWidth - halfLineWidth);
 			int actualWidth = right - left;
 			if (actualWidth <= 0)
@@ -720,8 +673,8 @@ public final class CropExporter
 				continue;
 			}
 			// Buffer is uniformly colored, so reading any (stride × height) subset gives the same result.
-			// Required: vertColumn.length >= actualWidth * height — satisfied because actualWidth is
-			// always ≤ lineWidth (clipped at the image edge).
+			// Required: vertColumn.length >= actualWidth * height — satisfied because actualWidth is always
+			// ≤ lineWidth (clipped at the image edge).
 			bmp.setPixels(vertColumn, 0, actualWidth, left, 0, actualWidth, height);
 		}
 
@@ -744,43 +697,49 @@ public final class CropExporter
 	}
 
 	/**
-	 * Encode a bitmap as JPEG via `Bitmap.compress` straight to a tempfile in cacheDir. Returns the
-	 * tempfile path so the rest of the metadata pipeline can stream from disk rather than holding the
-	 * 100+ MB encoded byte[] in Java heap. Caller is responsible for deleting the returned file once
-	 * downstream stages have consumed it; `deleteOnExit` is set as a JVM-shutdown safety net and
-	 * `UltraHdrCompat.sweepStaleCacheFiles` (invoked from MainActivity.onCreate) reclaims orphans
-	 * from hard process kills.
+	 * Encode a bitmap via `Bitmap.compress` straight to a tempfile in cacheDir. Returns the tempfile path so the
+	 * rest of the pipeline can stream from disk rather than holding the encoded byte[] in Java heap — a 200 MP
+	 * source encodes to 100+ MB as JPEG and roughly 400-560 MB as lossless PNG, and an in-memory BAOS +
+	 * toByteArray encode would peak at up to ~1 GB live (the BAOS internal buffer at the next power of 2 plus the
+	 * toByteArray copy), an unrecoverable OOM even with android:largeHeap. A compress false return throws rather
+	 * than shipping structurally-truncated bytes downstream. Caller deletes the returned file once downstream
+	 * stages have consumed it; `deleteOnExit` is a JVM-shutdown safety net and
+	 * `UltraHdrCompat.sweepStaleCacheFiles` (invoked from MainActivity.onCreate) reclaims orphans from hard
+	 * process kills.
 	 *
-	 * @param bmp      bitmap to encode (not recycled here; caller manages)
-	 * @param quality  JPEG quality 1..100; production save paths pass 100
-	 * @param cacheDir directory for the tempfile
-	 * @return tempfile holding the encoded JPEG bytes
-	 * @throws IOException if compress returns false (Skia rejected the bitmap) or the FileOutputStream
-	 *                     write fails
+	 * @param bmp       bitmap to encode (not recycled here; caller manages)
+	 * @param format    compress format; drives the encoder and the failure-message labels
+	 * @param quality   quality 1..100 passed to compress; production JPEG saves pass 100, PNG ignores it
+	 * @param nameInfix tempfile-name infix after the sweep prefix ("jpeg_encode_", "png_encode_")
+	 * @param extension tempfile extension including the dot
+	 * @param cacheDir  directory for the tempfile
+	 * @return tempfile holding the encoded bytes, fsynced
+	 * @throws IOException if compress returns false (Skia rejected the bitmap; output bytes are incomplete),
+	 *                     the FileOutputStream write fails, or the encoded size is out of int range
 	 */
-	private static File encodeJpegToTempfile(Bitmap bmp, int quality, File cacheDir) throws IOException
+	private static File encodeToTempfile(Bitmap bmp, Bitmap.CompressFormat format, int quality,
+		String nameInfix, String extension, File cacheDir) throws IOException
 	{
-		File temp = new File(cacheDir,
-			UltraHdrCompat.TEMPFILE_PREFIX_HDR_SRC + "jpeg_encode_"
-				+ Process.myPid() + "_" + System.nanoTime() + ".jpg");
-		temp.deleteOnExit();
+		File temp = newPipelineTempfile(cacheDir, UltraHdrCompat.TEMPFILE_PREFIX_HDR_SRC + nameInfix,
+			extension);
 		boolean success = false;
 		try
 		{
 			try (FileOutputStream fos = new FileOutputStream(temp))
 			{
-				if (!bmp.compress(Bitmap.CompressFormat.JPEG, quality, fos))
+				if (!bmp.compress(format, quality, fos))
 				{
-					Log.w(TAG, "Bitmap.compress(JPEG, " + quality
-						+ ") returned false on tempfile encode");
-					throw new IOException("Skia rejected JPEG encode");
+					throw new IOException("Bitmap.compress(" + format.name() + ", " + quality
+						+ ") returned false — Skia encoder rejected the bitmap; output"
+						+ " bytes are incomplete");
 				}
 				fos.getFD().sync();
 			}
 			long size = temp.length();
 			if (size <= 0 || size > Integer.MAX_VALUE)
 			{
-				throw new IOException("Encoded tempfile size out of range: " + size);
+				throw new IOException("Encoded " + format.name()
+					+ " tempfile size out of range: " + size);
 			}
 			success = true;
 			return temp;
@@ -789,80 +748,44 @@ public final class CropExporter
 		{
 			if (!success && temp.exists() && !temp.delete())
 			{
-				Log.w(TAG, "Failed to delete failed-encode tempfile " + temp);
+				Log.w(TAG, "Failed to delete failed-encode " + format.name() + " tempfile "
+					+ temp);
 			}
 		}
 	}
 
 	/**
-	 * Encode a bitmap as PNG via `Bitmap.compress` straight to a tempfile in cacheDir. Returns the
-	 * tempfile path so the eXIf-injection step can stream from disk rather than holding the
-	 * 400-600 MB encoded byte[] in Java heap. A 200 MP ARGB bitmap (200 megapixels × 4 bytes raw)
-	 * compresses lossless to roughly 400-560 MB, and the previous BAOS + toByteArray path peaked at
-	 * ~1 GB live (the BAOS internal buffer at the next power of 2 above 500 MB plus the toByteArray
-	 * copy) — an unrecoverable OOM even with android:largeHeap. Streaming straight to disk keeps
-	 * peak Java heap at chunk-buffer scale for the encode + inject phases, leaving the final readback
-	 * as the only large allocation.
+	 * JPEG save pipeline: encode → inject patched metadata → compose gain map (HDR sources) → append SEFT trailer,
+	 * each step a file-to-file streaming operation over disk-backed intermediates. The only large Java allocation
+	 * is the final readback of the finished file. On HDR-compose drop, re-injects from the encoded primary with
+	 * hdrgm XMP + MPF stripped so the output's metadata stays honest.
 	 *
-	 * @param bmp      bitmap to encode (not recycled here; caller manages)
-	 * @param cacheDir directory for the tempfile
-	 * @return tempfile holding the encoded PNG bytes
-	 * @throws IOException if compress returns false (Skia rejected the bitmap) or the FileOutputStream
-	 *                     write fails
+	 * @param state    source of segment list, original bytes, gain map, SEFT trailer, and crop geometry
+	 * @param bmp      rendered output bitmap; ownership transfers here — recycled immediately after the primary
+	 *                 encode (frees ~800 MB of native heap before the HDR re-encode), or in the finally block on
+	 *                 failure
+	 * @param cropW    output crop width in pixels
+	 * @param cropH    output crop height in pixels
+	 * @param cacheDir directory for the `hdr_src_`-prefixed pipeline tempfiles; all are deleted in the finally
+	 *                 block, and the startup sweep reclaims orphans from a mid-save process kill
+	 * @return byte[]-backed ExportResult carrying the final file bytes and whether a gain map was attached
+	 * @throws IOException when encoding, injection, composing, or the final readback fails, or a tempfile size
+	 *                     is out of int range
 	 */
-	private static File encodePngToTempfile(Bitmap bmp, File cacheDir) throws IOException
-	{
-		File temp = new File(cacheDir,
-			UltraHdrCompat.TEMPFILE_PREFIX_HDR_SRC + "png_encode_"
-				+ Process.myPid() + "_" + System.nanoTime() + ".png");
-		temp.deleteOnExit();
-		boolean success = false;
-		try
-		{
-			try (FileOutputStream fos = new FileOutputStream(temp))
-			{
-				// Same Skia-rejection check as the JPEG path — a false return ships a partial PNG
-				// header with no IEND chunk, and downstream eXIf injection would either fail at the
-				// IHDR walk or produce a file viewers reject as truncated.
-				if (!bmp.compress(Bitmap.CompressFormat.PNG, 100, fos))
-				{
-					throw new IOException("Bitmap.compress(PNG, 100) returned false — "
-						+ "Skia encoder rejected the bitmap; output bytes are incomplete");
-				}
-				fos.getFD().sync();
-			}
-			long size = temp.length();
-			if (size <= 0 || size > Integer.MAX_VALUE)
-			{
-				throw new IOException("Encoded PNG tempfile size out of range: " + size);
-			}
-			success = true;
-			return temp;
-		}
-		finally
-		{
-			if (!success && temp.exists() && !temp.delete())
-			{
-				Log.w(TAG, "Failed to delete failed-encode PNG tempfile " + temp);
-			}
-		}
-	}
-
 	private static ExportResult exportJpeg(CropState state, Bitmap bmp, int cropW, int cropH,
 		File cacheDir) throws IOException
 	{
-		// Fully streaming pipeline: encode → inject metadata → compose gain map → append SEFT, every
-		// step a file-to-file operation with disk-backed intermediates. The naive byte[]-pipeline
-		// allocates 4 successive byte[] arrays of ~108–148 MB on a 200 MP q=100 save — peak Java heap
-		// of ~350-400 MB during the gain-map compose step, which OOMs even with android:largeHeap
-		// once the heap is fragmented. The streaming pipeline holds at most one ~118 MB byte[] alive
-		// at a time (the final readback at the end of this method), so peak Java heap drops to
-		// roughly (final-output-size + state) ≈ ~150 MB for the same 200 MP HDR save.
-		//
-		// Tempfile lifecycle: every intermediate file is created in cacheDir with a recognisable
-		// `hdr_src_` prefix so UltraHdrCompat.sweepStaleCacheFiles picks them up on next launch if a
-		// process kill mid-save leaves orphans. The finally block deletes every file we created on
-		// success or failure. deleteOnExit is set as a JVM-shutdown safety net.
+		// Fully streaming pipeline: encode → inject metadata → compose gain map → append SEFT, every step a
+		// file-to-file operation with disk-backed intermediates. The naive byte[]-pipeline allocates 4
+		// successive byte[] arrays of ~108–148 MB on a 200 MP quality-100 save — peak Java heap of
+		// ~350-400 MB during the gain-map compose step, which OOMs even with android:largeHeap once the
+		// heap is fragmented. The
+		// streaming pipeline holds at most one ~118 MB byte[] alive at a time (the final readback at the end of
+		// this method), so peak Java heap drops to roughly (final-output-size + state) ≈ ~150 MB for the same
+		// 200 MP HDR save. Tempfile lifecycle: every intermediate file is created in cacheDir with a
+		// recognisable `hdr_src_` prefix so UltraHdrCompat.sweepStaleCacheFiles picks them up on next launch if
+		// a process kill mid-save leaves orphans. The finally block deletes every file we created on success or
+		// failure. deleteOnExit is set as a JVM-shutdown safety net.
 		int quality = 100;
 		byte[] thumbnail = null;
 		byte[] croppedGainMap = null;
@@ -873,71 +796,68 @@ public final class CropExporter
 		File seftFile = null;
 		boolean bmpRecycled = false;
 		// Snapshot state.getJpegMeta() ONCE at the top so every downstream stage sees the same list.
-		// CropState's volatile field could otherwise change mid-save if any concurrent path (graft
-		// install, image reload) commits a new list; without the snapshot, buildEmbeddedThumbnail's
-		// budget calculation could be based on one list while the actual inject patches a different
-		// one, producing a thumbnail sized to the wrong budget. metaWithHdrStripped is derived once
-		// too so the HDR-drop re-inject path uses a list consistent with what was originally injected.
-		// state.getJpegMeta() returns Collections.unmodifiableList — never null per its Javadoc, so no
-		// null guard needed on either reference below (the prior `(meta != null) ?` form and the
-		// `initialMeta != null ? initialMeta : List.of()` fallback inside the ExifPatcher.patch call
-		// were both dead defensive code that masked the contract from readers).
+		// CropState's volatile field could otherwise change mid-save if any concurrent path (graft install,
+		// image reload) commits a new list; without the snapshot, buildEmbeddedThumbnail's budget calculation
+		// could be based on one list while the actual inject patches a different one, producing a thumbnail
+		// sized to the wrong budget. metaWithHdrStripped is derived once too so the HDR-drop re-inject path
+		// uses a list consistent with what was originally injected. state.getJpegMeta() returns the
+		// field's immutable list — never null per its Javadoc, so neither reference below needs a null
+		// guard; a defensive fallback here would only mask that contract from readers.
 		List<JpegSegment> meta = state.getJpegMeta();
 		List<JpegSegment> metaWithHdrStripped = stripHdrSegments(meta);
 		try
 		{
 			// Stage 0: build thumbnail FROM bmp while it's still alive (small render — 512 px max).
 			thumbnail = buildEmbeddedThumbnail(meta, bmp);
-			// Stage 1: encode the primary to a tempfile. After this returns, bmp has served its
-			// purpose — every downstream stage reads encodedFile instead. Recycling bmp BEFORE
-			// buildCroppedGainMap is critical for HDR reliability: bmp on a lightly-cropped 200 MP
-			// source occupies ~800 MB of native memory (200 megapixels × 4 bytes ARGB_8888), and
-			// UltraHdrCompat.compressWithGainmap allocates its own 200 MP HDR-decoded bitmap plus a
-			// cropped primary plus a cropped gain-map surface — up to ~2 GB of native heap. With bmp
-			// still alive AND state.getSourceImage() (another ~800 MB) still alive, native heap can't
-			// satisfy the HDR re-decode allocations, UltraHdrCompat catches the failure and returns
-			// null, and HDR drops silently from the saved file. Recycling bmp at this point frees
-			// ~800 MB before the HDR re-encode runs.
-			encodedFile = encodeJpegToTempfile(bmp, quality, cacheDir);
+			// Stage 1: encode the primary to a tempfile. After this returns, bmp has served its purpose —
+			// every downstream stage reads encodedFile instead. Recycling bmp BEFORE buildCroppedGainMap is
+			// critical for HDR reliability: bmp on a lightly-cropped 200 MP source occupies ~800 MB of
+			// native memory (200 megapixels × 4 bytes ARGB_8888), and UltraHdrCompat.compressWithGainmap
+			// allocates its own 200 MP HDR-decoded bitmap plus a cropped primary plus a cropped gain-map
+			// surface — up to ~2 GB of native heap. With bmp still alive AND state.getSourceImage()
+			// (another ~800 MB) still alive, native heap can't satisfy the HDR re-decode allocations,
+			// UltraHdrCompat catches the failure and returns empty, and HDR drops silently from the saved
+			// file. Recycling bmp at this point frees ~800 MB before the HDR re-encode runs.
+			encodedFile = encodeToTempfile(bmp, Bitmap.CompressFormat.JPEG, quality, "jpeg_encode_",
+				".jpg", cacheDir);
 			bmp.recycle();
 			bmpRecycled = true;
-			// Stage 2: build cropped gain map. state.getOriginalFileBytes() and state.getGainMap()
-			// must remain non-null AFTER this returns so a subsequent in-session save (user rotates
-			// and re-saves without reloading) can re-run buildCroppedGainMap with the same source
-			// bytes. The streaming pipeline below uses tempfile I/O for every step, so Java heap
-			// stays well under the largeHeap cap even with the ~50-180 MB originalFileBytes + ~30 MB
-			// source gainMap resident — no need to free them mid-save. They get reclaimed by
-			// state.reset() at the next image load. Nulling these mid-save would degrade every
-			// in-session re-save to SDR — ExportPipeline.doExport reads srcHadHdr from
-			// state.getGainMap() at save start, so a null after the first save would short-circuit
-			// the HDR re-encode and ship a stripped-HDR file even when the user expects HDR.
-			croppedGainMap = buildCroppedGainMap(state, cropW, cropH, cacheDir, quality);
+			// Stage 2: build cropped gain map. state.getOriginalFileBytes() and state.getGainMap() must
+			// remain non-null AFTER this returns so a subsequent in-session save (user rotates and re-saves
+			// without reloading) can re-run buildCroppedGainMap with the same source bytes. The streaming
+			// pipeline below uses tempfile I/O for every step, so Java heap stays well under the largeHeap
+			// cap even with the ~50-180 MB originalFileBytes + ~30 MB source gainMap resident — no need to
+			// free them mid-save. They get reclaimed by state.reset() at the next image load. Nulling these
+			// mid-save would degrade every in-session re-save to SDR — ExportPipeline.doExport reads
+			// srcHadHdr from state.getGainMap() at save start, so a null after the first save would
+			// short-circuit the HDR re-encode and ship a stripped-HDR file even when the user expects HDR.
+			croppedGainMap = buildCroppedGainMap(state, cropW, cropH, cacheDir, quality).orElse(null);
 
-			// Stage 3: pick metadata + inject. HDR-attempted sources (croppedGainMap present) ship
-			// with the hdrgm XMP + MPF in the initial inject so composeFileToFile's MPF-offset patcher
-			// can rewrite the gain-map offset; non-HDR sources strip HDR markers up front so orphan
-			// MPF can't survive a non-HDR re-encode (Samsung "Best Photo" burst groups, focus-stacked
-			// panoramas). hdrAttempted is driven off the local croppedGainMap reference —
-			// buildCroppedGainMap returns null on the no-HDR / drop paths and non-null length > 0
-			// otherwise, so the != null check alone classifies correctly (a length > 0 check would just
-			// duplicate buildCroppedGainMap's own gate).
+			// Stage 3: pick metadata + inject. HDR-attempted sources (croppedGainMap present) ship with the
+			// hdrgm XMP + MPF in the initial inject so composeFileToFile's MPF-offset patcher can rewrite
+			// the gain-map offset; non-HDR sources strip HDR markers up front so orphan MPF can't survive a
+			// non-HDR re-encode (Samsung "Best Photo" burst groups, focus-stacked panoramas). hdrAttempted
+			// is driven off the local croppedGainMap reference — buildCroppedGainMap returns empty on the
+			// no-HDR / drop paths (unwrapped to null at the local) and length > 0 bytes otherwise, so the
+			// != null check alone classifies correctly (a length > 0 check would just duplicate
+			// buildCroppedGainMap's own gate).
 			boolean hdrAttempted = croppedGainMap != null;
 			List<JpegSegment> initialMeta = hdrAttempted ? meta : metaWithHdrStripped;
 			List<JpegSegment> initialPatched = ExifPatcher.patch(initialMeta, cropW, cropH, thumbnail);
 			injectedFile = newPipelineTempfile(cacheDir,
-				UltraHdrCompat.TEMPFILE_PREFIX_HDR_SRC + "inject_");
+				UltraHdrCompat.TEMPFILE_PREFIX_HDR_SRC + "inject_", ".jpg");
 			JpegMetadataInjector.injectFileToFile(encodedFile, initialPatched, injectedFile);
 
 			// Stage 4: gain-map compose if HDR was attempted. On compose drop (HDR not attachable),
-			// re-inject from encodedFile with stripped meta so the output's XMP / MPF stay honest.
-			// Use ComposeResult.hdrAttached() as the canonical signal — reference-inequality on
-			// byte[] returns was the original detection mechanism but it's not applicable here.
+			// re-inject from encodedFile with stripped meta so the output's XMP / MPF stay honest. Use
+			// ComposeResult.hdrAttached() as the canonical signal — reference-inequality on byte[] returns
+			// was the original detection mechanism but it's not applicable here.
 			boolean hdrAttached = false;
 			File preSeftFile;
 			if (hdrAttempted)
 			{
 				composedFile = newPipelineTempfile(cacheDir,
-					UltraHdrCompat.TEMPFILE_PREFIX_HDR_SRC + "compose_");
+					UltraHdrCompat.TEMPFILE_PREFIX_HDR_SRC + "compose_", ".jpg");
 				hdrAttached = GainMapComposer.composeFileToFile(
 					injectedFile, croppedGainMap, composedFile);
 				if (hdrAttached)
@@ -947,13 +867,12 @@ public final class CropExporter
 				else
 				{
 					Log.d(TAG, "HDR drop detected — re-injecting with hdrgm XMP + MPF stripped");
-					// metaWithHdrStripped is stripHdrSegments(meta)'s return — never null. Prior
-					// `!= null ? ... : List.of()` was dead defensive code (mirror of the cleanup
-					// at lines 1024-1027).
+					// metaWithHdrStripped is stripHdrSegments(meta)'s return — never null, so no
+					// defensive null fallback is needed.
 					List<JpegSegment> strippedPatched = ExifPatcher.patch(
 						metaWithHdrStripped, cropW, cropH, thumbnail);
 					reinjectedFile = newPipelineTempfile(cacheDir,
-						UltraHdrCompat.TEMPFILE_PREFIX_HDR_SRC + "reinject_");
+						UltraHdrCompat.TEMPFILE_PREFIX_HDR_SRC + "reinject_", ".jpg");
 					JpegMetadataInjector.injectFileToFile(
 						encodedFile, strippedPatched, reinjectedFile);
 					preSeftFile = reinjectedFile;
@@ -966,17 +885,17 @@ public final class CropExporter
 			// croppedGainMap consumed; free for GC before the final readback.
 			croppedGainMap = null;
 
-			// Stage 5: SEFT trailer append. Skip the file-to-file copy when there's no SEFT trailer
-			// to append — preSeftFile already holds the final bytes, so a Files.copy of a 148 MB
-			// tempfile would do 148 MB of pointless disk-to-disk I/O just to rename the file. Point
-			// finalFile directly at preSeftFile in that case; the finally block already handles
-			// deletion of all the pipeline tempfiles via the local refs.
+			// Stage 5: SEFT trailer append. Skip the file-to-file copy when there's no SEFT trailer to
+			// append — preSeftFile already holds the final bytes, so a Files.copy of a 148 MB tempfile
+			// would do 148 MB of pointless disk-to-disk I/O just to rename the file. Point finalFile
+			// directly at preSeftFile in that case; the finally block already handles deletion of all the
+			// pipeline tempfiles via the local refs.
 			byte[] seft = state.getSeftTrailer();
 			File finalFile;
 			if (seft != null && seft.length > 0)
 			{
 				seftFile = newPipelineTempfile(cacheDir,
-					UltraHdrCompat.TEMPFILE_PREFIX_HDR_SRC + "seft_");
+					UltraHdrCompat.TEMPFILE_PREFIX_HDR_SRC + "seft_", ".jpg");
 				appendSeftFileToFile(preSeftFile, seft, seftFile);
 				finalFile = seftFile;
 			}
@@ -985,20 +904,20 @@ public final class CropExporter
 				finalFile = preSeftFile;
 			}
 
-			// Stage 6: final byte[] readback. Only ONE big allocation in the whole save: the encode
-			// wrote to tempfile, inject/compose/SEFT-append streamed file-to-file with a 64 KB
-			// chunk buffer, and croppedGainMap was nulled above. Peak Java heap at this point is
-			// the byte[] size (~100-150 MB on a 200 MP HDR save) + state's originalFileBytes
-			// (~50-180 MB, kept resident for in-session re-save) + state's source gainMap (~30 MB)
-			// + state.jpegMeta (~10-15 MB) + small overhead — well within the largeHeap budget.
+			// Stage 6: final byte[] readback. Only ONE big allocation in the whole save: the encode wrote
+			// to tempfile, inject/compose/SEFT-append streamed file-to-file with a 64 KB chunk buffer, and
+			// croppedGainMap was nulled above. Peak Java heap at this point is the byte[] size (~100-150 MB
+			// on a 200 MP HDR save) + state's originalFileBytes (~50-180 MB, kept resident for in-session
+			// re-save) + state's source gainMap (~30 MB) + state.jpegMeta (~10-15 MB) + small overhead —
+			// well within the largeHeap budget.
 			long finalSize = finalFile.length();
 			if (finalSize <= 0 || finalSize > Integer.MAX_VALUE)
 			{
 				throw new IOException("Final tempfile size out of range: " + finalSize);
 			}
 			// `finalFile` may point at preSeftFile (when SEFT was empty), so don't expect a separate
-			// `seftFile` reference at this point — the finally block deletes all tempfile slots
-			// (including the one finalFile aliases) via deleteIfExists.
+			// `seftFile` reference at this point — the finally block deletes all tempfile slots (including
+			// the one finalFile aliases) via deleteIfExists.
 			byte[] finalBytes = Files.readAllBytes(finalFile.toPath());
 			return new ExportResult(finalBytes, hdrAttached);
 		}
@@ -1016,24 +935,38 @@ public final class CropExporter
 		}
 	}
 
+	/**
+	 * PNG save pipeline: encode → eXIf-chunk EXIF inject, both file-to-file streaming operations. Unlike
+	 * exportJpeg, the finished file is never read back into a byte[] — a 200 MP PNG is 400-600 MB, so the result
+	 * stays tempfile-backed and ExportPipeline.doExport streams it to the output.
+	 *
+	 * @param state    source of segment list, raw PNG TIFF (pngExifTiff), and crop geometry
+	 * @param bmp      rendered sRGB output bitmap; ownership transfers here — recycled after the encode, or in
+	 *                 the finally block on failure
+	 * @param cropW    output crop width in pixels
+	 * @param cropH    output crop height in pixels
+	 * @param cacheDir directory for the `hdr_src_`-prefixed pipeline tempfiles; the non-returned intermediate is
+	 *                 deleted here, and the startup sweep reclaims orphans from a mid-save process kill
+	 * @return tempfile-backed ExportResult (hdrAttached always false — PNG carries no gain map); ownership of
+	 *         the tempfile transfers to the caller, which must delete it after the write completes
+	 * @throws IOException when encoding or injection fails, or the final tempfile size is out of int range
+	 */
 	private static ExportResult exportPng(CropState state, Bitmap bmp, int cropW, int cropH,
 		File cacheDir) throws IOException
 	{
 		// Streaming PNG pipeline: encode → eXIf inject, both file-to-file. The naive byte[] path's
-		// `bmp.compress(PNG, 100, BAOS)` + `BAOS.toByteArray()` peaks at ~1 GB live on a 200 MP save
-		// (BAOS internal buffer at the next power of 2 above the 400-600 MB compressed size plus the
-		// toByteArray copy) — an unrecoverable OOM even with android:largeHeap. Streaming straight to
-		// disk keeps the encode + inject phases at chunk-buffer Java heap; the only large allocation
-		// is the final readback at the bottom.
-		//
-		// bmp is guaranteed sRGB for PNG exports (see export()); grid was rasterized on it with exact
-		// pixel-width rectangles. Generate the EXIF thumbnail BEFORE recycle so it represents the
-		// cropped + rotated pixels — passing null thumbnail to ExifPatcher would preserve the source's
-		// pre-crop IFD1 thumbnail, which leaks the original (uncropped, un-rotated, pre-edit) image
-		// content via any EXIF-thumbnail-aware viewer. Thumbnail format is JPEG per the EXIF spec
-		// regardless of the outer container, so buildEmbeddedThumbnail's JPEG compress is correct for
-		// PNG export too. Snapshot state.getJpegMeta() once: thumbnail budget and inject must agree if
-		// state mutates concurrently.
+		// `bmp.compress(PNG, 100, BAOS)` + `BAOS.toByteArray()` peaks at ~1 GB live on a 200 MP save (BAOS
+		// internal buffer at the next power of 2 above the 400-600 MB compressed size plus the toByteArray
+		// copy) — an unrecoverable OOM even with android:largeHeap. Streaming straight to disk keeps the whole
+		// method at chunk-buffer Java heap: the result stays tempfile-backed with no whole-file readback here;
+		// ExportPipeline streams the tempfile to the output and the save verify runs downstream. bmp is
+		// guaranteed sRGB for PNG exports (see export()); grid was rasterized on it with exact pixel-width
+		// rectangles. Generate the EXIF thumbnail BEFORE recycle so it represents the cropped +
+		// rotated pixels — passing null thumbnail to ExifPatcher would preserve the source's pre-crop IFD1
+		// thumbnail, which leaks the original (uncropped, un-rotated, pre-edit) image content via any
+		// EXIF-thumbnail-aware viewer. Thumbnail format is JPEG per the EXIF spec regardless of the outer
+		// container, so buildEmbeddedThumbnail's JPEG compress is correct for PNG export too. Snapshot
+		// state.getJpegMeta() once: thumbnail budget and inject must agree if state mutates concurrently.
 		List<JpegSegment> meta = state.getJpegMeta();
 		File encodedPng = null;
 		File injectedPng = null;
@@ -1041,7 +974,8 @@ public final class CropExporter
 		try
 		{
 			byte[] thumbnail = buildEmbeddedThumbnail(meta, bmp);
-			encodedPng = encodePngToTempfile(bmp, cacheDir);
+			encodedPng = encodeToTempfile(bmp, Bitmap.CompressFormat.PNG, 100, "png_encode_", ".png",
+				cacheDir);
 			bmp.recycle();
 			bmpRecycled = true;
 
@@ -1059,7 +993,8 @@ public final class CropExporter
 			byte[] tiffToInject = null;
 			if (pngExifTiff != null)
 			{
-				byte[] patchedTiff = patchPngExifTiff(pngExifTiff, cropW, cropH, thumbnail);
+				byte[] patchedTiff = patchPngExifTiff(pngExifTiff, cropW, cropH, thumbnail)
+					.orElse(null);
 				if (patchedTiff != null)
 				{
 					tiffToInject = patchedTiff;
@@ -1082,11 +1017,11 @@ public final class CropExporter
 				}
 			}
 			// Fall through to the synthetic-APP1 path when pngExifTiff is null (JPEG source) OR the
-			// raw-TIFF patch returned null AND the source TIFF was ≤ 64 KB. Calling ExifPatcher.patch
-			// with empty meta fires the synthesise-fresh-EXIF path so a PNG source with no EXIF at all
-			// (and a fresh thumbnail) still gets IFD1 written into the eXIf chunk. meta is
-			// state.getJpegMeta() which is unmodifiableList-wrapped and never null — the prior
-			// `(meta != null) ?` fallback was dead defensive code masking the contract.
+			// raw-TIFF patch returned null AND the source TIFF was ≤ 64 KB. Calling ExifPatcher.patch with
+			// empty meta fires the synthesise-fresh-EXIF path so a PNG source with no EXIF at all (and a
+			// fresh thumbnail) still gets IFD1 written into the eXIf chunk. meta is state.getJpegMeta()
+			// which is an immutable list and never null, so no null fallback is needed — adding one
+			// would mask the contract as dead defensive code.
 			if (tiffToInject == null)
 			{
 				for (JpegSegment seg : ExifPatcher.patch(meta, cropW, cropH, thumbnail))
@@ -1094,7 +1029,7 @@ public final class CropExporter
 					if (seg.isExif())
 					{
 						// Unwrap the JPEG-style APP1 (FF E1 LL LL "Exif\0\0" [TIFF]) → raw TIFF
-						// for the eXIf chunk. Same as the legacy inline `injectPngExif` logic.
+						// for the eXIf chunk.
 						byte[] segData = seg.data();
 						if (segData.length > 10)
 						{
@@ -1107,26 +1042,24 @@ public final class CropExporter
 				}
 			}
 
-			// Pick the final tempfile and hand off ownership to the caller (ExportPipeline.doExport).
-			// We do NOT call `Files.readAllBytes` here — on a 200 MP PNG the file is 400-600 MB, and
-			// the contiguous allocation OOMs the heap (typical Java heap state at this point is
-			// ~390 MB used out of 512 MB largeHeap cap, leaving ~120 MB which can't satisfy a 500 MB
-			// allocation). doExport streams from this tempfile to the SAF / file output without ever
-			// materialising the bytes as a single byte[]. The non-returned intermediate tempfile
-			// (either encodedPng or injectedPng, whichever didn't become finalFile) is deleted here;
-			// the returned tempfile is deleted by doExport once write/verify/callback completes.
-			//
-			// IMPORTANT ordering: validate the final file's size BEFORE nulling the ownership slot.
-			// If the size check throws AFTER the slot is nulled, the finally block can't see the
-			// tempfile (it's referenced only through finalFile, not through any owned slot) and it
-			// leaks on disk. Run the size validation first; only null the slot after the IOException
-			// throw point has passed.
+			// Pick the final tempfile and hand off ownership to the caller (ExportPipeline.doExport). We do
+			// NOT call `Files.readAllBytes` here — on a 200 MP PNG the file is 400-600 MB, and the
+			// contiguous allocation OOMs the heap (typical Java heap state at this point is ~390 MB used
+			// out of 512 MB largeHeap cap, leaving ~120 MB which can't satisfy a 500 MB allocation).
+			// doExport streams from this tempfile to the SAF / file output without ever materialising the
+			// bytes as a single byte[]. The non-returned intermediate tempfile (either encodedPng or
+			// injectedPng, whichever didn't become finalFile) is deleted here; the returned tempfile is
+			// deleted by doExport once write/verify/callback completes. IMPORTANT ordering: validate the
+			// final file's size BEFORE nulling the ownership slot. If the size check throws AFTER the slot
+			// is nulled, the finally block can't see the tempfile (it's referenced only through finalFile,
+			// not through any owned slot) and it leaks on disk. Run the size validation first; only null
+			// the slot after the IOException throw point has passed.
 			File finalFile;
 			File toDelete;
 			if (tiffToInject != null && tiffToInject.length > 0)
 			{
 				injectedPng = newPipelineTempfile(cacheDir,
-					UltraHdrCompat.TEMPFILE_PREFIX_HDR_SRC + "png_inject_");
+					UltraHdrCompat.TEMPFILE_PREFIX_HDR_SRC + "png_inject_", ".png");
 				injectPngExifFromTiffFileToFile(encodedPng, tiffToInject, injectedPng);
 				finalFile = injectedPng;
 				toDelete = encodedPng;
@@ -1144,8 +1077,8 @@ public final class CropExporter
 			{
 				throw new IOException("Final PNG tempfile size out of range: " + finalSize);
 			}
-			// Size valid — clean up the discarded intermediate and transfer ownership of finalFile.
-			// Now safe to null the owned slot; an exception past this point can't fire.
+			// Size valid — clean up the discarded intermediate and transfer ownership of finalFile. Now
+			// safe to null the owned slot; an exception past this point can't fire.
 			deleteIfExists(toDelete);
 			if (finalFile == injectedPng)
 			{
@@ -1163,8 +1096,8 @@ public final class CropExporter
 			{
 				bmp.recycle();
 			}
-			// Only delete tempfiles still owned by this method. The success-path nulls the slot whose
-			// file was handed off to the caller, so deleteIfExists is safe to call unconditionally.
+			// Only delete tempfiles still owned by this method. The success-path nulls the slot whose file
+			// was handed off to the caller, so deleteIfExists is safe to call unconditionally.
 			deleteIfExists(encodedPng);
 			deleteIfExists(injectedPng);
 		}
@@ -1173,44 +1106,44 @@ public final class CropExporter
 	/**
 	 * Produce an EXIF thumbnail JPEG that fits within maxBytes. Two-rung cascade on the longest side:
 	 * 512 maxDim first, then 256 maxDim. Each rung tries qualities 90 → 80 → 75 → 70 → 65 → 60 → 55 →
-	 * 50 in order; the first encoding that fits maxBytes wins. Returns null when 256-maxDim q50 still
+	 * 50 in order; the first encoding that fits maxBytes wins. Returns empty when 256-maxDim q50 still
 	 * doesn't fit — caller routes that through STRIP_IFD1_THUMBNAIL.
 	 *
-	 * Cascade design: drop quality before dim. Viewers downscale the EXIF preview for grid / hover
-	 * display (96-256 px), and downscaling masks JPEG artifacts — a heavily-compressed 410×512 viewed
-	 * at 128×160 looks better than a small high-quality 205×256 upscaled to 256×320. Matches Samsung's
-	 * "preserve dim, scale quality" design. No 1024-maxDim rung because typical 3-4 MP source produces
-	 * 130-400 KB at any quality — well above the 65 535-byte APP1 cap, so the rung was unreachable.
+	 * Cascade design: drop quality before dim. Viewers downscale the EXIF preview for grid / hover display (96-256
+	 * px), and downscaling masks JPEG artifacts — a heavily-compressed 410×512 viewed at 128×160 looks better than
+	 * a small high-quality 205×256 upscaled to 256×320. Matches Samsung's "preserve dim, scale quality" design. No
+	 * 1024-maxDim rung because typical 3-4 MP source produces 130-400 KB at any quality — well above the 65
+	 * 535-byte APP1 cap, so the rung was unreachable.
 	 *
-	 * No q95 rung: documented as unreachable on CropCenter's re-encoded source bitmap (the JPEG
-	 * cascade tax inflates bytes-per-pixel 2-4× over fresh-sensor input, so q95 never fits the APP1
-	 * cap). A cleaner future input pipeline (raw decode / lossless intermediate) would re-introduce
-	 * q95 — until then, keeping it would waste an encode pass that always falls through to q90.
+	 * No q95 rung: documented as unreachable on CropCenter's re-encoded source bitmap (the JPEG cascade tax
+	 * inflates bytes-per-pixel 2-4× over fresh-sensor input, so q95 never fits the APP1 cap). A cleaner future
+	 * input pipeline (raw decode / lossless intermediate) would re-introduce q95 — until then, keeping it would
+	 * waste an encode pass that always falls through to q90.
 	 *
-	 * The thumbnail is rendered into an sRGB bitmap regardless of bmp's color space: a DISPLAY_P3 bmp
-	 * would embed an APP2 ICC profile (~500-600 bytes) inside the thumbnail JPEG, which combined with
-	 * a tight maxBytes budget can cause ExifPatcher.replaceThumbnail to silently reject for APP1
-	 * overflow. sRGB matches camera-native thumbnails and keeps the byte budget predictable.
+	 * The thumbnail is rendered into an sRGB bitmap regardless of bmp's color space: a DISPLAY_P3 bmp would embed
+	 * an APP2 ICC profile (~500-600 bytes) inside the thumbnail JPEG, which combined with a tight maxBytes budget
+	 * can cause ExifPatcher.replaceThumbnail to silently reject for APP1 overflow. sRGB matches camera-native
+	 * thumbnails and keeps the byte budget predictable.
 	 *
 	 * @param bmp      source bitmap to encode; not recycled
 	 * @param maxBytes APP1 budget remaining for the thumbnail (incl. EXIF wrapper overhead the caller
 	 *                 already deducted)
-	 * @return thumbnail JPEG bytes that fit within maxBytes, or null when no cascade rung succeeds
+	 * @return thumbnail JPEG bytes that fit within maxBytes, or empty when the budget is non-positive,
+	 *         no cascade rung succeeds, or generation throws (incl. OOM)
 	 */
-	private static byte[] generateThumbnail(Bitmap bmp, int maxBytes)
+	private static Optional<byte[]> generateThumbnail(Bitmap bmp, int maxBytes)
 	{
 		if (maxBytes <= 0)
 		{
 			Log.w(TAG, "Thumbnail budget ≤ 0 — skipping generation");
-			return null;
+			return Optional.empty();
 		}
 		int width = bmp.getWidth();
 		int height = bmp.getHeight();
-		// Cascade: dimensions × qualities. First combo whose encoded size fits maxBytes wins. The
-		// 512 → 256 maxDim split aligns with Samsung's native thumbnail (~512×640 portrait); the
-		// 8-step quality bracket exhausts dim-preserving fallback (q90..q50) before stepping down
-		// to 256 maxDim. q95 omitted because it's unreachable under the APP1 cap on re-encoded
-		// sources — see the method Javadoc above.
+		// Cascade: dimensions × qualities. First combo whose encoded size fits maxBytes wins. The 512 → 256
+		// maxDim split aligns with Samsung's native thumbnail (~512×640 portrait); the 8-step quality bracket
+		// exhausts dim-preserving fallback (q90..q50) before stepping down to 256 maxDim. q95 omitted because
+		// it's unreachable under the APP1 cap on re-encoded sources — see the method Javadoc above.
 		int[] maxDims = { 512, 256 };
 		int[] qualities = { 90, 80, 75, 70, 65, 60, 55, 50 };
 		Bitmap thumb = null;
@@ -1248,22 +1181,22 @@ public final class CropExporter
 					{
 						Log.d(TAG, "Thumbnail: " + rw + "x" + rh + " q" + quality
 							+ " = " + result.length + "B");
-						return result;
+						return Optional.of(result);
 					}
 				}
 			}
-			Log.w(TAG, "Thumbnail too large at every cascade rung; returning null (maxBytes="
+			Log.w(TAG, "Thumbnail too large at every cascade rung; returning empty (maxBytes="
 				+ maxBytes + ")");
-			return null;
+			return Optional.empty();
 		}
 		catch (Exception | OutOfMemoryError e)
 		{
 			// Widened to OOM as well as Exception so a thumbnail-side allocation failure (Bitmap.compress
-			// on a multi-MP intermediate, or renderSrgbThumb's Canvas.drawBitmap rasterisation) degrades
-			// to "save without embedded thumbnail" rather than aborting the whole save with no toast —
+			// on a multi-MP intermediate, or renderSrgbThumb's Canvas.drawBitmap rasterisation) degrades to
+			// "save without embedded thumbnail" rather than aborting the whole save with no toast —
 			// encodePhase's catch is also Exception-only and OOM would otherwise propagate silently.
 			Log.w(TAG, "Thumbnail generation failed", e);
-			return null;
+			return Optional.empty();
 		}
 		finally
 		{
@@ -1275,13 +1208,17 @@ public final class CropExporter
 	}
 
 	/**
-	 * Allocate a fresh pipeline tempfile with the standard `hdr_src_` prefix so the startup sweep
-	 * (UltraHdrCompat.sweepStaleCacheFiles, called from MainActivity.onCreate) reclaims it if a
-	 * process kill leaves an orphan.
+	 * Allocate a fresh pipeline tempfile named so the startup sweep (UltraHdrCompat.sweepStaleCacheFiles, called
+	 * from MainActivity.onCreate) reclaims it if a process kill leaves an orphan.
+	 *
+	 * @param cacheDir  app cache directory the sweep covers
+	 * @param prefix    one of the `hdr_src_` sweep-matched prefixes; PID + nanoTime are appended for uniqueness
+	 * @param extension tempfile extension including the dot
+	 * @return fresh non-existent tempfile, also registered with deleteOnExit as a second cleanup layer
 	 */
-	private static File newPipelineTempfile(File cacheDir, String prefix)
+	private static File newPipelineTempfile(File cacheDir, String prefix, String extension)
 	{
-		File temp = new File(cacheDir, prefix + Process.myPid() + "_" + System.nanoTime() + ".jpg");
+		File temp = new File(cacheDir, prefix + Process.myPid() + "_" + System.nanoTime() + extension);
 		temp.deleteOnExit();
 		return temp;
 	}
@@ -1292,8 +1229,13 @@ public final class CropExporter
 	 * regardless of `src`'s color space.
 	 *
 	 * Recycles `out` and rethrows on any Canvas / Paint / drawBitmap failure (RuntimeException) or
-	 * OutOfMemoryError. Without the wrap, `out`'s native pixel buffer would orphan to the GC finalizer
-	 * under the same allocation pressure that triggered the OOM.
+	 * OutOfMemoryError. Without the wrap, `out`'s native pixel buffer would orphan to the GC finalizer under the
+	 * same allocation pressure that triggered the OOM.
+	 *
+	 * @param src    source bitmap; read only, never recycled here
+	 * @param width  output width in pixels
+	 * @param height output height in pixels
+	 * @return freshly allocated sRGB ARGB_8888 bitmap owned by the caller
 	 */
 	private static Bitmap renderSrgbThumb(Bitmap src, int width, int height)
 	{

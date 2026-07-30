@@ -22,15 +22,18 @@ import java.util.List;
  */
 public final class CropEditorView extends View implements TouchGestureHandler.Callback
 {
-	private static final float TOUCH_THRESHOLD_PX = 30f;       // screen-pixel radius for tap / long-press / brush
+	// Screen-pixel radius for tap / long-press / horizon brush. Package-private: HorizonPaintOverlay derives its
+	// painted-stroke width (2× — the brush diameter) from this so the stroke the user sees always matches the
+	// region HorizonDetector samples.
+	static final float TOUCH_THRESHOLD_PX = 30f;
 
 	private final HorizonPaintOverlay horizon = new HorizonPaintOverlay();
 	private final SelectionHistory history = new SelectionHistory();
-	// `new ViewportMath(this)` here captures `this` before the constructor body runs, which Effective Java
-	// item 17 names as a leak hazard. Safe in practice — ViewportMath's View-bound constructor wraps the
-	// reference in a ViewSize adapter that only ever calls `getWidth()` / `getHeight()` on it, never
-	// registering it with a listener / executor / anything that could call back. None of those reads
-	// happen during the rest of the View constructor chain.
+	// `new ViewportMath(this)` here captures `this` before the constructor body runs, which Effective Java item 17
+	// names as a leak hazard. Safe in practice — ViewportMath's View-bound constructor wraps the reference in a
+	// ViewSize adapter that only ever calls `getWidth()` / `getHeight()` on it, never registering it with a
+	// listener / executor / anything that could call back. None of those reads happen during the rest of the View
+	// constructor chain.
 	private final ViewportMath viewport = new ViewportMath(this);
 
 	private CropState state;
@@ -58,8 +61,8 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 	}
 
 	/**
-	 * Check whether the redo stack has at least one selection-point edit available. The toolbar uses
-	 * this to enable / disable the Redo button.
+	 * Check whether the redo stack has at least one selection-point edit available. The toolbar uses this to enable
+	 * / disable the Redo button.
 	 *
 	 * @return true when redo would pop an edit (the redo stack is non-empty)
 	 */
@@ -69,8 +72,8 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 	}
 
 	/**
-	 * Check whether the undo stack has at least one selection-point edit available. The toolbar uses
-	 * this to enable / disable the Undo button.
+	 * Check whether the undo stack has at least one selection-point edit available. The toolbar uses this to enable
+	 * / disable the Undo button.
 	 *
 	 * @return true when undo would pop an edit (the undo stack is non-empty)
 	 */
@@ -90,21 +93,26 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 	}
 
 	/**
-	 * Reset zoom to 1 and center the viewport on the image. Called on image load and on double-tap outside Select
-	 * mode.
+	 * Reset zoom to 1 and center the viewport on the image. Called on image load, view resize, and double-tap
+	 * outside Select mode. Fires the zoom-changed listener through the same path as pinch zoom so the info-bar zoom
+	 * badge tracks the reset instead of keeping the stale pre-fit value.
 	 */
 	public void fitToView()
 	{
 		viewport.fitToView(state);
 		invalidate();
+		if (onZoomChanged != null)
+		{
+			onZoomChanged.run();
+		}
 	}
 
 	/**
-	 * Convert the screen-space touch threshold to image-space brush radius for horizon paint mode.
-	 * Inverse-scales TOUCH_THRESHOLD_PX by (baseScale * zoom) so the brush feels the same finger-
-	 * thickness at any zoom level — at 4× zoom, one source pixel maps to 4 screen pixels, so the
-	 * image-space brush radius shrinks to a quarter to keep the visible brush at the same size.
-	 * Called by AutoRotateBinder before dispatching to HorizonDetector.
+	 * Convert the screen-space touch threshold to image-space brush radius for horizon paint mode. Inverse-scales
+	 * TOUCH_THRESHOLD_PX by (baseScale * zoom) so the brush feels the same finger-thickness at any zoom level — at
+	 * 4× zoom, one source pixel maps to 4 screen pixels, so the image-space brush radius shrinks to a quarter to
+	 * keep the visible brush at the same size. Called by AutoRotateBinder before dispatching to HorizonDetector,
+	 * and by isHorizonStrokeTooShort as the minimum stroke span.
 	 *
 	 * @return brush radius in image-space pixels at the current zoom level
 	 */
@@ -114,11 +122,10 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 	}
 
 	/**
-	 * Expose the painted horizon polyline. Returns the live List held by HorizonPaintOverlay — NOT
-	 * a defensive copy — because AutoRotateBinder's bg-thread detector needs to read the points
-	 * after dispatch and copying multi-hundred-point lists per dispatch is wasted work. The caller
-	 * MUST take its own snapshot before crossing to the bg thread; AutoRotateBinder does this via
-	 * `new ArrayList<>(...)` immediately on dispatch.
+	 * Expose the painted horizon polyline. Returns the live List held by HorizonPaintOverlay — NOT a defensive copy
+	 * — because AutoRotateBinder's bg-thread detector needs to read the points after dispatch and copying
+	 * multi-hundred-point lists per dispatch is wasted work. The caller MUST take its own snapshot before crossing
+	 * to the bg thread; AutoRotateBinder does this via `new ArrayList<>(...)` immediately on dispatch.
 	 *
 	 * @return live List of (x, y) float-pairs in image-space coordinates; empty when paint mode
 	 *         is off or no points have been painted yet
@@ -134,11 +141,11 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 	}
 
 	/**
-	 * Whether the editor is currently in horizon-paint mode — the transient state between an AutoRotate
-	 * tap and the ACTION_UP commit that hands the painted polyline to HorizonDetector. Touch routing
-	 * inside onTouchEvent consults this so paint-mode strokes don't accidentally trigger Select-mode
-	 * point taps or Move-mode crop drags; the same flag drives the AutoRotateBinder's "Cancel" label
-	 * on the Auto button while the user is mid-stroke.
+	 * Whether the editor is currently in horizon-paint mode — the transient state between an AutoRotate tap and the
+	 * ACTION_UP commit that hands the painted polyline to HorizonDetector. Touch routing inside onTouchEvent
+	 * consults this so paint-mode strokes don't accidentally trigger Select-mode point taps or Move-mode crop
+	 * drags; the same flag drives the AutoRotateBinder's "Cancel" label on the Auto button while the user is
+	 * mid-stroke.
 	 *
 	 * @return true when the editor is currently in horizon-paint mode (between AutoRotate-tap and
 	 *         ACTION_UP commit)
@@ -146,6 +153,21 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 	public boolean isHorizonMode()
 	{
 		return horizon.isActive();
+	}
+
+	/**
+	 * Whether the just-painted horizon stroke is too short for detection — its bounding-box span is smaller than
+	 * the current image-space brush radius, i.e. the user tapped (begin / end points coincide) or jittered instead
+	 * of stroking along the horizon. Such a stroke paints an isotropic blob with no direction for the Hough line
+	 * fit. AutoRotateBinder consults this gate before dispatching HorizonDetector so a tap surfaces "Paint was too
+	 * short" instead of a pointless background detection.
+	 *
+	 * @return true when the painted polyline spans less than the image-space brush radius (or has fewer
+	 *         than 2 points)
+	 */
+	public boolean isHorizonStrokeTooShort()
+	{
+		return HorizonPaintOverlay.isStrokeTooShort(horizon.getPoints(), getHorizonBrushRadius());
 	}
 
 	@Override
@@ -174,21 +196,14 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 		float imageY = imagePoint[1];
 		float threshold = TOUCH_THRESHOLD_PX / (viewport.getBaseScale() * viewport.getZoom());
 
-		SelectionPoint nearest = null;
-		float nearestDist = Float.MAX_VALUE;
-		for (SelectionPoint point : state.getSelectionPoints())
-		{
-			float dist = (float) Math.hypot(point.x() - imageX, point.y() - imageY);
-			if (dist < nearestDist)
-			{
-				nearestDist = dist;
-				nearest = point;
-			}
-		}
-		if (nearest != null && nearestDist < threshold)
+		// Snapshot the volatile-swapped selection list once so the index removalTargetIndex returns stays
+		// valid against the list it was computed on (same pattern as onTap's loop snapshot).
+		List<SelectionPoint> selectionSnapshot = state.getSelectionPoints();
+		int removalIndex = removalTargetIndex(selectionSnapshot, imageX, imageY, threshold);
+		if (removalIndex >= 0)
 		{
 			pushUndo();
-			state.removeSelectionPoint(nearest);
+			state.removeSelectionPoint(selectionSnapshot.get(removalIndex));
 			if (state.getSelectionPoints().isEmpty())
 			{
 				recenterCropOnImageMidpoint();
@@ -209,10 +224,10 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 		{
 			return;
 		}
-		// Same race window as onTap — a bg-thread state.reset() (Share/View intent's load mid-drag) can
-		// null sourceImage between the state-non-null check and the downstream getImageWidth() reads
-		// inside dragCropCenter / viewport.panViewport. Snapshot here and bail so the geometry routines
-		// don't receive imgW=0 / imgH=0 and trip a Math.clamp(value, +0.5f, -0.5f) IllegalArgumentException.
+		// Same race window as onTap — a bg-thread state.reset() (Share/View intent's load mid-drag) can null
+		// sourceImage between the state-non-null check and the downstream getImageWidth() reads inside
+		// dragCropCenter / viewport.panViewport. Snapshot here and bail so the geometry routines don't receive
+		// imgW=0 / imgH=0 and trip a Math.clamp(value, +0.5f, -0.5f) IllegalArgumentException.
 		if (state.getSourceImage() == null)
 		{
 			return;
@@ -230,10 +245,10 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 	}
 
 	/**
-	 * Drag-release: applies parity snap to centerX/centerY via snapAxisPreservingTies. Mid-drag stays
-	 * continuous (CropEngine.recomputeCrop does not snap per-frame — a continuous snap would flip
-	 * cropW even↔odd during rotation sweeps and flicker the crop). Viewport-pan releases skip the
-	 * snap. See snapAxisPreservingTies for the formula and tie-preservation rationale.
+	 * Drag-release: applies parity snap to centerX/centerY via snapAxisPreservingTies. Mid-drag stays continuous
+	 * (CropEngine.recomputeCrop does not snap per-frame — a continuous snap would flip cropW even↔odd during
+	 * rotation sweeps and flicker the crop). Viewport-pan releases skip the snap. See snapAxisPreservingTies for
+	 * the formula and tie-preservation rationale.
 	 */
 	@Override
 	public void onPanRelease()
@@ -275,8 +290,8 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 		{
 			return;
 		}
-		// Snapshot the source bitmap reference once. The volatile sourceImage field can be swapped to null by
-		// a bg-thread state.reset() (Share/View intent's load that arrived mid-tap) between this read and the
+		// Snapshot the source bitmap reference once. The volatile sourceImage field can be swapped to null by a
+		// bg-thread state.reset() (Share/View intent's load that arrived mid-tap) between this read and the
 		// imgW / imgH reads further down. Without the snapshot, a race between `isInsideRotatedImage`'s
 		// non-null check and the later getImageWidth() call yields imgW=0; Math.clamp(value, 0.5f, -0.5f) then
 		// throws IllegalArgumentException (Java 21 enforces min ≤ max) and propagates uncaught to the touch
@@ -288,13 +303,13 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 		}
 		int imgW = sourceImage.getWidth();
 		int imgH = sourceImage.getHeight();
-		// Defensive degenerate-size check: the snapshot guards the reference from being nulled
-		// mid-method, but the bitmap it points to can still be RECYCLED by the bg thread that
-		// initiated the reset (recycle() then null-out is the canonical teardown order). A
-		// recycled Bitmap's getWidth/getHeight is not guaranteed to keep its pre-recycle value
-		// across all Android versions — observed returning 0 on some devices. Bail before the
-		// snappedX/snappedY Math.clamp below would receive max < min (0.5f, imgW - 0.5f) and
-		// crash the UI thread with IllegalArgumentException.
+		// Defensive degenerate-size check. Today no code path recycles a CropState-installed bitmap
+		// while readers exist: reset() only nulls the fields, and MainActivity.onDestroy deliberately
+		// skips recycle so in-flight bg readers can't crash — the GC reclaims the pixels once the
+		// last reference drops. This guard is future-proofing for a teardown path that does recycle:
+		// a recycled Bitmap's getWidth/getHeight is not guaranteed to keep its pre-recycle value
+		// (observed returning 0 on some devices), and the snappedX/snappedY Math.clamp below would
+		// receive max < min (0.5f, imgW - 0.5f) and crash the UI thread with IllegalArgumentException.
 		if (imgW < 1 || imgH < 1)
 		{
 			return;
@@ -311,9 +326,9 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 		if (state.getEditorMode() == EditorMode.SELECT_FEATURE)
 		{
 			float threshold = TOUCH_THRESHOLD_PX / (viewport.getBaseScale() * viewport.getZoom());
-			// Snapshot the volatile-swapped selection list once. A bg-thread reset between the .size()
-			// call and a per-iteration .get() returns a different (smaller) list, throwing IOOBE on the
-			// get. EditorRenderer.draw uses the same snapshot pattern.
+			// Snapshot the volatile-swapped selection list once. A bg-thread reset between the .size() call
+			// and a per-iteration .get() returns a different (smaller) list, throwing IOOBE on the get.
+			// EditorRenderer.draw uses the same snapshot pattern.
 			List<SelectionPoint> selectionSnapshot = state.getSelectionPoints();
 			for (int i = 0; i < selectionSnapshot.size(); i++)
 			{
@@ -430,28 +445,26 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 	}
 
 	/**
-	 * Re-center crop and rotation anchor on the image midpoint, then recompute the crop dimensions for
-	 * the current aspect ratio + lock mode. Used by the four "selection just emptied" call sites
-	 * (onTap / onLongPress deletion of last point, undo/redo restoring an empty snapshot, Clear Points
-	 * button) — once the user no longer has any selection driving the framing, the natural default is
-	 * an image-centered crop at max size for the current AR.
+	 * Re-center crop and rotation anchor on the image midpoint, then recompute the crop dimensions for the current
+	 * aspect ratio + lock mode. Used by the four "selection just emptied" call sites (onTap / onLongPress deletion
+	 * of last point, undo/redo restoring an empty snapshot, Clear Points button) — once the user no longer has any
+	 * selection driving the framing, the natural default is an image-centered crop at max size for the current AR.
 	 *
 	 * NOT a generic "reset" affordance. The four callers all run on an already-empty selection list, so
-	 * recomputeCrop's findCropCenter falls into the "no selection → use anchor" branch and the anchor
-	 * we just set to the image midpoint genuinely takes effect. Calling this with selection points still
-	 * present in Select mode would let the points override the anchor (rotatedSelectionMidpoint wins
-	 * inside findCropCenter), making the operation a silent no-op with confusing semantics — that's why
-	 * the prior long-press AR-spinner "Crop reset" affordance was removed; switching modes already
-	 * provides the natural recompute path users want.
+	 * recomputeCrop's findCropCenter falls into the "no selection → use anchor" branch and the anchor we just set
+	 * to the image midpoint genuinely takes effect. Calling this with selection points still present in Select mode
+	 * would let the points override the anchor (rotatedSelectionMidpoint wins inside findCropCenter), making the
+	 * operation a silent no-op with confusing semantics — keep it off any control reachable with points present;
+	 * mode switches already provide the natural recompute path.
 	 */
 	public void recenterCropOnImageMidpoint()
 	{
-		// Snapshot the volatile sourceImage reference once. state.getImageWidth() and getImageHeight()
-		// each independently re-dereference the volatile sourceImage field (CropState returns 0 when
-		// null) — a bg-thread reset() between the two reads would silently produce (imageMidX, 0) or
-		// (0, imageMidY) and write it through setCenterUnclamped. ToolbarBinder.onClearPointsClick
-		// reaches this method without busy-gate protection, so the race window IS reachable. The tap
-		// / pan paths in this same View already use the snapshot-once pattern.
+		// Snapshot the volatile sourceImage reference once. state.getImageWidth() and getImageHeight() each
+		// independently re-dereference the volatile sourceImage field (CropState returns 0 when null) — a
+		// bg-thread reset() between the two reads would silently produce (imageMidX, 0) or (0, imageMidY) and
+		// write it through setCenterUnclamped. ToolbarBinder.onClearPointsClick reaches this method without
+		// busy-gate protection, so the race window IS reachable. The tap / pan paths in this same View already
+		// use the snapshot-once pattern.
 		Bitmap source = state.getSourceImage();
 		if (source == null)
 		{
@@ -482,11 +495,10 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 	}
 
 	/**
-	 * Enter or exit horizon paint mode. Entering installs the detection callback that fires on ACTION_UP
-	 * once the user finishes painting the horizon line; exiting (on=false) discards any in-progress stroke
-	 * without invoking the callback. Round-15 added two exit-path callers — AutoRotateBinder's re-tap
-	 * branch and AutoRotateBinder.cancelHorizonPaintMode (called from MainActivity.installImageOnUi when a
-	 * new image loads) — so this method is now bidirectional, not just an entry.
+	 * Enter or exit horizon paint mode. Entering installs the detection callback that fires on ACTION_UP once the
+	 * user finishes painting the horizon line; exiting (on=false) discards any in-progress stroke without invoking
+	 * the callback. Bidirectional, not just an entry: the exit path serves AutoRotateBinder's re-tap branch and
+	 * AutoRotateBinder.cancelHorizonPaintMode (called from MainActivity.installImageOnUi when a new image loads).
 	 *
 	 * @param on       true to enter paint mode, false to exit
 	 * @param onDrawn  callback invoked on ACTION_UP when on=true; ignored / may be null when on=false
@@ -498,12 +510,11 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 	}
 
 	/**
-	 * Enter paint mode with both completion AND cancellation callbacks. `onCancel` fires when the OS or a
-	 * parent view interrupts the stroke (ACTION_CANCEL) — host uses it to reset external UI (e.g.
-	 * AutoRotateBinder's button label) that's only synced via the entry path. Earlier code held paint
-	 * mode active across CANCEL "so the user could try again", which stranded touches in the horizon
-	 * handler when the cancel happened before any stroke began; the new contract exits paint mode and
-	 * lets the host clean up.
+	 * Enter paint mode with both completion AND cancellation callbacks. `onCancel` fires when the OS or a parent
+	 * view interrupts the stroke (ACTION_CANCEL) — host uses it to reset external UI (e.g. AutoRotateBinder's
+	 * button label) that's only synced via the entry path. CANCEL exits paint mode and lets the host clean up;
+	 * holding paint mode active across CANCEL ("so the user could try again") would strand touches in the horizon
+	 * handler when the cancel lands before any stroke begins.
 	 *
 	 * @param on       true to enter paint mode; pass false to use the simpler two-arg setHorizonMode
 	 * @param onDrawn  callback invoked on ACTION_UP when on=true
@@ -518,6 +529,8 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 	/**
 	 * Subscribe to "selection points changed" events — fired whenever the user adds, removes, or restores a
 	 * selection point. The host uses this to refresh undo / redo / clear button enablement.
+	 *
+	 * @param listener callback to run on each points mutation; replaces any prior listener
 	 */
 	public void setOnPointsChangedListener(Runnable listener)
 	{
@@ -525,8 +538,11 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 	}
 
 	/**
-	 * Subscribe to zoom-changed events — fired on every pinch-zoom gesture step. The host uses this to update the
-	 * zoom badge in the info bar.
+	 * Subscribe to zoom-changed events — fired on every zoom mutation: each pinch-zoom gesture step and every
+	 * fit-to-view reset (image load, view resize, double-tap). The host uses this to update the zoom badge in the
+	 * info bar.
+	 *
+	 * @param listener callback to run on each zoom mutation; replaces any prior listener
 	 */
 	public void setOnZoomChangedListener(Runnable listener)
 	{
@@ -536,6 +552,8 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 	/**
 	 * Hand the view the CropState to render. Triggers an initial fit-to-view and redraw. Call again after loading a
 	 * new image.
+	 *
+	 * @param state shared editor state the view renders from and writes gesture results into
 	 */
 	public void setState(CropState state)
 	{
@@ -573,13 +591,13 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 	}
 
 	/**
-	 * True when the locked axis moved more than 0.5 px between (preDragCenterX, preDragCenterY) and the
-	 * post-clamp (postCenterX, postCenterY) — i.e. the joint clamp in setCenter pushed the locked axis.
-	 * Used to reject moves on a locked axis and restore via recomputeCrop.
+	 * True when the locked axis moved more than 0.5 px between (preDragCenterX, preDragCenterY) and the post-clamp
+	 * (postCenterX, postCenterY) — i.e. the joint clamp in setCenter pushed the locked axis. Used to reject moves
+	 * on a locked axis and restore via recomputeCrop.
 	 *
-	 * Package-private static so CropEditorViewCrossAxisDriftedTest can pin the lock-axis selection AND the
-	 * 0.5px strict-greater threshold without a Context-bound View. CenterMode.BOTH / LOCKED / null all fall
-	 * through to false (only HORIZONTAL and VERTICAL are checked by name).
+	 * Package-private static so CropEditorViewCrossAxisDriftedTest can pin the lock-axis selection AND the 0.5px
+	 * strict-greater threshold without a Context-bound View. CenterMode.BOTH / LOCKED / null all fall through to
+	 * false (only HORIZONTAL and VERTICAL are checked by name).
 	 *
 	 * @param lock           the current lock mode; only HORIZONTAL and VERTICAL trigger a drift check
 	 * @param preDragCenterX X-center captured before the drag began
@@ -603,12 +621,49 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 	}
 
 	/**
-	 * Snap a centerX/Y to the parity-valid pixel grid: even dim → integer center, odd dim → half-integer.
-	 * Returns the input unchanged when both candidate targets are equidistant — a half-up bias would
-	 * shift the crop 0.5 px on a no-op MOVE pan after a SELECT-mode tap had placed the selection at the
-	 * pixel half-integer where the grid central line passes through the marker square's center.
-	 * cropImageX may then be fractional; BitmapUtils.drawCropped bilinear-samples through it (the
-	 * integer-cropImageX property is for crispness, not correctness).
+	 * Long-press removal hit-test: index of the selection point NEAREST to (imageX, imageY), provided that nearest
+	 * distance is strictly below the threshold; -1 when the list is empty or no point is close enough. Nearest-wins
+	 * is the load-bearing part — with two points inside the threshold, removing anything but the closest deletes a
+	 * point the user did not aim at, and the recompute that follows silently moves the crop. The boundary is strict
+	 * (dist == threshold is a miss), matching the tap path's strict less-than hit-test.
+	 *
+	 * Package-private static so CropEditorViewTest can pin the nearest-wins ordering and the strict boundary
+	 * without a Context-bound View. Pure function — reads no View or CropState state.
+	 *
+	 * @param points    selection points in list order (snapshot of CropState's volatile list)
+	 * @param imageX    long-press X in un-rotated image coords
+	 * @param imageY    long-press Y in un-rotated image coords
+	 * @param threshold image-space hit radius; the nearest point must be strictly closer than this to count
+	 * @return index into points of the nearest in-threshold point, or -1 when none qualifies
+	 */
+	static int removalTargetIndex(List<SelectionPoint> points, float imageX, float imageY, float threshold)
+	{
+		int nearestIndex = -1;
+		float nearestDist = Float.MAX_VALUE;
+		for (int i = 0; i < points.size(); i++)
+		{
+			SelectionPoint point = points.get(i);
+			float dist = (float) Math.hypot(point.x() - imageX, point.y() - imageY);
+			if (dist < nearestDist)
+			{
+				nearestDist = dist;
+				nearestIndex = i;
+			}
+		}
+		if (nearestIndex >= 0 && nearestDist < threshold)
+		{
+			return nearestIndex;
+		}
+		return -1;
+	}
+
+	/**
+	 * Snap a centerX/Y to the parity-valid pixel grid: even dim → integer center, odd dim → half-integer. Returns
+	 * the input unchanged when both candidate targets are equidistant — a half-up bias would shift the crop 0.5 px
+	 * on a no-op MOVE pan after a SELECT-mode tap had placed the selection at the pixel half-integer where the grid
+	 * central line passes through the marker square's center. cropImageX may then be fractional;
+	 * BitmapUtils.drawCropped bilinear-samples through it (the integer-cropImageX property is for crispness, not
+	 * correctness).
 	 *
 	 * Package-private so snap math can be unit-tested directly.
 	 *
@@ -621,10 +676,10 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 		float target = ((dim & 1) == 0)
 			? Math.round(center)
 			: (float) Math.floor(center) + 0.5f;
-		// Equidistant tie-case: the snap shift would be exactly 0.5 px in a fixed direction (half-up bias
-		// from Math.round, or floor+0.5 jumping a half-step from an integer input). Use 0.499f as the
-		// epsilon-tolerant threshold so float precision noise around 0.5 still resolves to "tied" rather
-		// than to a sub-half snap that mimics the half-up bias we're trying to avoid.
+		// Equidistant tie-case: the snap shift would be exactly 0.5 px in a fixed direction (half-up bias from
+		// Math.round, or floor+0.5 jumping a half-step from an integer input). Use 0.499f as the
+		// epsilon-tolerant threshold so float precision noise around 0.5 still resolves to "tied" rather than
+		// to a sub-half snap that mimics the half-up bias we're trying to avoid.
 		if (Math.abs(center - target) > 0.499f)
 		{
 			return center;
@@ -641,6 +696,9 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 	 * Wrapped in a beginBatch / endBatch pair so the two setCenter calls (ours below plus the one inside
 	 * CropEngine.recomputeCrop) coalesce into a single listener fire — otherwise each pan event triggers two full
 	 * applyStateToUi cycles.
+	 *
+	 * @param dx horizontal gesture delta in screen pixels; divided by the effective scale before applying
+	 * @param dy vertical gesture delta in screen pixels; divided by the effective scale before applying
 	 */
 	private void dragCropCenter(float dx, float dy)
 	{
@@ -673,34 +731,25 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 				newCenterY += dy / scale;
 			}
 
-			// Lock-aware pre-clamp: under per-axis lock, pre-clamp the FREE axis to a value valid
-			// at the LOCKED-axis pin BEFORE setCenter so the joint-clamp inside setCenter doesn't
-			// pull the locked axis. Without this pre-clamp, dragging the free axis to the rotated
-			// AABB's extreme causes clampRotated's binary search to pull the locked axis toward
-			// imageMid (the only position where the rotated corners fit at the extreme free-axis
-			// value), visibly breaking the per-axis lock (e.g. VERTICAL lock + drag Y to bottom
-			// under rotation caused X to snap to imageMidX). HORIZONTAL → free X (varyX=true);
-			// VERTICAL → free Y (varyX=false). This pre-clamp ALSO replaces an earlier
-			// selection-midpoint override that snapped the locked axis to selectionMid on every
-			// drag frame — that override was added to work around clampRotated's joint pull (the
-			// "frozen drag" bug it cited resolved because the override's `overrideActive` flag
-			// bypassed the cross-axis-drift rejection); with the pre-clamp here, the joint pull
-			// no longer happens and the override's drift-bypass is no longer needed. Dropping the
-			// override means dragging the crop in MOVE mode with selection points present no
-			// longer auto-recenters X onto the selection midpoint every frame — the user
-			// controls the locked axis position via their pre-drag center, and a one-shot
-			// `recenterOnSelection` on H/V toggle (ToolbarBinder.onLockButtonClick) still
-			// establishes the initial alignment to selection on entry. Bitmap dims read off the
-			// snapshot below — same race-avoidance pattern as setCenter.
+			// Lock-aware pre-clamp: under per-axis lock, pre-clamp the FREE axis to a value valid at the
+			// LOCKED-axis pin BEFORE setCenter so the joint-clamp inside setCenter doesn't pull the locked
+			// axis. Without this pre-clamp, dragging the free axis to the rotated AABB's extreme causes
+			// clampRotated's binary search to pull the locked axis toward imageMid (the only position where
+			// the rotated corners fit at the extreme free-axis value), visibly breaking the per-axis lock
+			// (e.g. VERTICAL lock + drag Y to bottom under rotation snaps X to imageMidX). HORIZONTAL →
+			// free X (varyX=true); VERTICAL → free Y (varyX=false). Deliberately NO per-frame
+			// selection-midpoint override of the locked axis: a MOVE-mode drag with selection points
+			// present keeps the locked axis at the user's pre-drag center rather than auto-recentering onto
+			// the selection midpoint every frame; the one-shot `recenterOnSelection` on H/V toggle
+			// (ToolbarBinder.onLockButtonClick) establishes the initial alignment to selection on entry.
+			// Bitmap dims read off the snapshot below — same race-avoidance pattern as setCenter.
 			Bitmap source = state.getSourceImage();
 			if (source != null && state.getCropW() > 0 && state.getCropH() > 0
 				&& (lock == CenterMode.HORIZONTAL || lock == CenterMode.VERTICAL))
 			{
 				boolean varyX = (lock == CenterMode.HORIZONTAL);
-				float[] preClamped = RotatedCropClamp.clampSingleAxis(
-					newCenterX, newCenterY,
-					state.getCropW(), state.getCropH(),
-					state.getRotationDegrees(),
+				float[] preClamped = RotatedCropClamp.clampSingleAxis(newCenterX, newCenterY,
+					state.getCropW(), state.getCropH(), state.getRotationDegrees(),
 					source.getWidth(), source.getHeight(), varyX);
 				newCenterX = preClamped[0];
 				newCenterY = preClamped[1];
@@ -709,9 +758,9 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 			// setCenter clamps both axes jointly (binary search under rotation). On a locked axis we only
 			// want motion on the unlocked axis — reject moves that would drift the locked axis more than
 			// 0.5 px from its pre-drag position. With the pre-clamp above, the locked axis is already at
-			// its pre-drag value when setCenter is called, so the joint clamp doesn't pull it and the
-			// drift check passes — anchor advances normally.
-			state.setCropSizeDirty(false);
+			// its pre-drag value when setCenter is called, so the joint clamp doesn't pull it and the drift
+			// check passes — anchor advances normally.
+			state.clearCropSizeDirty();
 			state.setCenter(newCenterX, newCenterY);
 			boolean shouldAdvanceAnchor = !crossAxisDrifted(lock, preDragCenterX, preDragCenterY,
 				state.getCenterX(), state.getCenterY());
@@ -742,6 +791,11 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 	/**
 	 * Check if a SCREEN point is inside the visible (rotated) image content. The image is drawn rotated by
 	 * state.getRotationDegrees() around its center.
+	 *
+	 * @param screenX x coordinate of the point in screen (view) pixels
+	 * @param screenY y coordinate of the point in screen (view) pixels
+	 * @return true when the point maps inside the image bounds; false when it misses, or when no state or
+	 *         source image is installed
 	 */
 	private boolean isInsideRotatedImage(float screenX, float screenY)
 	{
@@ -758,6 +812,8 @@ public final class CropEditorView extends View implements TouchGestureHandler.Ca
 	/**
 	 * True when a pan gesture should move the crop box (Move mode + center placed + not in Pan-the-viewport lock
 	 * mode). Otherwise the pan gesture moves the viewport.
+	 *
+	 * @return true when pan gestures should drag the crop center rather than the viewport
 	 */
 	private boolean isMovingCrop()
 	{

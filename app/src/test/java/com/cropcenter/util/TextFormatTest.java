@@ -9,20 +9,32 @@ import org.junit.Test;
 import java.util.Locale;
 
 /**
- * Tests for the rotation-degree formatter that drives both the rotation-ruler tick labels and the toolbar
- * readout. The variable-precision behavior — integer / one-decimal / two-decimal — is the chokepoint; a
- * regression in any branch would surface as inconsistent UI between ticks and readout.
+ * Tests for the rotation-degree formatter that drives both the rotation-ruler tick labels and the toolbar readout. The
+ * variable-precision behavior — integer / one-decimal / two-decimal — is the chokepoint; a regression in any branch
+ * would surface as inconsistent UI between ticks and readout.
  *
- * The Locale.ROOT test deliberately forces a non-en-US JVM default for the duration of the test method (and
- * restores it in @After) so the regression — passing `Locale.getDefault()` instead of `Locale.ROOT` to
- * String.format — would actually surface as a comma-decimal output. Without the locale switch the test would
- * pass vacuously on any en-US JVM.
+ * The Locale.ROOT test deliberately forces a non-en-US JVM default for the duration of the test method (and restores it
+ * in @After) so the regression — passing `Locale.getDefault()` instead of `Locale.ROOT` to String.format — would
+ * actually surface as a comma-decimal output. Without the locale switch the test would pass vacuously on any en-US JVM.
  */
 public final class TextFormatTest
 {
 	private static final String DEG = "°";
 
 	private Locale savedDefault;
+
+	@Test
+	public void degreesEpsilonBoundarySelectsOneVsTwoDecimals()
+	{
+		// The one-decimal branch fires when |deg * 10 - round(deg * 10)| < 0.001. Pin both sides of the
+		// epsilon: a tenths-residue of ~0.0005 stays inside the gate (renders "0.5°"), a residue of ~0.002
+		// falls outside and takes the two-decimal branch (renders "0.50°" — same value at %.2f, so the epsilon
+		// alone decides the trailing zero). A regression that widened the epsilon would collapse fine ruler
+		// readouts into one-decimal strings; one that shrank it would render "5.10°" for plain 5.1f inputs
+		// (float noise exceeds a too-tight gate).
+		assertEquals("0.5" + DEG, TextFormat.degrees(0.50005f));
+		assertEquals("0.50" + DEG, TextFormat.degrees(0.5002f));
+	}
 
 	@Test
 	public void degreesRendersIntegerWithoutDecimals()
@@ -56,14 +68,13 @@ public final class TextFormatTest
 	@Test
 	public void degreesUsesLocaleRootDecimalSeparator()
 	{
-		// Force the JVM default to a comma-decimal locale (German) for the duration of this test. A
-		// regression that passes Locale.getDefault() instead of Locale.ROOT to String.format would surface
-		// as "5,1°" here. Without forcing the locale, the test would pass vacuously on any en-US runner.
+		// Force the JVM default to a comma-decimal locale (German) for the duration of this test. A regression
+		// that passes Locale.getDefault() instead of Locale.ROOT to String.format would surface as "5,1°" here.
+		// Without forcing the locale, the test would pass vacuously on any en-US runner.
 		Locale.setDefault(Locale.GERMANY);
 		assertEquals("period decimal separator must survive a non-en-US JVM default",
 			"5.1" + DEG, TextFormat.degrees(5.1f));
-		assertEquals("two-decimal branch must also survive",
-			"0.05" + DEG, TextFormat.degrees(0.05f));
+		assertEquals("two-decimal branch must also survive", "0.05" + DEG, TextFormat.degrees(0.05f));
 	}
 
 	@After

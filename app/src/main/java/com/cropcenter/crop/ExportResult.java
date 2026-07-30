@@ -3,21 +3,23 @@ package com.cropcenter.crop;
 import java.io.File;
 
 /**
- * Bundle returned by CropExporter.export — either an in-memory byte[] payload OR a tempfile reference (for
- * streaming paths that must never materialise the encoded bytes in heap), plus a structurally-derived flag
- * for whether the saved output carries an attached HDR gain map.
+ * Bundle carrying the encode phase's payload — constructed by CropExporter.export (JPEG / PNG encode paths) and
+ * directly by ExportPipeline.encodePhase on the verbatim bypass path. Holds either an in-memory byte[] payload OR a
+ * tempfile reference (for streaming paths that must never materialise the encoded bytes in heap), plus a
+ * structurally-derived flag for whether the saved output carries an attached HDR gain map.
  *
- * Dual-mode contract: EXACTLY one of `bytes` and `tempfile` is non-null. byte[] is used by the bypass-encode
- * path (source bytes already in heap) and the JPEG streaming readback (~100-150 MB fits largeHeap). tempfile
- * is used by the PNG streaming path — a 200 MP ARGB compresses to 400-600 MB and Files.readAllBytes would OOM
- * even on largeHeap — so ExportPipeline streams it disk→output without a contiguous byte[].
+ * Dual-mode contract: EXACTLY one of `bytes` and `tempfile` is non-null. byte[] is used by the bypass-encode path
+ * (source bytes already in heap) and the JPEG streaming readback (~100-150 MB fits largeHeap). tempfile is used by the
+ * PNG streaming path — a 200 MP ARGB compresses to 400-600 MB and Files.readAllBytes would OOM even on largeHeap — so
+ * ExportPipeline streams it disk→output without a contiguous byte[].
  *
- * Ownership: when `tempfile` is non-null the caller (ExportPipeline) must delete it after write / verify /
- * callback finishes; the encode pipeline does NOT delete the final tempfile it hands off here.
+ * Ownership: when `tempfile` is non-null the caller (ExportPipeline) must delete it after write / verify / callback
+ * finishes; the encode pipeline does NOT delete the final tempfile it hands off here.
  *
- * `hdrAttached` comes straight from GainMapComposer.ComposeResult — true only on full success (XMP Item:Length
- * patched, gain map appended, MPF offsets rewritten), false on every drop path and always for PNG (can't carry
- * an Ultra HDR gain map).
+ * `hdrAttached` is true when the payload actually carries an attached gain map. On the JPEG encode path it is the
+ * gain-map composer's success boolean (composeFileToFile — XMP Item:Length patched, gain map appended, MPF offsets
+ * rewritten; false on every drop path). On the verbatim bypass path it is the source's own HDR presence (the untouched
+ * bytes ship whatever gain map they carried). Always false for PNG, which can't carry an Ultra HDR gain map.
  *
  * @param bytes        encoded bytes ready for write; null when tempfile is non-null
  * @param tempfile     encoded bytes staged on disk; null when bytes is non-null. Caller owns deletion.
@@ -33,11 +35,10 @@ public record ExportResult(byte[] bytes, File tempfile, boolean hdrAttached)
 	 *      defensive guard for downstream byte[] sites (`ReplaceStrategy.writeReplacementPayload`
 	 *      casts size() to int for `verifyReplace`; SAF write APIs all use int byte counts).
 	 *
-	 * Both encode pipelines (`CropExporter.exportJpeg`, `CropExporter.exportPng`) already validate
-	 * `finalSize > Integer.MAX_VALUE` before constructing the record, so the int-cap check here is
-	 * load-bearing only for hypothetical future callers; the XOR check is load-bearing today (any
-	 * caller that returns both, or neither, would silently break tempfile-vs-bytes dispatch in
-	 * `ExportPipeline.writePayloadToStream`).
+	 * Both encode pipelines (`CropExporter.exportJpeg`, `CropExporter.exportPng`) already validate `finalSize >
+	 * Integer.MAX_VALUE` before constructing the record, so the int-cap check here is load-bearing only for
+	 * hypothetical future callers; the XOR check is load-bearing today (any caller that returns both, or neither,
+	 * would silently break tempfile-vs-bytes dispatch in `ExportPipeline.writePayloadToStream`).
 	 *
 	 * @throws IllegalArgumentException when either invariant fails
 	 */
@@ -48,13 +49,12 @@ public record ExportResult(byte[] bytes, File tempfile, boolean hdrAttached)
 			throw new IllegalArgumentException(
 				"ExportResult requires exactly one of bytes/tempfile non-null");
 		}
-		// Size invariant: callers downstream (ReplaceStrategy.writeReplacementPayload's OOM-fallback
-		// branch casts size() to int for verifyReplace; SAF write APIs all use int byte counts) assume
-		// the payload fits in a JVM byte[] / int. byte[] mode is inherently bounded by
-		// Integer.MAX_VALUE; tempfile mode is NOT bounded by anything intrinsic, so guard here. Both
-		// encode pipelines (`exportJpeg`, `exportPng`) already validate their final tempfile size
-		// against Integer.MAX_VALUE before constructing the record, so this is defensive — a future
-		// caller that skips that check still can't ship an oversize record without an explicit error.
+		// Size invariant: callers downstream (ReplaceStrategy.writeReplacementPayload casts size() to int for
+		// verifyReplace; SAF write APIs all use int byte counts) assume the payload fits in a JVM byte[] / int.
+		// byte[] mode is inherently bounded by Integer.MAX_VALUE; tempfile mode is NOT bounded by anything
+		// intrinsic, so guard here. Both encode pipelines (`exportJpeg`, `exportPng`) already validate their
+		// final tempfile size against Integer.MAX_VALUE before constructing the record, so this is defensive —
+		// a future caller that skips that check still can't ship an oversize record without an explicit error.
 		if (tempfile != null && tempfile.length() > Integer.MAX_VALUE)
 		{
 			throw new IllegalArgumentException(
@@ -63,9 +63,9 @@ public record ExportResult(byte[] bytes, File tempfile, boolean hdrAttached)
 	}
 
 	/**
-	 * Two-arg constructor for the bytes-mode case (bypass encode + JPEG streaming pipeline final
-	 * readback). Equivalent to `new ExportResult(bytes, null, hdrAttached)`. Delegates to the compact
-	 * constructor, so the XOR + int-cap invariants apply.
+	 * Two-arg constructor for the bytes-mode case (bypass encode + JPEG streaming pipeline final readback).
+	 * Equivalent to `new ExportResult(bytes, null, hdrAttached)`. Delegates to the compact constructor, so the XOR
+	 * + int-cap invariants apply.
 	 *
 	 * @param bytes        non-null encoded bytes
 	 * @param hdrAttached  HDR-attached flag
@@ -78,9 +78,8 @@ public record ExportResult(byte[] bytes, File tempfile, boolean hdrAttached)
 	}
 
 	/**
-	 * Total size of the encoded payload in bytes. For bytes-mode this is `bytes.length`; for
-	 * tempfile-mode this is `tempfile.length()` — querying the file length is a cheap stat call that
-	 * doesn't load the file into heap.
+	 * Total size of the encoded payload in bytes. For bytes-mode this is `bytes.length`; for tempfile-mode this is
+	 * `tempfile.length()` — querying the file length is a cheap stat call that doesn't load the file into heap.
 	 *
 	 * @return encoded payload size in bytes
 	 */

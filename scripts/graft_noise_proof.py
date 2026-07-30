@@ -13,11 +13,10 @@ scale in display orient:
     Panel 3: Graft vs source gain-map diff — what the app actually produces,
              with the cyan AI bbox overlaid for spatial reference.
 
-If panels 2 and 3 look qualitatively the same speckle pattern (matching density,
-matching spatial concentration on smooth gradients vs sharp edges), the off-mask
-"red" in the actual graft heatmap is JPEG round-trip noise — not an inpaint bug
-or an app artifact. Panel 3 typically has a small bright cluster inside the cyan
-bbox where the inpainter wrote new values; panel 2 doesn't (nothing was inpainted).
+If panels 2 and 3 look qualitatively the same speckle pattern (matching density, matching spatial concentration on
+smooth gradients vs sharp edges), the off-mask "red" in the actual graft heatmap is JPEG round-trip noise — not an
+inpaint bug or an app artifact. Panel 3 typically has a small bright cluster inside the cyan bbox where the inpainter
+wrote new values; panel 2 doesn't (nothing was inpainted).
 
 Output: <stem>-jpeg-noise-proof.png
 """
@@ -45,9 +44,9 @@ def render(stem):
 		print(f'  {stem}: missing gain-map, skipping')
 		return
 
-	# Optional sanity: if a graft (2) sibling exists alongside graft, confirm it's
-	# byte-identical. The export pipeline is deterministic, so two saves of the same
-	# state produce the same MD5 — useful one-time confirmation, harmless to leave in.
+	# Optional sanity: if a graft (2) sibling exists alongside graft, confirm it's byte-identical. The export
+	# pipeline is deterministic, so two saves of the same state produce the same MD5 — useful one-time confirmation,
+	# harmless to leave in.
 	graft2_path = os.path.join(BASE, f'{stem}-graft (2).jpg')
 	if os.path.exists(graft2_path):
 		md5_a = hashlib.md5(graft_lib.read_bytes(graft_path)).hexdigest()
@@ -145,9 +144,9 @@ def render(stem):
 
 
 def _compute_ai_bbox(src_path, edit_path, src_orient, edit_orient, gm_size):
-	"""Locate the AI region in gain-map display coords for the cyan overlay. Mirrors
-	analyze.py's mask reconstruction at sampleSize=4 and threshold>30, then projects
-	the stored-coord mask through the source's EXIF orientation into gain-map space.
+	"""Locate the AI region in gain-map display coords for the cyan overlay. Mirrors analyze.py's mask
+	reconstruction at sampleSize=4 and threshold>30, then projects the stored-coord mask through the source's EXIF
+	orientation into gain-map space.
 	"""
 	src_stored = graft_lib.load_stored_downsampled(src_path, 4)
 	edit_stored = graft_lib.load_stored_downsampled(edit_path, 4)

@@ -5,6 +5,8 @@ import android.net.Uri;
 import android.util.Log;
 import android.widget.Toast;
 
+import androidx.annotation.WorkerThread;
+
 import com.cropcenter.graft.EditAligner;
 import com.cropcenter.metadata.GraftWriter;
 import com.cropcenter.model.Format;
@@ -18,14 +20,14 @@ import java.io.IOException;
 import java.util.Locale;
 
 /**
- * Orchestrates the "Apply External Edit" feature: btnGraft tap → user picks an external edit JPEG → validate
- * that the edit's DISPLAY dimensions match the loaded original's (EditAligner compares display dims, NOT raw
- * stored dims + EXIF orientation, because external editors routinely strip orientation and re-emit pixels in
- * display layout) and optionally reorient the edit's pixels back into the original's stored EXIF layout when
- * the two disagree. The aligned bytes are byte-spliced into the original's metadata container via GraftWriter
- * and handed to MainActivity to replace the in-memory image. The user can then crop / rotate / save normally;
- * the save flow's canvas re-encode adds one generation of JPEG loss vs the byte-perfect graft, imperceptible
- * at quality 100. See REQUIREMENTS.md (Apply External Edit) for the display-dim + reorient contract.
+ * Orchestrates the "Apply External Edit" feature: btnGraft tap → user picks an external edit JPEG → validate that the
+ * edit's DISPLAY dimensions match the loaded original's (EditAligner compares display dims, NOT raw stored dims + EXIF
+ * orientation, because external editors routinely strip orientation and re-emit pixels in display layout) and
+ * optionally reorient the edit's pixels back into the original's stored EXIF layout when the two disagree. The aligned
+ * bytes are byte-spliced into the original's metadata container via GraftWriter and handed to MainActivity to replace
+ * the in-memory image. The user can then crop / rotate / save normally; the save flow's canvas re-encode adds one
+ * generation of JPEG loss vs the byte-perfect graft, imperceptible at quality 100. See REQUIREMENTS.md (Apply External
+ * Edit) for the display-dim + reorient contract.
  *
  * Lives alongside SaveController but owns its own picker-stage state machine; once the splice succeeds control
  * transfers to MainActivity via onGraftReady (no save-flow involvement).
@@ -52,8 +54,8 @@ final class GraftController
 	}
 
 	/**
-	 * Captured at graft-tap time so onEditPicked sees a coherent view of the source even when the user has loaded
-	 * a different image while the picker was open.
+	 * Captured at graft-tap time so onEditPicked sees a coherent view of the source even when the user has loaded a
+	 * different image while the picker was open.
 	 *
 	 * @param originalBytes raw bytes of the source loaded when the user tapped btnGraft
 	 * @param gainMap       source's gain map at graft-tap time, or null for SDR sources
@@ -144,14 +146,14 @@ final class GraftController
 	}
 
 	/**
-	 * Edit-picker callback. Claims busy on the UI thread BEFORE dispatching the bg work so a Save / Open
-	 * tap during the read/align/detect/graft window can't preempt and cause applyGraftedBytes to
-	 * silently drop the prepared graft. On any failure path busy is released here; on success the held
-	 * busy is handed off to applyGraftedBytes which releases it after the apply completes.
+	 * Edit-picker callback. Claims busy on the UI thread BEFORE dispatching the bg work so a Save / Open tap during
+	 * the read/align/detect/graft window can't preempt and cause applyGraftedBytes to silently drop the prepared
+	 * graft. On any failure path busy is released here; on success the held busy is handed off to applyGraftedBytes
+	 * which releases it after the apply completes.
 	 *
-	 * Reads the picked edit on a bg thread, validates dimensions and EXIF orientation against the loaded
-	 * original, computes the graft, and dispatches the result to onGraftReady on the UI thread. All
-	 * failure paths clear graftPending so a fresh btnGraft tap can start over.
+	 * Reads the picked edit on a bg thread, validates dimensions and EXIF orientation against the loaded original,
+	 * computes the graft, and dispatches the result to onGraftReady on the UI thread. All failure paths clear
+	 * graftPending so a fresh btnGraft tap can start over.
 	 *
 	 * @param editUri SAF URI of the user-picked external edit (PhotoShop/Lightroom output); ignored
 	 *                when graftPending is false (spurious picker result with no active session)
@@ -215,22 +217,21 @@ final class GraftController
 	}
 
 	/**
-	 * Entry point — called from MainActivity's btnGraft click handler (the dedicated toolbar
-	 * merge-glyph icon between Open and Save). Validates the loaded source, snapshots the
-	 * source-derived state, sets graftPending, then invokes the caller-supplied launchPicker
-	 * Runnable to open the file picker. On launch failure the state is rolled back so a
-	 * subsequent tap can start over.
+	 * Entry point — called from MainActivity's btnGraft click handler (the dedicated toolbar merge-glyph icon
+	 * between Open and Save). Validates the loaded source, snapshots the source-derived state, sets graftPending,
+	 * then invokes the caller-supplied launchPicker Runnable to open the file picker. On launch failure the state
+	 * is rolled back so a subsequent tap can start over.
 	 *
-	 * launchPicker is a Runnable (rather than an ActivityResultLauncher) so the controller stays
-	 * decoupled from any specific picker implementation — the picker is now MainActivity's
-	 * in-app OpenPickerDialog (same dialog as the load flow). The Runnable is run synchronously
-	 * inside start; the picker is expected to open without throwing under normal conditions.
+	 * launchPicker is a Runnable (rather than an ActivityResultLauncher) so the controller stays decoupled from any
+	 * specific picker implementation — the picker is now MainActivity's in-app OpenPickerDialog (same dialog as the
+	 * load flow). The Runnable is run synchronously inside start; the picker is expected to open without throwing
+	 * under normal conditions.
 	 *
-	 * The recommended source editor is Photoshop with Camera Raw set to NOT auto-open JPEGs (Edit →
-	 * Preferences → Camera Raw → File Handling → JPEG → Disabled). Photoshop in pixel-space mode
-	 * preserves source pixel values everywhere except the AI-edited region, leaving only ICC-encoding-
-	 * level differences after canvas P3 conversion. Lightroom HDR exports apply a global tone curve
-	 * that produces a visible seam at the fill boundary; not recommended.
+	 * The recommended source editor is Photoshop with Camera Raw set to NOT auto-open JPEGs (Edit → Preferences →
+	 * Camera Raw → File Handling → JPEG → Disabled). Photoshop in pixel-space mode preserves source pixel values
+	 * everywhere except the AI-edited region, leaving only ICC-encoding-level differences after canvas P3
+	 * conversion. Lightroom HDR exports apply a global tone curve that produces a visible seam at the fill
+	 * boundary; not recommended.
 	 *
 	 * @param launchPicker called synchronously to open the in-app picker; if it throws, the
 	 *                     graft state (graftPending / pendingSource) is rolled back and the
@@ -303,13 +304,12 @@ final class GraftController
 	}
 
 	/**
-	 * Shared apply-pipeline entry for both the normal graft path (dispatchGraftToUi → here) and the
-	 * oversized-edit Apply button (confirmOversizedThenApply → here). Guards against the case where the user
-	 * taps through after the Activity started finishing — a config change that races the dialog (or the
-	 * UI runnable itself, in the normal path) leaves us at this point with the executor already shut down,
-	 * so onGraftReady's downstream `runInBackground` would throw RejectedExecutionException on the UI thread
-	 * and leak the held busy flag. The isDestroyed guard short-circuits cleanly; the catch covers any other
-	 * UI-thread throw from the apply pipeline.
+	 * Shared apply-pipeline entry for both the normal graft path (dispatchGraftToUi → here) and the oversized-edit
+	 * Apply button (confirmOversizedThenApply → here). Guards against the case where the user taps through after
+	 * the Activity started finishing — a config change that races the dialog (or the UI runnable itself, in the
+	 * normal path) leaves us at this point with the executor already shut down, so onGraftReady's downstream
+	 * `runInBackground` would throw RejectedExecutionException on the UI thread and leak the held busy flag. The
+	 * isDestroyed guard short-circuits cleanly; the catch covers any other UI-thread throw from the apply pipeline.
 	 *
 	 * @param graft       the assembled graft to install
 	 * @param releaseBusy the cleanup lambda that drops busy + clears the UI flags + hides progress
@@ -335,12 +335,13 @@ final class GraftController
 	}
 
 	/**
-	 * Bg-thread body of onEditPicked. Reads the picked edit, snapshots the source, aligns + detects + splices,
-	 * then hands off to the UI thread via dispatchGraftToUi. Owns the busy-release-on-failure / clear-snapshot
-	 * finally contract.
+	 * Bg-thread body of onEditPicked. Reads the picked edit, snapshots the source, aligns + detects + splices, then
+	 * hands off to the UI thread via dispatchGraftToUi. Owns the busy-release-on-failure / clear-snapshot finally
+	 * contract.
 	 *
 	 * @param editUri SAF URI of the user-picked edit JPEG
 	 */
+	@WorkerThread
 	private void assembleGraftOnBg(Uri editUri)
 	{
 		boolean handedOff = false;
@@ -366,12 +367,13 @@ final class GraftController
 				graftPending = false;
 				return;
 			}
-			// Defensive clone of the source bytes (and gain map below) — held off until the bg thread
-			// so the UI thread doesn't freeze / OOM cloning an 80 MB HDR JPEG. See start()'s comment
-			// for the deferred-clone rationale. Without this clone, a future code path that mutates the
-			// shared array in place could corrupt mid-graft data; with it, GraftWriter operates on
-			// bytes nothing else can touch. OOM here lands in the assembleGraftOnBg catch and surfaces
-			// "Graft failed" rather than escaping.
+			// Defensive clone of the source bytes — held off until the bg thread so the UI thread doesn't
+			// freeze / OOM cloning an 80 MB HDR JPEG. See start()'s comment for the deferred-clone
+			// rationale. Without this clone, a future code path that mutates the shared array in place
+			// could corrupt mid-graft data; with it, GraftWriter operates on bytes nothing else can touch.
+			// The snapshot's gain map needs no clone — it is only presence-checked below to route HDR vs
+			// SDR, never written through. OOM here lands in the assembleGraftOnBg catch and surfaces "Graft
+			// failed" rather than escaping.
 			byte[] originalBytes = snapshot.originalBytes().clone();
 
 			EditAligner.Result alignment = EditAligner.align(originalBytes, editBytes);
@@ -395,8 +397,9 @@ final class GraftController
 			// applied. The gain map check uses the SNAPSHOT, not state — see SourceSnapshot for why state
 			// can lie at this point.
 			byte[] sourceGainMap = snapshot.gainMap();
+			// Unwrap at the storage seam — aiMask feeds Graft's nullable field.
 			AiMask aiMask = (sourceGainMap != null && sourceGainMap.length > 0)
-				? AiRegionDetector.detect(originalBytes, alignedEditBytes)
+				? AiRegionDetector.detect(originalBytes, alignedEditBytes).orElse(null)
 				: null;
 
 			Graft graft = new Graft(GraftWriter.graft(originalBytes, alignedEditBytes),
@@ -408,16 +411,16 @@ final class GraftController
 			int maskedPixelCount = (aiMask != null) ? aiMask.maskedCount() : -1;
 			int maskTotal = (aiMask != null) ? aiMask.mask().length : 0;
 			// `handedOff = true` is set AFTER runOnUiThread succeeds so a runOnUiThread throw — rare but
-			// reachable on a torn-down view tree — lands in the catch below with handedOff still false.
-			// The finally's `if (!handedOff)` block then releases the busy AtomicBoolean. Setting the flag
+			// reachable on a torn-down view tree — lands in the catch below with handedOff still false. The
+			// finally's `if (!handedOff)` block then releases the busy AtomicBoolean. Setting the flag
 			// before the call would strand busy=true forever on this narrow path, leaving every subsequent
 			// Save/Open tap rejected with "Busy — try again" until Activity destroy.
 			host.runOnUiThread(() -> dispatchGraftToUi(graft, maskedPixelCount, maskTotal));
 			// graftPending = false runs AFTER the post succeeds so the documented "session active until
 			// applyGraftedBytes completes" invariant holds. Setting it before the post would briefly let
-			// start()'s `host.getBusy().get() || graftPending` check pass while busy was still held by
-			// THIS flow — the busy guard would catch any concurrent start() attempt anyway, but the
-			// graftPending half of the invariant should not be vacated until the handoff is queued.
+			// start()'s `host.getBusy().get() || graftPending` check pass while busy was still held by THIS
+			// flow — the busy guard would catch any concurrent start() attempt anyway, but the graftPending
+			// half of the invariant should not be vacated until the handoff is queued.
 			graftPending = false;
 			handedOff = true;
 		}
@@ -429,10 +432,10 @@ final class GraftController
 		}
 		catch (RuntimeException | OutOfMemoryError e)
 		{
-			// OOM merged with RuntimeException so a multi-MP HDR source whose decode + applyOrientation
-			// + AiRegionDetector + GraftWriter allocation chain blows the heap surfaces a "Graft
-			// failed" toast instead of dying silently — finally clears pendingSource + busy + progress
-			// but doesn't post the user-facing toast.
+			// OOM merged with RuntimeException so a multi-MP HDR source whose decode + applyOrientation +
+			// AiRegionDetector + GraftWriter allocation chain blows the heap surfaces a "Graft failed"
+			// toast instead of dying silently — finally clears pendingSource + busy + progress but doesn't
+			// post the user-facing toast.
 			Log.e(TAG, "Unexpected graft error", e);
 			toast("Graft failed: " + e.getMessage());
 			graftPending = false;
@@ -467,43 +470,40 @@ final class GraftController
 	 *
 	 * Lives here rather than in a util because the cleanup contract — release the busy flag we own, clear the UI's
 	 * busy indicator — is GraftController-specific and would leak busy ownership if hoisted to a generic helper.
+	 *
+	 * @param graft            the assembled graft to install when the user taps Apply
+	 * @param maskedPixelCount AI-mask masked-pixel count, or -1 when no mask was generated
+	 * @param maskTotal        AI-mask total-pixel count (mask array length), or 0 when no mask
 	 */
 	private void confirmOversizedThenApply(Graft graft, int maskedPixelCount, int maskTotal)
 	{
 		Runnable releaseBusy = host::finishBusy;
-		if (host.isDestroyed())
+		Runnable abortOnDestroyed = () ->
 		{
 			Log.w(TAG, "skipping oversized-edit dialog on destroyed activity");
 			releaseBusy.run();
-			return;
-		}
-		// Compute as a double so sub-1% masks (typical for AI fills at 0.001%-0.5%) don't truncate
-		// to "0%" — that wording read as misleading on a real ~0.3% mask. Format with one decimal
-		// when below 10% (covers most realistic cases with precision), integer otherwise. The
-		// dialog only fires when the fraction exceeds LARGE_EDIT_FRACTION (10%) AND the int round
-		// gates produced "0%" wording only for sub-1% pre-threshold cases — but defensive: keep
-		// the formatting consistent across the full range.
+		};
+		// Compute as a double so a sub-1% mask (typical for AI fills at 0.001%-0.5%) can't integer-truncate to
+		// a misleading "0%" on a real ~0.3% mask. The isOversizedEdit gate (> LARGE_EDIT_FRACTION, 10%) means
+		// pctValue always exceeds 10 here, so the one-decimal sub-10% branch is defensive-only — kept so the
+		// wording stays honest across the full range if the gate threshold ever drops.
 		double pctValue = 100.0 * maskedPixelCount / Math.max(1, maskTotal);
 		String pctText = pctValue < 10.0
 			? String.format(Locale.ROOT, "%.1f", pctValue)
 			: String.format(Locale.ROOT, "%d", Math.round(pctValue));
 		String message = "This edit changed about " + pctText + "% of pixels — much larger than"
 			+ " typical for AI spot removal. Apply anyway?";
-		// Decision latch: Apply / Cancel both set it true so the OnCancelListener — which fires
-		// from BOTH the inbound dismissTransientDialogs path AND the genuine user-cancel path —
-		// only releases busy on the latter. Without the latch, Apply's flow MainActivity.
-		// applyGraftedBytes → dismissTransientDialogs → cancel() → OnCancelListener would release
-		// busy WHILE applyGraftedBytesOnBg is being queued, letting Save/Open/another-graft slip
-		// in during applyBytes/state.reset() and race the in-flight commit. Apply's busy is held
-		// downstream until applyGraftedBytesOnBg's finally releases it.
+		// Decision latch: Apply / Cancel both set it true so the OnCancelListener — which fires from BOTH the
+		// inbound dismissTransientDialogs path AND the genuine user-cancel path — only releases busy on the
+		// latter. Without the latch, Apply's flow MainActivity. applyGraftedBytes → dismissTransientDialogs →
+		// cancel() → OnCancelListener would release busy WHILE applyGraftedBytesOnBg is being queued, letting
+		// Save/Open/another-graft slip in during applyBytes/state.reset() and race the in-flight commit.
+		// Apply's busy is held downstream until applyGraftedBytesOnBg's finally releases it. Registration lets
+		// a Share/View intent or a follow-up graft apply dismiss this dialog before bg state.reset() — a
+		// show-failure must not strand busy either, hence releaseBusy as the failure abort.
 		boolean[] decided = { false };
-		try
-		{
-			// Register with the host's transient-dialog tracker so a Share/View intent or a follow-up
-			// graft apply that arrives mid-prompt dismisses this dialog before bg state.reset() —
-			// without this registration the dialog can outlive its source state, leaving the user
-			// staring at a stale "x% of pixels" prompt that targets a vanished graft.
-			host.registerTransientDialog(new AlertDialog.Builder(host.getActivity())
+		EditorHost.showTransientGuarded(host, TAG, "oversized-edit dialog", abortOnDestroyed, releaseBusy,
+			() -> new AlertDialog.Builder(host.getActivity())
 				.setTitle("Large edit detected")
 				.setMessage(message)
 				.setPositiveButton(DialogStrings.APPLY, (dialog, which) ->
@@ -523,15 +523,7 @@ final class GraftController
 						releaseBusy.run();
 					}
 				})
-				.show());
-		}
-		catch (RuntimeException e)
-		{
-			// BadTokenException if the activity died between isDestroyed and show, or any other UI-thread
-			// throw from the dialog plumbing. Don't strand busy.
-			Log.w(TAG, "oversized-edit dialog failed to show", e);
-			releaseBusy.run();
-		}
+				.create());
 	}
 
 	/**

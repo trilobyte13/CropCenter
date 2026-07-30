@@ -5,22 +5,22 @@ import static org.junit.Assert.assertEquals;
 import org.junit.Test;
 
 /**
- * Tests for the CropRender value class's derived accessors. The `srcX()` / `srcY()` formulas are the chokepoint
- * for crop-origin computation in the export pipeline; a sign flip would silently mis-place the gain map's
- * spatial alignment relative to the primary scan and produce HDR halos around every cropped output.
+ * Tests for the CropRender value class's derived accessors. The `srcX()` / `srcY()` formulas are the chokepoint for
+ * crop-origin computation in the export pipeline; a sign flip would silently mis-place the gain map's spatial alignment
+ * relative to the primary scan and produce HDR halos around every cropped output.
  *
- * All construction goes through CropRender.of(...) — the canonical positional constructor is private precisely to
- * keep callers (including tests) from accidentally transposing (W, H) pairs against storage's (H, W) alphabetical
- * order. Tests using the public factory exercise the same compile-time-enforced API surface as production code.
+ * All construction goes through CropRender.of(...) — the canonical positional constructor is private precisely to keep
+ * callers (including tests) from accidentally transposing (W, H) pairs against storage's (H, W) alphabetical order.
+ * Tests using the public factory exercise the same compile-time-enforced API surface as production code.
  */
 public final class CropRenderTest
 {
 	@Test
 	public void factoryParameterOrderMatchesAccessorReadback()
 	{
-		// Pin the factory's argument-to-field mapping. Pass DISTINCT W and H values so a regression
-		// that drops the (W, H) → (H, W) swap inside of() would silently transpose every export's
-		// gain-map dimensions and surface as visible HDR halos around cropped outputs.
+		// Pin the factory's argument-to-field mapping. Pass DISTINCT W and H values so a regression that drops
+		// the (W, H) → (H, W) swap inside of() would silently transpose every export's gain-map dimensions and
+		// surface as visible HDR halos around cropped outputs.
 		CropRender render = CropRender.of(50f, 60f, 100, 200, 1000, 2000, 30f);
 		assertEquals(50f, render.centerX(), 0f);
 		assertEquals(60f, render.centerY(), 0f);

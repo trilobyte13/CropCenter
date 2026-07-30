@@ -1,15 +1,14 @@
 package com.cropcenter.model;
 
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
 
 /**
- * Tests for Format's accessors and the fromExtension reverse-lookup. Format replaced the previous String constants
- * (FORMAT_JPEG / FORMAT_PNG); SaveController routes filenames through fromExtension and the SAF picker round-trips the
- * extension/MIME pair, so the contract strings (".jpg", ".png", "image/jpeg", "image/png") are pinned here against the
- * external SAF / ContentResolver wire format.
+ * Tests for Format's accessors and the fromExtension reverse-lookup. SaveController routes filenames through
+ * fromExtension and the SAF picker round-trips the extension/MIME pair, so the contract strings (".jpg", ".png",
+ * "image/jpeg", "image/png") are pinned here against the external SAF / ContentResolver wire format.
  */
 public final class FormatTest
 {
@@ -44,30 +43,30 @@ public final class FormatTest
 	// ── fromExtension ──
 
 	@Test
-	public void fromExtensionReturnsNullForNullInput()
+	public void fromExtensionReturnsEmptyForNullInput()
 	{
 		// Null guard — caller relies on this to mean "no format change" rather than NPE.
-		assertNull(Format.fromExtension(null));
+		assertTrue(Format.fromExtension(null).isEmpty());
 	}
 
 	@Test
 	public void fromExtensionRecognisesDotJpg()
 	{
-		assertEquals(Format.JPEG, Format.fromExtension("photo.jpg"));
+		assertEquals(Format.JPEG, Format.fromExtension("photo.jpg").orElseThrow());
 	}
 
 	@Test
 	public void fromExtensionRecognisesDotJpegAlias()
 	{
 		// Common alternate spelling — pin that we accept it; SaveController's MIME-mismatch check depends on
-		// .jpeg → JPEG (not null) so a user typing "foo.jpeg" in the SAF picker doesn't get rejected.
-		assertEquals(Format.JPEG, Format.fromExtension("photo.jpeg"));
+		// .jpeg → JPEG (not empty) so a user typing "foo.jpeg" in the SAF picker doesn't get rejected.
+		assertEquals(Format.JPEG, Format.fromExtension("photo.jpeg").orElseThrow());
 	}
 
 	@Test
 	public void fromExtensionRecognisesDotPng()
 	{
-		assertEquals(Format.PNG, Format.fromExtension("photo.png"));
+		assertEquals(Format.PNG, Format.fromExtension("photo.png").orElseThrow());
 	}
 
 	@Test
@@ -75,26 +74,26 @@ public final class FormatTest
 	{
 		// SAF-returned filenames can come back in any case; user-typed names too. The toLowerCase(Locale.ROOT)
 		// in the impl handles this; pin all four canonical case variants.
-		assertEquals(Format.JPEG, Format.fromExtension("PHOTO.JPG"));
-		assertEquals(Format.JPEG, Format.fromExtension("Photo.Jpeg"));
-		assertEquals(Format.PNG, Format.fromExtension("PHOTO.PNG"));
-		assertEquals(Format.PNG, Format.fromExtension("Photo.PNG"));
+		assertEquals(Format.JPEG, Format.fromExtension("PHOTO.JPG").orElseThrow());
+		assertEquals(Format.JPEG, Format.fromExtension("Photo.Jpeg").orElseThrow());
+		assertEquals(Format.PNG, Format.fromExtension("PHOTO.PNG").orElseThrow());
+		assertEquals(Format.PNG, Format.fromExtension("Photo.PNG").orElseThrow());
 	}
 
 	@Test
-	public void fromExtensionReturnsNullForUnknownExtension()
+	public void fromExtensionReturnsEmptyForUnknownExtension()
 	{
 		// Unknown extensions leave the format untouched (caller's "leave-format-unchanged" semantics).
-		assertNull(Format.fromExtension("photo.heic"));
-		assertNull(Format.fromExtension("photo.webp"));
-		assertNull(Format.fromExtension("photo.gif"));
+		assertTrue(Format.fromExtension("photo.heic").isEmpty());
+		assertTrue(Format.fromExtension("photo.webp").isEmpty());
+		assertTrue(Format.fromExtension("photo.gif").isEmpty());
 	}
 
 	@Test
-	public void fromExtensionReturnsNullForFilenameWithNoExtension()
+	public void fromExtensionReturnsEmptyForFilenameWithNoExtension()
 	{
-		assertNull(Format.fromExtension("photo"));
-		assertNull(Format.fromExtension(""));
+		assertTrue(Format.fromExtension("photo").isEmpty());
+		assertTrue(Format.fromExtension("").isEmpty());
 	}
 
 	@Test
@@ -102,64 +101,63 @@ public final class FormatTest
 	{
 		// `endsWith` semantics: "foo.jpg.bak" ends with ".bak", not ".jpg". Recognises a match only on the real
 		// trailing extension — pin to prevent a regression that uses substring contains.
-		assertNull("backup file with .bak extension is not JPEG", Format.fromExtension("photo.jpg.bak"));
+		assertTrue("backup file with .bak extension is not JPEG",
+			Format.fromExtension("photo.jpg.bak").isEmpty());
 		// But "screenshot_2025.png" DOES end with ".png" — recognised.
-		assertEquals(Format.PNG, Format.fromExtension("screenshot_2025.png"));
+		assertEquals(Format.PNG, Format.fromExtension("screenshot_2025.png").orElseThrow());
 	}
 
 	@Test
 	public void fromExtensionAcceptsMixedCaseAlias()
 	{
 		// Internal mixed-case checks supplement fromExtensionIsCaseInsensitive: ".JpEg" exercises the
-		// toLowerCase(Locale.ROOT) path on every character (alternating case rather than block-cased
-		// like "JPG" / "Jpeg"). A regression that did Locale.getDefault().toLowerCase would mangle the
-		// dotless 'i' on tr_TR locales and miss this case; Locale.ROOT keeps it deterministic.
-		assertEquals(Format.JPEG, Format.fromExtension("photo.JpEg"));
-		assertEquals(Format.JPEG, Format.fromExtension("photo.jPg"));
-		assertEquals(Format.PNG, Format.fromExtension("photo.PnG"));
+		// toLowerCase(Locale.ROOT) path on every character (alternating case rather than block-cased like "JPG"
+		// / "Jpeg"). A regression that did Locale.getDefault().toLowerCase would mangle the dotless 'i' on
+		// tr_TR locales and miss this case; Locale.ROOT keeps it deterministic.
+		assertEquals(Format.JPEG, Format.fromExtension("photo.JpEg").orElseThrow());
+		assertEquals(Format.JPEG, Format.fromExtension("photo.jPg").orElseThrow());
+		assertEquals(Format.PNG, Format.fromExtension("photo.PnG").orElseThrow());
 	}
 
 	@Test
 	public void fromExtensionRejectsTrailingDotAfterExtension()
 	{
-		// "photo.jpg." — the trailing dot breaks the endsWith(".jpg") match. Some Android file
-		// pickers strip trailing dots automatically, but a hand-typed filename in the SAF dialog can
-		// arrive with one. Pin that we return null (no format inference) rather than guessing JPEG,
-		// because the user's typed extension as-written is NOT a valid filename a file manager
-		// would round-trip.
-		assertNull(Format.fromExtension("photo.jpg."));
-		assertNull(Format.fromExtension("photo.png."));
+		// "photo.jpg." — the trailing dot breaks the endsWith(".jpg") match. Some Android file pickers strip
+		// trailing dots automatically, but a hand-typed filename in the SAF dialog can arrive with one. Pin
+		// that we return empty (no format inference) rather than guessing JPEG, because the user's typed
+		// extension as-written is NOT a valid filename a file manager would round-trip.
+		assertTrue(Format.fromExtension("photo.jpg.").isEmpty());
+		assertTrue(Format.fromExtension("photo.png.").isEmpty());
 	}
 
 	@Test
 	public void fromExtensionAcceptsBareExtensionAsFullName()
 	{
-		// ".jpg" / ".png" as the entire filename — degenerate but endsWith(".jpg") still matches, so
-		// the function returns JPEG / PNG. This is consistent with the function's name (it parses
-		// extensions, not stems) but worth pinning: a future regression that required a non-empty
-		// stem (e.g. via lastIndexOf('.') > 0 + substring) would change the answer here from
-		// JPEG to null.
-		assertEquals(Format.JPEG, Format.fromExtension(".jpg"));
-		assertEquals(Format.JPEG, Format.fromExtension(".jpeg"));
-		assertEquals(Format.PNG, Format.fromExtension(".png"));
+		// ".jpg" / ".png" as the entire filename — degenerate but endsWith(".jpg") still matches, so the
+		// function returns JPEG / PNG. This is consistent with the function's name (it parses extensions, not
+		// stems) but worth pinning: a future regression that required a non-empty stem (e.g. via
+		// lastIndexOf('.') > 0 + substring) would change the answer here from JPEG to empty.
+		assertEquals(Format.JPEG, Format.fromExtension(".jpg").orElseThrow());
+		assertEquals(Format.JPEG, Format.fromExtension(".jpeg").orElseThrow());
+		assertEquals(Format.PNG, Format.fromExtension(".png").orElseThrow());
 	}
 
 	@Test
 	public void fromExtensionRejectsBareDotSequences()
 	{
-		// "." / ".." — degenerate path-component names that look like extensions but have no
-		// recognisable format. Pin that we return null rather than match-by-coincidence.
-		assertNull(Format.fromExtension("."));
-		assertNull(Format.fromExtension(".."));
-		assertNull(Format.fromExtension("..."));
+		// "." / ".." — degenerate path-component names that look like extensions but have no recognisable
+		// format. Pin that we return empty rather than match-by-coincidence.
+		assertTrue(Format.fromExtension(".").isEmpty());
+		assertTrue(Format.fromExtension("..").isEmpty());
+		assertTrue(Format.fromExtension("...").isEmpty());
 	}
 
 	@Test
 	public void fromExtensionRecognisesPathBasedNames()
 	{
 		// SAF display names sometimes include path-like prefixes. The endsWith check still works.
-		assertEquals(Format.JPEG, Format.fromExtension("/storage/emulated/0/DCIM/foo.jpg"));
-		assertEquals(Format.PNG, Format.fromExtension("primary:Pictures/screenshot.png"));
+		assertEquals(Format.JPEG, Format.fromExtension("/storage/emulated/0/DCIM/foo.jpg").orElseThrow());
+		assertEquals(Format.PNG, Format.fromExtension("primary:Pictures/screenshot.png").orElseThrow());
 	}
 
 	// ── stripExtension ──
@@ -167,9 +165,8 @@ public final class FormatTest
 	@Test
 	public void stripExtensionLeadingDotKeepsName()
 	{
-		// Leading-dot names (.gitignore) have NO separable extension by convention; lastIndexOf > 0
-		// rejects the index-0 dot. Pin so a refactor to `>= 0` doesn't accidentally produce an
-		// empty-stem name.
+		// Leading-dot names (.gitignore) have NO separable extension by convention; lastIndexOf > 0 rejects the
+		// index-0 dot. Pin so a refactor to `>= 0` doesn't accidentally produce an empty-stem name.
 		assertEquals(".gitignore", Format.stripExtension(".gitignore"));
 		assertEquals(".env", Format.stripExtension(".env"));
 	}
@@ -177,8 +174,8 @@ public final class FormatTest
 	@Test
 	public void stripExtensionMultiDotKeepsAllButLast()
 	{
-		// "image.v2.final.heic" — the meaningful name structure ("image.v2.final") survives; only
-		// the trailing extension is stripped. Mirrors normaliseExtension's swap behavior.
+		// "image.v2.final.heic" — the meaningful name structure ("image.v2.final") survives; only the trailing
+		// extension is stripped. Mirrors normaliseExtension's swap behavior.
 		assertEquals("image.v2.final", Format.stripExtension("image.v2.final.heic"));
 		assertEquals("archive.tar", Format.stripExtension("archive.tar.gz"));
 	}
@@ -186,8 +183,8 @@ public final class FormatTest
 	@Test
 	public void stripExtensionNoDotReturnsInputUnchanged()
 	{
-		// No dot anywhere — return verbatim. Caller's normaliseExtension appends the format
-		// extension; for "photo" + JPEG, the result is "photo.jpg".
+		// No dot anywhere — return verbatim. Caller's normaliseExtension appends the format extension; for
+		// "photo" + JPEG, the result is "photo.jpg".
 		assertEquals("photo", Format.stripExtension("photo"));
 		assertEquals("noext", Format.stripExtension("noext"));
 	}
@@ -208,9 +205,9 @@ public final class FormatTest
 	public void valuesContainsExactlyJpegAndPng()
 	{
 		// Exhaustiveness pin: Format is JPEG and PNG — adding a third value (e.g. WEBP) without updating
-		// CropExporter's switch dispatch reintroduces the silent-default-branch foot-gun the enum was
-		// created to prevent. This test fails on the cardinality OR on the membership, forcing a
-		// deliberate update everywhere a Format consumer dispatches.
+		// CropExporter's switch dispatch reintroduces the silent-default-branch foot-gun the enum was created
+		// to prevent. This test fails on the cardinality OR on the membership, forcing a deliberate update
+		// everywhere a Format consumer dispatches.
 		Format[] vals = Format.values();
 		assertEquals("Adding a new Format requires updating CropExporter's dispatch and this test",
 			2, vals.length);

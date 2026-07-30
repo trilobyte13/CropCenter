@@ -9,7 +9,9 @@ import android.util.Log;
 
 import com.cropcenter.metadata.JpegMarker;
 import com.cropcenter.metadata.JpegMarkerWalker;
-import com.cropcenter.metadata.TiffTag;
+import com.cropcenter.metadata.TiffIfd0;
+
+import java.util.Optional;
 
 /**
  * Reads EXIF orientation from raw JPEG bytes and rotates the bitmap accordingly. BitmapFactory.decodeByteArray() does
@@ -19,67 +21,60 @@ public final class BitmapUtils
 {
 	private static final String TAG = "BitmapUtils";
 	// Rotation values with magnitude below this threshold (degrees) are treated as 0 for rendering purposes. The
-	// ruler exposes 0.01° as its finest tick step (and the horizon detector rounds to 0.01° too), so the
-	// threshold sits a half-step below that — anything ≥ 0.005° is honored end-to-end (renderer
-	// rotates, readout shows, ExportPipeline can't bypass); anything below is below user control and would just
-	// burn a bilinear pass for no visible benefit. On a 4000-px-wide image, 0.01° corresponds to a corner shift of
-	// ~0.7 px, which is observable on fine vertical/horizontal lines.
+	// ruler exposes 0.01° as its finest tick step (and the horizon detector rounds to 0.01° too), so the threshold
+	// sits a half-step below that — anything ≥ 0.005° is honored end-to-end (renderer rotates, readout shows,
+	// ExportPipeline can't bypass); anything below is below user control and would just burn a bilinear pass for no
+	// visible benefit. On a 4000-px-wide image, 0.01° corresponds to a corner shift of ~0.7 px, which is observable
+	// on fine vertical/horizontal lines.
 	public static final float ROTATION_EPSILON = 0.005f;
 
-	// Decode-pixel cap for the consistent-subsampling BitmapFactory sites (ImageLoadController.applyBytes
-	// at load and UltraHdrCompat.decodeHdrBitmap at HDR-save re-decode). 256 MP (= 1 GB ARGB) handles
-	// Samsung's "200 MP" max-resolution mode (real pixel count 16384×12288 = 192 mebipixels = 201 million
-	// pixels) at inSampleSize=1 with comfortable headroom for future 256 MP sensors. Peak HDR-save working
-	// set is ~2.5× the source bitmap (source + UltraHdrCompat.decodeHdrBitmap re-decode + gainmap at 1/4
-	// resolution + Bitmap.compress encoder buffer), so peak ≈ 2.5 GB at this cap — fits in ~31% of the
-	// 8 GB minimum-spec device's RAM, ~21% on 12 GB (current S25 Ultra), ~16% on 16 GB (future S26).
-	// Min-spec is 8 GB RAM: pre-8 GB devices (the 4 GB tier was common pre-2022) are not supported because
-	// the peak working set during HDR save at the lower cap would still crowd the OS into the low-memory
-	// killer. minSdk=35 (Android 15) already requires post-2021 hardware in practice, so this cap is
-	// codifying what the OS version cutoff implies.
+	// Decode-pixel cap for the consistent-subsampling BitmapFactory sites (ImageLoadController.applyBytes at load
+	// and UltraHdrCompat.decodeHdrBitmap at HDR-save re-decode). 256 MP (= 1 GB ARGB) handles Samsung's "200 MP"
+	// max-resolution mode (real pixel count 16384×12288 = 192 mebipixels = 201 million pixels) at inSampleSize=1
+	// with comfortable headroom for future 256 MP sensors. Peak HDR-save working set is ~2.5× the source bitmap
+	// (source + UltraHdrCompat.decodeHdrBitmap re-decode + gainmap at 1/4 resolution + Bitmap.compress encoder
+	// buffer), so peak ≈ 2.5 GB at this cap — fits in ~31% of the 8 GB minimum-spec device's RAM, ~21% on 12 GB
+	// (current S25 Ultra), ~16% on 16 GB (future S26). Min-spec is 8 GB RAM: pre-8 GB devices (the 4 GB tier was
+	// common pre-2022) are not supported because the peak working set during HDR save at the lower cap would still
+	// crowd the OS into the low-memory killer. minSdk=35 (Android 15) already requires post-2021 hardware in
+	// practice, so this cap is codifying what the OS version cutoff implies.
 	public static final int MAX_DECODE_PIXELS = 256 * 1024 * 1024;
 
-	// Display-proxy cap. Used by createDisplayProxy to derive a downsampled bitmap from the full source for
-	// the editor's render path AND for HorizonDetector.detectFromPaintedRegion's edge-map compute. 16 MP
-	// (4096×4096 class = ~64 MB ARGB) is sized to roughly match the highest current phone screen
-	// resolution (Samsung S25 Ultra: 3120×1440 = 4.5 MP; hypothetical 4K phone: 3840×2160 = 8.3 MP) with
-	// 2-4× headroom for editor zoom. Larger proxies waste GPU upload bandwidth + texture memory without
-	// visible quality benefit at typical zoom levels since the mipmap chain samples a level matched to
-	// the on-screen render size anyway. At zoom ≥ 4 the renderer switches to the full source for
-	// pixel-grid accuracy. HorizonDetector at 16 MP allocates ~192 MB of float[] working set (vs 2.3 GB
-	// at 192 MP source) — ~12× faster Hough vote. Save paths (CropExporter, UltraHdrCompat) bypass the
-	// proxy entirely and read state.getSourceImage() directly, so output resolution stays at source res
-	// regardless of display subsampling.
+	// Display-proxy cap. Used by createDisplayProxy to derive a downsampled bitmap from the full source for the
+	// editor's render path AND for HorizonDetector.detectFromPaintedRegion's edge-map compute. 16 MP (4096×4096
+	// class = ~64 MB ARGB) is sized to roughly match the highest current phone screen resolution (Samsung S25
+	// Ultra: 3120×1440 = 4.5 MP; hypothetical 4K phone: 3840×2160 = 8.3 MP) with 2-4× headroom for editor zoom.
+	// Larger proxies waste GPU upload bandwidth + texture memory without visible quality benefit at typical zoom
+	// levels since the mipmap chain samples a level matched to the on-screen render size anyway. At zoom ≥ 4 the
+	// renderer switches to the full source for pixel-grid accuracy. HorizonDetector at 16 MP allocates ~192 MB of
+	// float[] working set (vs 2.3 GB at 192 MP source) — ~12× faster Hough vote. Save paths (CropExporter,
+	// UltraHdrCompat) bypass the proxy entirely and read state.getSourceImage() directly, so output resolution
+	// stays at source res regardless of display subsampling.
 	public static final int MAX_DISPLAY_PIXELS = 16 * 1024 * 1024;
 
-	// Per-axis dimension cap on the display proxy. Independent of MAX_DISPLAY_PIXELS — guards against
-	// pathological aspect ratios (1×100M attacker input) that would otherwise produce a 1×16M proxy.
-	// Bitmap.createBitmap throws IllegalArgumentException at dim ≥ 32768 (Android's internal limit),
-	// and even before that, Skia's HARDWARE-config copy rejects dims past the device's GL_MAX_TEXTURE_SIZE
-	// (8192-16384 on modern Android). 16384 picks the wider end of that range — fits flagship-class GPUs
-	// (Adreno 730+, Mali-G77+) and is power-of-2-clean. For real camera aspect ratios (4:3, 16:9, 3:2,
-	// 1:1) at MAX_DISPLAY_PIXELS = 16 MP, neither axis comes close to this cap (~4096-5000 px max).
+	// Per-axis dimension cap on the display proxy. Independent of MAX_DISPLAY_PIXELS — guards against pathological
+	// aspect ratios (1×100M attacker input) that would otherwise produce a 1×16M proxy. Bitmap.createBitmap throws
+	// IllegalArgumentException at dim ≥ 32768 (Android's internal limit), and even before that, Skia's
+	// HARDWARE-config copy rejects dims past the device's GL_MAX_TEXTURE_SIZE (8192-16384 on modern Android). 16384
+	// picks the wider end of that range — fits flagship-class GPUs (Adreno 730+, Mali-G77+) and is
+	// power-of-2-clean. For real camera aspect ratios (4:3, 16:9, 3:2, 1:1) at MAX_DISPLAY_PIXELS = 16 MP, neither
+	// axis comes close to this cap (~4096-5000 px max).
 	static final int MAX_PROXY_AXIS = 16384;
 
-	// Companion per-axis cap. A panorama like 32767×1000 sits under MAX_SOURCE_RENDER_PIXELS (32 MP < 64
-	// MP) but its width is past every supported GPU's GL_MAX_TEXTURE_SIZE (typically 8192–16384). Without
-	// this guard the source-switch would hand Skia a bitmap whose texture upload silently fails or
-	// allocates a fallback path and stalls. Numerically equal to MAX_PROXY_AXIS — the proxy is sized so
-	// its dimensions fit in this axis cap by construction, but the SOURCE is not pre-shrunk and must be
-	// gated explicitly before the renderer asks the GPU to bind it.
+	// Companion per-axis cap. A panorama like 32767×1000 sits under MAX_SOURCE_RENDER_PIXELS (32 MP < 64 MP) but
+	// its width is past every supported GPU's GL_MAX_TEXTURE_SIZE (typically 8192–16384). Without this guard the
+	// source-switch would hand Skia a bitmap whose texture upload silently fails or allocates a fallback path and
+	// stalls. Numerically equal to MAX_PROXY_AXIS — the proxy is sized so its dimensions fit in this axis cap by
+	// construction, but the SOURCE is not pre-shrunk and must be gated explicitly before the renderer asks the GPU
+	// to bind it.
 	public static final int MAX_SOURCE_RENDER_AXIS = 16384;
 
-	// Pixel-count ceiling above which the renderer keeps using the display proxy even at zoom ≥ 4.
-	// Background: at zoom ≥ 4 EditorRenderer normally switches from the proxy to the full source so the
-	// pixel-grid overlay (scale ≥ 6) lands on true source-pixel boundaries. For sub-cap sources this is a
-	// one-shot GPU texture upload that the renderer can absorb. For 200 MP class sources the upload would
-	// be ~800 MB ARGB — past most phone GPUs' addressable texture memory and certain to thrash the texture
-	// cache (visible as a multi-second freeze when crossing zoom = 4) or fail allocation outright. At
-	// 64 MP (~256 MB ARGB) the upload still costs but is recoverable on every supported device. Above the
-	// cap the user sees the 16 MP proxy interpolated at very high zoom — soft pixels rather than the
-	// crisp pixel grid, but a working app rather than a freeze + OOM. The pixel grid path itself reads
-	// source.getWidth/getHeight unconditionally so the grid line spacing always matches source coords;
-	// only the bitmap-render path is gated by this cap.
+	// Pixel-count ceiling on the zoom-≥-4 whole-source GPU upload. At zoom ≥ 4 EditorRenderer leaves the display
+	// proxy for true source pixels: a source within this cap (and MAX_SOURCE_RENDER_AXIS) is uploaded whole — at 64
+	// MP (~256 MB ARGB) a one-shot cost every supported device absorbs. Past either cap the renderer instead draws
+	// only the visible region as a viewport-bounded 1:1 tile cut from the software source
+	// (EditorRenderer.drawSourceTile, reused across frames via tileCovers), so a 200 MP capture (~800 MB ARGB, past
+	// most phone GPUs' addressable texture memory) still pixel-peeks crisply without an over-budget texture upload.
 	public static final int MAX_SOURCE_RENDER_PIXELS = 64 * 1024 * 1024;
 
 	private BitmapUtils() {}
@@ -111,21 +106,19 @@ public final class BitmapUtils
 	}
 
 	/**
-	 * Compute the largest power-of-2 inSampleSize that fits (outWidth × outHeight) within `maxPixels` total
-	 * after subsampling — i.e., the smallest sample size that ensures `(outWidth / s) × (outHeight / s) <=
-	 * maxPixels`. Returns 1 when the un-subsampled image already fits; doubles until the constraint holds.
+	 * Compute the largest power-of-2 inSampleSize that fits (outWidth × outHeight) within `maxPixels` total after
+	 * subsampling — i.e., the smallest sample size that ensures `(outWidth / s) × (outHeight / s) <= maxPixels`.
+	 * Returns 1 when the un-subsampled image already fits; doubles until the constraint holds.
 	 *
-	 * Used by ImageLoadController.applyBytes and UltraHdrCompat.decodeHdrBitmap to bound peak decode memory
-	 * on very-large sources (Samsung's "200 MP" mode produces 16384×12288 captures ≈ 192 mebipixels =
-	 * ~800 MB ARGB). The cap is the `MAX_DECODE_PIXELS` constant (256 MP, ~1 GB ARGB), comfortably above
-	 * a 200 MP capture so those sources decode at `inSampleSize=1` (no quality loss); subsampling only
-	 * kicks in for hypothetical > 256 MP sources (future sensor generations). The trade-off when
-	 * sampleSize > 1 is that the saved crop uses the subsampled bitmap as its source, so output
-	 * resolution scales down — preferable to instant OOM.
+	 * Used by ImageLoadController.applyBytes and UltraHdrCompat.decodeHdrBitmap to bound peak decode memory on
+	 * very-large sources (Samsung's "200 MP" mode produces 16384×12288 captures ≈ 192 mebipixels = ~800 MB ARGB).
+	 * The cap is the `MAX_DECODE_PIXELS` constant (256 MP, ~1 GB ARGB), comfortably above a 200 MP capture so those
+	 * sources decode at `inSampleSize=1` (no quality loss); subsampling only kicks in for hypothetical > 256 MP
+	 * sources (future sensor generations). The trade-off when sampleSize > 1 is that the saved crop uses the
+	 * subsampled bitmap as its source, so output resolution scales down — preferable to instant OOM.
 	 *
-	 * Android's BitmapFactory.Options.inSampleSize requires a power of 2 (any other value is rounded down
-	 * to the nearest power of 2 internally), so this helper produces 1, 2, 4, 8, ... rather than the exact
-	 * minimum ratio.
+	 * Android's BitmapFactory.Options.inSampleSize requires a power of 2 (any other value is rounded down to the
+	 * nearest power of 2 internally), so this helper produces 1, 2, 4, 8, ... rather than the exact minimum ratio.
 	 *
 	 * @param outWidth  decoded image width before subsampling (from BitmapFactory bounds pre-pass)
 	 * @param outHeight decoded image height before subsampling
@@ -149,47 +142,49 @@ public final class BitmapUtils
 	}
 
 	/**
-	 * Compute the proxy's (width, height) for a source of the given dimensions, landing the resulting pixel
-	 * count at-or-below MAX_DISPLAY_PIXELS while keeping each axis ≥ 1. Returns null when the source already
-	 * fits (caller should alias the source in that case rather than allocating). Separated from
-	 * createDisplayProxy so the pure-math piece is unit-testable without an Android Bitmap (the createBitmap
-	 * call in createDisplayProxy is a JNI hop that fails outside the Android runtime).
+	 * Compute the proxy's (width, height) for a source of the given dimensions, landing the resulting pixel count
+	 * at-or-below MAX_DISPLAY_PIXELS while keeping each axis ≥ 1. Returns empty when the source already fits
+	 * (caller should alias the source in that case rather than allocating). Separated from createDisplayProxy so
+	 * the pure-math piece is unit-testable without an Android Bitmap (the createBitmap call in createDisplayProxy
+	 * is a JNI hop that fails outside the Android runtime).
 	 *
-	 * Scale factor is `sqrt(MAX_DISPLAY_PIXELS / sourcePixels)` so the cap is treated as a pixel-count budget
-	 * (not a per-axis budget). For a 16384×12288 (192 MP) source at MAX_DISPLAY_PIXELS = 16 MP, the per-axis
-	 * scale is ~0.289 giving dims ~4738×3553 (~16 MP, just under the cap). For typical camera aspect ratios
-	 * (4:3, 16:9, 3:2, square) the per-axis Math.round biases within ±1 px of the pixel-count-optimal
-	 * dimensions, preserving aspect ratio to within ~0.1% — the editor renders via one width-derived
-	 * proxyToSource scale, so aspect-ratio drift translates directly to vertical/horizontal pixel stretch.
+	 * Scale factor is `sqrt(MAX_DISPLAY_PIXELS / sourcePixels)` so the cap is treated as a pixel-count budget (not
+	 * a per-axis budget). For a 16384×12288 (192 MP) source at MAX_DISPLAY_PIXELS = 16 MP, the per-axis scale is
+	 * ~0.2887 giving rounded dims 4730×3547 = 16,777,310 — 94 px OVER the cap — so the product re-check trims the
+	 * dominant axis by 1 to 4729×3547 (under the cap). For typical camera aspect ratios (4:3, 16:9, 3:2, square)
+	 * the per-axis Math.round biases within ±1 px of the pixel-count-optimal dimensions, preserving aspect ratio to
+	 * within ~0.1% — the editor renders via one width-derived proxyToSource scale, so aspect-ratio drift translates
+	 * directly to vertical/horizontal pixel stretch.
 	 *
-	 * Pathological aspect-ratio guard: for sources where one axis scales to less than 0.5 pixels (e.g.,
-	 * 1×100M attacker input), the Math.max(1, ...) floor bumps that axis up from 0 to 1 and leaves the
-	 * other axis at its scaled value — which would push the product past MAX_DISPLAY_PIXELS (a 1×100M
-	 * source would give 1×40M = 40 MP, blowing the 16 MP cap by 2.5×). The product re-check below shrinks
-	 * the dominant axis until the cap holds. The resulting proxy's aspect ratio diverges from the source
-	 * for such pathological inputs, which is acceptable — no real camera produces 1×100M images, and the
-	 * cap is the harder guarantee than aspect preservation.
+	 * The product re-check fires in two shapes. Normal aspect ratios: Math.round can land the product just past the
+	 * cap (the 192 MP 4:3 case above), and the trim is bounded to 1 px on one axis — below render-alignment noise.
+	 * Pathological aspect ratios: for sources where one axis scales to less than 0.5 pixels (e.g., 1×100M attacker
+	 * input), the Math.max(1, ...) floor bumps that axis up from 0 to 1 and leaves the other axis at its scaled
+	 * value, pushing the product far past MAX_DISPLAY_PIXELS (a 1×100M source would give 1×40M = 40 MP); the
+	 * re-check shrinks the dominant axis until the cap holds, and the resulting aspect divergence from the source
+	 * is acceptable — no real camera produces 1×100M images, and the cap is the harder guarantee than aspect
+	 * preservation.
 	 *
 	 * @param srcW source bitmap width in pixels (must be positive)
 	 * @param srcH source bitmap height in pixels (must be positive)
 	 * @return 2-element int array {dstW, dstH} when downscaling is needed (guaranteed dstW*dstH ≤
-	 *         MAX_DISPLAY_PIXELS and dstW ≥ 1 and dstH ≥ 1), OR null when the source already fits within
+	 *         MAX_DISPLAY_PIXELS and dstW ≥ 1 and dstH ≥ 1), OR empty when the source already fits within
 	 *         MAX_DISPLAY_PIXELS (caller must alias the source rather than allocate)
 	 */
-	public static int[] computeProxyDims(int srcW, int srcH)
+	public static Optional<int[]> computeProxyDims(int srcW, int srcH)
 	{
 		long srcPixels = (long) srcW * srcH;
 		if (srcPixels <= MAX_DISPLAY_PIXELS)
 		{
-			return null;
+			return Optional.empty();
 		}
 		double scale = Math.sqrt((double) MAX_DISPLAY_PIXELS / (double) srcPixels);
 		int dstW = Math.max(1, (int) Math.round(srcW * scale));
 		int dstH = Math.max(1, (int) Math.round(srcH * scale));
-		// Re-check the product after the Math.max-with-1 floor: for very high-aspect-ratio sources the
-		// floor bumps one axis up from 0 and leaves the other unchanged, pushing the product past the
-		// cap. Shrink the dominant axis until the product fits. Long arithmetic — dstW*dstH can be ~40 MP
-		// (well within int) but the multiply uses long to mirror the srcPixels computation pattern.
+		// Re-check the product after the Math.max-with-1 floor: for very high-aspect-ratio sources the floor
+		// bumps one axis up from 0 and leaves the other unchanged, pushing the product past the cap. Shrink the
+		// dominant axis until the product fits. Long arithmetic — dstW*dstH can be ~40 MP (well within int) but
+		// the multiply uses long to mirror the srcPixels computation pattern.
 		long proxyPixels = (long) dstW * dstH;
 		if (proxyPixels > MAX_DISPLAY_PIXELS)
 		{
@@ -224,29 +219,29 @@ public final class BitmapUtils
 			dstW = Math.max(1, (int) (dstW * axisScale));
 			dstH = Math.max(1, (int) (dstH * axisScale));
 		}
-		return new int[] { dstW, dstH };
+		return Optional.of(new int[] { dstW, dstH });
 	}
 
 	/**
-	 * Derive a display-proxy bitmap downsampled to fit within MAX_DISPLAY_PIXELS, preserving aspect ratio. When
-	 * the source already fits, returns the source reference directly (no copy) — caller treats source and proxy
-	 * as interchangeable and must NOT recycle the proxy independently in that case. Used by ImageLoadController
-	 * after the EXIF-rotation pass; installed alongside the source via CropState.setSourceImage(source, display)
-	 * so EditorRenderer renders the smaller buffer per frame while save paths pull the full source.
+	 * Derive a display-proxy bitmap downsampled to fit within MAX_DISPLAY_PIXELS, preserving aspect ratio. When the
+	 * source already fits, returns the source reference directly (no copy) — caller treats source and proxy as
+	 * interchangeable and must NOT recycle the proxy independently in that case. Used by ImageLoadController after
+	 * the EXIF-rotation pass; installed alongside the source via CropState.setSourceImage(source, display) so
+	 * EditorRenderer renders the smaller buffer per frame while save paths pull the full source.
 	 *
-	 * When downscaled, the result is Bitmap.Config.HARDWARE: pixels live in GPU memory and per-frame drawBitmap
-	 * is a zero-upload texture-bind. Without HARDWARE, Skia re-uploads ARGB from native heap on any texture-cache
+	 * When downscaled, the result is Bitmap.Config.HARDWARE: pixels live in GPU memory and per-frame drawBitmap is
+	 * a zero-upload texture-bind. Without HARDWARE, Skia re-uploads ARGB from native heap on any texture-cache
 	 * eviction, causing per-frame upload spikes that read as gesture lag. Tradeoff: HARDWARE is immutable and
-	 * getPixels() returns null, so AutoRotateBinder copies the proxy back to ARGB_8888 before HorizonDetector —
-	 * a one-shot GPU→CPU readback that only fires on auto-rotate, not per frame. If the HARDWARE copy fails (GPU
+	 * getPixels() returns null, so AutoRotateBinder copies the proxy back to ARGB_8888 before HorizonDetector — a
+	 * one-shot GPU→CPU readback that only fires on auto-rotate, not per frame. If the HARDWARE copy fails (GPU
 	 * memory exhausted), falls back to an ARGB scaled bitmap with mipmaps.
 	 *
 	 * setHasMipMap(true) lets the GPU sample an appropriate mip level (trilinear) at fit-to-view zoom instead of
-	 * supersampling (+33% memory from the mip chain); prepareToDraw() hints an early off-thread upload so the
-	 * first post-load frame doesn't pay upload latency on the UI thread.
+	 * supersampling (+33% memory from the mip chain); prepareToDraw() hints an early off-thread upload so the first
+	 * post-load frame doesn't pay upload latency on the UI thread.
 	 *
-	 * Side effect in the alias case (source already fits): the proxy IS the source, so these two hints mutate
-	 * the source bitmap (mipmap flag on, GPU upload pending). Harmless for save-path CPU consumers, but a caller
+	 * Side effect in the alias case (source already fits): the proxy IS the source, so these two hints mutate the
+	 * source bitmap (mipmap flag on, GPU upload pending). Harmless for save-path CPU consumers, but a caller
 	 * expecting an unmutated source reference must know it isn't pristine after this call.
 	 *
 	 * @param source full-resolution bitmap to downsample; never null. Mutated in-place when aliased (see above)
@@ -255,16 +250,17 @@ public final class BitmapUtils
 	 */
 	public static Bitmap createDisplayProxy(Bitmap source)
 	{
-		int[] dims = computeProxyDims(source.getWidth(), source.getHeight());
+		Optional<int[]> proxyDims = computeProxyDims(source.getWidth(), source.getHeight());
 		Bitmap proxy;
-		if (dims == null)
+		if (proxyDims.isEmpty())
 		{
-			// Already fits — aliasing source as the proxy avoids a fresh allocation on the common case of
-			// a sub-16-MP capture (every phone camera at default resolution).
+			// Already fits — aliasing source as the proxy avoids a fresh allocation on the common case of a
+			// sub-16-MP capture (every phone camera at default resolution).
 			proxy = source;
 		}
 		else
 		{
+			int[] dims = proxyDims.orElseThrow();
 			// Two-step: first downscale to ARGB via createScaledBitmap (bilinear, smooth), then copy that
 			// to HARDWARE config for GPU-resident rendering. The intermediate ARGB is recycled — it served
 			// only as the source of pixel data for the HARDWARE copy. If HARDWARE allocation fails (the
@@ -326,14 +322,14 @@ public final class BitmapUtils
 			canvas.save();
 			canvas.rotate(rotation, drawX + src.getWidth() / 2f, drawY + src.getHeight() / 2f);
 
-			// Cardinal rotations (±90°, 180°, ±270°) are pure integer-pixel remaps ONLY when srcX / srcY
-			// are also integer-aligned — in that case, disable bilinear filtering so nearest-neighbor
-			// sampling inherits source pixels verbatim. Fractional srcX / srcY mean dst pixels end up at
-			// sub-pixel positions relative to the canvas grid, so we need bilinear to match the preview
-			// (which draws at the same fractional offset). Non-cardinal rotations always bilinear-sample —
-			// interpolation is inherent to the geometry.
+			// Cardinal rotations are pure integer-pixel remaps ONLY when srcX / srcY are integer-aligned
+			// AND the angle passes isLosslessCardinalRotation's parity gate (±90° / ±270° need srcW + srcH
+			// even — see its Javadoc for the half-pixel math) — then nearest-neighbor inherits source
+			// pixels verbatim. Fractional srcX / srcY, mixed-parity 90°/270°, and non-cardinal angles all
+			// bilinear-sample, matching the preview: soft but correctly positioned beats sharp but
+			// half-pixel offset.
 			boolean integerAligned = srcX == Math.floor(srcX) && srcY == Math.floor(srcY);
-			if (isCardinalRotation(rotation) && integerAligned)
+			if (integerAligned && isLosslessCardinalRotation(rotation, src.getWidth(), src.getHeight()))
 			{
 				Paint nearestPaint = new Paint(paint);
 				nearestPaint.setFilterBitmap(false);
@@ -368,29 +364,48 @@ public final class BitmapUtils
 		}
 		else
 		{
-			// Fractional srcX / srcY — draw at the float offset so Android's renderer bilinear-samples
-			// at sub-pixel positions.
+			// Fractional srcX / srcY — draw at the float offset so Android's renderer bilinear-samples at
+			// sub-pixel positions.
 			canvas.drawBitmap(src, drawX, drawY, paint);
 		}
 	}
 
 	/**
-	 * True when `rotation` is within ROTATION_EPSILON of ±90°, 180°, or ±270° (mod 360). Cardinal rotations map
-	 * integer source pixels to integer destination pixels and are therefore losslessly expressible with
-	 * nearest-neighbor sampling. Non-cardinal rotations require bilinear filtering.
+	 * True when rotating a srcW × srcH bitmap by rotationDegrees around the crop-window center is a lossless
+	 * integer-pixel remap — the single chokepoint predicate for every nearest-neighbor cardinal-rotation gate
+	 * (drawCropped's rotated branch and UltraHdrCompat's gain-map draw). Angles match within ROTATION_EPSILON
+	 * (strict less-than).
 	 *
-	 * 0° (and ±360°, ±720°, …) is explicitly NOT cardinal here — drawCropped's cardinal branch is the rotated path,
-	 * and 0° already goes through the unrotated fast path higher up that gates on Math.abs(rotation) >=
-	 * ROTATION_EPSILON. Including 0 would route an already-handled case through a strictly-worse code path.
+	 * Parity math: with an integer-aligned draw offset, a 0°/180° center rotation maps each source pixel center
+	 * (drawX + i + 0.5) to drawX + srcW − i − 0.5 per axis — a pixel center for ANY dims, because only that axis's
+	 * own integer dimension enters the mapping. A ±90°/±270° rotation swaps the axes, so a source pixel center (i +
+	 * 0.5, j + 0.5) maps to destination X = drawX + (srcW + srcH)/2 − j − 0.5 — a pixel center only when (srcW +
+	 * srcH)/2 is an integer. An odd srcW + srcH (mixed parity) puts the whole rotated grid on half-pixel offsets,
+	 * so nearest-neighbor would sample exactly on pixel boundaries and ship a half-pixel-shifted copy; those inputs
+	 * must fall back to the bilinear path — soft but correctly positioned beats sharp but offset.
 	 *
-	 * @param rotation rotation in degrees; sign / magnitude / mod-360 all handled
-	 * @return true when the angle is within ROTATION_EPSILON of ±90° / 180° / ±270°
+	 * The caller must separately verify the draw offset is integer-aligned; this predicate covers only the angle +
+	 * dimension-parity half of the losslessness condition.
+	 *
+	 * @param rotationDegrees rotation in degrees; sign / magnitude / mod-360 all handled
+	 * @param srcW            width in pixels of the bitmap being drawn (the bitmap NN samples from)
+	 * @param srcH            height in pixels of the bitmap being drawn
+	 * @return true when nearest-neighbor sampling reproduces the source pixels verbatim for this
+	 *         rotation + dimension combination (0°/180° at any dims; ±90°/±270° only when srcW + srcH is even)
 	 */
-	public static boolean isCardinalRotation(float rotation)
+	public static boolean isLosslessCardinalRotation(float rotationDegrees, int srcW, int srcH)
 	{
-		float normalized = ((rotation % 360f) + 360f) % 360f;
-		return Math.abs(normalized - 90f) < ROTATION_EPSILON || Math.abs(normalized - 180f) < ROTATION_EPSILON
-			|| Math.abs(normalized - 270f) < ROTATION_EPSILON;
+		float normalized = ((rotationDegrees % 360f) + 360f) % 360f;
+		if (normalized < ROTATION_EPSILON || normalized > 360f - ROTATION_EPSILON
+			|| Math.abs(normalized - 180f) < ROTATION_EPSILON)
+		{
+			return true;
+		}
+		if (Math.abs(normalized - 90f) < ROTATION_EPSILON || Math.abs(normalized - 270f) < ROTATION_EPSILON)
+		{
+			return (srcW + srcH) % 2 == 0;
+		}
+		return false;
 	}
 
 	/**
@@ -447,6 +462,19 @@ public final class BitmapUtils
 		}
 	}
 
+	/**
+	 * Marker-walk the JPEG head (via JpegMarkerWalker.nextHeadSegment) to the Exif APP1 segment, then locate and
+	 * read the IFD0 Orientation entry via the shared TiffIfd0 walker. Header / offset / entry-shape validation
+	 * lives in TiffIfd0.findOrientationEntry; this reader keeps the JPEG-specific parts — the APP1 "Exif\0\0"
+	 * filter and the upright fallback on every structural failure. The walk stops at SOS / EOI (EXIF never
+	 * legally follows the scan).
+	 *
+	 * May throw IndexOutOfBoundsException from ByteBufferUtils' bounds checks on truncated input —
+	 * readExifOrientation's catch maps that to upright per the public contract.
+	 *
+	 * @param jpeg full JPEG file bytes; null tolerated
+	 * @return EXIF orientation 1..8, or 1 when the tag is absent or any structural check fails
+	 */
 	private static int readExifOrientationInternal(byte[] jpeg)
 	{
 		if (jpeg == null || jpeg.length < 14)
@@ -461,135 +489,46 @@ public final class BitmapUtils
 		int off = 2;
 		while (off < jpeg.length - 4)
 		{
-			if ((jpeg[off] & 0xFF) != 0xFF)
+			JpegMarkerWalker.HeadSegment step = JpegMarkerWalker.nextHeadSegment(jpeg, off, jpeg.length);
+			if (step.kind() == JpegMarkerWalker.HeadKind.NO_MARKER)
 			{
 				return 1;
 			}
-			int markerByteOff = JpegMarkerWalker.skipFillBytes(jpeg, off, jpeg.length);
-			if (markerByteOff < 0)
-			{
-				return 1;
-			}
-			int marker = jpeg[markerByteOff] & 0xFF;
-			int afterMarker = markerByteOff + 1;
+			int marker = step.marker();
 			if (marker == JpegMarker.SOS || marker == JpegMarker.EOI)
 			{
 				break;
 			}
-			if (marker == JpegMarker.STUFFING || marker == JpegMarker.TEM
-				|| (marker >= JpegMarker.RST_FIRST && marker <= JpegMarker.RST_LAST))
+			if (step.kind() == JpegMarkerWalker.HeadKind.STANDALONE)
 			{
-				off = afterMarker;
+				off = step.next();
 				continue;
 			}
-			if (afterMarker + 2 > jpeg.length)
+			if (step.kind() == JpegMarkerWalker.HeadKind.BAD_LENGTH)
 			{
 				return 1;
 			}
-			int segLen = ByteBufferUtils.readU16BE(jpeg, afterMarker);
-			if (segLen < 2)
-			{
-				// Segment length must include the 2 length bytes themselves (JPEG spec). Zero or one
-				// would advance off by 0 or 1 instead of the real segment size.
-				return 1;
-			}
+			int afterMarker = step.markerByteOff() + 1;
 
-			// APP1 with Exif header
-			if (marker == JpegMarker.APP1 && segLen > 14 && afterMarker + 8 <= jpeg.length
+			// APP1 with Exif header. Deliberately checked before the OVERRUN bail: a truncated file whose
+			// APP1 claims a length past EOF still gets its in-bounds TIFF body parsed, matching the
+			// pre-cursor guard order.
+			if (marker == JpegMarker.APP1 && step.segLen() > 14 && afterMarker + 8 <= jpeg.length
 				&& jpeg[afterMarker + 2] == 'E' && jpeg[afterMarker + 3] == 'x'
 				&& jpeg[afterMarker + 4] == 'i' && jpeg[afterMarker + 5] == 'f'
 				&& jpeg[afterMarker + 6] == 0 && jpeg[afterMarker + 7] == 0)
 			{
-				int tiffStart = afterMarker + 8; // TIFF header
-				if (tiffStart + 8 > jpeg.length)
-				{
-					return 1;
-				}
-				// TIFF byte-order marker is 2 bytes — "II" (little) or "MM" (big). A malformed
-				// mismatched pair would silently be treated as little-endian and produce nonsense u32
-				// reads downstream.
-				int byteOrderHi = jpeg[tiffStart] & 0xFF;
-				int byteOrderLo = jpeg[tiffStart + 1] & 0xFF;
-				if (!((byteOrderHi == 0x49 && byteOrderLo == 0x49)
-					|| (byteOrderHi == 0x4D && byteOrderLo == 0x4D)))
-				{
-					return 1;
-				}
-				boolean isLittleEndian = byteOrderHi == 0x49;
-
-				// TIFF magic = 42 (0x002A). A byte-order match without the magic value means the chunk
-				// isn't really TIFF — without this check a malformed payload with plausible offsets and
-				// a coincidental TiffTag.ORIENTATION byte sequence would rotate pixels.
-				int tiffMagic = ByteBufferUtils.readU16(jpeg, tiffStart + 2, isLittleEndian);
-				if (tiffMagic != TiffTag.MAGIC)
-				{
-					return 1;
-				}
-
-				// Validate the long sum BEFORE casting — an adversarial u32 ifdOff like 0xFFFFFFFE plus
-				// a small tiffStart wraps to a small positive int that passes both bounds checks on
-				// the truncated value, letting the IFD entry walk read garbage as tag/type/value and
-				// rotate pixels.
-				long ifdOff = ByteBufferUtils.readU32(jpeg, tiffStart + 4, isLittleEndian);
-				long absIfd = (long) tiffStart + ifdOff;
-				if (absIfd < tiffStart || absIfd + 2 > jpeg.length || absIfd > Integer.MAX_VALUE)
-				{
-					return 1;
-				}
-				int ifd = (int) absIfd;
-
-				int count = ByteBufferUtils.readU16(jpeg, ifd, isLittleEndian);
-				for (int i = 0; i < count; i++)
-				{
-					long entryLong = (long) ifd + 2 + (long) i * 12;
-					if (entryLong + 12 > jpeg.length)
-					{
-						break;
-					}
-					int entry = (int) entryLong;
-					int tag = ByteBufferUtils.readU16(jpeg, entry, isLittleEndian);
-					if (tag == TiffTag.ORIENTATION)
-					{
-						return readOrientationFromIfdEntry(jpeg, entry, isLittleEndian);
-					}
-				}
-				return 1; // EXIF found but no orientation tag
+				// TIFF header sits just past the 6-byte "Exif\0\0" identifier.
+				return TiffIfd0.findOrientationEntry(jpeg, afterMarker + 8, jpeg.length, 0)
+					.map(entry -> TiffIfd0.readOrientation(jpeg, entry))
+					.orElse(1);
 			}
-			int next = afterMarker + segLen;
-			if (next > jpeg.length || next < off)
+			if (step.kind() == JpegMarkerWalker.HeadKind.OVERRUN)
 			{
 				return 1;
 			}
-			off = next;
+			off = step.next();
 		}
 		return 1;
-	}
-
-	/**
-	 * Read the orientation value from an IFD entry whose tag has already been confirmed to be TiffTag.ORIENTATION.
-	 * Validates that the entry is well-formed (type SHORT, count 1, value 1..8) — any other shape is malformed
-	 * and maps to upright (1). A coincidental TiffTag.ORIENTATION entry with the wrong type / count would
-	 * otherwise have us reading random bytes as orientation. Real EXIF always emits this entry as SHORT/1.
-	 *
-	 * @param data           full JPEG / PNG-eXIf byte array
-	 * @param entry          offset of the 12-byte IFD entry (tag at entry, type at entry+2, count at entry+4,
-	 *                       value at entry+8)
-	 * @param isLittleEndian TIFF byte order
-	 * @return orientation 1..8, or 1 when the entry is malformed
-	 */
-	private static int readOrientationFromIfdEntry(byte[] data, int entry, boolean isLittleEndian)
-	{
-		int entryType = ByteBufferUtils.readU16(data, entry + 2, isLittleEndian);
-		long entryCount = ByteBufferUtils.readU32(data, entry + 4, isLittleEndian);
-		if (entryType != TiffTag.TYPE_SHORT || entryCount != 1)
-		{
-			return 1;
-		}
-		int orientation = ByteBufferUtils.readU16(data, entry + 8, isLittleEndian);
-		if (orientation < 1 || orientation > 8)
-		{
-			return 1;
-		}
-		return orientation;
 	}
 }

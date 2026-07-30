@@ -3,20 +3,18 @@
 Usage:
     py scripts/graft_noise_control.py 20250820_093032
 
-Hypothesis under test: the ~4% off-mask "red speckle" you see in the gain-map diff
-heatmap (graft_analyze.py panel 3 outside the cyan AI bbox) is JPEG round-trip noise
-from Skia re-encoding the gain-map at save time, not an inpaint bug or app-side artifact.
+Hypothesis under test: the ~4% off-mask "red speckle" you see in the gain-map diff heatmap (graft_analyze.py panel 3
+outside the cyan AI bbox) is JPEG round-trip noise from Skia re-encoding the gain-map at save time, not an inpaint bug
+or app-side artifact.
 
-Control: take the source's own gain-map, re-encode it ourselves at multiple quality
-levels (and with the graft's actual Skia-derived Q table), decode again, and measure
-the resulting noise. If the self-encode noise floor matches the actual graft-vs-source
-diff, the JPEG hypothesis is confirmed and there's no app bug to chase. If self-encoding
-produces zero noise but the graft shows 4%, the explanation is wrong and the bug is
-elsewhere.
+Control: take the source's own gain-map, re-encode it ourselves at multiple quality levels (and with the graft's actual
+Skia-derived Q table), decode again, and measure the resulting noise. If the self-encode noise floor matches the actual
+graft-vs-source diff, the JPEG hypothesis is confirmed and there's no app bug to chase. If self-encoding produces zero
+noise but the graft shows 4%, the explanation is wrong and the bug is elsewhere.
 
-Reports six sections of numbers — Q-table comparison, self-encode at q=95, the full
-quality sweep (q=75..100), self-encode using Skia's actual Q table, the reference
-graft-vs-source diff for the same stem, and a verdict line comparing the two.
+Reports six sections of numbers — Q-table comparison, self-encode at q=95, the full quality sweep (q=75..100),
+self-encode using Skia's actual Q table, the reference graft-vs-source diff for the same stem, and a verdict line
+comparing the two.
 
 Companion script: jpeg_noise_proof.py renders the same comparison visually.
 """
@@ -131,8 +129,8 @@ def _print_diff_distribution(diff_arr, label):
 
 
 def _real_graft_diff(src_path, graft_path, src_gm_bytes, graft_gm_bytes):
-	"""Reproduce analyze.py's gain-map diff: reorient both to display, resize source if
-	dimensions don't match, return the per-pixel max-channel diff as uint8.
+	"""Reproduce analyze.py's gain-map diff: reorient both to display, resize source if dimensions don't match,
+	return the per-pixel max-channel diff as uint8.
 	"""
 	src_orient = graft_lib.primary_orient(src_path)
 	graft_orient = graft_lib.primary_orient(graft_path)

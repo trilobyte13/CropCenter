@@ -5,9 +5,12 @@ package com.cropcenter.model;
  * `(16, 9)` and `(160, 90)` mean the same thing. The FREE constant (dimensions ≤ 0) signals "no constraint" and lets
  * CropEngine use the maximum available extent on each axis.
  *
- * Hosts the MIN_CROP_DIMENSION_PX constant (moved from CropEngine) so model/ doesn't have to import crop/ —
- * AspectRatio.snap needs the floor to keep tiny ARs from collapsing, and CropEngine's per-axis clamps need it too;
- * keeping it on AspectRatio puts the constraint at the data-type that defines what a "valid AR shape" can be.
+ * Hosts the MIN_CROP_DIMENSION_PX constant so model/ doesn't have to import crop/ — AspectRatio.snap needs the floor to
+ * keep tiny ARs from collapsing, and CropEngine's per-axis clamps need it too; keeping it on AspectRatio puts the
+ * constraint at the data-type that defines what a "valid AR shape" can be.
+ *
+ * @param width  horizontal ratio component in arbitrary units; ≤ 0 or non-finite means free (see isFree)
+ * @param height vertical ratio component in arbitrary units; ≤ 0 or non-finite means free (see isFree)
  */
 public record AspectRatio(float width, float height)
 {
@@ -29,11 +32,13 @@ public record AspectRatio(float width, float height)
 	public static final int MIN_CROP_DIMENSION_PX = 4;
 
 	/**
-	 * Any non-positive or non-finite dimension means "no constraint" — catches both the canonical FREE (0, 0)
-	 * and malformed external constructions like (4, 0) or (-1, -1) that would otherwise produce ratio() == 0
-	 * and poison CropEngine's Math.round(cropW / ratio) with Integer.MAX_VALUE. The non-finite check (NaN /
-	 * Infinity) prevents ratio() returning NaN or Infinity when the user types "NaN" / "Infinity" into the
-	 * Custom AR dialog and ToolbarBinder.parseIntOr falls back to a poisoned value.
+	 * Any non-positive or non-finite dimension means "no constraint" — catches both the canonical FREE (0, 0) and
+	 * malformed external constructions like (4, 0) or (-1, -1) that would otherwise produce ratio() == 0 and poison
+	 * CropEngine's Math.round(cropW / ratio) with Integer.MAX_VALUE. The non-finite check (NaN / Infinity) prevents
+	 * ratio() returning NaN or Infinity when the user types "NaN" / "Infinity" into the Custom AR dialog and
+	 * ToolbarBinder.parseIntOr falls back to a poisoned value.
+	 *
+	 * @return true when this ratio imposes no constraint (either dimension ≤ 0, NaN, or infinite)
 	 */
 	public boolean isFree()
 	{
@@ -41,8 +46,8 @@ public record AspectRatio(float width, float height)
 	}
 
 	/**
-	 * Compute the bound aspect ratio. Callers must check isFree() before dividing by the return value —
-	 * a free ratio returns the sentinel 0 rather than width / height (which would be NaN for free).
+	 * Compute the bound aspect ratio. Callers must check isFree() before dividing by the return value — a free
+	 * ratio returns the sentinel 0 rather than width / height (which would be NaN for free).
 	 *
 	 * @return width / height when bound; 0 when free (isFree() returns true)
 	 */
@@ -56,15 +61,14 @@ public record AspectRatio(float width, float height)
 	}
 
 	/**
-	 * Snap (cropW, cropH) to (Wr·k, Hr·k) where (Wr, Hr) is this AR reduced to lowest terms, picking the
-	 * integer k minimising Euclidean distance from (cropW, cropH) — the exact integer-pixel realisation of the
-	 * locked AR nearest the requested crop, eliminating the ~0.5 px/axis drift that independent per-axis
-	 * Math.round produces.
+	 * Snap (cropW, cropH) to (Wr·k, Hr·k) where (Wr, Hr) is this AR reduced to lowest terms, picking the integer k
+	 * minimising Euclidean distance from (cropW, cropH) — the exact integer-pixel realisation of the locked AR
+	 * nearest the requested crop, eliminating the ~0.5 px/axis drift that independent per-axis Math.round produces.
 	 *
 	 * Returns input unchanged when this AR is FREE (nothing to snap to) or either dimension is non-integer
 	 * (fractional custom AR — exact-integer snap isn't achievable). Capped at (maxW, maxH) so the result never
-	 * exceeds bounds (caller passes imgW/imgH, or the input cropW/cropH in a never-grow context), and k is
-	 * floored so both axes stay ≥ CropEngine.MIN_CROP_DIMENSION_PX (a 1:1 lock yields 4×4, not 1×1).
+	 * exceeds bounds (caller passes imgW/imgH, or the input cropW/cropH in a never-grow context), and k is floored
+	 * so both axes stay ≥ CropEngine.MIN_CROP_DIMENSION_PX (a 1:1 lock yields 4×4, not 1×1).
 	 *
 	 * @param cropW pre-snap width in image pixels (output of CropEngine's per-axis Math.round)
 	 * @param cropH pre-snap height in image pixels (same)
@@ -88,16 +92,17 @@ public record AspectRatio(float width, float height)
 		int divisor = gcd(wInt, hInt);
 		wInt /= divisor;
 		hInt /= divisor;
-		// k that minimises (wInt·k - cropW)² + (hInt·k - cropH)². Setting the derivative to 0 gives
-		// k = (wInt·cropW + hInt·cropH) / (wInt² + hInt²). Use long arithmetic so a 16:9 AR on a
-		// 50000×50000 image (50000·16 + 50000·9 ≈ 1.25M) doesn't overflow.
+		// k that minimises (wInt·k - cropW)² + (hInt·k - cropH)². Setting the derivative to 0 gives k =
+		// (wInt·cropW + hInt·cropH) / (wInt² + hInt²). The (long) casts are load-bearing at the extremes:
+		// wInt·cropW passes 2^31 for a 16:9 crop 2^27 px wide, and wInt² alone passes it once the reduced width
+		// term reaches 46341 — an int product would wrap negative and degenerate k.
 		long num = (long) wInt * cropW + (long) hInt * cropH;
 		long den = (long) wInt * wInt + (long) hInt * hInt;
 		int k = Math.round((float) num / den);
-		// Floor k so both axes land at ≥ MIN_CROP_DIMENSION_PX pixels — keeps 1:1 / 2:1 / similar-tiny
-		// ARs from collapsing to 1×1 at the lower edge of the optimisation. ceil(floor/wInt) is the
-		// smallest k that makes wInt·k ≥ floor; same for hInt. The floor constant lives on this type
-		// so model/ doesn't have to depend on crop/; CropEngine reads it back from here.
+		// Floor k so both axes land at ≥ MIN_CROP_DIMENSION_PX pixels — keeps 1:1 / 2:1 / similar-tiny ARs from
+		// collapsing to 1×1 at the lower edge of the optimisation. ceil(floor/wInt) is the smallest k that
+		// makes wInt·k ≥ floor; same for hInt. The floor constant lives on this type so model/ doesn't have to
+		// depend on crop/; CropEngine reads it back from here.
 		int floor = MIN_CROP_DIMENSION_PX;
 		int kMin = Math.max(1, Math.max((floor + wInt - 1) / wInt, (floor + hInt - 1) / hInt));
 		// Cap k at the supplied bounds — never snap larger than the image (or no-grow caller) allows.
@@ -114,8 +119,8 @@ public record AspectRatio(float width, float height)
 	}
 
 	/**
-	 * Greatest common divisor via Euclid. Pure helper for snap's reduce-to-lowest-terms step. Operates
-	 * on positive integers only (snap pre-checks that both dimensions are positive integer-valued).
+	 * Greatest common divisor via Euclid. Pure helper for snap's reduce-to-lowest-terms step. Operates on positive
+	 * integers only (snap pre-checks that both dimensions are positive integer-valued).
 	 *
 	 * @param a positive integer
 	 * @param b positive integer

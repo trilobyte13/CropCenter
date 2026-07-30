@@ -1,5 +1,6 @@
 package com.cropcenter.metadata;
 
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
@@ -66,9 +67,9 @@ public final class JpegMetadataExtractorTest
 	@Test
 	public void malformedZeroSegmentLengthHaltsParsing() throws IOException
 	{
-		// Boundary case: segLen=0 must also bail. The guard is `segLen < 2`, so segLen=0 is rejected. Pin
-		// this distinct from the segLen=1 test so a regression to `segLen < 1` (which would still pass the
-		// segLen=1 test but loop forever at next == off when segLen=0) surfaces here.
+		// Boundary case: segLen=0 must also bail. The guard is `segLen < 2`, so segLen=0 is rejected. Pin this
+		// distinct from the segLen=1 test so a regression to `segLen < 1` (which would still pass the segLen=1
+		// test but loop forever at next == off when segLen=0) surfaces here.
 		byte[] jpeg = JpegFixtures.concat(JpegFixtures.soi(),
 			new byte[]{ (byte) 0xFF, (byte) 0xE1, 0x00, 0x00 });   // segLen = 0, malformed
 		List<JpegSegment> segs = JpegMetadataExtractor.extract(jpeg);
@@ -79,15 +80,13 @@ public final class JpegMetadataExtractorTest
 	public void markerFillBytesBetweenSegmentsArePreserved() throws IOException
 	{
 		// JPEG spec ITU-T T.81 §B.1.1.2: any marker may be preceded by any number of 0xFF fill bytes. Without
-		// fill-byte handling the walker would mis-read the second 0xFF as marker code 0xFF and fail to
-		// extract the APP segment that follows. This test pins the regression fix.
+		// fill-byte handling the walker would mis-read the second 0xFF as marker code 0xFF and fail to extract
+		// the APP segment that follows. This test pins the regression fix.
 		byte[] exif = JpegFixtures.exifAppPayload();
-		byte[] jpeg = JpegFixtures.concat(
-			JpegFixtures.soi(),
+		byte[] jpeg = JpegFixtures.concat(JpegFixtures.soi(),
 			new byte[] { (byte) 0xFF, (byte) 0xFF, (byte) 0xE1 }, // 1 fill byte before APP1
 			new byte[] { 0x00, (byte) (2 + exif.length) },         // segLen
-			exif,
-			JpegFixtures.minimalScanAndEoi());
+			exif, JpegFixtures.minimalScanAndEoi());
 		List<JpegSegment> segs = JpegMetadataExtractor.extract(jpeg);
 		assertEquals(1, segs.size());
 		assertEquals(0xE1, segs.get(0).marker());
@@ -114,14 +113,9 @@ public final class JpegMetadataExtractorTest
 			JpegFixtures.soi(), JpegFixtures.appSegment(0xE3, body), JpegFixtures.minimalScanAndEoi());
 		List<JpegSegment> segs = JpegMetadataExtractor.extract(jpeg);
 		assertEquals(1, segs.size());
-		byte[] data = segs.get(0).data();
-		assertEquals((byte) 0xFF, data[0]);
-		assertEquals((byte) 0xE3, data[1]);
-		assertEquals((byte) 0x00, data[2]);    // length high byte
-		assertEquals((byte) 0x05, data[3]);    // length low byte (2 + 3 payload bytes)
-		assertEquals((byte) 0x10, data[4]);
-		assertEquals((byte) 0x20, data[5]);
-		assertEquals((byte) 0x30, data[6]);
+		// FF E3 marker + length 0x0005 (2 length bytes + 3 payload bytes) + payload verbatim.
+		assertArrayEquals(new byte[] { (byte) 0xFF, (byte) 0xE3, 0x00, 0x05, 0x10, 0x20, 0x30 },
+			segs.get(0).data());
 	}
 
 	@Test

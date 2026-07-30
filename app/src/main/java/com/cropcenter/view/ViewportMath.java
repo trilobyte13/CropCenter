@@ -4,6 +4,7 @@ import android.view.View;
 
 import com.cropcenter.model.CropState;
 import com.cropcenter.util.BitmapUtils;
+import com.cropcenter.util.RotatedCropClamp;
 import com.cropcenter.util.RotationMath;
 
 /**
@@ -30,10 +31,10 @@ final class ViewportMath
 	}
 
 	// Maximum on-screen size of a single source pixel, in screen pixels. The zoom ceiling is derived as
-	// MAX_PIXEL_RATIO / baseScale so each source pixel can render at most this many screen pixels —
-	// regardless of how large or small the source image is. A 200 MP source has tiny baseScale (~0.06)
-	// and thus a high zoom ceiling (~1066); a small 1024×768 source fit at baseScale ~1.05 caps at ~60.
-	// 64 lets the user pixel-peep individual sensor pixels at maximum zoom.
+	// MAX_PIXEL_RATIO / baseScale so each source pixel can render at most this many screen pixels — regardless of
+	// how large or small the source image is. A 200 MP source has tiny baseScale (~0.06) and thus a high zoom
+	// ceiling (~1066); a small 1024×768 source fit at baseScale ~1.05 caps at ~60. 64 lets the user pixel-peep
+	// individual sensor pixels at maximum zoom.
 	private static final float MAX_PIXEL_RATIO = 64f;
 	private static final float MIN_ZOOM = 1f;
 
@@ -97,8 +98,8 @@ final class ViewportMath
 	}
 
 	/**
-	 * Zero-rotation pure-geometry overload. Backward-compat shim for tests / callers that don't have a rotation
-	 * to pass; delegates to the rotation-aware overload with rotation = 0.
+	 * Zero-rotation pure-geometry overload. Backward-compat shim for tests / callers that don't have a rotation to
+	 * pass; delegates to the rotation-aware overload with rotation = 0.
 	 *
 	 * @param imgW image width in image pixels (must be ≥ 0; behavior degenerate at 0)
 	 * @param imgH image height in image pixels (must be ≥ 0; behavior degenerate at 0)
@@ -115,8 +116,8 @@ final class ViewportMath
 	 * extend past [0, imgW] × [0, imgH] in screen-aligned coords). A stale un-rotated clamp would make those
 	 * corners unreachable at high zoom. Sub-epsilon rotations collapse to the un-rotated bounds via
 	 * RotationMath.rotatedAabbDimensions's identity branch. Note the center is clamped against the rotated
-	 * half-extents but the centering branch (visibleDim >= rotatedDim) pins to the UN-rotated midpoint
-	 * (imgW/2, imgH/2) — correct because the rotated AABB is symmetric about that same point.
+	 * half-extents but the centering branch (visibleDim >= rotatedDim) pins to the UN-rotated midpoint (imgW/2,
+	 * imgH/2) — correct because the rotated AABB is symmetric about that same point.
 	 *
 	 * Package-private so ViewportMathTest can pin the rotated clamp range.
 	 *
@@ -130,35 +131,14 @@ final class ViewportMath
 		float visibleW = size.width() / scale;
 		float visibleH = size.height() / scale;
 		float[] rotatedDims = RotationMath.rotatedAabbDimensions(imgW, imgH, rotationDegrees, new float[2]);
-		float midX = imgW / 2f;
-		float midY = imgH / 2f;
-		float halfRotatedW = rotatedDims[0] / 2f;
-		float halfRotatedH = rotatedDims[1] / 2f;
 
-		if (visibleW >= rotatedDims[0])
-		{
-			viewportX = midX;
-		}
-		else
-		{
-			viewportX = Math.clamp(viewportX, midX - halfRotatedW + visibleW / 2f,
-				midX + halfRotatedW - visibleW / 2f);
-		}
-
-		if (visibleH >= rotatedDims[1])
-		{
-			viewportY = midY;
-		}
-		else
-		{
-			viewportY = Math.clamp(viewportY, midY - halfRotatedH + visibleH / 2f,
-				midY + halfRotatedH - visibleH / 2f);
-		}
+		viewportX = RotatedCropClamp.clampCenteredExtent(viewportX, visibleW, imgW / 2f, rotatedDims[0]);
+		viewportY = RotatedCropClamp.clampCenteredExtent(viewportY, visibleH, imgH / 2f, rotatedDims[1]);
 	}
 
 	/**
-	 * CropState overload of `effectiveMinZoom(int, int, float)`. Returns the static `MIN_ZOOM` when state is
-	 * null or has no loaded image so the production callers don't have to re-check those conditions.
+	 * CropState overload of `effectiveMinZoom(int, int, float)`. Returns the static `MIN_ZOOM` when state is null
+	 * or has no loaded image so the production callers don't have to re-check those conditions.
 	 *
 	 * @param state CropState providing image dimensions + rotation; null / no-image returns `MIN_ZOOM`
 	 * @return the effective zoom-floor under the current rotation
@@ -196,9 +176,9 @@ final class ViewportMath
 		float[] rotatedDims = RotationMath.rotatedAabbDimensions(imgW, imgH, rotationDegrees, new float[2]);
 		// Defensive second-pass guard. Mathematically rotatedAabbDimensions returns positive values whenever
 		// imgW > 0 and imgH > 0 (sin²+cos² = 1, so at least one of |cos| / |sin| is strictly positive at every
-		// angle). A NaN rotation propagates as NaN through cos/sin and breaks the > 0 invariant; the form
-		// `!(a > 0 && b > 0)` rejects 0, negative, and NaN in one expression (>-comparisons return false for
-		// NaN). Falls back to MIN_ZOOM rather than crashing the zoom clamp on NaN.
+		// angle). A NaN rotation propagates as NaN through cos/sin and breaks the > 0 invariant; the form `!(a
+		// > 0 && b > 0)` rejects 0, negative, and NaN in one expression (>-comparisons return false for NaN).
+		// Falls back to MIN_ZOOM rather than crashing the zoom clamp on NaN.
 		if (!(rotatedDims[0] > 0 && rotatedDims[1] > 0))
 		{
 			return MIN_ZOOM;
@@ -209,8 +189,8 @@ final class ViewportMath
 
 	/**
 	 * Reset zoom to 1, recompute baseScale to fit the full image in the view at its current rotation, and center
-	 * the viewport on the image. Called on image load and on double-tap (outside Select mode). No-ops when state
-	 * is null, has no loaded image, or the view hasn't been measured yet (size.width() == 0).
+	 * the viewport on the image. Called on image load and on double-tap (outside Select mode). No-ops when state is
+	 * null, has no loaded image, or the view hasn't been measured yet (size.width() == 0).
 	 *
 	 * @param state CropState supplying image dimensions + rotation; null / no-image / unmeasured-view
 	 *              short-circuits without mutating viewport state
@@ -225,8 +205,8 @@ final class ViewportMath
 	}
 
 	/**
-	 * Zero-rotation pure-geometry overload. Backward-compat shim for tests / callers that don't have a rotation
-	 * to pass; delegates to the rotation-aware overload with rotation = 0.
+	 * Zero-rotation pure-geometry overload. Backward-compat shim for tests / callers that don't have a rotation to
+	 * pass; delegates to the rotation-aware overload with rotation = 0.
 	 *
 	 * @param imgW image width in image pixels (must be > 0; behavior undefined at 0)
 	 * @param imgH image height in image pixels (must be > 0; behavior undefined at 0)
@@ -239,15 +219,15 @@ final class ViewportMath
 	/**
 	 * Pure-geometry overload taking image dimensions plus rotation directly. The rotated image's axis-aligned
 	 * bounding box (rotatedW = |imgW·cos θ| + |imgH·sin θ|, rotatedH = |imgW·sin θ| + |imgH·cos θ|) is what
-	 * actually has to fit on screen — using the unrotated imgW × imgH gives a baseScale that lets the rotated
-	 * image extend past the view's edges at every non-cardinal angle. Sub-epsilon rotations are treated as zero
-	 * (and use the unrotated dims directly) so the result matches the legacy two-arg overload exactly at the
-	 * zero-rotation common case.
+	 * actually has to fit on screen — using the unrotated imgW × imgH gives a baseScale that lets the rotated image
+	 * extend past the view's edges at every non-cardinal angle. Sub-epsilon rotations are treated as zero (and use
+	 * the unrotated dims directly) so the result matches the two-arg overload exactly at the zero-rotation common
+	 * case — no trig round-off in the baseScale.
 	 *
-	 * Package-private so ViewportMathTest can pin the baseScale formula (min of width-ratio / height-ratio
-	 * against the rotated bounding box) and the zoom-reset / center-viewport contract without a Bitmap-bound
-	 * CropState. Assumes the caller has already null-checked the source image and the view dimensions;
-	 * production callers go through the CropState overload above so those guards live in one place.
+	 * Package-private so ViewportMathTest can pin the baseScale formula (min of width-ratio / height-ratio against
+	 * the rotated bounding box) and the zoom-reset / center-viewport contract without a Bitmap-bound CropState.
+	 * Assumes the caller has already null-checked the source image and the view dimensions; production callers go
+	 * through the CropState overload above so those guards live in one place.
 	 *
 	 * @param imgW            image width in image pixels (must be > 0; behavior undefined at 0)
 	 * @param imgH            image height in image pixels (must be > 0; behavior undefined at 0)
@@ -258,9 +238,9 @@ final class ViewportMath
 	{
 		// Sub-epsilon rotations and the trig formula both flow through RotationMath.rotatedAabbDimensions —
 		// using the shared helper keeps fit-to-view consistent with CropEngine.computeMaxCropSize and
-		// clampFreeAxes, which read the same rotated-bounding-box dimensions for the rotation-aware crop
-		// math. Drift between the two callsites would surface as a crop overlay that doesn't quite fit
-		// inside the rotated image at the fit-to-view zoom.
+		// clampFreeAxes, which read the same rotated-bounding-box dimensions for the rotation-aware crop math.
+		// Drift between the two callsites would surface as a crop overlay that doesn't quite fit inside the
+		// rotated image at the fit-to-view zoom.
 		float[] rotatedDims = RotationMath.rotatedAabbDimensions(imgW, imgH, rotationDegrees, new float[2]);
 		baseScale = Math.min(size.width() / rotatedDims[0], size.height() / rotatedDims[1]);
 		zoom = 1f;
@@ -279,8 +259,8 @@ final class ViewportMath
 	}
 
 	/**
-	 * Current zoom factor on top of baseScale. 1 = fit-to-view; capped at maxZoom() so each source
-	 * pixel renders at no more than MAX_PIXEL_RATIO screen pixels.
+	 * Current zoom factor on top of baseScale. 1 = fit-to-view; capped at maxZoom() so each source pixel renders at
+	 * no more than MAX_PIXEL_RATIO screen pixels.
 	 *
 	 * @return the current zoom multiplier (1 at fit-to-view, up to maxZoom())
 	 */
@@ -294,8 +274,8 @@ final class ViewportMath
 	 * that the editor's onDraw applies to the bitmap. Use this for overlays (selection points, polygon vertices)
 	 * whose visual position must track image content as the user rotates. For overlays defined in image-coord
 	 * axis-aligned space (the crop rectangle, dim regions), use imageToScreenX/Y directly. Writes the rotated
-	 * screen coordinates into `out[0]` / `out[1]` and returns `out`; callers in onDraw reuse a per-renderer
-	 * scratch buffer so the per-frame path does no allocation.
+	 * screen coordinates into `out[0]` / `out[1]` and returns `out`; callers in onDraw reuse a per-renderer scratch
+	 * buffer so the per-frame path does no allocation.
 	 *
 	 * @param ix    image X coordinate
 	 * @param iy    image Y coordinate
@@ -347,19 +327,18 @@ final class ViewportMath
 
 	/**
 	 * Upper bound of the zoom range. Computed from baseScale so each source pixel can render at most
-	 * MAX_PIXEL_RATIO screen pixels — large images get a high ceiling, small images a low one.
-	 * Floored to MIN_ZOOM so a degenerate baseScale (0 / negative / NaN — only reachable before
-	 * fitToView measured the view) can't collapse the cap below 1 and trap the user below fit-to-view.
+	 * MAX_PIXEL_RATIO screen pixels — large images get a high ceiling, small images a low one. Floored to MIN_ZOOM
+	 * so a degenerate baseScale (0 / negative / NaN — only reachable before fitToView measured the view) can't
+	 * collapse the cap below 1 and trap the user below fit-to-view.
 	 *
 	 * @return the current zoom-ceiling (MAX_PIXEL_RATIO / baseScale, floored at MIN_ZOOM)
 	 */
 	float maxZoom()
 	{
-		// `!(x > 0)` catches 0, negative, AND NaN (>-comparisons return false for NaN, so the
-		// outer ! flips that to true). The plain `baseScale <= 0f` form would silently let NaN
-		// through and propagate a NaN cap up to the zoom clamp. baseScale can be NaN when the
-		// view is unmeasured AND imgW=0 hits the 0/0 division in fitToView (rotatedDims[0]=0 →
-		// size.width()/0 = NaN with size.width()=0).
+		// `!(x > 0)` catches 0, negative, AND NaN (>-comparisons return false for NaN, so the outer ! flips
+		// that to true). The plain `baseScale <= 0f` form would silently let NaN through and propagate a NaN
+		// cap up to the zoom clamp. baseScale can be NaN when the view is unmeasured AND imgW=0 hits the 0/0
+		// division in fitToView (rotatedDims[0]=0 → size.width()/0 = NaN with size.width()=0).
 		if (!(baseScale > 0f))
 		{
 			return MIN_ZOOM;
@@ -368,9 +347,9 @@ final class ViewportMath
 	}
 
 	/**
-	 * Pan the viewport by a SCREEN-space delta. Converts to image pixels via the current zoom, then clamps.
-	 * Skips clamping when state is null or has no loaded image — the pan-arithmetic side still runs, matching
-	 * the prior behavior where a pan without an image just updated the viewport variables.
+	 * Pan the viewport by a SCREEN-space delta. Converts to image pixels via the current zoom, then clamps. Skips
+	 * clamping when state is null or has no loaded image — the pan-arithmetic side still runs, so a pan without an
+	 * image just updates the viewport variables.
 	 *
 	 * @param dx    screen-space X delta (positive = pan right; viewport shifts left)
 	 * @param dy    screen-space Y delta (positive = pan down; viewport shifts up)
@@ -400,10 +379,10 @@ final class ViewportMath
 	}
 
 	/**
-	 * Pure-geometry overload taking image dimensions plus rotation directly. Package-private so
-	 * ViewportMathTest can pin the screen-delta-to-image-pixels conversion AND the rotation-aware post-pan
-	 * clamp (the rotated image's far corners sit outside `[0, imgW] × [0, imgH]` and the un-rotated clamp
-	 * would make them unreachable at high zoom).
+	 * Pure-geometry overload taking image dimensions plus rotation directly. Package-private so ViewportMathTest
+	 * can pin the screen-delta-to-image-pixels conversion AND the rotation-aware post-pan clamp (the rotated
+	 * image's far corners sit outside `[0, imgW] × [0, imgH]` and the un-rotated clamp would make them unreachable
+	 * at high zoom).
 	 *
 	 * @param dx              screen-space X delta (positive = pan right; viewport shifts left)
 	 * @param dy              screen-space Y delta (positive = pan down; viewport shifts up)
@@ -421,8 +400,8 @@ final class ViewportMath
 
 	/**
 	 * Convert a SCREEN point to IMAGE pixel coordinates, accounting for the CropState rotation applied at draw
-	 * time. Returns a fresh `float[2]` of image pixels (possibly outside image bounds — caller checks).
-	 * Allocates per call — for hot per-frame loops use `screenToImagePixelInto` instead.
+	 * time. Returns a fresh `float[2]` of image pixels (possibly outside image bounds — caller checks). Allocates
+	 * per call — for hot per-frame loops use `screenToImagePixelInto` instead.
 	 *
 	 * @param screenX screen-space X coordinate
 	 * @param screenY screen-space Y coordinate
@@ -496,14 +475,13 @@ final class ViewportMath
 	}
 
 	/**
-	 * Zoom at a screen-space focus point, keeping that point stationary under the finger. Clamps zoom
-	 * against [effectiveMinZoom(state), maxZoom()] — at rotation, the lower bound drops below 1 so the
-	 * user can pinch out far enough to fit the rotated bounding box on screen (the rotated image is
-	 * bigger than the un-rotated image, so fit-to-rotated needs an effective scale below baseScale).
-	 * The upper bound is per-image: each source pixel can render at most MAX_PIXEL_RATIO screen pixels,
-	 * so large source images get a high ceiling and small ones get a low ceiling. Re-clamps the
-	 * viewport against the new scale. Skips the viewport clamp when state is null or has no loaded
-	 * image — the zoom + focus-shift arithmetic still runs.
+	 * Zoom at a screen-space focus point, keeping that point stationary under the finger. Clamps zoom against
+	 * [effectiveMinZoom(state), maxZoom()] — at rotation, the lower bound drops below 1 so the user can pinch out
+	 * far enough to fit the rotated bounding box on screen (the rotated image is bigger than the un-rotated image,
+	 * so fit-to-rotated needs an effective scale below baseScale). The upper bound is per-image: each source pixel
+	 * can render at most MAX_PIXEL_RATIO screen pixels, so large source images get a high ceiling and small ones
+	 * get a low ceiling. Re-clamps the viewport against the new scale. Skips the viewport clamp when state is null
+	 * or has no loaded image — the zoom + focus-shift arithmetic still runs.
 	 *
 	 * @param scaleFactor multiplier applied to the current zoom (clamped post-multiply to
 	 *                    [effectiveMinZoom(state), maxZoom()])
@@ -525,8 +503,8 @@ final class ViewportMath
 	}
 
 	/**
-	 * Zero-rotation pure-geometry overload taking image dimensions directly. Backward-compat shim for tests
-	 * that don't have a rotation to pass; delegates to the rotation-aware overload with rotation = 0.
+	 * Zero-rotation pure-geometry overload taking image dimensions directly. Backward-compat shim for tests that
+	 * don't have a rotation to pass; delegates to the rotation-aware overload with rotation = 0.
 	 *
 	 * @param scaleFactor multiplier applied to zoom (clamped post-multiply to [MIN_ZOOM=1, maxZoom()] at
 	 *                    zero rotation)
@@ -541,12 +519,12 @@ final class ViewportMath
 	}
 
 	/**
-	 * Pure-geometry overload taking image dimensions plus rotation directly. Package-private so
-	 * ViewportMathTest can pin the "focus stays under the finger" identity, the rotation-aware zoom-clamp
-	 * lower bound, and the post-zoom viewport clamp — without a Bitmap-bound CropState. At non-zero rotation
-	 * the minimum zoom is `min(1, (view-fit-to-rotated-AABB) / baseScale)` so a user who fit-to-view at one
-	 * rotation can still zoom out to fit at a later (more extreme) rotation without having to re-fit. The
-	 * upper bound is `maxZoom() = MAX_PIXEL_RATIO / baseScale` — per-image rather than a flat constant.
+	 * Pure-geometry overload taking image dimensions plus rotation directly. Package-private so ViewportMathTest
+	 * can pin the "focus stays under the finger" identity, the rotation-aware zoom-clamp lower bound, and the
+	 * post-zoom viewport clamp — without a Bitmap-bound CropState. At non-zero rotation the minimum zoom is `min(1,
+	 * (view-fit-to-rotated-AABB) / baseScale)` so a user who fit-to-view at one rotation can still zoom out to fit
+	 * at a later (more extreme) rotation without having to re-fit. The upper bound is `maxZoom() = MAX_PIXEL_RATIO
+	 * / baseScale` — per-image rather than a flat constant.
 	 *
 	 * @param scaleFactor     multiplier applied to zoom (clamped post-multiply to
 	 *                        [effectiveMinZoom(imgW, imgH, rotationDegrees), maxZoom()])

@@ -2,10 +2,10 @@ package com.cropcenter.model;
 
 import static org.junit.Assert.assertEquals;
 
+import org.junit.Test;
+
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicInteger;
-
-import org.junit.Test;
 
 /**
  * Tests for StateBus's listener-dispatch + batch-suppression protocol. Lives in com.cropcenter.model so the
@@ -19,15 +19,13 @@ public final class StateBusTest
 	@Test
 	public void concurrentNotifyAcrossEndBatchNeverLosesDirtyFlag() throws Exception
 	{
-		// Race: bg thread enters notifyChanged() and reads batchDepth > 0; UI thread interleaves
-		// endBatch() that decrements depth to 0 and reads batchDirty == false (bg hasn't set it yet);
-		// bg sets batchDirty = true and returns. The dirty flag is stranded — endBatch already passed
-		// its check, only the next batch flushes it. notifyChanged + endBatch share one synchronized
-		// section so endBatch either sees a dirty flag inside the lock-protected window or sees that
-		// no notify is in flight.
-		//
-		// Test: fresh bus per trial; main opens a batch; bg + ui race notifyChanged against endBatch;
-		// every trial must produce at least one fire (no stranding).
+		// Race: bg thread enters notifyChanged() and reads batchDepth > 0; UI thread interleaves endBatch()
+		// that decrements depth to 0 and reads batchDirty == false (bg hasn't set it yet); bg sets batchDirty =
+		// true and returns. The dirty flag is stranded — endBatch already passed its check, only the next batch
+		// flushes it. notifyChanged + endBatch share one synchronized section so endBatch either sees a dirty
+		// flag inside the lock-protected window or sees that no notify is in flight. Test: fresh bus per trial;
+		// main opens a batch; bg + ui race notifyChanged against endBatch; every trial must produce at least
+		// one fire (no stranding).
 		int trials = 1000;
 		int strandedTrials = 0;
 		for (int trial = 0; trial < trials; trial++)
@@ -82,20 +80,18 @@ public final class StateBusTest
 				strandedTrials++;
 			}
 		}
-		assertEquals("notify across endBatch must never be stranded (race regression)",
-			0, strandedTrials);
+		assertEquals("notify across endBatch must never be stranded (race regression)", 0, strandedTrials);
 	}
 
 	@Test
 	public void concurrentSetListenerNullDuringFireNeverNpes() throws Exception
 	{
 		// Race: bg enters fire(), reads `this.listener != null` in the guard (non-null); UI interleaves
-		// setListener(null); bg re-reads at the invocation site → NPE. Activity.onDestroy clears the
-		// listener precisely so a late-firing bg worker can no-op safely, so an NPE here defeats the
-		// lifecycle guard. fire() snapshots the volatile field to a local before the guard+invoke pair.
-		//
-		// Test: bg spams notifyChanged() while UI alternates setListener(non-null) / setListener(null).
-		// Any NPE caught surfaces as a non-zero failure count.
+		// setListener(null); bg re-reads at the invocation site → NPE. Activity.onDestroy clears the listener
+		// precisely so a late-firing bg worker can no-op safely, so an NPE here defeats the lifecycle guard.
+		// fire() snapshots the volatile field to a local before the guard+invoke pair. Test: bg spams
+		// notifyChanged() while UI alternates setListener(non-null) / setListener(null). Any NPE caught
+		// surfaces as a non-zero failure count.
 		int iterations = 5000;
 		StateBus bus = new StateBus();
 		AtomicInteger fires = new AtomicInteger();

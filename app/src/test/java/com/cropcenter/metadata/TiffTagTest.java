@@ -5,10 +5,10 @@ import static org.junit.Assert.assertEquals;
 import org.junit.Test;
 
 /**
- * Pins the TIFF / EXIF / MPF constant values against their spec sources. The constants are wire-format tag
- * IDs and entry-type codes — a regression that flips e.g. ORIENTATION to a wrong hex would silently corrupt
- * every saved JPEG / PNG eXIf chunk and only manifest at runtime in real EXIF parsers. These assertions are
- * cheap insurance for a class that's loaded into 4+ metadata-walking sites.
+ * Pins the TIFF / EXIF / MPF constant values against their spec sources. The constants are wire-format tag IDs and
+ * entry-type codes — a regression that flips e.g. ORIENTATION to a wrong hex would silently corrupt every saved JPEG /
+ * PNG eXIf chunk and only manifest at runtime in real EXIF parsers. These assertions are cheap insurance for a class
+ * that's loaded into 4+ metadata-walking sites.
  *
  * Sources: TIFF 6.0 spec (Adobe), EXIF 2.32 (CIPA DC-008-2019), CIPA DC-007-2009 (MPF).
  */
@@ -17,9 +17,9 @@ public final class TiffTagTest
 	@Test
 	public void compressionTag()
 	{
-		// TIFF 6.0 §22 Compression — used by `ExifPatcher`'s IFD0 sanitisation (zeros the entry
-		// when it leaks into IFD0, since it belongs in IFD1) and by `buildFreshIfd1Header` (writes
-		// the value 6 = JPEG into the fresh IFD1).
+		// TIFF 6.0 §22 Compression — used by `ExifPatcher`'s IFD0 sanitisation (zeros the entry when it leaks
+		// into IFD0, since it belongs in IFD1) and by `buildFreshIfd1Header` (writes the value 6 = JPEG into
+		// the fresh IFD1).
 		assertEquals(0x0103, TiffTag.COMPRESSION);
 	}
 
@@ -71,11 +71,11 @@ public final class TiffTagTest
 	@Test
 	public void tiffMagic()
 	{
-		// TIFF 6.0 §2 — the 16-bit magic that follows the byte-order marker (II*\0 or MM\0*).
-		// Required by every TIFF-body validity check across `ExifPatcher`, `PngMetadataExtractor`,
-		// `BitmapUtils.readExifOrientationInternal`, `MpfPatcher`, `JpegSegment.isExtendedXmp`'s
-		// downstream walkers. A regression here would silently reject every big-endian Samsung
-		// MM TIFF that survives the byte-order check but fails the swapped-magic-bytes test.
+		// TIFF 6.0 §2 — the 16-bit magic that follows the byte-order marker (II*\0 or MM\0*). Required by every
+		// TIFF-body validity check across `ExifPatcher`, `PngMetadataExtractor`,
+		// `BitmapUtils.readExifOrientationInternal`, `MpfPatcher`, `JpegSegment.isExtendedXmp`'s downstream
+		// walkers. A regression here would silently reject every big-endian Samsung MM TIFF that survives the
+		// byte-order check but fails the swapped-magic-bytes test.
 		assertEquals(42, TiffTag.MAGIC);
 	}
 

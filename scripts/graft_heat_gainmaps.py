@@ -10,13 +10,12 @@ Renders a 3-panel composite per stem at gain-map scale in display orient:
     Panel 2: Source gain-map heat-mapped 0..255
     Panel 3: Graft  gain-map heat-mapped 0..255
 
-Color ramp: black → blue → magenta → orange → yellow → white as the gain-map byte
-sweeps 0 → 255. Bright = high HDR boost, dark = no boost.
+Color ramp: black → blue → magenta → orange → yellow → white as the gain-map byte sweeps 0 → 255. Bright = high HDR
+boost, dark = no boost.
 
-Panels 2 and 3 should look qualitatively identical — the graft pipeline only modifies
-pixels inside the AI region, so the global gain-map distribution should preserve.
-A visible difference between them indicates either an inpaint that's spilling out of
-the masked region, or a Skia re-encode that's significantly perturbing source content.
+Panels 2 and 3 should look qualitatively identical — the graft pipeline only modifies pixels inside the AI region, so
+the global gain-map distribution should preserve. A visible difference between them indicates either an inpaint that's
+spilling out of the masked region, or a Skia re-encode that's significantly perturbing source content.
 
 Output: <stem>-gainmaps-heat.png
 """
@@ -97,12 +96,11 @@ def render(stem):
 
 
 def _build_thermal_lut():
-	"""256-entry RGB lookup table for thermal-style gain-map visualization. Black at 0,
-	dark blue at 1/4, magenta at 1/2, orange at 3/4, white at 255. Different ramp than
-	graft_lib.heat() — this one runs the full 0..255 range and emphasises mid-range
-	gradients, which is what you want for showing gain-map content (most pixels in the
-	100-130 range with peaks at the bright spots) vs gain-map diff (mostly 0 with sparse
-	1-2s, where the heat() ramp's bottom-heavy weighting matters more).
+	"""256-entry RGB lookup table for thermal-style gain-map visualization. Black at 0, dark blue at 1/4, magenta at
+	1/2, orange at 3/4, white at 255. Different ramp than graft_lib.heat() — this one runs the full 0..255 range and
+	emphasises mid-range gradients, which is what you want for showing gain-map content (most pixels in the 100-130
+	range with peaks at the bright spots) vs gain-map diff (mostly 0 with sparse 1-2s, where the heat() ramp's
+	bottom-heavy weighting matters more).
 	"""
 	lut = np.zeros((256, 3), dtype=np.uint8)
 	for i in range(256):

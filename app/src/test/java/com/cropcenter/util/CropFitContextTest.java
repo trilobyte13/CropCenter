@@ -6,9 +6,9 @@ import static org.junit.Assert.assertTrue;
 import org.junit.Test;
 
 /**
- * Tests for the CropFitContext factory and the negation invariant. The factory caches `cos(-θ)` and `sin(-θ)`
- * because RotatedCropClamp checks corners by un-rotating them — a sign flip in `of()` would silently corrupt
- * every rotated-crop clamp call across the codebase.
+ * Tests for the CropFitContext factory and the negation invariant. The factory caches `cos(-θ)` and `sin(-θ)` because
+ * RotatedCropClamp checks corners by un-rotating them — a sign flip in `of()` would silently corrupt every rotated-crop
+ * clamp call across the codebase.
  */
 public final class CropFitContextTest
 {
@@ -47,8 +47,8 @@ public final class CropFitContextTest
 	@Test
 	public void ofAtZeroRotationProducesCosOneSinZero()
 	{
-		// Identity rotation — cos(0) = 1, sin(0) = 0. Pin so a regression that drops the negation never
-		// shows up here because zero is its own negation.
+		// Identity rotation — cos(0) = 1, sin(0) = 0. Pin so a regression that drops the negation never shows
+		// up here because zero is its own negation.
 		CropFitContext ctx = CropFitContext.of(100, 80, 0f, 1000, 800);
 		assertEquals(1.0, ctx.cosR(), 1e-9);
 		assertEquals(0.0, ctx.sinR(), 1e-9);
@@ -57,8 +57,8 @@ public final class CropFitContextTest
 	@Test
 	public void ofComputesHalfDimensionsAsFloatNotInt()
 	{
-		// Odd cropW / cropH must produce half-pixel offsets — `cropW / 2f` not `cropW / 2` (integer
-		// division). Pin so a regression that drops the float divisor surfaces here.
+		// Odd cropW / cropH must produce half-pixel offsets — `cropW / 2f` not `cropW / 2` (integer division).
+		// Pin so a regression that drops the float divisor surfaces here.
 		CropFitContext ctx = CropFitContext.of(7, 5, 0f, 1000, 800);
 		assertEquals(3.5f, ctx.halfWidth(), 0f);
 		assertEquals(2.5f, ctx.halfHeight(), 0f);
@@ -76,8 +76,8 @@ public final class CropFitContextTest
 	@Test
 	public void ofInfinityRotationProducesNanTrig()
 	{
-		// Mirror NaN behavior — Infinity is the other non-finite input that could leak through if a
-		// future caller bypassed CropState's setRotationDegrees sanitisation. Math.cos(Infinity) and
+		// Mirror NaN behavior — Infinity is the other non-finite input that could leak through if a future
+		// caller bypassed CropState's setRotationDegrees sanitisation. Math.cos(Infinity) and
 		// Math.sin(Infinity) both return NaN per JLS.
 		CropFitContext ctx = CropFitContext.of(100, 80, Float.POSITIVE_INFINITY, 1000, 800);
 		assertTrue(Double.isNaN(ctx.cosR()));
@@ -89,11 +89,10 @@ public final class CropFitContextTest
 	@Test
 	public void ofNanRotationProducesNanTrig()
 	{
-		// CropState.setRotationDegrees sanitises NaN to 0, so production never reaches this helper
-		// with NaN. But the helper is package-public static — a future refactor that bypasses
-		// CropState could call it directly with NaN. Pin the actual behaviour (NaN propagates
-		// through Math.cos/sin to both cosR/sinR) so callers can rely on "non-finite in → non-finite
-		// out" rather than crash or coincidental zero.
+		// CropState.setRotationDegrees sanitises NaN to 0, so production never reaches this helper with NaN.
+		// But the helper is package-public static — a future refactor that bypasses CropState could call it
+		// directly with NaN. Pin the actual behaviour (NaN propagates through Math.cos/sin to both cosR/sinR)
+		// so callers can rely on "non-finite in → non-finite out" rather than crash or coincidental zero.
 		CropFitContext ctx = CropFitContext.of(100, 80, Float.NaN, 1000, 800);
 		assertTrue(Double.isNaN(ctx.cosR()));
 		assertTrue(Double.isNaN(ctx.sinR()));

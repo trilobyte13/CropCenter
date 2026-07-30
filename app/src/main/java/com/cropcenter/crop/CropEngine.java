@@ -22,10 +22,10 @@ import java.util.List;
  */
 public final class CropEngine
 {
-	// Local alias for AspectRatio.MIN_CROP_DIMENSION_PX — moved to AspectRatio (model/) so model/
-	// doesn't depend on crop/. Alias keeps the existing CropEngine.MIN_CROP_DIMENSION_PX call sites
-	// working without the long-name AspectRatio.MIN_CROP_DIMENSION_PX at each Math.max call. The
-	// original constant docstring (4-px floor, why) lives on AspectRatio.MIN_CROP_DIMENSION_PX.
+	// Local alias for AspectRatio.MIN_CROP_DIMENSION_PX — moved to AspectRatio (model/) so model/ doesn't depend on
+	// crop/. Alias keeps the existing CropEngine.MIN_CROP_DIMENSION_PX call sites working without the long-name
+	// AspectRatio.MIN_CROP_DIMENSION_PX at each Math.max call. The original constant docstring (4-px floor, why)
+	// lives on AspectRatio.MIN_CROP_DIMENSION_PX.
 	public static final int MIN_CROP_DIMENSION_PX = AspectRatio.MIN_CROP_DIMENSION_PX;
 
 	private CropEngine() {}
@@ -82,12 +82,12 @@ public final class CropEngine
 	 */
 	public static void recomputeCrop(CropState state)
 	{
-		// Snapshot the volatile sourceImage reference once. The post-check getImageWidth() /
-		// getImageHeight() reads each independently dereference the same volatile field (CropState
-		// returns 0 when null), so a bg-thread reset() between the null check and the dimension
-		// reads would silently produce imgW=imgH=0, collapse rotatedAabbDimensions to (0, 0), and
-		// leave Math.clamp(center, 0, 0) writing a (0, 0) crop center. Snapshot here and read
-		// dimensions off the local Bitmap so reset() can null state.sourceImage independently.
+		// Snapshot the volatile sourceImage reference once. The post-check getImageWidth() / getImageHeight()
+		// reads each independently dereference the same volatile field (CropState returns 0 when null), so a
+		// bg-thread reset() between the null check and the dimension reads would silently produce imgW=imgH=0,
+		// collapse rotatedAabbDimensions to (0, 0), and leave Math.clamp(center, 0, 0) writing a (0, 0) crop
+		// center. Snapshot here and read dimensions off the local Bitmap so reset() can null state.sourceImage
+		// independently.
 		Bitmap source = state.getSourceImage();
 		if (!state.hasCenter() || source == null)
 		{
@@ -98,14 +98,14 @@ public final class CropEngine
 		int imgH = source.getHeight();
 		float rotation = state.getRotationDegrees();
 
-		// Compute the rotated AABB bounds for centerX / centerY. centerX / centerY live in screen-aligned
-		// image space — the same coords that the editor's crop overlay draws into via `imageToScreenX/Y`,
-		// which is a linear (un-rotated) map. When the image is rotated, the bitmap pixel at (px, py) appears
-		// at the forward-rotated position on screen, which can lie OUTSIDE the un-rotated [0, imgW] ×
-		// [0, imgH] bitmap rectangle. So the legitimate range of centerX / centerY is the rotated AABB —
-		// `[imgW/2 ± rotatedW/2]` × `[imgH/2 ± rotatedH/2]`. Clamping to the un-rotated bitmap bounds (the
-		// old behavior) pulled out-of-bitmap-but-in-AABB selection centers back onto the bitmap edge,
-		// causing the crop to be drawn far from the user's selection points at high rotation.
+		// Compute the rotated AABB bounds for centerX / centerY. centerX / centerY live in screen-aligned image
+		// space — the same coords that the editor's crop overlay draws into via `imageToScreenX/Y`, which is a
+		// linear (un-rotated) map. When the image is rotated, the bitmap pixel at (px, py) appears at the
+		// forward-rotated position on screen, which can lie OUTSIDE the un-rotated [0, imgW] × [0, imgH] bitmap
+		// rectangle. So the legitimate range of centerX / centerY is the rotated AABB — `[imgW/2 ± rotatedW/2]`
+		// × `[imgH/2 ± rotatedH/2]`. Clamping to the un-rotated bitmap bounds instead would pull
+		// out-of-bitmap-but-in-AABB selection centers back onto the bitmap edge, drawing the crop far from the
+		// user's selection points at high rotation.
 		float[] rotatedDims = RotationMath.rotatedAabbDimensions(imgW, imgH, rotation, new float[2]);
 		float halfRotatedW = rotatedDims[0] / 2f;
 		float halfRotatedH = rotatedDims[1] / 2f;
@@ -123,8 +123,8 @@ public final class CropEngine
 		if (!state.isCropSizeDirty() && state.getCropW() > 0 && state.getCropH() > 0)
 		{
 			// Size locked — keep cropW / cropH, let setCenter clamp centerX / centerY into the rotated
-			// image bounds. No parity snap: cropImageX is the continuous-float `centerX − cropW / 2f`
-			// from getCropImageXFloat; the exporter's float-origin path absorbs the sub-pixel bias.
+			// image bounds. No parity snap: cropImageX is the continuous-float `centerX − cropW / 2f` from
+			// getCropImageXFloat; the exporter's float-origin path absorbs the sub-pixel bias.
 			state.setCropSizeSilent(state.getCropW(), state.getCropH());
 			state.setCenter(centerX, centerY);
 			return;
@@ -162,19 +162,18 @@ public final class CropEngine
 			}
 		}
 
-		int roundedCropW = Math.max(MIN_CROP_DIMENSION_PX, Math.round(Math.max(MIN_CROP_DIMENSION_PX, cropW)));
-		int roundedCropH = Math.max(MIN_CROP_DIMENSION_PX, Math.round(Math.max(MIN_CROP_DIMENSION_PX, cropH)));
-		// Snap to exact-integer aspect ratio — eliminates the per-axis ½-pixel drift that produced
-		// 0.79989 instead of 0.80000 on locked 4:5 (round(2990.4)=2990, round(3737.5)=3738; the pair
-		// drifts off the locked AR even though the float dims were exact). Pass the rounded dims as
-		// the snap bounds (no-grow) — computeMaxCropSize already produced the largest crop that fits
-		// at the locked center, so allowing snap-up against imgW / imgH would let the snap exceed
-		// what fits at the user's anchored center, and the subsequent setCenter clamp would silently
-		// drift the locked center inward. No-op for FREE / fractional ARs.
-		int[] snapped = state.getAspectRatio().snap(roundedCropW, roundedCropH,
-			roundedCropW, roundedCropH);
+		int roundedCropW = Math.max(MIN_CROP_DIMENSION_PX, Math.round(cropW));
+		int roundedCropH = Math.max(MIN_CROP_DIMENSION_PX, Math.round(cropH));
+		// Snap to exact-integer aspect ratio — eliminates the per-axis ½-pixel drift that produced 0.79989
+		// instead of 0.80000 on locked 4:5 (round(2990.4)=2990, round(3737.5)=3738; the pair drifts off the
+		// locked AR even though the float dims were exact). Pass the rounded dims as the snap bounds (no-grow)
+		// — computeMaxCropSize already produced the largest crop that fits at the locked center, so allowing
+		// snap-up against imgW / imgH would let the snap exceed what fits at the user's anchored center, and
+		// the subsequent setCenter clamp would silently drift the locked center inward. No-op for FREE /
+		// fractional ARs.
+		int[] snapped = state.getAspectRatio().snap(roundedCropW, roundedCropH, roundedCropW, roundedCropH);
 		state.setCropSizeSilent(snapped[0], snapped[1]);
-		state.setCropSizeDirty(false);
+		state.clearCropSizeDirty();
 		state.setCenter(centerX, centerY);
 
 		recheckRotationFit(state, imgW, imgH, rotation);
@@ -185,11 +184,11 @@ public final class CropEngine
 	 * take the axis-aligned bounding box there, return its midpoint. Rotation doesn't commute with AABB, so this
 	 * differs (correctly) from rotating the un-rotated midpoint.
 	 *
-	 * Used by CropEngine.recomputeCrop (Select-mode center) and MainActivity.recenterOnSelection (lock-axis
-	 * switch in Move mode on a rotated image) — sharing one formula means switching Select↔Move can't shift the
-	 * crop's visual position. For a single point, snaps to the nearest half-integer in rotated space so the
-	 * grid's middle line draws through the marker pixel (onTap pre-snaps to pixel+0.5 un-rotated; rotation makes
-	 * that fractional, so a re-snap is needed).
+	 * Used by CropEngine.recomputeCrop (Select-mode center) and MainActivity.recenterOnSelection (lock-axis switch
+	 * in Move mode on a rotated image) — sharing one formula means switching Select↔Move can't shift the crop's
+	 * visual position. For a single point, snaps to the nearest half-integer in rotated space so the grid's middle
+	 * line draws through the marker pixel (onTap pre-snaps to pixel+0.5 un-rotated; rotation makes that fractional,
+	 * so a re-snap is needed).
 	 *
 	 * @param points   selection points in un-rotated image coords
 	 * @param imgW     source image width
@@ -224,14 +223,14 @@ public final class CropEngine
 	}
 
 	/**
-	 * Shift free-axis centers so the crop stays inside the rotated AABB. Guards the degenerate case where the
-	 * crop dimension meets or exceeds the AABB extent on its axis (the upper clamp bound would fall ≤ the lower
-	 * and Math.clamp would throw) by centering on the image midpoint. Rotation-aware: at zero rotation
-	 * rotatedW = imgW and it matches pre-rotation behavior.
+	 * Shift free-axis centers so the crop stays inside the rotated AABB. The degenerate case where the crop
+	 * dimension meets or exceeds the AABB extent on its axis centers on the image midpoint — the guard lives in
+	 * RotatedCropClamp.clampCenteredExtent. Rotation-aware: at zero rotation rotatedW = imgW and it matches
+	 * pre-rotation behavior.
 	 *
 	 * Package-private so CropEngineGeometryTest pins the formula — a regression flipping the locked/free
-	 * predicates or dropping the "cropW >= rotatedW → midpoint" guard would let Math.clamp throw lo > hi instead
-	 * of centering safely.
+	 * predicates would desynchronise the axes, and the "cropW >= rotatedW → midpoint" guard is what keeps
+	 * Math.clamp from throwing lo > hi instead of centering safely.
 	 *
 	 * @param centerX         current crop center X (screen-aligned image coords)
 	 * @param centerY         current crop center Y (screen-aligned image coords)
@@ -244,8 +243,7 @@ public final class CropEngine
 	 * @param rotationDegrees current rotation; sets the rotated AABB the free axes clamp against
 	 * @return [shiftedX, shiftedY] keeping the crop inside the rotated AABB on each free axis
 	 */
-	static float[] clampFreeAxes(float centerX, float centerY,
-		float cropW, float cropH, int imgW, int imgH,
+	static float[] clampFreeAxes(float centerX, float centerY, float cropW, float cropH, int imgW, int imgH,
 		boolean lockedX, boolean lockedY, float rotationDegrees)
 	{
 		float[] rotatedDims = RotationMath.rotatedAabbDimensions(imgW, imgH, rotationDegrees, new float[2]);
@@ -255,27 +253,20 @@ public final class CropEngine
 		float imageMidY = imgH / 2f;
 		if (!lockedX)
 		{
-			centerX = (cropW < rotatedW)
-				? Math.clamp(centerX, imageMidX - rotatedW / 2f + cropW / 2f,
-					imageMidX + rotatedW / 2f - cropW / 2f)
-				: imageMidX;
+			centerX = RotatedCropClamp.clampCenteredExtent(centerX, cropW, imageMidX, rotatedW);
 		}
 		if (!lockedY)
 		{
-			centerY = (cropH < rotatedH)
-				? Math.clamp(centerY, imageMidY - rotatedH / 2f + cropH / 2f,
-					imageMidY + rotatedH / 2f - cropH / 2f)
-				: imageMidY;
+			centerY = RotatedCropClamp.clampCenteredExtent(centerY, cropH, imageMidY, rotatedH);
 		}
 		return new float[] { centerX, centerY };
 	}
 
 	/**
 	 * Compute the maximum crop size per axis, subject to lock mode and aspect ratio. Locked axes are symmetric
-	 * about the center (keeping a selection framed); free axes get the full rotated-AABB extent (clamped later
-	 * by clampFreeAxes). Rotation-aware: at zero rotation the rotated AABB matches the un-rotated bounds; at
-	 * non-zero rotation it's bigger, and the resulting crop is shrunk to fit by the downstream
-	 * maxScaleForRotation pass.
+	 * about the center (keeping a selection framed); free axes get the full rotated-AABB extent (clamped later by
+	 * clampFreeAxes). Rotation-aware: at zero rotation the rotated AABB matches the un-rotated bounds; at non-zero
+	 * rotation it's bigger, and the resulting crop is shrunk to fit by the downstream maxScaleForRotation pass.
 	 *
 	 * Package-private so CropEngineGeometryTest can pin the locked-axis symmetry and AR fit/shrink branches.
 	 *
@@ -344,10 +335,20 @@ public final class CropEngine
 	 * entirely within an imgW × imgH image rotated by rotation degrees. Each crop corner, un-rotated around image
 	 * center, must land inside [0, imgW] × [0, imgH].
 	 *
-	 * Package-private so CropEngineGeometryTest can pin the 25-iteration binary search behavior. A
-	 * regression that returns 1f for crops that ALREADY extend past the rotated bounds, or loops fewer
-	 * iterations and converges short of the actual max, would let rotated exports bleed CANVAS_BG
-	 * outside the image rectangle at the saved corners.
+	 * Package-private so CropEngineGeometryTest can pin the 25-iteration binary search behavior. A regression that
+	 * returns 1f for crops that ALREADY extend past the rotated bounds, or loops fewer iterations and converges
+	 * short of the actual max, would let rotated exports bleed the background fill (ThemeColors.BACKGROUND) outside
+	 * the image rectangle at the saved corners.
+	 *
+	 * @param centerX  crop-center X in image pixels
+	 * @param centerY  crop-center Y in image pixels
+	 * @param cropW    unscaled crop width in image pixels
+	 * @param cropH    unscaled crop height in image pixels
+	 * @param imgW     image width in pixels
+	 * @param imgH     image height in pixels
+	 * @param rotation rotation in degrees applied around the image midpoint
+	 * @return largest scale in [0.01, 1] whose scaled crop corners all un-rotate to within the ±0.5-px-slack
+	 *         image bounds; 1f when every corner already fits at full size
 	 */
 	static float maxScaleForRotation(float centerX, float centerY, float cropW, float cropH,
 		int imgW, int imgH, float rotation)
@@ -370,11 +371,11 @@ public final class CropEngine
 
 			// If this corner already fits at scale=1, nothing to do. Otherwise binary-search the largest
 			// scale factor that brings it inside image bounds. Slack tolerance matches
-			// `RotatedCropClamp.cornersInside` — both use a ±0.5-px window so a center that
-			// `setCenter`'s rotation-clamp landed JUST inside cornersInside's float-precision tolerance
-			// isn't seen as "outside" here, which would then trigger `recheckRotationFit` to
-			// unnecessarily shrink the crop by ~1 px on edge-touching rotations. Sharing the slack
-			// keeps the two rotation predicates joint enforcing the same invariant.
+			// `RotatedCropClamp.cornersInside` — both use a ±0.5-px window so a center that `setCenter`'s
+			// rotation-clamp landed JUST inside cornersInside's float-precision tolerance isn't seen as
+			// "outside" here, which would then trigger `recheckRotationFit` to unnecessarily shrink the
+			// crop by ~1 px on edge-touching rotations. Sharing the slack keeps the two rotation predicates
+			// joint enforcing the same invariant.
 			if (unrotated[0] < -0.5f || unrotated[0] > imgW + 0.5f
 				|| unrotated[1] < -0.5f || unrotated[1] > imgH + 0.5f)
 			{
@@ -412,11 +413,11 @@ public final class CropEngine
 	 * < 0.99), shrink + re-round + re-commit. Uses the state's current (post-setCenter) values because setCenter's
 	 * own rotation clamp may have nudged the center.
 	 *
-	 * Package-private so CropEngineGeometryTest can pin the 0.99 threshold AND the AR-snap-no-grow guard
-	 * directly — a regression that flips the threshold to ≥ 1f (no recheck ever fires) would let
-	 * post-rounding crops bleed CANVAS_BG outside the rotated image at the saved corners; a regression that
-	 * passes (imgW, imgH) as snap bounds (instead of the refined dims) would let the AR snap grow past the
-	 * just-shrunk fit and re-violate the very invariant this pass exists to enforce.
+	 * Package-private so CropEngineGeometryTest can pin the 0.99 threshold AND the AR-snap-no-grow guard directly —
+	 * a regression that flips the threshold to ≥ 1f (no recheck ever fires) would let post-rounding crops bleed
+	 * background fill outside the rotated image at the saved corners; a regression that passes (imgW, imgH) as snap
+	 * bounds (instead of the refined dims) would let the AR snap grow past the just-shrunk fit and re-violate the
+	 * very invariant this pass exists to enforce.
 	 *
 	 * @param state    crop state mutated in place; reads the post-setCenter center + crop dims and may rewrite
 	 *                 the crop dims and re-commit the center
@@ -442,9 +443,9 @@ public final class CropEngine
 		float cropH = state.getCropH() * recheck;
 		int refinedCropW = Math.max(MIN_CROP_DIMENSION_PX, Math.round(cropW));
 		int refinedCropH = Math.max(MIN_CROP_DIMENSION_PX, Math.round(cropH));
-		// Snap to exact-integer AR while forbidding growth — pass refinedCropW / refinedCropH as the
-		// max bounds so the snap rounds DOWN to the nearest (Wr·k, Hr·k) that fits the just-shrunk
-		// dims. Up-snapping here would re-violate the rotation fit this method exists to enforce.
+		// Snap to exact-integer AR while forbidding growth — pass refinedCropW / refinedCropH as the max bounds
+		// so the snap rounds DOWN to the nearest (Wr·k, Hr·k) that fits the just-shrunk dims. Up-snapping here
+		// would re-violate the rotation fit this method exists to enforce.
 		int[] snapped = state.getAspectRatio().snap(refinedCropW, refinedCropH, refinedCropW, refinedCropH);
 		state.setCropSizeSilent(snapped[0], snapped[1]);
 		state.setCenter(finalCenterX, finalCenterY);
@@ -453,9 +454,9 @@ public final class CropEngine
 	/**
 	 * Axis-aligned bounding-box midpoint of a non-empty selection. A single point is its own midpoint; with
 	 * multiple points we average the min/max on each axis (cheaper than a true centroid and matches how the crop
-	 * engine frames the selection). Package-private so CropEngineTest can pin the single-vs-multi branch
-	 * directly — the only production consumer outside CropEngine is rotatedSelectionMidpoint, which transforms
-	 * the midpoint through rotation before returning.
+	 * engine frames the selection). Package-private so CropEngineTest can pin the single-vs-multi branch directly —
+	 * the only production consumer outside CropEngine is rotatedSelectionMidpoint, which transforms the midpoint
+	 * through rotation before returning.
 	 *
 	 * @param points non-empty list of selection points in image-space coordinates; the list is read-only here
 	 *               (not modified, not retained)

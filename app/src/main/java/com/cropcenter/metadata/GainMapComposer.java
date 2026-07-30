@@ -15,10 +15,9 @@ import java.nio.file.StandardCopyOption;
 public final class GainMapComposer
 {
 	/**
-	 * Tagged outcome from compose(). Disambiguates the three return shapes that previously had to be inferred
-	 * from reference identity on the returned byte[] — a leaky contract that broke once compose started
-	 * returning the XMP-patched primary on the MPF-fail path (the new array misled `withGainMap != input`
-	 * callers into thinking HDR attached when it hadn't).
+	 * Tagged outcome from compose(). The explicit hdrAttached flag is load-bearing: reference identity on the
+	 * returned byte[] cannot distinguish the three return shapes — the MPF-fail path returns a fresh XMP-patched
+	 * array with NO gain map appended, so a `result != input` test would misread it as HDR-attached.
 	 *
 	 * @param bytes        the output JPEG bytes — either the primary verbatim, an XMP-patched primary with
 	 *                     no gain map appended, or the full primary + gain map concatenation; callers can't
@@ -30,12 +29,11 @@ public final class GainMapComposer
 	public record ComposeResult(byte[] bytes, boolean hdrAttached) {}
 
 	private static final String TAG = "GainMapComposer";
-	// Upper bound on the byte[] we load off the primary's head for XMP / MPF patching when streaming
-	// compose. JPEG APP segments — including standard XMP (≤ 64 KB), Extended XMP chunks (≤ 64 KB
-	// each), MPF (~few hundred bytes), and EXIF with MakerNote (up to a few MB on Samsung captures)
-	// — cluster at the front of the file before SOS. 16 MB head comfortably covers every realistic
-	// shape while keeping the patch step's peak Java heap to ~32 MB (head + patcher's optional new
-	// allocation) rather than ~118 MB on a 200 MP-class primary.
+	// Upper bound on the byte[] we load off the primary's head for XMP / MPF patching when streaming compose. JPEG
+	// APP segments — including standard XMP (≤ 64 KB), Extended XMP chunks (≤ 64 KB each), MPF (~few hundred
+	// bytes), and EXIF with MakerNote (up to a few MB on Samsung captures) — cluster at the front of the file
+	// before SOS. 16 MB head comfortably covers every realistic shape while keeping the patch step's peak Java heap
+	// to ~32 MB (head + patcher's optional new allocation) rather than ~118 MB on a 200 MP-class primary.
 	private static final int HEAD_READ_LIMIT = 16 * 1024 * 1024;
 
 	private GainMapComposer() {}
@@ -46,7 +44,7 @@ public final class GainMapComposer
 	 * Three HDR-drop branches return a primary-only JPEG (hdrAttached=false), differing in which primary they
 	 * wrap:
 	 *  - gainMap null/empty (SDR source that still hit this method) → input `primary` unchanged.
-	 *  - XmpItemLengthPatcher.patch returns null (GContainer Item:Length can't be safely rewritten — in
+	 *  - XmpItemLengthPatcher.patch returns empty (GContainer Item:Length can't be safely rewritten — in
 	 *    Extended XMP, straddling a chunk boundary, or an unpatchable standard-XMP segment): shipping the gain
 	 *    map with a stale Item:Length silently truncates it in strict decoders (Google's libUltraHdr), so drop
 	 *    HDR. bytes = input `primary` unchanged (the patcher's refusal means we can't cleanly rewrite the XMP).
@@ -68,18 +66,16 @@ public final class GainMapComposer
 			Log.d(TAG, "Compose skipped: gain map absent");
 			return new ComposeResult(primary, false);
 		}
-		// Patch the GContainer Item:Length attribute in primary's XMP to match the actual gain-map size
-		// BEFORE assembly so MpfPatcher's primarySize calculation reflects the post-patch primary length.
-		// Without this, strict GContainer-respecting decoders (Google's libUltraHdr is one) slice the gain
-		// map by Item:Length and decode a truncated stream — silent HDR-boost drop on a file that's
-		// otherwise correct. MpfPatcher's primarySize cascade is preserved
-		// because we re-bind primarySize to patched.length below.
-		//
-		// Null return means Item:Length couldn't be safely rewritten — either it lives in Extended XMP
-		// (>64 KB packet form), or it lives in standard XMP but the segment is unpatchable (over-cap
-		// segLen, malformed quote, unterminated digit run). The patcher logs the specific reason at
-		// the W level before returning null; we drop HDR here rather than ship stale Item:Length.
-		byte[] patched = XmpItemLengthPatcher.patch(primary, gainMap.length);
+		// Patch the GContainer Item:Length attribute in primary's XMP to match the actual gain-map size BEFORE
+		// assembly so MpfPatcher's primarySize calculation reflects the post-patch primary length. Without
+		// this, strict GContainer-respecting decoders (Google's libUltraHdr is one) slice the gain map by
+		// Item:Length and decode a truncated stream — silent HDR-boost drop on a file that's otherwise correct.
+		// MpfPatcher's primarySize cascade is preserved because we re-bind primarySize to patched.length below.
+		// An empty return means Item:Length couldn't be safely rewritten — either it lives in Extended XMP
+		// (>64 KB packet form), or it lives in standard XMP but the segment is unpatchable (over-cap segLen,
+		// malformed quote, unterminated digit run). The patcher logs the specific reason at the W level before
+		// returning empty; we drop HDR here rather than ship stale Item:Length.
+		byte[] patched = XmpItemLengthPatcher.patch(primary, gainMap.length).orElse(null);
 		if (patched == null)
 		{
 			Log.w(TAG, "Compose dropped gain map: XmpItemLengthPatcher refused the patch. Returning "
@@ -98,13 +94,12 @@ public final class GainMapComposer
 			Log.w(TAG, "Compose dropped gain map: MPF patch failed (no MPF segment, "
 				+ "or malformed/unsupported MPF). Returning patched primary verbatim to "
 				+ "avoid shipping orphaned HDR bytes.");
-			// Return `patched` (the XMP-Item:Length-cleaned primary) rather than `primary` so the
-			// HDR-drop output's XMP no longer carries a stale GContainer Item:Length pointing at a
-			// gain map that was never appended. hdrAttached=false signals to the caller (CropExporter)
-			// to run stripHdrSegments and toast "[HDR dropped]" — the previous reference-inequality
-			// detection broke when `patched` was a freshly-allocated array distinct from `primary`,
-			// which made `withGainMap != withFullMeta` true on this drop path and silently shipped
-			// a JPEG that still claimed HDR but carried no gain map.
+			// Return `patched` (the XMP-Item:Length-cleaned primary) rather than `primary` so the HDR-drop
+			// output's XMP doesn't carry a stale GContainer Item:Length pointing at a gain map that was
+			// never appended. hdrAttached=false is the ONLY reliable drop signal to the caller
+			// (CropExporter: stripHdrSegments + "[HDR dropped]" toast) — `patched` is a freshly-allocated
+			// array distinct from `primary`, so a reference-inequality test would misread this drop path as
+			// HDR-attached and silently ship a JPEG that claims HDR but carries no gain map.
 			return new ComposeResult(patched, false);
 		}
 
@@ -114,18 +109,18 @@ public final class GainMapComposer
 	}
 
 	/**
-	 * Streaming compose: reads the primary JPEG from `inFile`, writes the composed output (patched primary +
-	 * gain map appended) to `outFile`, avoiding the ~120 MB `combined` byte[] the byte[] variant needs by
-	 * streaming the primary's image-data tail straight from disk. Peak heap ~32 MB + the gainMap reference,
-	 * independent of inFile size (the naive byte[] path peaks ~384 MB on a big primary).
+	 * Streaming compose: reads the primary JPEG from `inFile`, writes the composed output (patched primary + gain
+	 * map appended) to `outFile`, avoiding the ~120 MB `combined` byte[] the byte[] variant needs by streaming the
+	 * primary's image-data tail straight from disk. Peak heap ~32 MB + the gainMap reference, independent of inFile
+	 * size (the naive byte[] path peaks ~384 MB on a big primary).
 	 *
 	 * Strategy: load only the first HEAD_READ_LIMIT bytes (JPEG APP segments cluster before SOS) — feeding
-	 * XmpItemLengthPatcher / MpfPatcher just the head is byte-identical to the byte[] variant since they
-	 * operate only within APP segments. Write the patched head, stream-copy the tail from the original head
-	 * offset, then append the gain map. Byte-identical to compose(Files.readAllBytes(inFile), gainMap).
+	 * XmpItemLengthPatcher / MpfPatcher just the head is byte-identical to the byte[] variant since they operate
+	 * only within APP segments. Write the patched head, stream-copy the tail from the original head offset, then
+	 * append the gain map. Byte-identical to compose(Files.readAllBytes(inFile), gainMap).
 	 *
-	 * Drop-path mirrors compose: XmpItemLengthPatcher refusal → verbatim stream-copy, hdrAttached=false;
-	 * MpfPatcher failure → patched head + tail (no gain map), hdrAttached=false.
+	 * Drop-path mirrors compose: XmpItemLengthPatcher refusal → verbatim stream-copy, hdrAttached=false; MpfPatcher
+	 * failure → patched head + tail (no gain map), hdrAttached=false.
 	 *
 	 * @param inFile  primary JPEG on disk (typically the injected tempfile); never null
 	 * @param gainMap gain map JPEG bytes to append; null / empty → stream-copy with hdrAttached=false
@@ -143,32 +138,19 @@ public final class GainMapComposer
 		}
 		long inFileSize = inFile.length();
 		// When inFileSize > HEAD_READ_LIMIT the patchers see only the first 16 MB — byte-identical to the
-		// full-buffer path as long as SOS (hence every APP segment) sits within 16 MB, true for every
-		// realistic JPEG. A >16 MB APP cluster (unreachable in practice) could straddle the boundary, but
-		// the only caller re-injects from the encoded primary on any compose anomaly, so nothing ships corrupt.
+		// full-buffer path as long as SOS (hence every APP segment) sits within 16 MB, true for every realistic
+		// JPEG. A >16 MB APP cluster (unreachable in practice) could straddle the boundary, but the only caller
+		// re-injects from the encoded primary on any compose anomaly, so nothing ships corrupt.
 		int headTarget = (int) Math.min(inFileSize, HEAD_READ_LIMIT);
-		byte[] head = new byte[headTarget];
+		byte[] head;
 		try (FileInputStream fis = new FileInputStream(inFile))
 		{
-			int read = 0;
-			while (read < headTarget)
-			{
-				int n = fis.read(head, read, headTarget - read);
-				if (n < 0)
-				{
-					break;
-				}
-				read += n;
-			}
-			if (read < headTarget)
-			{
-				byte[] truncated = new byte[read];
-				System.arraycopy(head, 0, truncated, 0, read);
-				head = truncated;
-			}
+			// readNBytes returns exactly the bytes read — shorter than headTarget only on a mid-call shrink
+			// or early EOF, in which case we use what we got.
+			head = fis.readNBytes(headTarget);
 		}
 		long originalHeadSize = head.length;
-		byte[] patchedHead = XmpItemLengthPatcher.patch(head, gainMap.length);
+		byte[] patchedHead = XmpItemLengthPatcher.patch(head, gainMap.length).orElse(null);
 		if (patchedHead == null)
 		{
 			Log.w(TAG, "Streaming compose: XmpItemLengthPatcher refused — copying primary unchanged");
@@ -181,11 +163,11 @@ public final class GainMapComposer
 		{
 			throw new IOException("Primary size exceeds int range after XMP patch: " + fullPrimarySize);
 		}
-		// Pass gainMap.length EXPLICITLY: patchedHead is only the primary's APP-marker head (a few KB to
-		// a few MB), so the `jpeg.length - primarySize` derivation used by the 2-arg overload would be
-		// negative when patchedHead.length < primarySize and write a garbage u32 into the MPF entry's
-		// size field. Lenient decoders fall back to the XMP hdrgm marker so HDR still renders, but the
-		// MPF table itself ships corrupt — strict decoders that trust MPF would reject the gain map.
+		// Pass gainMap.length EXPLICITLY: patchedHead is only the primary's APP-marker head (a few KB to a few
+		// MB), so the `jpeg.length - primarySize` derivation used by the 2-arg overload would be negative when
+		// patchedHead.length < primarySize and write a garbage u32 into the MPF entry's size field. Lenient
+		// decoders fall back to the XMP hdrgm marker so HDR still renders, but the MPF table itself ships
+		// corrupt — strict decoders that trust MPF would reject the gain map.
 		boolean mpfPatched = MpfPatcher.patch(patchedHead, (int) fullPrimarySize, gainMap.length);
 		try (FileOutputStream fos = new FileOutputStream(outFile))
 		{
@@ -195,15 +177,10 @@ public final class GainMapComposer
 				try (FileInputStream tailFis = new FileInputStream(inFile))
 				{
 					// JpegMetadataInjector.skipExactly handles FileInputStream.skip() transiently
-					// returning 0 — the previous loop-and-break-on-zero idiom silently truncated
-					// the stream and shipped corrupted bytes when skip stalled. See helper Javadoc.
+					// returning 0 — a naive loop-and-break-on-zero idiom silently truncates the
+					// stream and ships corrupted bytes when skip stalls. See helper Javadoc.
 					JpegMetadataInjector.skipExactly(tailFis, originalHeadSize);
-					byte[] buf = new byte[JpegMetadataInjector.STREAM_CHUNK_SIZE];
-					int n;
-					while ((n = tailFis.read(buf)) > 0)
-					{
-						fos.write(buf, 0, n);
-					}
+					JpegMetadataInjector.copyRemaining(tailFis, fos);
 				}
 			}
 			if (mpfPatched)

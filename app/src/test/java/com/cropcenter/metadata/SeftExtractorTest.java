@@ -3,7 +3,6 @@ package com.cropcenter.metadata;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
@@ -32,7 +31,7 @@ public final class SeftExtractorTest
 			JpegFixtures.soi(), JpegFixtures.appSegment(0xE1, JpegFixtures.exifAppPayload()),
 			JpegFixtures.minimalScanAndEoi(), expectedTrailer);
 
-		byte[] result = SeftExtractor.extract(file, true);
+		byte[] result = SeftExtractor.extract(file, true).orElseThrow();
 		assertArrayEquals(expectedTrailer, result);
 	}
 
@@ -53,19 +52,18 @@ public final class SeftExtractorTest
 			JpegFixtures.minimalScanAndEoi(),       // gain map EOI (FFD9)
 			expectedTrailer);
 
-		byte[] result = SeftExtractor.extract(file, true);
+		byte[] result = SeftExtractor.extract(file, true).orElseThrow();
 		assertArrayEquals(expectedTrailer, result);
 	}
 
 	@Test
 	public void hasSeftFooterAcceptsExactMinAndRejectsShorterOrWrongMagic()
 	{
-		// `hasSeftFooter` is the gate consumed by both `extract` and `GainMapExtractor`'s
-		// `file.length - FOOTER_SIZE` slice cap. A regression in its boundary check would silently
-		// mis-cap the gain-map walk on Samsung files (dropping HDR) or skip SEFT preservation
-		// (breaking Gallery's Revert chain). Pin all four boundary conditions: too-short, exact
-		// 12-byte minimum with valid magic, exact 12-byte with wrong magic, and 12-byte with
-		// partial magic at the wrong offset.
+		// `hasSeftFooter` is the gate consumed by both `extract` and `GainMapExtractor`'s `file.length -
+		// FOOTER_SIZE` slice cap. A regression in its boundary check would silently mis-cap the gain-map walk
+		// on Samsung files (dropping HDR) or skip SEFT preservation (breaking Gallery's Revert chain). Pin all
+		// four boundary conditions: too-short, exact 12-byte minimum with valid magic, exact 12-byte with wrong
+		// magic, and 12-byte with partial magic at the wrong offset.
 		assertFalse("11-byte file can't carry SEFT trailer (min is 4 magic + 4 size + 4 EOI = 12)",
 			SeftExtractor.hasSeftFooter(new byte[11]));
 		byte[] exactMin = new byte[12];
@@ -90,58 +88,58 @@ public final class SeftExtractorTest
 	}
 
 	@Test
-	public void returnsNullOnFileTooShort()
+	public void returnsEmptyOnFileTooShort()
 	{
 		// SEFT trailer is at minimum 12 bytes (FFD9 + 4-byte size + "SEFT"). Anything shorter can't carry one
-		// and must return null without indexing OOB.
-		assertNull(SeftExtractor.extract(new byte[]{ }, true));
-		assertNull(SeftExtractor.extract(new byte[]{ 0x01 }, true));
-		assertNull(SeftExtractor.extract(new byte[11], true));
+		// and must return empty without indexing OOB.
+		assertTrue(SeftExtractor.extract(new byte[]{ }, true).isEmpty());
+		assertTrue(SeftExtractor.extract(new byte[]{ 0x01 }, true).isEmpty());
+		assertTrue(SeftExtractor.extract(new byte[11], true).isEmpty());
 	}
 
 	@Test
-	public void returnsNullOnMissingSeftMagic() throws IOException
+	public void returnsEmptyOnMissingSeftMagic() throws IOException
 	{
 		// File ends with bytes other than "SEFT" — not a Samsung file.
 		byte[] file = JpegFixtures.concat(JpegFixtures.soi(), JpegFixtures.minimalScanAndEoi());
-		assertNull(SeftExtractor.extract(file, true));
+		assertTrue(SeftExtractor.extract(file, true).isEmpty());
 	}
 
 	@Test
-	public void returnsNullOnNullInput()
+	public void returnsEmptyOnNullInput()
 	{
-		assertNull(SeftExtractor.extract(null, true));
+		assertTrue(SeftExtractor.extract(null, true).isEmpty());
 	}
 
 	@Test
-	public void returnsNullWhenGainMapPresentButSliceUnparseable() throws IOException
+	public void returnsEmptyWhenGainMapPresentButSliceUnparseable() throws IOException
 	{
-		// Forward-walk fix: when primary's EOI is followed by FFD8 (gain-map SOI) but the slice
-		// has no clean EOI before the SEFT footer, JpegMarkerWalker.findPrimaryEoi(slice, ...) returns -1
-		// and the extractor must return null. A regression that fell back to trailerStart=primaryEnd on
-		// gmEoiInSlice<0 would mis-locate the trailer start IN THE MIDDLE OF the broken gain map and ship
-		// gain-map bytes as the SEFT trailer on save — silent corruption when re-appended downstream.
+		// When primary's EOI is followed by FFD8 (gain-map SOI) but the gain-map walk finds no clean
+		// EOI before the SEFT footer, the extractor must fail closed and return empty — the trailer is
+		// dropped, never truncated. The size footer is a PLAUSIBLE little-endian value (4) on purpose:
+		// a regression that "recovers" the trailer from the footer u32 (which is the SEFH DIRECTORY
+		// length only, not the whole-trailer size) would compute an in-bounds start inside the broken
+		// gain map, return truncated bytes instead of empty, and fail this assertion.
 		byte[] gainMapWithNoEoi = {
 			(byte) 0xFF, (byte) 0xD8,                    // SOI
 			(byte) 0xFF, (byte) 0xE0, 0x00, 0x06,        // APP0 with 6-byte length
 			0x01, 0x02, 0x03, 0x04                       // 4 bytes of body — never reaches EOI
 		};
-		byte[] sizeFooter = { 0x00, 0x00, 0x00, 0x04 };
+		byte[] sizeFooter = { 0x04, 0x00, 0x00, 0x00 };  // LE u32 = 4
 		byte[] seftMagic = { 'S', 'E', 'F', 'T' };
 		byte[] file = JpegFixtures.concat(JpegFixtures.soi(), JpegFixtures.minimalScanAndEoi(),
 			gainMapWithNoEoi, sizeFooter, seftMagic);
-		assertNull(SeftExtractor.extract(file, true));
+		assertTrue(SeftExtractor.extract(file, true).isEmpty());
 	}
 
 	@Test
 	public void sdrFileWithEmbeddedThumbnailInSeftKeepsThumbnailInTrailer() throws IOException
 	{
-		// An SDR Samsung file's SEFT data block can begin with FF D8 (embedded JPEG
-		// thumbnail). With hasGainMap=false the extractor must NOT walk past those bytes as if they were
-		// a gain-map EOI — the trailer must include the thumbnail bytes verbatim. Pre-fix, the extractor
-		// trusted the FF D8 alone and would mis-walk to the thumbnail's FF D9, dropping the thumbnail
-		// from state.seftTrailer; the next save's re-appended trailer would be missing the thumbnail
-		// and break Samsung Gallery's Revert flow.
+		// An SDR Samsung file's SEFT data block can begin with FF D8 (embedded JPEG thumbnail). With
+		// hasGainMap=false the extractor must NOT walk past those bytes as if they were a gain-map EOI — the
+		// trailer must include the thumbnail bytes verbatim. An extractor that trusts the FF D8 alone mis-walks
+		// to the thumbnail's FF D9, dropping the thumbnail from state.seftTrailer; the next save's re-appended
+		// trailer is then missing the thumbnail and breaks Samsung Gallery's Revert flow.
 		byte[] embeddedThumb = JpegFixtures.concat(JpegFixtures.soi(), JpegFixtures.minimalScanAndEoi());
 		byte[] sizeFooter = { 0x00, 0x00, 0x00, 0x10 };
 		byte[] seftMagic = { 'S', 'E', 'F', 'T' };
@@ -150,7 +148,7 @@ public final class SeftExtractorTest
 		byte[] file = JpegFixtures.concat(
 			JpegFixtures.soi(), JpegFixtures.minimalScanAndEoi(), expectedTrailer);
 
-		byte[] result = SeftExtractor.extract(file, false);
+		byte[] result = SeftExtractor.extract(file, false).orElseThrow();
 		assertArrayEquals(expectedTrailer, result);
 	}
 
@@ -166,7 +164,7 @@ public final class SeftExtractorTest
 		trailer[11] = 'T';
 		byte[] file = JpegFixtures.concat(JpegFixtures.soi(), JpegFixtures.minimalScanAndEoi(), trailer);
 
-		byte[] result = SeftExtractor.extract(file, true);
+		byte[] result = SeftExtractor.extract(file, true).orElseThrow();
 		assertEquals(12, result.length);
 	}
 }

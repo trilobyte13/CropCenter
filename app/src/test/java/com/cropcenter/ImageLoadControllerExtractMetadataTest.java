@@ -1,5 +1,10 @@
 package com.cropcenter;
 
+import static com.cropcenter.metadata.JpegFixtures.appSegment;
+import static com.cropcenter.metadata.JpegFixtures.concat;
+import static com.cropcenter.metadata.JpegFixtures.eoi;
+import static com.cropcenter.metadata.JpegFixtures.scanBody;
+import static com.cropcenter.metadata.JpegFixtures.soi;
 import static com.cropcenter.metadata.PngFixtures.PNG_SIGNATURE;
 import static com.cropcenter.metadata.PngFixtures.buildChunk;
 import static com.cropcenter.metadata.PngFixtures.buildIhdrChunk;
@@ -29,29 +34,24 @@ import java.nio.charset.StandardCharsets;
  */
 public final class ImageLoadControllerExtractMetadataTest
 {
-	private static final byte[] JPEG_SOI = { (byte) 0xFF, (byte) 0xD8 };
-	private static final byte[] JPEG_EOI = { (byte) 0xFF, (byte) 0xD9 };
-
 	@Test
 	public void extractEmitsHdrAndSamsungInDisplayWhenGainMapAndSeftPresent() throws IOException
 	{
-		// Full Samsung Ultra-HDR shape (MPF segment + XMP carrying hdrgm + primary scan + gain-map JPEG
-		// + SEFT footer). The display string must list both HDR and Samsung — UI-honesty contract. A
-		// regression that swaps the two appendIf calls or flips a gate surfaces as a missing flag.
-		byte[] mpfPayload = concat(
-			"MPF\0".getBytes(StandardCharsets.US_ASCII),
+		// Full Samsung Ultra-HDR shape (MPF segment + XMP carrying hdrgm + primary scan + gain-map JPEG + SEFT
+		// footer). The display string must list both HDR and Samsung — UI-honesty contract. A regression that
+		// swaps the two appendIf calls or flips a gate surfaces as a missing flag.
+		byte[] mpfPayload = concat("MPF\0".getBytes(StandardCharsets.US_ASCII),
 			new byte[] { 'I', 'I', '*', 0x00 });
 		byte[] mpfSeg = appSegment(0xE2, mpfPayload);
-		// XMP segment carrying the hdrgm namespace — HdrSignature.hasHdrgmInXmp scans XMP segment
-		// bodies only, so the marker must live INSIDE an XMP APP1 segment to fire the gate. 28 bytes
-		// of canonical XMP_HEADER + a body that mentions hdrgm.
-		byte[] xmpPayload = concat(
-			"http://ns.adobe.com/xap/1.0/\0".getBytes(StandardCharsets.US_ASCII),
+		// XMP segment carrying the hdrgm namespace — HdrSignature.hasHdrgmInXmp scans XMP segment bodies only,
+		// so the marker must live INSIDE an XMP APP1 segment to fire the gate. 28 bytes of canonical XMP_HEADER
+		// + a body that mentions hdrgm.
+		byte[] xmpPayload = concat("http://ns.adobe.com/xap/1.0/\0".getBytes(StandardCharsets.US_ASCII),
 			"<x:xmpmeta xmlns:hdrgm=\"http://ns.adobe.com/hdr-gain-map/1.0/\"/>"
 				.getBytes(StandardCharsets.US_ASCII));
 		byte[] xmpSeg = appSegment(0xE1, xmpPayload);
-		byte[] primary = concat(JPEG_SOI, xmpSeg, mpfSeg, scanBody(), JPEG_EOI);
-		byte[] gainMap = concat(JPEG_SOI, scanBody(), JPEG_EOI);
+		byte[] primary = concat(soi(), xmpSeg, mpfSeg, scanBody(), eoi());
+		byte[] gainMap = concat(soi(), scanBody(), eoi());
 		byte[] seftFooter = { 0x00, 0x00, 0x00, 0x04, 'S', 'E', 'F', 'T' };
 		byte[] seftBody = { 0x42, 0x42, 0x42, 0x42 };
 		byte[] jpeg = concat(primary, gainMap, seftBody, seftFooter);
@@ -72,7 +72,7 @@ public final class ImageLoadControllerExtractMetadataTest
 	{
 		// Bare SOI+EOI — no APP/COM segments, no HDR / SEFT trailer. Format must be JPEG and the display string
 		// empty (no "EXIF" / "ICC" / "XMP" / "HDR" / "Samsung" components).
-		byte[] jpeg = concat(JPEG_SOI, JPEG_EOI);
+		byte[] jpeg = concat(soi(), eoi());
 		var extracted = ImageLoadController.extractMetadata(jpeg);
 		assertEquals(Format.JPEG, extracted.sourceFormat());
 		assertEquals("", extracted.displayString());
@@ -101,7 +101,7 @@ public final class ImageLoadControllerExtractMetadataTest
 		app1.write(0); app1.write(0);
 		app1.write(tiff);
 
-		byte[] jpeg = concat(JPEG_SOI, app1.toByteArray(), JPEG_EOI);
+		byte[] jpeg = concat(soi(), app1.toByteArray(), eoi());
 		var extracted = ImageLoadController.extractMetadata(jpeg);
 		assertEquals(Format.JPEG, extracted.sourceFormat());
 		// "EXIF" prefix is present (further markers like ICC / XMP would extend it).
@@ -150,13 +150,13 @@ public final class ImageLoadControllerExtractMetadataTest
 	@Test
 	public void extractTreatsJpegWithHdrgmStringButNoMpfAsNonHdr() throws IOException
 	{
-		// The HDR gate at extractMetadata is `hasMpf && HdrSignature.hasHdrgmInXmp(meta)`. hasMpf is a
-		// cheap pre-filter — without it, an SDR file with a coincidental "hdrgm" sequence (vendor
-		// MakerNote, COM, XMP fragment in a comment) would be mis-tagged as HDR. A JPEG with "hdrgm"
-		// in a COM segment but NO MPF must NOT extract a gain map.
+		// The HDR gate at extractMetadata is `hasMpf && HdrSignature.hasHdrgmInXmp(meta)`. hasMpf is a cheap
+		// pre-filter — without it, an SDR file with a coincidental "hdrgm" sequence (vendor MakerNote, COM, XMP
+		// fragment in a comment) would be mis-tagged as HDR. A JPEG with "hdrgm" in a COM segment but NO MPF
+		// must NOT extract a gain map.
 		byte[] commentWithHdrgm = "user comment hdrgm here".getBytes(StandardCharsets.US_ASCII);
 		byte[] comSeg = appSegment(0xFE, commentWithHdrgm);
-		byte[] jpeg = concat(JPEG_SOI, comSeg, scanBody(), JPEG_EOI);
+		byte[] jpeg = concat(soi(), comSeg, scanBody(), eoi());
 
 		var extracted = ImageLoadController.extractMetadata(jpeg);
 		assertEquals(Format.JPEG, extracted.sourceFormat());
@@ -168,16 +168,15 @@ public final class ImageLoadControllerExtractMetadataTest
 	@Test
 	public void extractTreatsJpegWithMpfButNoHdrgmAsNonHdr() throws IOException
 	{
-		// Even when MPF is present, the absence of the hdrgm namespace marker means the file is non-HDR
-		// (MPF can describe focus-stacked / panorama / ZSL bursts, not just Ultra HDR). Pin: a JPEG
-		// with MPF + a post-primary FF D8 thumbnail but no "hdrgm" anywhere must NOT extract that
-		// thumbnail as a gain map — the symmetric false-positive on the MPF-but-not-HDR path.
-		byte[] mpfPayload = concat(
-			"MPF\0".getBytes(StandardCharsets.US_ASCII),
+		// Even when MPF is present, the absence of the hdrgm namespace marker means the file is non-HDR (MPF
+		// can describe focus-stacked / panorama / ZSL bursts, not just Ultra HDR). Pin: a JPEG with MPF + a
+		// post-primary FF D8 thumbnail but no "hdrgm" anywhere must NOT extract that thumbnail as a gain map —
+		// the symmetric false-positive on the MPF-but-not-HDR path.
+		byte[] mpfPayload = concat("MPF\0".getBytes(StandardCharsets.US_ASCII),
 			new byte[] { 'I', 'I', '*', 0x00 });
 		byte[] mpfSeg = appSegment(0xE2, mpfPayload);
-		byte[] thumbnail = concat(JPEG_SOI, scanBody(), JPEG_EOI);
-		byte[] jpeg = concat(JPEG_SOI, mpfSeg, scanBody(), JPEG_EOI, thumbnail);
+		byte[] thumbnail = concat(soi(), scanBody(), eoi());
+		byte[] jpeg = concat(soi(), mpfSeg, scanBody(), eoi(), thumbnail);
 
 		var extracted = ImageLoadController.extractMetadata(jpeg);
 		assertEquals(Format.JPEG, extracted.sourceFormat());
@@ -189,64 +188,25 @@ public final class ImageLoadControllerExtractMetadataTest
 	@Test
 	public void extractTreatsJpegWithMpfPlusHdrgmOutsideXmpAsNonHdr() throws IOException
 	{
-		// Even when MPF AND the literal "hdrgm" sequence are both present, the file is NOT HDR unless
-		// the marker lives inside an XMP APP1 segment. A coarser full-file scan false-positives on
-		// "hdrgm" in MakerNote / COM / vendor blob / SEFT history / entropy. MPF + COM-with-hdrgm +
-		// post-primary FF D8 thumbnail must NOT extract a gain map.
-		byte[] mpfPayload = concat(
-			"MPF\0".getBytes(StandardCharsets.US_ASCII),
+		// Even when MPF AND the literal "hdrgm" sequence are both present, the file is NOT HDR unless the
+		// marker lives inside an XMP APP1 segment. A coarser full-file scan false-positives on "hdrgm" in
+		// MakerNote / COM / vendor blob / SEFT history / entropy. MPF + COM-with-hdrgm + post-primary FF D8
+		// thumbnail must NOT extract a gain map.
+		byte[] mpfPayload = concat("MPF\0".getBytes(StandardCharsets.US_ASCII),
 			new byte[] { 'I', 'I', '*', 0x00 });
 		byte[] mpfSeg = appSegment(0xE2, mpfPayload);
-		// "hdrgm" sequence in a COM segment — the bytes are present but not in XMP, so the precise
-		// gate must reject.
+		// "hdrgm" sequence in a COM segment — the bytes are present but not in XMP, so the precise gate must
+		// reject.
 		byte[] comWithHdrgm = "comment with hdrgm here".getBytes(StandardCharsets.US_ASCII);
 		byte[] comSeg = appSegment(0xFE, comWithHdrgm);
-		byte[] thumbnail = concat(JPEG_SOI, scanBody(), JPEG_EOI);
-		byte[] jpeg = concat(JPEG_SOI, mpfSeg, comSeg, scanBody(), JPEG_EOI, thumbnail);
+		byte[] thumbnail = concat(soi(), scanBody(), eoi());
+		byte[] jpeg = concat(soi(), mpfSeg, comSeg, scanBody(), eoi(), thumbnail);
 
 		var extracted = ImageLoadController.extractMetadata(jpeg);
 		assertEquals(Format.JPEG, extracted.sourceFormat());
-		assertNull("hdrgm OUTSIDE an XMP segment must not trigger gain-map extraction",
-			extracted.gainMap());
+		assertNull("hdrgm OUTSIDE an XMP segment must not trigger gain-map extraction", extracted.gainMap());
 		assertFalse("display must not advertise HDR when hdrgm is only in COM: "
 			+ extracted.displayString(), extracted.displayString().contains("HDR"));
 	}
 
-	private static byte[] appSegment(int marker, byte[] payload) throws IOException
-	{
-		ByteArrayOutputStream out = new ByteArrayOutputStream();
-		out.write(0xFF);
-		out.write(marker);
-		// segLen INCLUDES the 2 length bytes themselves per JPEG spec.
-		int segLen = 2 + payload.length;
-		out.write((segLen >> 8) & 0xFF);
-		out.write(segLen & 0xFF);
-		out.write(payload);
-		return out.toByteArray();
-	}
-
-	private static byte[] concat(byte[]... parts) throws IOException
-	{
-		ByteArrayOutputStream out = new ByteArrayOutputStream();
-		for (byte[] p : parts)
-		{
-			out.write(p);
-		}
-		return out.toByteArray();
-	}
-
-	private static byte[] scanBody() throws IOException
-	{
-		// Minimal SOS segment + entropy-coded scan body. The walker stops at the next FF D9 (EOI) the
-		// caller appends — keep that EOI separate so test compositions can append a gain map / trailer
-		// directly after.
-		ByteArrayOutputStream out = new ByteArrayOutputStream();
-		out.write(0xFF);
-		out.write(0xDA);                // SOS
-		out.write(0x00);
-		out.write(0x06);                // length = 6
-		out.write(new byte[] { 0x01, 0x00, 0x00, 0x00 });   // scan header body
-		out.write(new byte[] { 0x77, 0x77, 0x77 });          // entropy-coded payload
-		return out.toByteArray();
-	}
 }

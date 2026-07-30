@@ -84,8 +84,8 @@ def analyze(stem):
 	graft_gm_arr = np.asarray(graft_gm_disp, dtype=np.int16)
 	src_gm_arr, alignment_dx, alignment_dy = _align_source_to_graft(src_gm_arr, graft_gm_arr)
 	d_gm = np.abs(src_gm_arr - graft_gm_arr).astype(np.uint8)
-	# Display dims now match graft's after alignment crop — re-derive the display variant for downstream
-	# heatmap rendering / inpaint-effect reporting that expect Image-shaped inputs.
+	# Display dims now match graft's after alignment crop — re-derive the display variant for downstream heatmap
+	# rendering / inpaint-effect reporting that expect Image-shaped inputs.
 	src_gm_disp = Image.fromarray(src_gm_arr.astype(np.uint8))
 	print(f'\n  Best source->graft alignment: dx={alignment_dx} dy={alignment_dy}'
 		f' (crops source from {graft_gm_disp.size[0] + abs(alignment_dx)}x'
@@ -100,25 +100,25 @@ def analyze(stem):
 def _align_source_to_graft(src_arr, graft_arr):
 	"""Find the (dx, dy) crop offset where the user's crop placed the graft within source's gain map.
 
-	The export pipeline crops the source's gain map to the user's crop region; the analyzer previously
-	assumed centered crop, which silently overestimated the gainmap diff by ~5-8 mean for any non-
-	centered crop. This helper slides a graft-sized window over the source's gain map (both axes) and
-	picks the offset that minimises L1 mean diff — that's the alignment that reflects where the user
-	actually positioned the crop on the source. Returns the source array cropped to graft's dims at
-	the discovered offset, plus the offset itself for reporting.
+	The export pipeline crops the source's gain map to the user's crop region, so the comparison must align at the
+	crop's true offset — a fixed centered-crop assumption overestimates the gainmap diff for any non-centered crop.
+	This helper
+	slides a graft-sized window over the source's gain map (both axes) and picks the offset that minimises L1 mean
+	diff — that's the alignment that reflects where the user actually positioned the crop on the source. Returns the
+	source array cropped to graft's dims at the discovered offset, plus the offset itself for reporting.
 
-	For typical Samsung HDR JPEGs the quarter-resolution gain map's slide space is small (≤ 250 rows
-	for a 3000x4000 → 3000x3750 crop with 0.25 scale → 62-row vertical slide; full-width crops have
-	zero horizontal slide). The full grid search is O(slide_w * slide_h * gain_map_pixels), which on
-	750x938 with a 62-row slide is ~44M operations — sub-second in numpy.
+	For typical Samsung HDR JPEGs the quarter-resolution gain map's slide space is small (≤ 250 rows for a 3000x4000
+	→ 3000x3750 crop with 0.25 scale → 62-row vertical slide; full-width crops have zero horizontal slide). The full
+	grid search is O(slide_w * slide_h * gain_map_pixels), which on 750x938 with a 62-row slide is ~44M operations —
+	sub-second in numpy.
 	"""
 	sH, sW = src_arr.shape
 	gH, gW = graft_arr.shape
 	slide_y = sH - gH
 	slide_x = sW - gW
 	if slide_y < 0 or slide_x < 0:
-		# Source is smaller than graft along some axis — fall back to centered Lanczos resize so the
-		# pipeline still produces a diff (degenerate but recoverable on a malformed graft).
+		# Source is smaller than graft along some axis — fall back to centered Lanczos resize so the pipeline
+		# still produces a diff (degenerate but recoverable on a malformed graft).
 		src_pil = Image.fromarray(src_arr.astype(np.uint8))
 		resized = np.asarray(src_pil.resize((gW, gH), Image.LANCZOS), dtype=np.int16)
 		return (resized, 0, 0)
@@ -137,9 +137,8 @@ def _align_source_to_graft(src_arr, graft_arr):
 
 
 def _ai_mask_stored(src_path, edit_path, src_orient, edit_orient):
-	"""Compute the AI-region mask in source's stored coords at sampleSize=4 — mirrors
-	what Java's AiRegionDetector produces. Returns a 2D bool array, or None when the
-	source / edit shapes don't match after re-orientation.
+	"""Compute the AI-region mask in source's stored coords at sampleSize=4 — mirrors what Java's AiRegionDetector
+	produces. Returns a 2D bool array, or None when the source / edit shapes don't match after re-orientation.
 	"""
 	src_stored = graft_lib.load_stored_downsampled(src_path, 4)
 	edit_stored = graft_lib.load_stored_downsampled(edit_path, 4)
@@ -162,9 +161,8 @@ def _ai_mask_stored(src_path, edit_path, src_orient, edit_orient):
 
 
 def _dilate(mask, radius):
-	"""Bool-mask dilation by `radius` 8-connected pixels — matches GainMapInpainter's
-	DILATE_RADIUS. Used to project the strict AI mask out into the inpaint footprint
-	for the inside-vs-outside diff stats.
+	"""Bool-mask dilation by `radius` 8-connected pixels — matches GainMapInpainter's DILATE_RADIUS. Used to project
+	the strict AI mask out into the inpaint footprint for the inside-vs-outside diff stats.
 	"""
 	out = mask.copy()
 	for _ in range(radius):
@@ -189,9 +187,8 @@ def _exif_field(ex, ifd, tag):
 
 
 def _render_heatmap(src_path, gm_size, ai_mask_in_gm, d_gm, stem, out_path):
-	"""Compose the 3-panel heatmap PNG: primary thumbnail, AI region overlay, gainmap
-	diff heat. Cyan box on the diff panel marks the AI bbox so visual comparison with
-	the AI panel is direct.
+	"""Compose the 3-panel heatmap PNG: primary thumbnail, AI region overlay, gainmap diff heat. Cyan box on the
+	diff panel marks the AI bbox so visual comparison with the AI panel is direct.
 	"""
 	pgw, pgh = gm_size
 	primary = ImageOps.exif_transpose(Image.open(src_path)).convert('RGB')
@@ -292,9 +289,8 @@ def _report_identity_metadata(src_path, graft_path):
 
 
 def _report_inpaint_effect(ai_mask_stored, src_orient, gm_size, d_gm):
-	"""Project the stored-coord AI mask into gain-map display coords, dilate, and report
-	mean / max diff inside vs outside. The inside/outside ratio is what tells you the
-	inpainter is actually firing on the right region.
+	"""Project the stored-coord AI mask into gain-map display coords, dilate, and report mean / max diff inside vs
+	outside. The inside/outside ratio is what tells you the inpainter is actually firing on the right region.
 	"""
 	if ai_mask_stored is None or ai_mask_stored.sum() == 0:
 		print(f'\n  Inpaint effect: skipped (no AI mask)')
@@ -324,10 +320,9 @@ def _report_inpaint_effect(ai_mask_stored, src_orient, gm_size, d_gm):
 
 
 def _report_orientation_alignment(src_path, graft_path, src_gm_im, graft_gm_im):
-	"""Sanity-check that primary and gain-map have the same aspect orientation. If they
-	disagree (one landscape one portrait), the gain-map is sideways relative to its
-	primary — which is the regression we hit when the AI detector ran on full-res
-	mismatched coords.
+	"""Sanity-check that primary and gain-map have the same aspect orientation. If they disagree (one landscape one
+	portrait), the gain-map is sideways relative to its primary — which is the regression we hit when the AI
+	detector ran on full-res mismatched coords.
 	"""
 	src_w, src_h = Image.open(src_path).size
 	graft_w, graft_h = Image.open(graft_path).size

@@ -10,14 +10,13 @@ import org.junit.Test;
 
 /**
  * Tests for CropEngine's package-private geometry helpers — `clampFreeAxes`, `computeMaxCropSize`, and
- * `maxScaleForRotation`. These are the load-bearing math primitives that `recomputeCrop` composes; without
- * direct coverage a regression in any of them would let the recomputed crop bleed outside the image (CANVAS_BG
- * showing at corners after save) or collapse the visible difference between lock modes (free X / free Y / free
- * both producing identical crops).
+ * `maxScaleForRotation`. These are the load-bearing math primitives that `recomputeCrop` composes; without direct
+ * coverage a regression in any of them would let the recomputed crop bleed outside the image (background fill showing
+ * at corners after save) or collapse the visible difference between lock modes (free X / free Y / free both producing
+ * identical crops).
  *
- * `recomputeCrop` itself depends on a Bitmap-backed CropState.getSourceImage() and isn't unit-testable without
- * Android — these helper tests are the closest we can get to pinning recomputeCrop's geometry without dragging
- * in Robolectric.
+ * `recomputeCrop` itself depends on a Bitmap-backed CropState.getSourceImage() and isn't unit-testable without Android
+ * — these helper tests are the closest we can get to pinning recomputeCrop's geometry without dragging in Robolectric.
  */
 public final class CropEngineGeometryTest
 {
@@ -28,10 +27,10 @@ public final class CropEngineGeometryTest
 	{
 		// NaN rotation propagates to rotatedW/rotatedH via cos/sin. The fallback gate
 		// `cropW < rotatedW` evaluates false against NaN, so both axes take the imageMid fallback:
-		// X = imgW/2, Y = imgH/2. Pin the EXACT result on BOTH axes (not just one — a regression that
-		// NaN-propagated only X would have passed the prior loose "isNaN OR isFinite" assertion which
-		// was tautological for all non-Infinity floats). A future explicit NaN guard added at the top
-		// of clampFreeAxes should produce the same midpoint fallback to preserve this contract.
+		// X = imgW/2, Y = imgH/2. Pin the EXACT result on BOTH axes: only the two-axis exact pin catches
+		// a regression that NaN-propagates a single axis — a loose "isNaN OR isFinite" assertion is
+		// tautological for every non-Infinity float and misses it. A future explicit NaN guard added at
+		// the top of clampFreeAxes should produce the same midpoint fallback to preserve this contract.
 		float[] result = CropEngine.clampFreeAxes(50f, 50f, 40f, 60f, 100, 100, false, false, Float.NaN);
 		assertEquals("NaN rotation must fall back to imgW/2 on X", 50f, result[0], 0f);
 		assertEquals("NaN rotation must fall back to imgH/2 on Y", 50f, result[1], 0f);
@@ -53,8 +52,8 @@ public final class CropEngineGeometryTest
 		// At 30° rotation, the rotated AABB of a 4000x3000 image extends past the un-rotated bitmap bounds:
 		// rotatedW = 4964, rotatedH = 4598. The center range becomes X=[-482, 4482], Y=[-799, 3799]. A
 		// selection point whose rotated position is at (1000, -500) — outside the un-rotated [0, imgH] Y
-		// bounds but inside the rotated AABB — must NOT be pulled to Y=0 (the un-rotated edge) the way the
-		// pre-fix code did. Both X and Y free, crop is smaller than rotated AABB on each axis.
+		// bounds but inside the rotated AABB — must NOT be pulled to Y=0 (the un-rotated edge). Both X
+		// and Y free, crop is smaller than rotated AABB on each axis.
 		float[] result = CropEngine.clampFreeAxes(1000f, -500f, 100f, 100f, 4000, 3000, false, false, 30f);
 		assertEquals("X unchanged inside rotated AABB", 1000f, result[0], TOL);
 		assertEquals("Y unchanged inside rotated AABB despite being negative", -500f, result[1], TOL);
@@ -65,8 +64,8 @@ public final class CropEngineGeometryTest
 	{
 		// Neither axis locked — both X and Y get clamped to keep crop fully inside image.
 		float[] result = CropEngine.clampFreeAxes(50f, 50f, 40f, 60f, 100, 100, false, false, 0f);
-		// cropW=40, half=20 → X clamped to [20, 80] — 50 stays
-		// cropH=60, half=30 → Y clamped to [30, 70] — 50 stays
+		// cropW=40, half=20 → X clamped to [20, 80] — 50 stays cropH=60, half=30 → Y clamped to [30, 70] — 50
+		// stays
 		assertEquals(50f, result[0], TOL);
 		assertEquals(50f, result[1], TOL);
 	}
@@ -75,8 +74,8 @@ public final class CropEngineGeometryTest
 	public void clampFreeAxesCenterFallsBackWhenCropExceedsImage()
 	{
 		// cropW = imgW: clamp's lo=cropW/2=50, hi=imgW-cropW/2=50 — degenerate (lo==hi). The `cropW < imgW`
-		// guard takes the centering fallback. Pin both this degenerate-equal case AND the cropW > imgW case
-		// to prove the guard is `<`, not `<=`, and the fallback is `imgW / 2`.
+		// guard takes the centering fallback. Pin both this degenerate-equal case AND the cropW > imgW case to
+		// prove the guard is `<`, not `<=`, and the fallback is `imgW / 2`.
 		float[] degenerate = CropEngine.clampFreeAxes(99f, 99f, 100f, 100f, 100, 100, false, false, 0f);
 		assertEquals("cropW == imgW → fallback to imgW/2", 50f, degenerate[0], TOL);
 		assertEquals("cropH == imgH → fallback to imgH/2", 50f, degenerate[1], TOL);
@@ -117,10 +116,10 @@ public final class CropEngineGeometryTest
 	@Test
 	public void computeMaxCropSizeAtNaNRotationPropagatesAsNaNOnBothAxes()
 	{
-		// NaN rotation produces NaN rotatedW/rotatedH via cos/sin. Free axes return rotatedDims
-		// directly — so both X AND Y land as NaN. Pin both axes explicitly: the previous loose
-		// "NaN on at least one axis" assertion let a regression that NaN'd only X (returning a stale
-		// finite Y) slip through silently. NaN-equality requires Float.isNaN, not `==`.
+		// NaN rotation produces NaN rotatedW/rotatedH via cos/sin. Free axes return rotatedDims directly — so
+		// both X AND Y land as NaN. Pin both axes explicitly: a loose "NaN on at least one axis" assertion
+		// would let a regression that NaN's only X (returning a stale finite Y) slip through silently.
+		// NaN-equality requires Float.isNaN, not `==`.
 		float[] result = CropEngine.computeMaxCropSize(AspectRatio.FREE, 200f, 200f,
 			400, 400, false, false, Float.NaN);
 		assertTrue("NaN rotation must propagate as NaN on cropW (got " + result[0] + ")",
@@ -133,15 +132,13 @@ public final class CropEngineGeometryTest
 	public void computeMaxCropSizeAtRotationFreeAxesReturnsRotatedAabbDims()
 	{
 		// At 30° rotation on a 4000x3000 image, FREE AR + free axes → the max crop is the rotated AABB
-		// dimensions (4964 x 4598). The downstream maxScaleForRotation pass will shrink this to fit inside
-		// the actual rotated bitmap; the goal here is just that the pre-shrink max isn't clamped by the
-		// un-rotated bitmap rectangle (the pre-fix behavior).
+		// dimensions (4964 x 4598). The downstream maxScaleForRotation pass will shrink this to fit inside the
+		// actual rotated bitmap; the goal here is just that the pre-shrink max isn't clamped by the un-rotated
+		// bitmap rectangle.
 		float[] result = CropEngine.computeMaxCropSize(AspectRatio.FREE, 2000f, 1500f,
 			4000, 3000, false, false, 30f);
-		float expectedW = (float) (4000 * Math.cos(Math.toRadians(30))
-			+ 3000 * Math.sin(Math.toRadians(30)));
-		float expectedH = (float) (4000 * Math.sin(Math.toRadians(30))
-			+ 3000 * Math.cos(Math.toRadians(30)));
+		float expectedW = (float) (4000 * Math.cos(Math.toRadians(30)) + 3000 * Math.sin(Math.toRadians(30)));
+		float expectedH = (float) (4000 * Math.sin(Math.toRadians(30)) + 3000 * Math.cos(Math.toRadians(30)));
 		assertEquals(expectedW, result[0], TOL);
 		assertEquals(expectedH, result[1], TOL);
 	}
@@ -149,30 +146,29 @@ public final class CropEngineGeometryTest
 	@Test
 	public void computeMaxCropSizeAtRotationLockedAxisUsesRotatedBounds()
 	{
-		// At 30° on 4000x3000, locked-Y at centerY=-500 (legitimate screen-aligned position inside the
-		// rotated AABB). rotatedH = 4000*sin(30°) + 3000*cos(30°) ≈ 4598.08, topBound = imgH/2 - rotatedH/2
-		// ≈ -799.04, bottomBound ≈ 3799.04. maxCropH = 2 * min(-500 - topBound, bottomBound - (-500))
-		// ≈ 2 * 299.04 = 598.08. Pre-fix code computed 2 * min(-500, 3000 - (-500)) = -1000 (degenerate).
+		// At 30° on 4000x3000, locked-Y at centerY=-500 (legitimate screen-aligned position inside the rotated
+		// AABB). rotatedH = 4000*sin(30°) + 3000*cos(30°) ≈ 4598.08, topBound = imgH/2 - rotatedH/2 ≈ -799.04,
+		// bottomBound ≈ 3799.04. maxCropH = 2 * min(-500 - topBound, bottomBound - (-500)) ≈ 2 * 299.04 =
+		// 598.08. Bounding against the un-rotated bitmap instead would compute 2 * min(-500, 3000 - (-500)) =
+		// -1000 (degenerate).
 		float[] result = CropEngine.computeMaxCropSize(AspectRatio.FREE, 2000f, -500f,
 			4000, 3000, false, true, 30f);
-		float rotatedH = (float) (4000 * Math.sin(Math.toRadians(30))
-			+ 3000 * Math.cos(Math.toRadians(30)));
+		float rotatedH = (float) (4000 * Math.sin(Math.toRadians(30)) + 3000 * Math.cos(Math.toRadians(30)));
 		float topBound = 1500f - rotatedH / 2f;
 		float expectedMaxH = 2f * Math.min(-500f - topBound, 1500f + rotatedH / 2f - (-500f));
 		assertEquals(expectedMaxH, result[1], TOL);
-		// Sanity: pre-fix result was 2*min(-500, 3500) = -1000, which would be degenerate. The post-fix
-		// result must be POSITIVE.
-		assertTrue("post-fix max height must be positive at off-bitmap center", result[1] > 0);
+		// Sanity: the degenerate un-rotated-bounds value would be negative; the result must be POSITIVE.
+		assertTrue("rotated-bounds max height must be positive at off-bitmap center", result[1] > 0);
 	}
 
 	@Test
 	public void computeMaxCropSizeAtZeroDimensionsReturnsZeroCrop()
 	{
-		// imgW=0 or imgH=0 hits the maxCropH-then-divide branch (computeMaxCropSize divides cropW/cropH
-		// for the AR check). Pin the EXACT result — both axes must be 0 (rotatedW = imgW = 0 at zero
-		// rotation, so free-axis max = 0). A previous finite-but-positive return like [Float.MAX_VALUE,
-		// 1f] would have passed the prior `isFinite` check while still propagating garbage to
-		// setCropSizeSilent. Hard-pin zero so a regression that returned anything else surfaces.
+		// imgW=0 or imgH=0 hits the maxCropH-then-divide branch (computeMaxCropSize divides cropW/cropH for the
+		// AR check). Pin the EXACT result — both axes must be 0 (rotatedW = imgW = 0 at zero rotation, so
+		// free-axis max = 0). A finite-but-positive return like [Float.MAX_VALUE, 1f] would pass a mere
+		// isFinite check while still propagating garbage to setCropSizeSilent. Hard-pin zero so a regression
+		// that returned anything else surfaces.
 		float[] zeroW = CropEngine.computeMaxCropSize(AspectRatio.FREE, 0f, 0f, 0, 100, false, false, 0f);
 		assertEquals("zero imgW must produce 0 cropW", 0f, zeroW[0], 0f);
 		assertEquals("zero imgW must produce non-negative cropH", 100f, zeroW[1], 0f);
@@ -211,8 +207,8 @@ public final class CropEngineGeometryTest
 	@Test
 	public void computeMaxCropSizeLockedAxisIsSymmetricAroundCenter()
 	{
-		// Locked X at centerX=30 in imgW=100 → max symmetric extent = 2*min(30, 70) = 60. Free Y gets
-		// full image extent.
+		// Locked X at centerX=30 in imgW=100 → max symmetric extent = 2*min(30, 70) = 60. Free Y gets full
+		// image extent.
 		float[] result = CropEngine.computeMaxCropSize(AspectRatio.FREE, 30f, 50f, 100, 200, true, false, 0f);
 		assertEquals(60f, result[0], TOL);
 		assertEquals(200f, result[1], TOL);
@@ -221,12 +217,12 @@ public final class CropEngineGeometryTest
 	@Test
 	public void maxScaleForRotationAtZeroRotationStillShrinksOversizedCrop()
 	{
-		// Counter to maxScaleForRotationCenteredCropFitsAtIdentityRotation: that test asserts scale=1f
-		// for a fitting crop at rotation=0. Without this companion test, a stub implementation that
-		// returned 1f unconditionally at zero rotation would silently pass. Drive a 200x200 crop in a
-		// 100x100 image at rotation=0 — the binary search must shrink because the un-rotated crop
-		// already exceeds the image bounds. Theoretical max scale: corner extents 100·s land at 50 ±
-		// 100·s; slack-aware requirement is 100·s ≤ 50 + 0.5, so s ≤ 50.5/100 = 0.505. Pin closed-form.
+		// Counter to maxScaleForRotationCenteredCropFitsAtIdentityRotation: that test asserts scale=1f for a
+		// fitting crop at rotation=0. Without this companion test, a stub implementation that returned 1f
+		// unconditionally at zero rotation would silently pass. Drive a 200x200 crop in a 100x100 image at
+		// rotation=0 — the binary search must shrink because the un-rotated crop already exceeds the image
+		// bounds. Theoretical max scale: corner extents 100·s land at 50 ± 100·s; slack-aware requirement is
+		// 100·s ≤ 50 + 0.5, so s ≤ 50.5/100 = 0.505. Pin closed-form.
 		float scale = CropEngine.maxScaleForRotation(50f, 50f, 200f, 200f, 100, 100, 0f);
 		assertEquals("oversized crop at zero rotation must shrink via the same code path",
 			0.505f, scale, 1e-3f);
@@ -235,8 +231,8 @@ public final class CropEngineGeometryTest
 	@Test
 	public void maxScaleForRotationCenteredCropFitsAtIdentityRotation()
 	{
-		// A crop equal to image bounds at rotation=0° should fit at scale=1f. All corners land exactly on
-		// image edges; the bounds check uses >= 0 and <= imgW/imgH so edge corners pass.
+		// A crop equal to image bounds at rotation=0° should fit at scale=1f. All corners land exactly on image
+		// edges; the bounds check uses >= 0 and <= imgW/imgH so edge corners pass.
 		float scale = CropEngine.maxScaleForRotation(50f, 50f, 100f, 100f, 100, 100, 0f);
 		assertEquals(1f, scale, 0f);
 	}
@@ -251,18 +247,17 @@ public final class CropEngineGeometryTest
 		// (image edge + slack), so s ≤ 25.5/(25·√2) ≈ 0.7212.
 		float scale = CropEngine.maxScaleForRotation(25f, 25f, 50f, 50f, 50, 50, 45f);
 		float expectedScale = (float) (25.5 / (25.0 * Math.sqrt(2)));
-		assertEquals("converged scale must match closed-form (slack-aware)",
-			expectedScale, scale, 1e-5f);
+		assertEquals("converged scale must match closed-form (slack-aware)", expectedScale, scale, 1e-5f);
 	}
 
 	@Test
 	public void maxScaleForRotationShrinksWhenRotatedCropExceedsBounds()
 	{
-		// A 100x100 image with a 99x99 crop at 45° rotation: the rotated bounding-box of the crop is
-		// 99·√2 ≈ 140, way larger than the image. The corner extents 49.5·√2·s land at 50 ± 49.5·√2·s;
-		// slack-aware requirement is 50 + 49.5·√2·s ≤ 100.5, so s ≤ 50.5/(49.5·√2) ≈ 0.7215.
-		// Tight tolerance to catch both (a) the "always returns 1f" trivial regression AND (b) a
-		// converge-short regression that lands at 0.7 instead of 0.7215.
+		// A 100x100 image with a 99x99 crop at 45° rotation: the rotated bounding-box of the crop is 99·√2 ≈
+		// 140, way larger than the image. The corner extents 49.5·√2·s land at 50 ± 49.5·√2·s; slack-aware
+		// requirement is 50 + 49.5·√2·s ≤ 100.5, so s ≤ 50.5/(49.5·√2) ≈ 0.7215. Tight tolerance to catch both
+		// (a) the "always returns 1f" trivial regression AND (b) a converge-short regression that lands at 0.7
+		// instead of 0.7215.
 		float scale = CropEngine.maxScaleForRotation(50f, 50f, 99f, 99f, 100, 100, 45f);
 		float expectedScale = (float) (50.5 / (49.5 * Math.sqrt(2)));
 		assertEquals("rotated 45° must converge to closed-form max scale (slack-aware)",
@@ -273,13 +268,13 @@ public final class CropEngineGeometryTest
 	@Test
 	public void recheckRotationFitShrinksAndCommitsWhenPostRoundedCropFitsLooselyAtRotation()
 	{
-		// Simulate the post-integer-round state recomputeCrop leaves behind: large crop at the image
-		// center, modest rotation. maxScaleForRotation should return a recheck factor below 0.99 (the
-		// trigger threshold), causing recheckRotationFit to shrink + re-round + re-commit. Pin the
-		// AR-snap-no-grow contract DIRECTLY by using a non-FREE AR — the snap call passes the refined
-		// dims as the max bounds, so the snap can only round DOWN, never up against the un-rotated
-		// image dims. The previous FREE-AR test trivially passed since snap is a no-op for FREE; using
-		// R4_5 forces the snap math to actually run and the no-grow contract is genuinely pinned.
+		// Simulate the post-integer-round state recomputeCrop leaves behind: large crop at the image center,
+		// modest rotation. maxScaleForRotation should return a recheck factor below 0.99 (the trigger
+		// threshold), causing recheckRotationFit to shrink + re-round + re-commit. Pin the AR-snap-no-grow
+		// contract DIRECTLY by using a non-FREE AR — the snap call passes the refined dims as the max bounds,
+		// so the snap can only round DOWN, never up against the un-rotated image dims. A FREE-AR fixture would
+		// pass trivially (snap is a no-op for FREE); R4_5 forces the snap math to actually run, so the no-grow
+		// contract is genuinely pinned.
 		CropState state = new CropState();
 		state.setAspectRatio(AspectRatio.R4_5);
 		state.setRotationDegrees(30f);
@@ -297,29 +292,27 @@ public final class CropEngineGeometryTest
 			+ "x" + initialH + ", got " + finalW + "x" + finalH + ")",
 			finalW < initialW && finalH < initialH);
 		assertTrue("post-recheck dims must be positive", finalW > 0 && finalH > 0);
-		// AR-snap-no-grow contract: the R4_5 snap was passed `refinedCrop` as max bounds, so the result
-		// must satisfy finalW × 5 == finalH × 4 (exact 4:5) AND finalW ≤ refinedCrop in both axes (i.e.
-		// snap rounded DOWN, not up). A regression that passed (imgW, imgH) as snap bounds would let
-		// snap round UP past refinedCrop, re-violating the rotation-fit invariant.
-		assertEquals("snapped dims must respect 4:5 aspect ratio exactly",
-			finalW * 5, finalH * 4);
+		// AR-snap-no-grow contract: the R4_5 snap was passed `refinedCrop` as max bounds, so the result must
+		// satisfy finalW × 5 == finalH × 4 (exact 4:5) AND finalW ≤ refinedCrop in both axes (i.e. snap rounded
+		// DOWN, not up). A regression that passed (imgW, imgH) as snap bounds would let snap round UP past
+		// refinedCrop, re-violating the rotation-fit invariant.
+		assertEquals("snapped dims must respect 4:5 aspect ratio exactly", finalW * 5, finalH * 4);
 	}
 
 	@Test
-	public void recheckRotationFitSkipsAtSubEpsilonRotation()
+	public void recheckRotationFitSkipsOversizedCropAtSubEpsilonRotation()
 	{
-		// Sub-epsilon rotation must NOT alter the crop dims even if the recheck call would otherwise
-		// trigger a shrink under the rotated-corners check. Pins the early-return at the top of the
-		// method — a regression that drops the epsilon guard would needlessly shrink a crop the user
-		// sees as unrotated.
+		// Sub-epsilon rotation must NOT alter the crop dims even when the recheck would otherwise trigger a
+		// shrink. The 4400×3300 crop against a 4000×3000 image is load-bearing: an exactly-fitting 4000×3000
+		// crop passes with or without the sub-epsilon guard (maxScaleForRotation returns ~1 either way), so
+		// only an OVERSIZED crop detects guard removal — without the guard, the residual 0.001° angle runs
+		// the recheck and visibly shrinks the crop to ~4001×3001 even though the user sees it as unrotated.
 		CropState state = new CropState();
 		state.setRotationDegrees(0f);
 		state.setCenter(2000f, 1500f);
-		state.setCropSizeSilent(4000, 3000);
+		state.setCropSizeSilent(4400, 3300);
 		CropEngine.recheckRotationFit(state, 4000, 3000, 0.001f);
-		assertEquals("dims must be unchanged under sub-epsilon rotation",
-			4000, state.getCropW());
-		assertEquals("dims must be unchanged under sub-epsilon rotation",
-			3000, state.getCropH());
+		assertEquals("dims must be unchanged under sub-epsilon rotation", 4400, state.getCropW());
+		assertEquals("dims must be unchanged under sub-epsilon rotation", 3300, state.getCropH());
 	}
 }

@@ -14,9 +14,10 @@ import com.cropcenter.util.AiRegionDetector.AiMask;
  *                   inside the AI fill match Generative Remove's "this region looks like
  *                   its neighbors" intent. Stashed on CropState by installGraft.
  *
- * Records keep the GraftReadyHandler.onReady signature stable as we add or remove fields, and let
- * CropState.installGraft accept a single argument that carries every post-apply side-effect together — avoiding the
- * historical "set graftApplied AND aiMask, both AFTER applyBytes which calls state.reset()" ordering trap.
+ * Records keep the GraftReadyHandler.onReady signature stable as fields are added or removed, and let
+ * CropState.installGraft accept a single argument that carries every post-apply side-effect together: applyBytes calls
+ * state.reset(), so graftApplied and aiMask must land as one unit strictly after it — a caller setting them
+ * individually could interleave one ahead of the reset and have it silently wiped.
  */
 public record Graft(byte[] bytes, String displayName, AiMask aiMask)
 {

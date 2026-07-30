@@ -3,11 +3,14 @@ package com.cropcenter.metadata;
 import com.cropcenter.util.ByteBufferUtils;
 
 /**
- * Canonical JPEG marker walker. The single SOS / EOI / RST / segment-length / overflow-guard implementation shared by
- * CropExporter, GraftWriter, and GainMapExtractor, so a bug fixed here applies to all three by construction.
+ * Canonical JPEG marker walker. Two consolidated walk families live here so a bug fixed once applies to every
+ * consumer by construction: findEoi / findPrimaryEoi (the SOS / EOI / RST / segment-length / overflow-guard walk to
+ * the byte past a JPEG's EOI, shared by CropExporter, GraftWriter, and GainMapExtractor) and nextHeadSegment (the
+ * per-segment head-walk cursor shared by every leading-APP/COM iterator — JpegMetadataExtractor,
+ * XmpItemLengthPatcher, MpfPatcher, JpegMetadataInjector, GraftWriter, and BitmapUtils).
  *
- * Static, no state — every call carries its own (file, endBound) pair. The endBound parameter covers both the
- * "scan to file.length" and "scan to SEFT-aware boundary" cases: callers that don't need to bound past a trailer pass
+ * Static, no state — every call carries its own (file, endBound) pair. The endBound parameter covers both the "scan to
+ * file.length" and "scan to SEFT-aware boundary" cases: callers that don't need to bound past a trailer pass
  * file.length; callers that strip a known trailer (GainMapExtractor) pass the trailer's start.
  *
  * Per the JPEG spec (ITU-T T.81 / ISO/IEC 10918-1):
@@ -20,6 +23,38 @@ import com.cropcenter.util.ByteBufferUtils;
  */
 public final class JpegMarkerWalker
 {
+	/**
+	 * Classification of one head-walk step from nextHeadSegment. Tells the caller which HeadSegment components
+	 * carry valid facts — see the nextHeadSegment Javadoc for the component validity per kind.
+	 */
+	public enum HeadKind
+	{
+		// No marker byte reachable: file[off] is not 0xFF, or the fill-byte run hits endBound.
+		NO_MARKER,
+		// Standalone marker (TEM / STUFFING / RST) with no length field.
+		STANDALONE,
+		// Length-bearing marker whose 2-byte length field extends past endBound or reads below the spec
+		// minimum of 2 (the field includes its own 2 bytes per ITU-T T.81 §B.1.1.4).
+		BAD_LENGTH,
+		// Valid length, but the segment end (markerByteOff + 1 + segLen) lands past endBound.
+		OVERRUN,
+		// Well-formed length-bearing segment entirely inside [off, endBound).
+		SEGMENT
+	}
+
+	/**
+	 * One classified head-walk step from nextHeadSegment. Component validity depends on kind:
+	 *
+	 * @param kind          step classification — see HeadKind
+	 * @param markerByteOff offset of the marker code byte (past any fill bytes); -1 for NO_MARKER
+	 * @param marker        marker code in 0..255; -1 for NO_MARKER
+	 * @param segLen        big-endian segment length including its own 2 bytes; -1 unless kind is
+	 *                      OVERRUN or SEGMENT
+	 * @param next          offset of the next walk position (just past the segment for SEGMENT, just past
+	 *                      the marker byte for STANDALONE); -1 for every other kind
+	 */
+	public record HeadSegment(HeadKind kind, int markerByteOff, int marker, int segLen, int next) {}
+
 	// Sentinel returned by scanSosEntropy when the SOS header itself is malformed (truncated header or
 	// wrap-overflow on sosLen). Distinct from "found EOI" (≥ 0) and from "next-marker offset" (negative encoding).
 	// Caller propagates a -1 to the outer findPrimaryEoi return.
@@ -28,9 +63,9 @@ public final class JpegMarkerWalker
 	private JpegMarkerWalker() {}
 
 	/**
-	 * Walk JPEG markers from `startOff` (must point at SOI, FF D8) to the byte just past the matching EOI
-	 * (FF D9). Returns -1 when the JPEG doesn't end cleanly within `endBound` — caller treats that as "no
-	 * recoverable scan" rather than reading past EOF.
+	 * Walk JPEG markers from `startOff` (must point at SOI, FF D8) to the byte just past the matching EOI (FF D9).
+	 * Returns -1 when the JPEG doesn't end cleanly within `endBound` — caller treats that as "no recoverable scan"
+	 * rather than reading past EOF.
 	 *
 	 * Forward marker-chain walking (not a backward FF D9 scan) is required for a JPEG embedded in a container:
 	 * SEFT trailers hold embedded thumbnails whose own FF D9 and arbitrary bytes would short-circuit a backward
@@ -54,11 +89,10 @@ public final class JpegMarkerWalker
 	 */
 	public static int findEoi(byte[] file, int startOff, int endBound)
 	{
-		// Long-arithmetic overflow guard. An adversarial startOff near Integer.MAX_VALUE would let
-		// `startOff + 2` wrap into Integer.MIN_VALUE + 0 (signed-overflow), passing the `off < endBound`
-		// check with a negative value that then indexes the byte array negatively → AIOOBE. Symmetric
-		// to the `next < off` guard further down the walk; placing it up front avoids the unchecked
-		// add altogether.
+		// Long-arithmetic overflow guard. An adversarial startOff near Integer.MAX_VALUE would let `startOff +
+		// 2` wrap into Integer.MIN_VALUE + 0 (signed-overflow), passing the `off < endBound` check with a
+		// negative value that then indexes the byte array negatively → AIOOBE. Symmetric to the `next < off`
+		// guard further down the walk; placing it up front avoids the unchecked add altogether.
 		if (startOff < 0 || startOff > Integer.MAX_VALUE - 2)
 		{
 			return -1;
@@ -130,9 +164,9 @@ public final class JpegMarkerWalker
 
 	/**
 	 * Walk JPEG markers from byte 0 to find the byte offset just past the primary's EOI (FF D9). Convenience
-	 * wrapper for the most common case — when the JPEG starts at the file's first byte. Delegates to
-	 * findEoi(file, 0, endBound) which is the same walk with an explicit start offset for the embedded-JPEG
-	 * case (gain-map scan in GainMapExtractor, etc.).
+	 * wrapper for the most common case — when the JPEG starts at the file's first byte. Delegates to findEoi(file,
+	 * 0, endBound) which is the same walk with an explicit start offset for the embedded-JPEG case (gain-map scan
+	 * in GainMapExtractor, etc.).
 	 *
 	 * @param file     full JPEG file bytes (must start with SOI at byte 0)
 	 * @param endBound exclusive upper offset to stop scanning at (typically file.length, or the start of a
@@ -145,16 +179,71 @@ public final class JpegMarkerWalker
 	}
 
 	/**
-	 * Skip JPEG marker fill bytes. Per ITU-T T.81 §B.1.1.2: "Any marker may optionally be preceded by any number
-	 * of fill bytes, which are bytes assigned code 0xFF." Given an offset where `file[ffOff] == 0xFF`, advance
-	 * past any additional 0xFF bytes and return the offset of the actual marker byte (the first non-0xFF byte
-	 * after the run). Returns -1 if the run extends past `endBound` without finding a marker byte.
+	 * Classify one step of a JPEG head-segment walk at `off`. The single home for the per-segment walk mechanics
+	 * (0xFF check, fill-byte skip, standalone-marker detection, big-endian length read with the spec-minimum
+	 * segLen ≥ 2 guard, and the long-arithmetic segment-end overrun guard) shared by the head walkers in
+	 * JpegMetadataExtractor, XmpItemLengthPatcher, MpfPatcher, JpegMetadataInjector, GraftWriter, and
+	 * BitmapUtils.readExifOrientationInternal — one home so a hardening fix (fill bytes, length guards) cannot
+	 * land in some walkers and miss others. Callers keep only their own
+	 * segment filter, stop condition, and failure convention.
 	 *
-	 * Without this, a JPEG containing legal `FF FF E1 ...` (one fill byte before APP1) would be mis-read as
-	 * marker code 0xFF followed by garbage bytes, causing GainMapExtractor / GraftWriter / CropExporter to
-	 * misalign or short-circuit. Real-world Samsung sources observed in the wild without fill bytes; the hazard
-	 * is shipping support for any legitimate JPEG that uses this allowance (some encoders emit fill bytes for
-	 * 16-bit alignment between markers).
+	 * SOS and EOI are NOT terminal here — they classify like any length-bearing marker and every marker-carrying
+	 * kind reports the marker code, so a caller checks its own stop markers (SOS / EOI for segment collectors,
+	 * any non-APP / non-COM for scan-start finders) before inspecting the kind.
+	 *
+	 * @param file     bytes containing the JPEG head to walk
+	 * @param off      offset of the expected 0xFF marker prefix; caller must ensure 0 <= off < endBound
+	 * @param endBound exclusive upper bound for every read (typically file.length)
+	 * @return the classified step; component validity per kind is documented on HeadSegment
+	 */
+	public static HeadSegment nextHeadSegment(byte[] file, int off, int endBound)
+	{
+		if ((file[off] & 0xFF) != 0xFF)
+		{
+			return new HeadSegment(HeadKind.NO_MARKER, -1, -1, -1, -1);
+		}
+		int markerByteOff = skipFillBytes(file, off, endBound);
+		if (markerByteOff < 0)
+		{
+			return new HeadSegment(HeadKind.NO_MARKER, -1, -1, -1, -1);
+		}
+		int marker = file[markerByteOff] & 0xFF;
+		int afterMarker = markerByteOff + 1;
+		if (marker == JpegMarker.STUFFING || marker == JpegMarker.TEM
+			|| (marker >= JpegMarker.RST_FIRST && marker <= JpegMarker.RST_LAST))
+		{
+			return new HeadSegment(HeadKind.STANDALONE, markerByteOff, marker, -1, afterMarker);
+		}
+		if (afterMarker + 2 > endBound)
+		{
+			return new HeadSegment(HeadKind.BAD_LENGTH, markerByteOff, marker, -1, -1);
+		}
+		int segLen = ByteBufferUtils.readU16BE(file, afterMarker);
+		if (segLen < 2)
+		{
+			return new HeadSegment(HeadKind.BAD_LENGTH, markerByteOff, marker, -1, -1);
+		}
+		// Long arithmetic so a segLen near 65535 with afterMarker near Integer.MAX_VALUE can't wrap into a
+		// negative `next` that passes bounds checks and indexes the array negatively on the following step.
+		long next = (long) afterMarker + segLen;
+		if (next > endBound)
+		{
+			return new HeadSegment(HeadKind.OVERRUN, markerByteOff, marker, segLen, -1);
+		}
+		return new HeadSegment(HeadKind.SEGMENT, markerByteOff, marker, segLen, (int) next);
+	}
+
+	/**
+	 * Skip JPEG marker fill bytes. Per ITU-T T.81 §B.1.1.2: "Any marker may optionally be preceded by any number of
+	 * fill bytes, which are bytes assigned code 0xFF." Given an offset where `file[ffOff] == 0xFF`, advance past
+	 * any additional 0xFF bytes and return the offset of the actual marker byte (the first non-0xFF byte after the
+	 * run). Returns -1 if the run extends past `endBound` without finding a marker byte.
+	 *
+	 * Without this, a JPEG containing legal `FF FF E1 ...` (one fill byte before APP1) would be mis-read as marker
+	 * code 0xFF followed by garbage bytes, causing GainMapExtractor / GraftWriter / CropExporter to misalign or
+	 * short-circuit. Real-world Samsung sources observed in the wild without fill bytes; the hazard is shipping
+	 * support for any legitimate JPEG that uses this allowance (some encoders emit fill bytes for 16-bit alignment
+	 * between markers).
 	 *
 	 * @param file     JPEG byte array
 	 * @param ffOff    offset where `file[ffOff]` is known to be 0xFF
@@ -176,9 +265,9 @@ public final class JpegMarkerWalker
 	}
 
 	/**
-	 * Scan an SOS segment's entropy-coded data forward from `off` (the FF DA position). Skips over RST
-	 * (FFD0–FFD7) and stuffing (FF00) bytes per the JPEG spec; the first non-RST, non-stuff marker
-	 * either ends the scan (EOI) or signals the next segment's start.
+	 * Scan an SOS segment's entropy-coded data forward from `off` (the FF DA position). Skips over RST (FFD0–FFD7)
+	 * and stuffing (FF00) bytes per the JPEG spec; the first non-RST, non-stuff marker either ends the scan (EOI)
+	 * or signals the next segment's start.
 	 *
 	 * @param file     JPEG bytes to walk
 	 * @param off      offset of the SOS marker's FF byte (FF DA)
@@ -199,11 +288,11 @@ public final class JpegMarkerWalker
 			return SOS_BAIL;
 		}
 		int sosLen = ByteBufferUtils.readU16BE(file, off + 2);
-		// Per ITU-T T.81 §B.1.1.4, a marker segment's length includes the 2 length bytes themselves —
-		// sosLen < 2 is structurally impossible for a well-formed SOS. Without this guard, sosLen=0 makes
-		// scanOff = off + 2 (lands inside the length field) and sosLen=1 makes scanOff = off + 3 (lands
-		// inside the SOS header body); both let the entropy walk treat the header bytes as scan content
-		// and accept a coincidental FF D9 there as a "valid EOI".
+		// Per ITU-T T.81 §B.1.1.4, a marker segment's length includes the 2 length bytes themselves — sosLen <
+		// 2 is structurally impossible for a well-formed SOS. Without this guard, sosLen=0 makes scanOff = off
+		// + 2 (lands inside the length field) and sosLen=1 makes scanOff = off + 3 (lands inside the SOS header
+		// body); both let the entropy walk treat the header bytes as scan content and accept a coincidental FF
+		// D9 there as a "valid EOI".
 		if (sosLen < 2)
 		{
 			return SOS_BAIL;
@@ -245,9 +334,9 @@ public final class JpegMarkerWalker
 		}
 		// Encode "next real marker at scanOff" as a negative number distinct from SOS_BAIL. Decode in caller
 		// via `-result - 1`. Defensive cap: scanOff == Integer.MAX_VALUE would encode to Integer.MIN_VALUE,
-		// which collides with SOS_BAIL and would mis-route the caller. Unreachable under SafFileHelper's
-		// 128MB read cap, but the aliasing of the sentinel space with the encoded-result space is exactly the
-		// kind of subtle bug an adversarial input might exploit on a future cap relaxation.
+		// which collides with SOS_BAIL and would mis-route the caller. Unreachable under SafFileHelper's 128MB
+		// read cap, but the aliasing of the sentinel space with the encoded-result space is exactly the kind of
+		// subtle bug an adversarial input might exploit on a future cap relaxation.
 		if (scanOff == Integer.MAX_VALUE)
 		{
 			return SOS_BAIL;

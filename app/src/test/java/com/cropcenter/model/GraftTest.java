@@ -4,9 +4,9 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
-import org.junit.Test;
-
 import com.cropcenter.util.AiRegionDetector.AiMask;
+
+import org.junit.Test;
 
 /**
  * Tests for the Graft record and its hasAiMask predicate. hasAiMask drives the inpaint branch in CropState.installGraft

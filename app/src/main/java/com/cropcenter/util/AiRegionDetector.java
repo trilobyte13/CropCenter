@@ -5,6 +5,7 @@ import android.graphics.BitmapFactory;
 import android.util.Log;
 
 import java.util.Locale;
+import java.util.Optional;
 
 /**
  * Detect the AI-modified pixel region by diffing source vs aligned-edit bitmaps. Used by the graft pipeline to locate
@@ -23,12 +24,10 @@ public final class AiRegionDetector
 	 * Binary mask of AI-modified pixels in downsampled stored coordinates. The mask is row-major: mask[y * width +
 	 * x] = true means the pixel at (x, y) in the downsampled coords differs from source by more than DIFF_THRESHOLD
 	 * on at least one channel. sampleSize is the BitmapFactory inSampleSize used during detection, so callers can
-	 * map mask coordinates back to full-resolution coords (multiply by sampleSize) when needed. maskedCount caches
-	 * the flagged-pixel count from detect()'s diff pass — accessing it is O(1). Before the cache, callers
-	 * (GraftController.assembleGraftOnBg, GainMapInpainter.inpaintBitmap via hasMaskedPixels) re-walked the mask
-	 * array to re-derive the count, paying O(N) each. Storing the count on the record makes those reads O(1) and
-	 * is the reason the canonical constructor takes the count as an explicit parameter (rather than always
-	 * re-walking).
+	 * map mask coordinates back to full-resolution coords (multiply by sampleSize) when needed. maskedCount is the
+	 * precomputed flagged-pixel count, so hasMaskedPixels and its callers (GraftController.assembleGraftOnBg,
+	 * GainMapInpainter.inpaintBitmap) read it O(1) instead of re-walking the mask array; the canonical constructor
+	 * takes the count as an explicit parameter because detect() already counted during its diff pass.
 	 */
 	public record AiMask(boolean[] mask, int width, int height, int sampleSize, int maskedCount)
 	{
@@ -57,10 +56,9 @@ public final class AiRegionDetector
 		}
 
 		/**
-		 * Check whether the mask flagged any pixel as AI-modified. Callers use this to skip the inpaint
-		 * step entirely when the edit didn't change anything (the inpaint would be a no-op but the JPEG
-		 * re-encode of the gain map would still burn cycles + add minor quantization noise to the saved
-		 * file).
+		 * Check whether the mask flagged any pixel as AI-modified. Callers use this to skip the inpaint step
+		 * entirely when the edit didn't change anything (the inpaint would be a no-op but the JPEG re-encode of
+		 * the gain map would still burn cycles + add minor quantization noise to the saved file).
 		 *
 		 * @return true when at least one pixel was flagged AI-modified during detection
 		 */
@@ -87,8 +85,8 @@ public final class AiRegionDetector
 
 	/**
 	 * Decode both inputs at IN_SAMPLE_SIZE, compute per-pixel max-channel diff, threshold, and return the resulting
-	 * mask. Returns null when either decode fails or the two decoded bitmaps don't share dimensions (e.g. caller
-	 * passed unaligned edit bytes).
+	 * mask. Returns empty when either decode fails, the two decoded bitmaps don't share dimensions (e.g. caller
+	 * passed unaligned edit bytes), or the pixel count overflows int.
 	 *
 	 * Both bitmaps are recycled before return — the mask is the only output that survives this call. Logs the
 	 * masked-pixel count at DEBUG so a missing AI mask after a known-edited file points at the threshold being too
@@ -96,9 +94,10 @@ public final class AiRegionDetector
 	 *
 	 * @param sourceBytes original JPEG bytes (pre-AI-edit)
 	 * @param editBytes   alignment-corrected edit JPEG bytes
-	 * @return mask in IN_SAMPLE_SIZE-downsampled coordinates, or null on decode failure or shape mismatch
+	 * @return mask in IN_SAMPLE_SIZE-downsampled coordinates, or empty on decode failure / shape mismatch /
+	 *         pixel-count overflow
 	 */
-	public static AiMask detect(byte[] sourceBytes, byte[] editBytes)
+	public static Optional<AiMask> detect(byte[] sourceBytes, byte[] editBytes)
 	{
 		BitmapFactory.Options opts = new BitmapFactory.Options();
 		opts.inSampleSize = IN_SAMPLE_SIZE;
@@ -112,7 +111,7 @@ public final class AiRegionDetector
 			{
 				Log.w(TAG, "Decode failed (source=" + (source != null)
 					+ ", edit=" + (edit != null) + ")");
-				return null;
+				return Optional.empty();
 			}
 			int width = source.getWidth();
 			int height = source.getHeight();
@@ -120,7 +119,7 @@ public final class AiRegionDetector
 			{
 				Log.w(TAG, "Downsampled shape mismatch: source " + width + "x" + height
 					+ ", edit " + edit.getWidth() + "x" + edit.getHeight());
-				return null;
+				return Optional.empty();
 			}
 			// width * height in int arithmetic silently overflows above ~46k px on a side. Reject before
 			// allocating with Math.multiplyExact so a 200MP-mode source (12k×9k = 108M, fine) doesn't trip
@@ -135,7 +134,7 @@ public final class AiRegionDetector
 			{
 				Log.w(TAG, "AI mask refused: width*height overflows int ("
 					+ width + "x" + height + ")");
-				return null;
+				return Optional.empty();
 			}
 			int[] sourcePixels = new int[pixelCount];
 			int[] editPixels = new int[pixelCount];
@@ -147,7 +146,7 @@ public final class AiRegionDetector
 			Log.d(TAG, "AI mask: " + maskedCount + " of " + mask.length
 				+ " pixels (" + String.format(Locale.ROOT, "%.3f", 100.0 * maskedCount / mask.length)
 				+ "%) at " + width + "x" + height + " (sampleSize=" + IN_SAMPLE_SIZE + ")");
-			return new AiMask(mask, width, height, IN_SAMPLE_SIZE, maskedCount);
+			return Optional.of(new AiMask(mask, width, height, IN_SAMPLE_SIZE, maskedCount));
 		}
 		finally
 		{
@@ -167,10 +166,10 @@ public final class AiRegionDetector
 	 * channel-diff + threshold contract without Robolectric (a bad threshold / channel-extraction bug would
 	 * silently include encode noise or exclude real AI fills).
 	 *
-	 * Mask + count contract: mask[i] is SET true where the max-channel diff exceeds threshold; pre-existing
-	 * true entries are NOT cleared. The count is the number of pixels exceeding threshold (NOT false→true
-	 * transitions) — equal when the caller passes a fresh boolean[] (production always does), but a
-	 * pre-populated input would double-count.
+	 * Mask + count contract: mask[i] is SET true where the max-channel diff exceeds threshold; pre-existing true
+	 * entries are NOT cleared. The count is the number of pixels exceeding threshold (NOT false→true transitions) —
+	 * equal when the caller passes a fresh boolean[] (production always does), but a pre-populated input would
+	 * double-count.
 	 *
 	 * @param sourcePixels ARGB-packed pixels from the source bitmap
 	 * @param editPixels   ARGB-packed pixels from the alignment-corrected edit; same length as sourcePixels

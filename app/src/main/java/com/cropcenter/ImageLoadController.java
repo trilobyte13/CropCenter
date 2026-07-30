@@ -7,6 +7,8 @@ import android.net.Uri;
 import android.util.Log;
 import android.widget.Toast;
 
+import androidx.annotation.WorkerThread;
+
 import com.cropcenter.metadata.GainMapExtractor;
 import com.cropcenter.metadata.HdrSignature;
 import com.cropcenter.metadata.JpegMarker;
@@ -22,26 +24,24 @@ import com.cropcenter.util.SafFileHelper;
 import java.util.List;
 
 /**
- * Image-load flow extracted from MainActivity. Owns the bg-thread decode + EXIF orientation + metadata-extract pipeline
- * that turns a SAF URI (or in-memory graft bytes) into a fully-populated CropState. The Activity-specific view setup
- * that follows decode is delegated back to the host via installImageOnUi.
- *
- * Extracted so MainActivity stays focused on Activity glue (lifecycle, host-interface implementations, view wiring)
- * and the load pipeline is independently readable.
+ * Image-load flow. Owns the bg-thread decode + EXIF orientation + metadata-extract pipeline that turns a SAF URI (or
+ * in-memory graft bytes) into a fully-populated CropState. The Activity-specific view setup that follows decode is
+ * delegated back to the host via installImageOnUi — MainActivity stays focused on Activity glue (lifecycle,
+ * host-interface implementations, view wiring) and the load pipeline is independently readable.
  *
  * Public entry points:
  *   load(Uri)                 — SAF URI → bytes → bitmap → state
  *   applyBytes(byte[], String) — already-in-memory bytes (used by the graft flow)
  *   handleIncomingIntent(Intent) — Share / View intents
- *   tryTakePersistable(Uri, String, boolean) — persistable URI permission helper
+ *   tryTakePersistable(Uri, String, boolean, boolean) — persistable URI permission helper
  */
 final class ImageLoadController
 {
 
 	/**
-	 * Snapshot of the metadata extracted from a freshly-loaded image, ready to commit onto CropState as one
-	 * atomic block. Read-only-on-construction so a partial extraction failure can be discarded without
-	 * tearing the previous state.
+	 * Snapshot of the metadata extracted from a freshly-loaded image, ready to commit onto CropState as one atomic
+	 * block. Read-only-on-construction so a partial extraction failure can be discarded without tearing the
+	 * previous state.
 	 *
 	 * @param sourceFormat   JPEG or PNG (one of the two — caller guards the input)
 	 * @param jpegMeta       APP/COM segment list (synthetic APP1 with capped TIFF for PNG sources)
@@ -57,12 +57,11 @@ final class ImageLoadController
 
 	private final ImageLoadHost host;
 	private final SafFileHelper safFiles;
-	// URI of the most recently SUCCESSFULLY-loaded source — promoted from the load() argument only
-	// after applyBytes returns true AND the UI install runnable has been posted. Setting before
-	// success would pair the attempted URI with the prior session's CropState if the load was
-	// busy-rejected, failed to decode, or never reached the install path — onSaveInstanceState
-	// would then persist a restore-bundle mismatching the URI to the in-memory edit state, and the
-	// restore would load image B while applying image A's geometry. Volatile so the UI thread
+	// URI of the most recently SUCCESSFULLY-loaded source — promoted from the load() argument only after applyBytes
+	// returns true AND the UI install runnable has been posted. Setting before success would pair the attempted URI
+	// with the prior session's CropState if the load was busy-rejected, failed to decode, or never reached the
+	// install path — onSaveInstanceState would then persist a restore-bundle mismatching the URI to the in-memory
+	// edit state, and the restore would load image B while applying image A's geometry. Volatile so the UI thread
 	// (onSaveInstanceState) sees the bg thread's promote.
 	private volatile Uri lastLoadedUri;
 
@@ -80,9 +79,8 @@ final class ImageLoadController
 	 * BitmapUtils.applyOrientation without an extra null/range check.
 	 *
 	 * Package-private so ImageLoadControllerOrientationTest can pin the format-dispatch contract — a regression
-	 * that routed JPEG bytes through the PNG reader (or vice versa) would silently load the source in
-	 * stored-pixel orientation while the export side normalises to 1, baking a permanent rotation into every
-	 * saved image.
+	 * that routed JPEG bytes through the PNG reader (or vice versa) would silently load the source in stored-pixel
+	 * orientation while the export side normalises to 1, baking a permanent rotation into every saved image.
 	 *
 	 * @param fileBytes raw image bytes; recognised when bytes 0..1 match JPEG SOI (FF D8) OR bytes 0..7 match
 	 *                  the canonical PNG signature
@@ -103,14 +101,14 @@ final class ImageLoadController
 	}
 
 	/**
-	 * Scan the loaded image's bytes for EXIF/ICC/XMP/HDR/SEFT markers and build a snapshot of everything that
-	 * needs to land on CropState. Caller commits the snapshot atomically AFTER state.reset() so a thrown
-	 * extractor (rare but possible on adversarial input) can't half-populate state and destroy the previous
-	 * load — the caller's reset only fires on the success path.
+	 * Scan the loaded image's bytes for EXIF/ICC/XMP/HDR/SEFT markers and build a snapshot of everything that needs
+	 * to land on CropState. Caller commits the snapshot atomically AFTER state.reset() so a thrown extractor (rare
+	 * but possible on adversarial input) can't half-populate state and destroy the previous load — the caller's
+	 * reset only fires on the success path.
 	 *
-	 * Caller has already verified the bytes match either a JPEG SOI or PNG signature (applyBytes does the gate
-	 * up front), so the JPEG-vs-PNG branch here is a straightforward routing — no need to re-validate or fall
-	 * through to "PNG" as a default for unrecognised formats.
+	 * Caller has already verified the bytes match either a JPEG SOI or PNG signature (applyBytes does the gate up
+	 * front), so the JPEG-vs-PNG branch here is a straightforward routing — no need to re-validate or fall through
+	 * to "PNG" as a default for unrecognised formats.
 	 *
 	 * @param fileBytes raw image bytes (must start with FF D8 or the PNG 8-byte signature)
 	 * @return snapshot of the extraction result; caller commits to CropState
@@ -127,10 +125,11 @@ final class ImageLoadController
 			//   - state.pngExifTiff carries the raw TIFF bytes uncapped. PNG → PNG export prefers this so a
 			//     PNG with > 64KB EXIF (camera with extensive MakerNote / GPS metadata) round-trips fully —
 			//     the PNG eXIf chunk has a u31 length field, so no cap applies on the output side.
-			// PngMetadataExtractor returns empty / null when no eXIf chunk is present; typical PNGs without
-			// EXIF are unaffected.
+			// PngMetadataExtractor returns empty when no eXIf chunk is present; typical PNGs without
+			// EXIF are unaffected. pngExifTiff feeds MetadataExtraction's nullable field — unwrap at
+			// the storage seam.
 			List<JpegSegment> pngMeta = PngMetadataExtractor.extract(fileBytes);
-			byte[] pngExifTiff = PngMetadataExtractor.extractRawTiff(fileBytes);
+			byte[] pngExifTiff = PngMetadataExtractor.extractRawTiff(fileBytes).orElse(null);
 			String display = pngExifTiff == null ? "PNG" : "PNG+EXIF";
 			return new MetadataExtraction(Format.PNG, pngMeta, pngExifTiff, null, null, display);
 		}
@@ -151,21 +150,21 @@ final class ImageLoadController
 		Log.d(TAG, "Segments: " + meta.size()
 			+ " EXIF=" + hasExif + " ICC=" + hasIcc + " XMP=" + hasXmp + " MPF=" + hasMpf);
 
-		// HDR gate: only consider FF D8 after primary EOI as a gain map when the file carries the XMP
-		// hdrgm namespace marker (scanned ONLY inside parsed XMP APP1 segments — a stray "hdrgm" 5-byte
-		// sequence in MakerNote / COM / vendor blob / SEFT history / entropy doesn't false-positive)
-		// AND has MPF segments (which describe Multi-Picture layouts including HDR). hasMpf is the
-		// cheap pre-filter — segment iteration above already computed it; the XMP-segment-only hdrgm
-		// scan runs only when MPF is present (Samsung non-HDR files typically don't have MPF, so the
-		// scan is skipped on the SDR happy path). Without this combined gate, an SDR Samsung file
-		// whose SEFT data block starts with an embedded JPEG thumbnail's FF D8 would be mis-extracted
-		// as having a gain map AND have its SEFT trailer truncated past the thumbnail. Both extractors
-		// use the resulting hint.
+		// HDR gate: only consider FF D8 after primary EOI as a gain map when the file carries the XMP hdrgm
+		// namespace marker (scanned ONLY inside parsed XMP APP1 segments — a stray "hdrgm" 5-byte sequence in
+		// MakerNote / COM / vendor blob / SEFT history / entropy doesn't false-positive) AND has MPF segments
+		// (which describe Multi-Picture layouts including HDR). hasMpf is the cheap pre-filter — segment
+		// iteration above already computed it; the XMP-segment-only hdrgm scan runs only when MPF is present
+		// (Samsung non-HDR files typically don't have MPF, so the scan is skipped on the SDR happy path).
+		// Without this combined gate, an SDR Samsung file whose SEFT data block starts with an embedded JPEG
+		// thumbnail's FF D8 would be mis-extracted as having a gain map AND have its SEFT trailer truncated
+		// past the thumbnail. Both extractors use the resulting hint.
 		boolean isHdrSource = hasMpf && HdrSignature.hasHdrgmInXmp(meta);
-		byte[] gainMap = GainMapExtractor.extract(fileBytes, isHdrSource);
-		byte[] seftTrailer = SeftExtractor.extract(fileBytes, gainMap != null);
+		// Both extraction results feed MetadataExtraction's nullable fields — unwrap at the storage seam.
+		byte[] gainMap = GainMapExtractor.extract(fileBytes, isHdrSource).orElse(null);
+		byte[] seftTrailer = SeftExtractor.extract(fileBytes, gainMap != null).orElse(null);
 		// Use the extractor's authoritative answer rather than re-running the magic-byte check. SeftExtractor
-		// returns null when the trailer is structurally invalid (no primary EOI, etc.) even if the bytes end
+		// returns empty when the trailer is structurally invalid (no primary EOI, etc.) even if the bytes end
 		// with "SEFT" — the info-bar string and the saved-file SEFT-suffix decision must agree.
 		boolean hasSeft = seftTrailer != null;
 		Log.d(TAG, "HDR=" + (gainMap != null ? gainMap.length + "b" : "none")
@@ -198,29 +197,16 @@ final class ImageLoadController
 	}
 
 	/**
-	 * True when fileBytes starts with the 8-byte PNG signature (89 50 4E 47 0D 0A 1A 0A). Routes through
-	 * PngMetadataExtractor.PNG_SIGNATURE rather than re-declaring the 8 hex/ASCII bytes here so the
-	 * canonical constant lives in one place — paired with the chunk walkers in PngMetadataExtractor that
-	 * also reference it.
+	 * True when fileBytes starts with the 8-byte PNG signature (89 50 4E 47 0D 0A 1A 0A). Delegates to
+	 * PngMetadataExtractor.hasPngSignature — the canonical PNG-detection predicate — rather than re-declaring the
+	 * signature bytes or the comparison here.
 	 *
 	 * @param fileBytes raw bytes
 	 * @return true when the first eight bytes match the PNG file signature
 	 */
 	static boolean isPngSignature(byte[] fileBytes)
 	{
-		byte[] sig = PngMetadataExtractor.PNG_SIGNATURE;
-		if (fileBytes.length < sig.length)
-		{
-			return false;
-		}
-		for (int i = 0; i < sig.length; i++)
-		{
-			if (fileBytes[i] != sig[i])
-			{
-				return false;
-			}
-		}
-		return true;
+		return PngMetadataExtractor.hasPngSignature(fileBytes);
 	}
 
 	/**
@@ -237,6 +223,7 @@ final class ImageLoadController
 	 * @param origName  display name used as the source filename in CropState
 	 * @return true on successful decode + state population, false when BitmapFactory rejected the bytes
 	 */
+	@WorkerThread
 	boolean applyBytes(byte[] fileBytes, String origName)
 	{
 		// Reject non-JPEG/PNG sources up front. BitmapFactory will happily decode HEIC, WebP, GIF, and other
@@ -251,23 +238,22 @@ final class ImageLoadController
 				"Unsupported image format — only JPEG and PNG are supported", Toast.LENGTH_LONG));
 			return false;
 		}
-		// Two-pass decode for memory bounds. Pass 1 reads only the SOF dimensions (no pixel allocation) so
-		// we can pick an inSampleSize that fits the decoded bitmap within BitmapUtils.MAX_DECODE_PIXELS
-		// (256 MP / ~1 GB ARGB). 200 MP Samsung captures (real 192 mebipixels) decode at inSampleSize=1
-		// with comfortable headroom; subsampling only kicks in for hypothetical > 256 MP sources. Pass 2
-		// does the real decode at that subsampling. BitmapFactory's bounds pre-pass is essentially free —
-		// header walk only, no entropy decode — so the overhead is negligible for sources that don't need
-		// to subsample.
+		// Two-pass decode for memory bounds. Pass 1 reads only the SOF dimensions (no pixel allocation) so we
+		// can pick an inSampleSize that fits the decoded bitmap within BitmapUtils.MAX_DECODE_PIXELS (256 MP /
+		// ~1 GB ARGB). 200 MP Samsung captures (real 192 mebipixels) decode at inSampleSize=1 with comfortable
+		// headroom; subsampling only kicks in for hypothetical > 256 MP sources. Pass 2 does the real decode at
+		// that subsampling. BitmapFactory's bounds pre-pass is essentially free — header walk only, no entropy
+		// decode — so the overhead is negligible for sources that don't need to subsample.
 		int maxPixels = BitmapUtils.MAX_DECODE_PIXELS;
 		BitmapFactory.Options boundsOpts = new BitmapFactory.Options();
 		boundsOpts.inJustDecodeBounds = true;
 		BitmapFactory.decodeByteArray(fileBytes, 0, fileBytes.length, boundsOpts);
-		// Defensive guard against bounds-decode failing silently: BitmapFactory leaves outWidth /
-		// outHeight at 0 when it couldn't read the SOF dimensions (corrupt/truncated metadata even
-		// though the magic-byte gate above passed — e.g. a JPEG with a malformed SOF segment).
-		// Passing 0×0 into computeInSampleSize could return implementation-defined behaviour, and
-		// the subsequent real decode would also fail. Surface the diagnosis here so the user gets
-		// a clean "Failed to decode" toast instead of crash-or-garbage downstream.
+		// Defensive guard against bounds-decode failing silently: BitmapFactory leaves outWidth / outHeight at
+		// 0 when it couldn't read the SOF dimensions (corrupt/truncated metadata even though the magic-byte
+		// gate above passed — e.g. a JPEG with a malformed SOF segment). Passing 0×0 into computeInSampleSize
+		// could return implementation-defined behaviour, and the subsequent real decode would also fail.
+		// Surface the diagnosis here so the user gets a clean "Failed to decode" toast instead of
+		// crash-or-garbage downstream.
 		if (boundsOpts.outWidth <= 0 || boundsOpts.outHeight <= 0)
 		{
 			host.runOnUiThread(() -> host.toastIfAlive("Failed to decode", Toast.LENGTH_SHORT));
@@ -313,30 +299,29 @@ final class ImageLoadController
 		catch (RuntimeException | OutOfMemoryError e)
 		{
 			// applyOrientation calls Bitmap.createBitmap for orientations 2..8, which can throw
-			// OutOfMemoryError (Error, not RuntimeException) on low-memory devices with multi-MP sources.
-			// A narrow RuntimeException catch would let OOM propagate with `raw` still owning its native
-			// pixel buffer — exactly the moment recycling matters most because the same allocation
-			// pressure that triggered the OOM is hammering the heap. Catching both lets us release the
-			// buffer immediately rather than waiting on the GC finalizer.
+			// OutOfMemoryError (Error, not RuntimeException) on low-memory devices with multi-MP sources. A
+			// narrow RuntimeException catch would let OOM propagate with `raw` still owning its native
+			// pixel buffer — exactly the moment recycling matters most because the same allocation pressure
+			// that triggered the OOM is hammering the heap. Catching both lets us release the buffer
+			// immediately rather than waiting on the GC finalizer.
 			raw.recycle();
 			throw e;
 		}
 
 		// `bmp` is allocated above and ownership transfers to the UI runnable below (which posts
 		// setSourceImage). If any step between here and the post throws — extractMetadata could raise on a
-		// truly adversarial source segment, or width/height reads could trip on a recycled bitmap — bmp
-		// would otherwise leak its native pixel buffer to the GC finalizer. The handedOff flag flips the
-		// moment the runnable is queued; until then the catch path recycles bmp and rethrows so the caller's
-		// catch (in applyGraftedBytes / loadImage) posts a real failure toast.
-		//
-		// State commit is deferred until AFTER extractMetadata succeeds: we run the extraction against
-		// fileBytes only (no state mutation) and stash everything in a MetadataExtraction snapshot. Only
-		// after the snapshot is built do we call state.reset() and apply the snapshot. A throw inside any
-		// extractor leaves the previous load intact — no half-populated state, no destroyed prior image.
+		// truly adversarial source segment, or width/height reads could trip on a recycled bitmap — bmp would
+		// otherwise leak its native pixel buffer to the GC finalizer. The handedOff flag flips the moment the
+		// runnable is queued; until then the catch path recycles bmp and rethrows so the caller's catch (in
+		// applyGraftedBytes / loadImage) posts a real failure toast. State commit is deferred until AFTER
+		// extractMetadata succeeds: we run the extraction against fileBytes only (no state mutation) and stash
+		// everything in a MetadataExtraction snapshot. Only after the snapshot is built do we call
+		// state.reset() and apply the snapshot. A throw inside any extractor leaves the previous load intact —
+		// no half-populated state, no destroyed prior image.
 		boolean handedOff = false;
-		// Declared outside the try so the finally's recycle path can see it. Assigned inside the try only
-		// AFTER createDisplayProxy returns; an earlier throw (extractMetadata, reset, setter cascade) leaves
-		// it null and the finally's null-check + identity-check skip the recycle.
+		// Declared outside the try so the finally's recycle path can see it. Assigned inside the try only AFTER
+		// createDisplayProxy returns; an earlier throw (extractMetadata, reset, setter cascade) leaves it null
+		// and the finally's null-check + identity-check skip the recycle.
 		Bitmap displayImage = null;
 		try
 		{
@@ -360,25 +345,24 @@ final class ImageLoadController
 			// when it aliases bmp, the identity check prevents double-recycle of the same native buffer.
 			displayImage = BitmapUtils.createDisplayProxy(bmp);
 
-			// All extraction + proxy creation succeeded — now commit to state atomically. The bg
-			// executor is single-threaded so these writes are serialized; UI-thread reads see them via
-			// the Handler.post happens-before edge below. EditorRenderer / tap paths null-check
-			// getSourceImage so a null-during-load snapshot is handled as "no image loaded".
-			// installLoadedImage performs the per-field state writes wrapped in beginBatch/endBatch; the
-			// field writes themselves don't call notifyChanged today, so the batch is structural
-			// insurance against a future maintainer adding one
-			// rather than a current listener-coalescing measure.
+			// All extraction + proxy creation succeeded — now commit to state atomically. The bg executor
+			// is single-threaded so these writes are serialized; UI-thread reads see them via the
+			// Handler.post happens-before edge below. EditorRenderer / tap paths null-check getSourceImage
+			// so a null-during-load snapshot is handled as "no image loaded". installLoadedImage performs
+			// the per-field state writes wrapped in beginBatch/endBatch; the field writes themselves don't
+			// call notifyChanged today, so the batch is structural insurance against a future maintainer
+			// adding one rather than a current listener-coalescing measure.
 			CropState state = host.getState();
 			state.reset();
 			state.installLoadedImage(fileBytes, origName, extracted.sourceFormat(),
 				extracted.jpegMeta(), extracted.pngExifTiff(), extracted.gainMap(),
 				extracted.seftTrailer());
 
-			// `handedOff = true` flips ONLY AFTER runOnUiThread successfully posts the runnable. A
-			// throw from the post (RejectedExecutionException on a quitting looper) leaves handedOff
-			// false, so the finally's recycle reclaims both native pixel buffers promptly. `displayForUi`
-			// is a final-by-name alias so the lambda captures it cleanly — `displayImage` is reassigned
-			// above and fails the lambda's effectively-final requirement.
+			// `handedOff = true` flips ONLY AFTER runOnUiThread successfully posts the runnable. A throw
+			// from the post (RejectedExecutionException on a quitting looper) leaves handedOff false, so
+			// the finally's recycle reclaims both native pixel buffers promptly. `displayForUi` is a
+			// final-by-name alias so the lambda captures it cleanly — `displayImage` is reassigned above
+			// and fails the lambda's effectively-final requirement.
 			Bitmap displayForUi = displayImage;
 			host.runOnUiThread(() -> host.installImageOnUi(bmp, displayForUi, sizeInfo, metaInfo));
 			handedOff = true;
@@ -401,11 +385,10 @@ final class ImageLoadController
 	}
 
 	/**
-	 * Accessor for MainActivity.onSaveInstanceState — the URI of the most recently SUCCESSFULLY-loaded
-	 * source, promoted only after applyBytes returns true (so a busy-rejected or decode-failed load
-	 * doesn't pair a stale URI with the in-memory CropState). Stays set across the rest of the session
-	 * because the field tracks "what source is currently in the editor", which is exactly what the
-	 * process-death restore flow needs to re-fetch.
+	 * Accessor for MainActivity.onSaveInstanceState — the URI of the most recently SUCCESSFULLY-loaded source,
+	 * promoted only after applyBytes returns true (so a busy-rejected or decode-failed load doesn't pair a stale
+	 * URI with the in-memory CropState). Stays set across the rest of the session because the field tracks "what
+	 * source is currently in the editor", which is exactly what the process-death restore flow needs to re-fetch.
 	 *
 	 * @return URI promoted from the most recent successful load(), or null when no successful load has
 	 *         happened this session (fresh launch with no prior load, or every load attempt failed)
@@ -440,13 +423,12 @@ final class ImageLoadController
 		{
 			return;
 		}
-		// Scheme gate: only accept "content://" URIs from share/view intents. Android N+ blocks senders
-		// from using "file://" via FileUriExposedException, but a privileged sender or pre-N device
-		// could feed a file:// URI pointing at app-internal paths the app has read access to. We have
-		// MANAGE_EXTERNAL_STORAGE granted for the save flow, which gives ContentResolver.openInputStream
-		// broad read access on file:// URIs — without this gate, an attacker-controlled VIEW intent
-		// could exfiltrate file content via our load path. "android.resource://" is allowed for legitimate
-		// app-resource shares.
+		// Scheme gate: only accept "content://" URIs from share/view intents. Android N+ blocks senders from
+		// using "file://" via FileUriExposedException, but a privileged sender or pre-N device could feed a
+		// file:// URI pointing at app-internal paths the app has read access to. We have
+		// MANAGE_EXTERNAL_STORAGE granted for the save flow, which gives ContentResolver.openInputStream broad
+		// read access on file:// URIs — without this gate, an attacker-controlled VIEW intent could exfiltrate
+		// file content via our load path. "android.resource://" is allowed for legitimate app-resource shares.
 		String scheme = uri.getScheme();
 		if (!"content".equals(scheme) && !"android.resource".equals(scheme))
 		{
@@ -454,36 +436,36 @@ final class ImageLoadController
 			return;
 		}
 		// Share/View intents routinely don't carry persistable permission — log at debug, not warn, since this
-		// is expected for external intents.
-		tryTakePersistable(uri, "(share)", false);
+		// is expected for external intents. readOnlyRetry=true: this path only reads the source, so when the
+		// sender granted read-only persistable access the READ-only downgrade still secures the restore path.
+		tryTakePersistable(uri, "(share)", false, true);
 		load(uri);
 	}
 
 	/**
-	 * Hands the SAF URI to SafFileHelper.readUriBytes, which prefers a direct filesystem read (bypasses
-	 * Samsung MediaStore's EXIF mangling and post-EOI gain-map stripping) and falls back to a cache-file
-	 * copy for cloud / SAF-only URIs that don't resolve to a readable path.
+	 * Hands the SAF URI to SafFileHelper.readUriBytes, which prefers a direct filesystem read (bypasses Samsung
+	 * MediaStore's EXIF mangling and post-EOI gain-map stripping) and falls back to a cache-file copy for cloud /
+	 * SAF-only URIs that don't resolve to a readable path.
 	 *
 	 * @param uri SAF URI to load
 	 */
 	void load(Uri uri)
 	{
-		// lastLoadedUri is NOT updated here — see field comment for why. Promoted in runLoadBg
-		// after applyBytes succeeds + the install runnable posts.
-		// Dismiss whatever state-mutating dialog is open BEFORE busy.compareAndSet — once we
-		// dispatch to bg, state.reset() runs and would race any open dialog's still-active widget
-		// commits to CropState. Done synchronously on the UI thread so by the time runInBackground is called,
-		// no widget inside the dialog can fire another updateGridConfig.
+		// lastLoadedUri is NOT updated here — see field comment for why. Promoted in runLoadBg after applyBytes
+		// succeeds + the install runnable posts. Dismiss whatever state-mutating dialog is open BEFORE
+		// busy.compareAndSet — once we dispatch to bg, state.reset() runs and would race any open dialog's
+		// still-active widget commits to CropState. Done synchronously on the UI thread so by the time
+		// runInBackground is called, no widget inside the dialog can fire another updateGridConfig.
 		host.dismissTransientDialogs();
 		if (!host.getBusy().compareAndSet(false, true))
 		{
 			host.showBusyToast();
 			return;
 		}
-		// Between the busy acquire and the runInBackground enqueue, any throw from the UI setup
-		// (setBusyUi / showProgress can hit findViewById / setText during an unusual view-tree state) or the
-		// executor submission (RejectedExecutionException after onDestroy) would otherwise strand busy=true
-		// forever. Clear busy + hide UI before propagating so a second Open tap isn't permanently rejected.
+		// Between the busy acquire and the runInBackground enqueue, any throw from the UI setup (setBusyUi /
+		// showProgress can hit findViewById / setText during an unusual view-tree state) or the executor
+		// submission (RejectedExecutionException after onDestroy) would otherwise strand busy=true forever.
+		// Clear busy + hide UI before propagating so a second Open tap isn't permanently rejected.
 		try
 		{
 			host.setBusyUi(true);
@@ -506,7 +488,12 @@ final class ImageLoadController
 	}
 
 	/**
-	 * Take read+write persistable permission on the URI. Logging level follows context:
+	 * Take persistable permission on the URI: read+write first, then — for read-only call sites — a READ-only
+	 * retry when a SecurityException rejects the write bit. Share and restore sources routinely carry a
+	 * read-only persistable grant, so the READ|WRITE take throws and without the retry the app would keep NO
+	 * durable permission at all; those paths only read the document, so a durable READ-only grant beats none.
+	 * The Save As site takes read+write or nothing (readOnlyRetry false) — Replace's SAF fallbacks reopen the
+	 * document for writing, so a read-only grant is of no use there. Logging level follows context:
 	 * Open and Save As log at WARN because failure means we'll lose access on next launch
 	 * (actionable for the user); Share intents log at DEBUG because external intents
 	 * routinely don't grant persistable permission and the failure is expected, not a
@@ -519,25 +506,40 @@ final class ImageLoadController
 	 * @param warnOnFailure  true to log failures at WARN (Open / Save flows where the
 	 *                       user's action implies they care), false for DEBUG (Share
 	 *                       intents where the failure is expected and not actionable)
+	 * @param readOnlyRetry  true for read-only call sites (Share / restore) — a
+	 *                       SecurityException on the read+write take retries with
+	 *                       FLAG_GRANT_READ_URI_PERMISSION alone before giving up;
+	 *                       false for Save As, which needs write or nothing
 	 */
-	void tryTakePersistable(Uri uri, String contextTag, boolean warnOnFailure)
+	void tryTakePersistable(Uri uri, String contextTag, boolean warnOnFailure, boolean readOnlyRetry)
 	{
 		try
 		{
 			int flags = Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION;
 			host.getActivity().getContentResolver().takePersistableUriPermission(uri, flags);
 		}
+		catch (SecurityException e)
+		{
+			if (!readOnlyRetry)
+			{
+				logPersistableFailure(contextTag, uri, warnOnFailure, e);
+				return;
+			}
+			// A read-only persistable grant rejects the write bit with SecurityException; retry for
+			// the durable READ-only grant this call site can actually use.
+			try
+			{
+				host.getActivity().getContentResolver().takePersistableUriPermission(uri,
+					Intent.FLAG_GRANT_READ_URI_PERMISSION);
+			}
+			catch (Exception readRetryFailure)
+			{
+				logPersistableFailure(contextTag, uri, warnOnFailure, readRetryFailure);
+			}
+		}
 		catch (Exception e)
 		{
-			if (warnOnFailure)
-			{
-				Log.w(TAG, "takePersistableUriPermission " + contextTag + " failed for " + uri, e);
-			}
-			else
-			{
-				Log.d(TAG, "takePersistableUriPermission " + contextTag
-					+ " declined: " + e.getMessage());
-			}
+			logPersistableFailure(contextTag, uri, warnOnFailure, e);
 		}
 	}
 
@@ -563,45 +565,68 @@ final class ImageLoadController
 	}
 
 	/**
-	 * Background-thread body of load: reads the URI's bytes via SafFileHelper.readUriBytes (direct
-	 * filesystem read when resolvable, cache-file copy fallback so post-EOI HDR data survives provider
-	 * quirks), then hands off to applyBytes for decode + metadata extract. Releases the busy flag in
-	 * finally so a thrown read / decode doesn't strand subsequent Open / Save attempts behind a permanent
-	 * "Busy" toast. Failure surfaces as a toast on the UI thread.
+	 * Shared failure log for tryTakePersistable's give-up paths. WARN carries the stack trace for flows where
+	 * losing durable access is actionable; DEBUG carries the bare message where the failure is expected.
+	 *
+	 * @param contextTag    entry-point tag from tryTakePersistable (Open / Save / Share)
+	 * @param uri           URI the persistable take failed for
+	 * @param warnOnFailure true for WARN with the exception, false for DEBUG with the message only
+	 * @param failure       the exception being reported
+	 */
+	private void logPersistableFailure(String contextTag, Uri uri, boolean warnOnFailure, Exception failure)
+	{
+		if (warnOnFailure)
+		{
+			Log.w(TAG, "takePersistableUriPermission " + contextTag + " failed for " + uri, failure);
+		}
+		else
+		{
+			Log.d(TAG, "takePersistableUriPermission " + contextTag
+				+ " declined: " + failure.getMessage());
+		}
+	}
+
+	/**
+	 * Background-thread body of load: reads the URI's bytes via SafFileHelper.readUriBytes (direct filesystem read
+	 * when resolvable, cache-file copy fallback so post-EOI HDR data survives provider quirks), then hands off to
+	 * applyBytes for decode + metadata extract. Releases the busy flag in finally so a thrown read / decode doesn't
+	 * strand subsequent Open / Save attempts behind a permanent "Busy" toast. Failure surfaces as a toast on the UI
+	 * thread.
 	 *
 	 * @param uri SAF URI to load
 	 */
+	@WorkerThread
 	private void runLoadBg(Uri uri)
 	{
 		try
 		{
 			byte[] fileBytes = safFiles.readUriBytes(uri);
 			Log.d(TAG, "Loaded " + fileBytes.length + " raw bytes");
-			boolean applied = applyBytes(fileBytes, safFiles.getDisplayName(uri));
+			boolean applied = applyBytes(fileBytes, safFiles.getDisplayName(uri).orElse(null));
 			if (applied)
 			{
 				// Promote AFTER applyBytes posts the UI install runnable. A false return (decode
 				// failure, unsupported format) leaves lastLoadedUri pointing at whatever prior
-				// successful load it tracked, so onSaveInstanceState's restore-bundle still
-				// matches in-memory state. Volatile write is seen by the UI thread.
+				// successful load it tracked, so onSaveInstanceState's restore-bundle still matches
+				// in-memory state. Volatile write is seen by the UI thread.
 				lastLoadedUri = uri;
-				// Persist the parent of the loaded file so the next FolderPickerDialog open can
-				// land there when no save folder has been recorded yet. fileFromSafUri returns
-				// null for cloud / SAF-only URIs that don't resolve to a filesystem path —
-				// recordLoadFolder treats null as a no-op so we don't need the guard here. Gated
-				// on `applied` so a failed load (unsupported format, decode error) doesn't shift
-				// the next save dialog's initial folder onto a directory that doesn't contain
-				// the currently-loaded image — matches REQUIREMENTS.md §9's "recorded on
-				// successful load" wording.
-				SaveController.recordLoadFolder(host.getActivity(), safFiles.fileFromSafUri(uri));
+				// Persist the parent of the loaded file so the next FolderPickerDialog open can land
+				// there when no save folder has been recorded yet. fileFromSafUri returns empty for
+				// cloud / SAF-only URIs that don't resolve to a filesystem path — recordLoadFolder
+				// treats null as a no-op so we don't need the guard here. Gated on `applied` so a
+				// failed load (unsupported format, decode error) doesn't shift the next save dialog's
+				// initial folder onto a directory that doesn't contain the currently-loaded image —
+				// matches REQUIREMENTS.md §9's "recorded on successful load" wording.
+				SaveController.recordLoadFolder(host.getActivity(),
+					safFiles.fileFromSafUri(uri).orElse(null));
 			}
 		}
 		catch (Exception | OutOfMemoryError e)
 		{
 			// Widened to include OutOfMemoryError so a multi-MP / HDR source whose primary-bitmap or
-			// applyOrientation rotated copy blows the heap budget surfaces a "Load failed: …" toast
-			// instead of dying silently — finally releases busy and hides the overlay, but the catch
-			// is the only place the user-facing toast posts.
+			// applyOrientation rotated copy blows the heap budget surfaces a "Load failed: …" toast instead
+			// of dying silently — finally releases busy and hides the overlay, but the catch is the only
+			// place the user-facing toast posts.
 			Log.e(TAG, "Load failed", e);
 			host.runOnUiThread(() -> host.toastIfAlive(
 				"Load failed: " + e.getMessage(), Toast.LENGTH_SHORT));

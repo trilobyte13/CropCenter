@@ -1,7 +1,7 @@
 # CropCenter Code Style
 
-Coding conventions for this project — rule violations need fixing before merge even on a compile-clean patch.
-Sections and subsections are ordered alphabetically.
+Coding conventions for this project — rule violations need fixing before merge even on a compile-clean patch. Sections
+and subsections are ordered alphabetically.
 
 ## Android / Java idioms
 
@@ -13,8 +13,8 @@ Sections and subsections are ordered alphabetically.
 - **try-with-resources** for anything `Closeable` / `AutoCloseable`. Don't hand-roll close-in-finally.
 - **Intentionally swallowed exceptions** use the parameter name `ignored`, and the catch body must contain a `//`
   comment explaining *why* the throw is safe to drop — readers should see at a glance which throws are expected by
-  design vs. accidentally lost. The rule applies whether the catch body is empty or carries fallback logic
-  (`return defaultValue`):
+  design vs. accidentally lost. The rule applies whether the catch body is empty or carries fallback logic (`return
+  defaultValue`):
   ```java
   catch (NumberFormatException ignored)
   {
@@ -28,6 +28,16 @@ Sections and subsections are ordered alphabetically.
   }
   ```
   If the `Exception` actually deserves a log line, log it (`Log.w(TAG, "...", e)`) instead of naming it `ignored`.
+- **Thread-contract annotations:** `androidx.annotation` thread annotations are mandatory at the UI/bg seams — host
+  interfaces with a thread contract (`EditorHost` / `SaveHost` / `ImageLoadHost`), background entry points (the `*Bg` /
+  `*OnBg` bodies and the pipeline roots they call: `CropExporter.export`, `UltraHdrCompat.compressWithGainmap`,
+  `SafFileHelper.readUriBytes`, `HorizonDetector.detectFromPaintedRegion`, FolderBrowser's enumerate/decode seams), and
+  UI-mutation methods (`UiSync`, `installImageOnUi`, FolderBrowser's refresh/toggle seams). Use `@UiThread` for
+  UI-thread-only, `@WorkerThread` for bg-executor-only, and `@AnyThread` for marshal-internally methods that post to the
+  UI thread themselves (`finishBusy` / `toastIfAlive` / `showProgress` / `hideProgress`) — `@AnyThread` is documentation
+  of that contract, not lint enforcement. Lint's `WrongThread` check (`./gradlew.bat :app:lintDebug`) machine-checks
+  `@UiThread`-vs-`@WorkerThread` call paths; annotate new seams when they're introduced, verify the real call topology
+  first, and never annotate a method both threads legitimately call with anything but `@AnyThread`.
 - **Toast-from-background-thread helpers** go through a UI-thread-safe path (`runOnUiThread` + `isDestroyed()` guard).
   The `toastIfAlive` helper in `MainActivity` is the canonical pattern.
 - **`final` on local variables** is required only when a lambda or anonymous class captures them. Don't sprinkle `final`
@@ -41,9 +51,8 @@ Sections and subsections are ordered alphabetically.
 
 ## Boolean negation of comparisons
 
-Prefer the direct inverted comparison over wrapping a comparison in `!(...)`. The negated form
-costs the reader two cognitive passes (parse the `!`, parse the comparison, mentally combine);
-the direct form reads as one thought.
+Prefer the direct inverted comparison over wrapping a comparison in `!(...)`. The negated form costs the reader two
+cognitive passes (parse the `!`, parse the comparison, mentally combine); the direct form reads as one thought.
 
 | Avoid          | Use        |
 | -------------- | ---------- |
@@ -54,25 +63,23 @@ the direct form reads as one thought.
 | `!(x == y)`    | `x != y`   |
 | `!(x != y)`    | `x == y`   |
 
-The rule applies regardless of operand type — `int`, `long`, `float`, `double`, references via
-`equals` — except for the **NaN-rejection idiom** below.
+The rule applies regardless of operand type — `int`, `long`, `float`, `double`, references via `equals` — except for the
+**NaN-rejection idiom** below.
 
 **Float / double NaN exception.** When the comparison is on a `float` / `double` AND a NaN
-operand must fold into the "false" side of the branch, the negated form is **not** equivalent
-to the direct form:
+operand must fold into the "false" side of the branch, the negated form is **not** equivalent to the direct form:
 
 - `!(NaN > 0f)` is `true` — folds NaN into "not positive"
-- `NaN <= 0f` is `false` — silently lets NaN through, then the surrounding code propagates
-  the NaN (an NaN cap, NaN clamp output, NaN coordinate)
+- `NaN <= 0f` is `false` — silently lets NaN through, then the surrounding code propagates the NaN (an NaN cap, NaN
+  clamp output, NaN coordinate)
 
-When this is the intent, keep the `!(x op y)` form AND attach an inline `// ` comment at the
-check site naming NaN as the reason — not just in the enclosing method's Javadoc. The local
-rationale is what tells the next reader (and the audit) that the negation is load-bearing.
+When this is the intent, keep the `!(x op y)` form AND attach an inline `// ` comment at the check site naming NaN as
+the reason — not just in the enclosing method's Javadoc. The local rationale is what tells the next reader (and the
+audit) that the negation is load-bearing.
 
-The exception applies only to `float` / `double`. For `int` / `long` there's no NaN, so the
-direct comparison is always correct. Compound boolean negation that doesn't fit the
-`!(x op y)` shape (`!(allowSet1 || allowSet2)`, `!isFoo()`) is unrelated to this rule —
-that's just ordinary `!` on a boolean expression.
+The exception applies only to `float` / `double`. For `int` / `long` there's no NaN, so the direct comparison is always
+correct. Compound boolean negation that doesn't fit the `!(x op y)` shape (`!(allowSet1 || allowSet2)`, `!isFoo()`) is
+unrelated to this rule — that's just ordinary `!` on a boolean expression.
 
 ## Braces and blocks
 
@@ -117,9 +124,7 @@ that's just ordinary `!` on a boolean expression.
       }
 
       @Override
-      public void onNothingSelected(AdapterView<?> parent)
-      {
-      }
+      public void onNothingSelected(AdapterView<?> parent) {}
   });
   ```
 
@@ -154,27 +159,29 @@ Android-platform noise — which file emits it shifts as Android deprecates furt
     — a transformer that does more than swap one field (recomputes derived state, validates against a constrained set,
     nulls a sibling field) still gets Javadoc
 
-When in doubt, write the Javadoc — and write the full block (description + every tag) per the completeness rule below.
-A one-liner `/** Returns the width. */` without `@return` is a violation, not a tasteful minimum. But keep the
-description TIGHT: the contract plus the non-obvious "why", not a narrated walkthrough. A method whose contract fits in
-two sentences gets two sentences — length is not thoroughness.
+When in doubt, write the Javadoc — and write the full block (description + every tag) per the completeness rule below. A
+one-liner `/** Returns the width. */` without `@return` is a violation, not a tasteful minimum. But keep the description
+TIGHT: the contract plus the non-obvious "why", not a narrated walkthrough. A method whose contract fits in two
+sentences gets two sentences — length is not thoroughness.
 
 - **When Javadoc IS present, it's a multi-line block.** Inline `/** Foo. */` on one physical line stays out; expand to:
 
   ```java
   /**
-   * Parse the thing. Returns null on error.
+   * Parse the thing.
+   *
+   * @param s serialized form to parse
+   * @return parsed value, or empty when s is malformed
    */
-  public Thing parse(String s)
+  public Optional<Thing> parse(String s)
   ```
 
 - **Javadoc completeness is all-or-nothing.** When Javadoc is present, it must have a description plus `@param` for
-  every parameter, `@return` for every non-void return, and `@throws` for every declared / documented checked
-  exception. Write the full block or omit Javadoc entirely (per the optional-omission list above) — partial Javadoc
-  is a bug. Tags should convey what the type and name alone don't: bound semantics, null behavior, ownership
-  transfer, side-effects on inputs (e.g. `recycled when rotation produces a new instance`), the meaning of edge-case
-  return values (`null when the EXIF byte-order field is malformed`), and the trigger conditions for each declared
-  exception.
+  every parameter, `@return` for every non-void return, and `@throws` for every declared / documented checked exception.
+  Write the full block or omit Javadoc entirely (per the optional-omission list above) — partial Javadoc is a bug. Tags
+  should convey what the type and name alone don't: bound semantics, null behavior, ownership transfer, side-effects on
+  inputs (e.g. `recycled when rotation produces a new instance`), the meaning of edge-case return values (`null when the
+  EXIF byte-order field is malformed`), and the trigger conditions for each declared exception.
 
   ```java
   /**
@@ -198,22 +205,22 @@ two sentences gets two sentences — length is not thoroughness.
   document a single declaration.
 - **No HTML or Javadoc inline tags in comments.** Do not write `<p>`, `<br>`, `<cite>`, `<code>`, `{@code ...}`, or
   `{@link ...}`. Also no HTML entities — write `>` / `<` / `&` / `"` literally, never `&gt;` / `&lt;` / `&amp;` /
-  `&nbsp;` / `&quot;`. This is an Android app — Javadoc is not rendered as HTML for end users, and the tags clutter
-  the source. Use blank Javadoc lines (`*` on its own line) to separate paragraphs. Reference types by their bare
-  name instead of wrapping them in `{@link}`.
-- **Don't state the obvious.** Comments explain *why*, not *what* — if the only thing the comment / Javadoc would
-  say is what the signature / next line already says, delete it. Counter-examples (keep): comments that name a
-  JPEG-spec literal (`// SOI` before `0xFFD8`), label a magic number (`int budget = 60_000; // JPEG thumbnail cap`),
-  or explain a non-obvious invariant / threading concern / defensive guard.
+  `&nbsp;` / `&quot;`. This is an Android app — Javadoc is not rendered as HTML for end users, and the tags clutter the
+  source. Use blank Javadoc lines (`*` on its own line) to separate paragraphs. Reference types by their bare name
+  instead of wrapping them in `{@link}`.
+- **Don't state the obvious.** Comments explain *why*, not *what* — if the only thing the comment / Javadoc would say is
+  what the signature / next line already says, delete it. Counter-examples (keep): comments that name a JPEG-spec
+  literal (`// SOI` before `0xFFD8`), label a magic number (`int budget = 60_000; // JPEG thumbnail cap`), or explain a
+  non-obvious invariant / threading concern / defensive guard.
 - **No change-history or narration.** Comments and Javadoc describe the code as it IS, not how it got there. Drop
   "Previously…", "the old behavior…", "earlier this was…", "pre-fix…", and performance-vs-the-old-way comparisons
-  ("~300ms instead of ~750ms") — git carries all of that, and in-source it just goes stale. State the current
-  invariant / rationale directly. Don't justify a convention the audit already enforces ("ordered alphabetically per
-  CLAUDE.md") — just follow it.
+  ("~300ms instead of ~750ms") — git carries all of that, and in-source it just goes stale. State the current invariant
+  / rationale directly. Don't justify a convention the audit already enforces ("ordered alphabetically per CLAUDE.md") —
+  just follow it.
 - **Keep explanatory blocks short.** Encode the invariant, footgun, or "why not the obvious approach" in the fewest
   lines that stay clear and accurate — not cryptically abbreviated, but not a multi-paragraph essay. A block running
-  past ~6 lines is usually restating the code or narrating; compress to the load-bearing point. High signal-to-noise
-  is the goal: the next reader (human or LLM) should trust the comment without re-deriving it from the code.
+  past ~6 lines is usually restating the code or narrating; compress to the load-bearing point. High signal-to-noise is
+  the goal: the next reader (human or LLM) should trust the comment without re-deriving it from the code.
 
 ## Constants
 
@@ -238,41 +245,64 @@ stays load-bearing:
   tick marks invisible. The Self-audit grep below catches any new `(int) (N * density)` regression.
 - **`util/RotationMath.rotate / inverse`** — every 2D rotation around the image center. Sub-epsilon residual handling
   lives here.
+- **`util/RotatedCropClamp.clampCenteredExtent(center, itemExtent, mid, boundExtent)`** — every clamp of a center
+  coordinate so a symmetric extent stays inside a symmetric bound (crop centers against image / rotated-AABB extents,
+  viewport pan against visible extents). Owns the itemExtent >= boundExtent → midpoint fallback that keeps Math.clamp
+  from throwing on inverted lo > hi bounds. Consumed by RotatedCropClamp's axis-aligned + sub-epsilon single-axis
+  paths, `CropEngine.clampFreeAxes`, and `ViewportMath.clampViewport`.
 - **`util/BitmapUtils.MAX_DECODE_PIXELS` + `BitmapUtils.computeInSampleSize`** — static decode-pixel cap (256 MP,
   handles 200 MP Samsung captures at sampleSize=1 with headroom for future sensor generations). The pair is the
   chokepoint for every consistent-subsampling `BitmapFactory` site (load in `ImageLoadController.applyBytes`, HDR
-  re-decode in `UltraHdrCompat.decodeHdrBitmap`). `EditAligner.reorientEdit` deliberately bypasses it — the graft
-  splice needs full-resolution edit primary. See `BitmapUtils.computeInSampleSize` Javadoc for the power-of-2
-  sampleSize contract.
-- **`util/BitmapUtils.MAX_DISPLAY_PIXELS` + `BitmapUtils.createDisplayProxy`** — display-proxy cap (16 MP) and
-  factory. `ImageLoadController.applyBytes` derives a HARDWARE-config proxy from each loaded source on the bg
-  thread; `EditorRenderer` and `AutoRotateBinder` then render / detect against the proxy at zoom < 4 for smooth
-  GPU-resident gestures, while save paths work from full source — `CropExporter` reads `getSourceImage()` and
-  `UltraHdrCompat` re-decodes the original bytes — so output resolution stays at source.
-  `CropState.setSourceImage(source, display)` is the only legal way to install both bitmaps in lockstep.
-  Companion caps `BitmapUtils.MAX_SOURCE_RENDER_PIXELS` (64 MP) and
-  `BitmapUtils.MAX_SOURCE_RENDER_AXIS` (16384 px) gate `EditorRenderer`'s zoom-≥-4 switch from proxy to source —
-  past either cap the renderer keeps drawing the proxy (soft pixels at high zoom) rather than ask the GPU to
-  upload an unaddressable texture.
+  re-decode in `UltraHdrCompat.decodeHdrBitmap`). `EditAligner.reorientEdit` deliberately bypasses it — the graft splice
+  needs full-resolution edit primary. See `BitmapUtils.computeInSampleSize` Javadoc for the power-of-2 sampleSize
+  contract.
+- **`util/BitmapUtils.MAX_DISPLAY_PIXELS` + `BitmapUtils.createDisplayProxy`** — display-proxy cap (16 MP) and factory.
+  `ImageLoadController.applyBytes` derives a HARDWARE-config proxy from each loaded source on the bg thread;
+  `EditorRenderer` and `AutoRotateBinder` then render / detect against the proxy at zoom < 4 for smooth GPU-resident
+  gestures, while save paths work from full source — `CropExporter` reads `getSourceImage()` and `UltraHdrCompat`
+  re-decodes the original bytes — so output resolution stays at source. `CropState.setSourceImage(source, display)` is
+  the only legal way to install both bitmaps in lockstep. Companion caps `BitmapUtils.MAX_SOURCE_RENDER_PIXELS` (64 MP)
+  and `BitmapUtils.MAX_SOURCE_RENDER_AXIS` (16384 px) gate `EditorRenderer`'s zoom-≥-4 switch from proxy to source —
+  past either cap the renderer draws only the visible region as a viewport-bounded 1:1 tile cut from the software source
+  (`EditorRenderer.drawSourceTile`) rather than ask the GPU to upload an unaddressable texture.
 - **`metadata/JpegMarker`** — every JPEG marker byte (`SOI` / `EOI` / `SOS` / `RST_FIRST` / `RST_LAST` / `STUFFING` /
   `TEM`). Don't repeat the hex literal with an explanatory comment.
 - **`metadata/JpegMarkerWalker.findPrimaryEoi(file, endBound)`** — every walk to find the byte just past the primary
-  JPEG's EOI. Consolidates the SOS / EOI / RST / segment-length / overflow-guard logic that previously lived as three
-  near-identical implementations across `CropExporter`, `GraftWriter`, and `GainMapExtractor`. Hardened against `segLen
-  < 2`, `off + 2 + segLen` wrap-overflow, and truncated SOS headers.
-- **`metadata/JpegMetadataInjector.STREAM_CHUNK_SIZE`** (64 KB) — every streaming file-to-file copy in the save
-  pipeline. Used by `JpegMetadataInjector.injectFileToFile`, `GainMapComposer.composeFileToFile`,
+  JPEG's EOI. The single chokepoint for the SOS / EOI / RST / segment-length / overflow-guard walk; consumed by
+  `CropExporter`, `GraftWriter`, and `GainMapExtractor`. Hardened against `segLen < 2`, `off + 2 + segLen`
+  wrap-overflow, and truncated SOS headers.
+- **`metadata/JpegMarkerWalker.nextHeadSegment(file, off, endBound)`** — every per-segment iteration over a JPEG's
+  leading APP / COM markers. Classifies one walk step (`NO_MARKER` / `STANDALONE` / `BAD_LENGTH` / `OVERRUN` /
+  `SEGMENT`) and owns the fill-byte skip, the u16 length read with the spec-minimum guard, and the long-arithmetic
+  overrun guard; each caller (`JpegMetadataExtractor.extract`, `XmpItemLengthPatcher.walkApp1Ranges`,
+  `MpfPatcher.patch`, `JpegMetadataInjector.computeScanStart`, `GraftWriter.findFirstNonAppNonCom`,
+  `BitmapUtils.readExifOrientationInternal`) keeps only its segment filter, stop condition, and failure convention.
+  SOS / EOI are not terminal in the cursor — callers check their own stop markers before the kind.
+- **`metadata/JpegMetadataInjector.STREAM_CHUNK_SIZE`** (64 KB) — the chunk size for every streaming copy in the save
+  pipeline. Consumed by `JpegMetadataInjector.copyRemaining` (the copy loop itself) and `SafFileHelper.streamCompare`
+  (the save-verification readback comparator body, which needs the chunk size without the copy;
+  `ExportPipeline.streamCompare` is a one-line delegating seam over it). Single canonical value so future tuning
+  (FileChannel.transferTo migration) lands in one place.
+- **`metadata/JpegMetadataInjector.copyRemaining(InputStream, OutputStream)`** — every chunked stream copy in the save
+  pipeline; returns bytes copied (`ExportPipeline.writePayloadToStream` uses the count, the tail-copy sites ignore
+  it). Used by `JpegMetadataInjector.injectFileToFile`, `GainMapComposer.composeFileToFile`,
   `CropExporter.appendSeftFileToFile`, `CropExporter.injectPngExifFromTiffFileToFile`, and
-  `ExportPipeline.writePayloadToStream`. Single canonical value so future tuning (FileChannel.transferTo migration)
-  lands in one place.
+  `ExportPipeline.writePayloadToStream` — the `> 0` loop-condition subtlety lives in one body.
 - **`metadata/JpegMetadataInjector.skipExactly(FileInputStream, long)`** — every disk-backed tail-position skip in the
   streaming pipeline. Forces progress via a single-byte `read()` when `FileInputStream.skip` transiently returns 0
   (observed intermittently on Samsung's FUSE-backed scoped storage); only treats `read() < 0` as true EOF. The naive
-  `skip()`-loop-with-`break-on-zero` idiom silently truncates the stream, producing SOI + segments + (some random
-  middle of the file). Used by `GainMapComposer.composeFileToFile`, `JpegMetadataInjector.injectFileToFile`, and
+  `skip()`-loop-with-`break-on-zero` idiom silently truncates the stream, producing SOI + segments + (some random middle
+  of the file). Used by `GainMapComposer.composeFileToFile`, `JpegMetadataInjector.injectFileToFile`, and
   `CropExporter.injectPngExifFromTiffFileToFile`.
 - **`metadata/JpegSegment.XMP_HEADER`** — the canonical `"http://ns.adobe.com/xap/1.0/\0"` namespace identifier consumed
   by `isXmp()`, `HorizonDetector`, and `XmpItemLengthPatcher`.
+- **`metadata/TiffIfd0.findOrientationEntry(data, tiffStart, tiffEnd, minIfdRel)`** — every TIFF IFD0
+  Orientation-entry walk: II / MM byte-order + magic-42 validation, long-arithmetic bounds-checked IFD0 walk, and the
+  SHORT / count-1 entry-shape check. The readers (`BitmapUtils.readExifOrientationInternal` for JPEG APP1,
+  `PngMetadataExtractor.extractOrientationInternal` for PNG eXIf) read the value via `TiffIfd0.readOrientation`
+  (1..8 else upright); the writer (`CropExporter.forceTiffOrientationToUpright`) rewrites any non-1 value and passes
+  `minIfdRel=8` to reject an IFD0 overlapping the TIFF header. ExifPatcher's IFD walks stay separate — they chase the
+  IFD0 → IFD1 thumbnail chain, not the Orientation entry.
 - **`model/Format`** — JPEG / PNG enum carrying `extension()` and `mimeType()`. Never re-derive `".jpg"` /
   `"image/jpeg"`; never compare format with `String.equals`.
 - **`model/CropRender.of(...)`** — factory bundling (centerX, centerY, cropW, cropH, imgW, imgH, rotation) for the
@@ -284,6 +314,12 @@ stays load-bearing:
   `hasImageSignature`, `hasParentTraversalSegment`). Static, no Context — testable directly.
 - **`model/StateBus`** — listener-dispatch + batch-suppression. CropState delegates here; never re-implement the batch
   protocol.
+- **`EditorHost.showTransientGuarded(host, tag, label, onDestroyed, onShowFailed, build)`** — every
+  registerTransientDialog producer's guarded show ceremony: destroyed-Activity skip, build → register → show inside one
+  try, RuntimeException (BadTokenException config-change race) mapped to a warn log + per-site abort runnable. Abort
+  actions stay at the call site so each flow keeps its exact rollback semantics. Flows using
+  `setActiveTransientDialog` (FolderPickerDialog / OpenPickerDialog / SettingsDialog) stay outside it per their
+  composite-OnDismissListener contract.
 
 ## Field ordering
 
@@ -299,6 +335,10 @@ primitives** — `String` sorts before `boolean`, `float`, `int`, `long`. `byte[
 starts with `b`).
 
 Within the same type, sort by **field name** alphabetically.
+
+One sanctioned exception: Java initializes fields in declaration order, so a field consumed by a sibling field's
+initializer may be declared ahead of its tier / alphabetical slot. Attach an in-file comment naming the dependency
+(see MainActivity's safFiles / permissions / ui trio).
 
 ### One variable per line
 
@@ -321,7 +361,8 @@ Top of file:
 
 1. `package` declaration
 2. Blank line
-3. Imports, grouped: `android.*`, blank, `androidx.*`, blank, `com.*`, blank, `java.*`. Alphabetical within each group.
+3. Imports, grouped: `android.*`, blank, `androidx.*`, blank, `com.*`, blank, `org.*`, blank, `java.*`. Alphabetical
+   within each group. (`org.*` is currently test-only — `org.junit` — but the slot applies tree-wide.)
 4. Blank line
 5. Class-level Javadoc (required — see Comments)
 6. Class declaration
@@ -395,7 +436,21 @@ Inside a class:
   combinations, or 1–2 cases.
 - **`Math.clamp`** for range clamping. Do not hand-roll `Math.max(lo, Math.min(hi, x))` — `Math.clamp(x, lo, hi)` (Java
   21) is clearer and the argument order matches the intent ("value, low, high").
-
+- **`Optional<T>` for absent-value RETURNS on internal APIs.** A method whose result can be legitimately absent
+  returns `Optional<T>`, not null. Six carve-outs keep null with a documented `@return … or null when …` contract:
+  (a) fields and parameters are never Optional (volatile bitmap / state fields stay `T`);
+  (b) per-frame / hot-path getters read inside onDraw / render / gesture loops (CropState.getSourceImage /
+  getDisplayImage, read every frame by EditorRenderer) stay null — Optional allocation in the draw loop violates the
+  renderer's no-alloc discipline;
+  (c) Android-framework boundaries (BitmapFactory, ContentResolver, DocumentsContract) keep null internally up to the
+  first internal seam, which wraps (e.g. SafFileHelper's private resolvers stay null; `fileFromSafUri` wraps);
+  (d) collection returns are never `Optional<List>` — return empty collections, or keep a documented null contract
+  when empty is itself a meaningful value (SelectionHistory.undo / redo);
+  (e) sentinel primitives (EXIF orientation 1-as-default etc.) are not null contracts — untouched;
+  (f) a tiny private helper whose only caller null-checks inline MAY stay null when conversion adds ceremony without
+  clarity — judged per site, reason recorded in the helper's own `@return … or null when …` contract.
+  Idiom: no bare `Optional.get()` — use `orElse` / `orElseThrow` / `map` / `ifPresent` / `isEmpty`. Tests pin absence
+  via `isEmpty()` and presence via `isPresent()`, not `assertNull` / `assertNotNull`.
 ### Records
 
 A class may become a `record` when **every field is effectively immutable** in practice — no setters, no internal
@@ -454,6 +509,10 @@ debug (stack traces show synthetic names), and resists naming — extracting it 
 attach Javadoc. Imperative loops inside a lambda body (and especially nested control flow) are a strong signal the body
 should be a method.
 
+One test-tree exception: concurrency race harnesses (`new Thread(() -> { ... })` bodies that capture several locals
+and interleave latches, as in StateBusTest) may exceed the cap — extracting them into named methods scatters the
+interleaving the test exists to demonstrate. Judged per site; main-tree lambdas get no such latitude.
+
 ### Streams vs imperative loops
 
 Prefer a stream / collector when:
@@ -474,10 +533,15 @@ When in doubt, stay imperative. Streams are a clarity tool, not a goal.
 
 - Fields that could be method-local variables should be. If a value lives entirely inside one method, don't lift it to a
   field.
-- Methods that could be `private` should be. `public` only if the class contract actually exposes them.
+- Methods that could be `private` should be. `public` only if the class contract actually exposes them. One sanctioned
+  exception: **package-private static test seams** — a bg-pipeline method may sit at package level (not private)
+  solely so the unit suite can drive it directly (`ExportPipeline.streamCompare` — now a one-line delegation into
+  `SafFileHelper.streamCompare` kept only as the suite's seam — / `canBypassEncode`,
+  `CropExporter.appendSeftFileToFile`). Keep such seams static with their side effects contained; the Test-coverage
+  section in REQUIREMENTS.md documents the suite's seam targets.
 - Classes/interfaces that could be package-private should be.
-- Scope a constant to its narrowest use site: `final` inside one method, `private static final` on a single class,
-  or a shared utility (`ThemeColors`, etc.) only when ≥ 2 files need it.
+- Scope a constant to its narrowest use site: `final` inside one method, `private static final` on a single class, or a
+  shared utility (`ThemeColors`, etc.) only when ≥ 2 files need it.
 - Unused fields and dead code get deleted, not commented out.
 
 ## Self-audit
@@ -488,23 +552,29 @@ Before declaring a change done, run the consolidated runner:
 python scripts/audit.py
 ```
 
-The runner has 8 checks: 6 failing (`over-cols`, `ignored-catches`, `static-first`, `method-order`,
-`adjacent-comment-styles`, `final-classes`) and 2 advisory (`reflow`, `lsloc` — always print, never fail). Exit code 0
-means the 6 failing checks are clean. Individual subcommands (`python scripts/audit.py <name>`) are available for any
-of the 8. The awk one-liners below cover the additional checks audit.py doesn't (inline FQNs, HTML/Javadoc tags,
-dp-px truncation, etc.) — all should produce zero output on a clean tree. The sibling
-`python scripts/refactor.py <code|comments|md|strip-blanks>` runner handles bulk-reflowing source / comments /
-markdown when a width-violation needs a mechanical fix.
+The runner has 9 checks: 6 failing (`over-cols`, `ignored-catches`, `static-first`, `method-order`,
+`adjacent-comment-styles`, `final-classes`) and 3 advisory (`over-cols-py`, `reflow`, `lsloc` — always print, never
+fail). Exit code 0 means the 6 failing checks are clean. Individual subcommands (`python scripts/audit.py <name>`) are
+available for any of the 9. The awk one-liners below cover the additional checks audit.py doesn't (inline FQNs,
+HTML/Javadoc tags, dp-px truncation, etc.) — all should produce zero output on a clean tree. The sibling `python
+scripts/refactor.py <code|comments|md|py|strip-blanks>` runner handles bulk-reflowing source / comments / markdown /
+Python when a width-violation needs a mechanical fix.
+
+The done-gate also covers the REQUIREMENTS.md pins: a change that adds, removes, or restructures Java code must
+refresh the LSLOC pin (`python scripts/audit.py lsloc`), and a test change must refresh the Test-coverage section —
+both in the same commit. REQUIREMENTS.md declares those numbers zero-tolerance; audit.py's `lsloc` output is advisory,
+so the pin refresh is a manual step of declaring a change done.
 
 ```bash
 # Double-indent continuations (any line that starts with an operator and is
 # more than one tab deeper than the previous non-blank line):
 awk '
+  FNR==1 { prev=-1 }
   { indent=0; t=$0
     while (substr(t,1,1)=="\t") { indent++; t=substr(t,2) }
     if (t !~ /^[[:graph:]]/) next
     if (prev>=0 && t~/^(\.|&&|\|\||\+|\?|:)/ && indent-prev>1)
-      print FILENAME":"NR" indent_diff="(indent-prev)
+      print FILENAME":"FNR" indent_diff="(indent-prev)
     prev=indent
   }
 ' $(find app/src/main/java -name '*.java')
@@ -512,12 +582,13 @@ awk '
 # Mismatched chain continuation (consecutive `.foo()` or operator lines
 # at different indents):
 awk '
+  FNR==1 { prev_indent=-1; prev_op=0 }
   { indent=0; t=$0
     while (substr(t,1,1)=="\t") { indent++; t=substr(t,2) }
     if (t !~ /^[[:graph:]]/) next
     op = (t~/^(\.|\+|&&|\|\|)/)
     if (prev_op && op && indent != prev_indent)
-      print FILENAME":"NR" mismatched ("prev_indent"->"indent")"
+      print FILENAME":"FNR" mismatched ("prev_indent"->"indent")"
     prev_indent=indent; prev_op=op
   }
 ' $(find app/src/main/java -name '*.java')
@@ -575,7 +646,8 @@ python scripts/audit.py over-cols app/src
 
 # // comments directly above a class or method declaration (use Javadoc instead):
 awk '
-  /^\s*\/\// { if (!in_comment) { in_comment=1; comment_ln=NR } next }
+  FNR==1     { in_comment=0 }
+  /^\s*\/\// { if (!in_comment) { in_comment=1; comment_ln=FNR } next }
   /^\s*$/    { in_comment=0; next }
   {
     if (in_comment && $0~/^[[:space:]]*(public|private|protected|static|final|abstract|@Override|@Deprecated|void|boolean|byte\[\]|int|long|float|double|String|[A-Z][A-Za-z0-9_<>]*)\b.*\(/)
@@ -622,6 +694,22 @@ grep -rnE '\b[a-z][a-zA-Z0-9]*[a-z][A-Z][A-Z]+[a-zA-Z0-9]*\b' app/src/main/java 
 
 Build must also be clean (see Build & verify section above).
 
+## Spec writing
+
+REQUIREMENTS.md documents contracts, not mechanisms:
+
+- **State the invariant first; cite the symbol as the anchor.** Exact identifiers are what make the spec
+  machine-verifiable — keep them for contracts: return-value semantics, toast strings, byte layouts, failure modes,
+  pinned values and thresholds ("collision detection fires the Replace / Rename / Cancel dialog, gated on
+  `target.isFile()`").
+- **Omit details below the contract line.** Local variable names, layout attributes, and anything a tool derives on
+  demand drift silently and add no verifiable promise. When a user-visible invariant is delivered by an
+  implementation trick, spec the invariant and leave the trick to a code / layout comment at the site.
+- **Fix on touch.** When editing a section anyway, demote any mechanism-level sentence you're already touching —
+  don't schedule rewrite passes for it.
+- Renaming a symbol the spec cites is a spec-touching operation: update REQUIREMENTS.md in the same commit, per the
+  cross-file consistency rule under Variable names.
+
 ## Theme colors
 
 The Catppuccin Mocha palette is defined in two places:
@@ -652,8 +740,8 @@ it there rather than copying the hex.
   methods*, `pp` (Paint) *inside tight drawing loops*. "Tiny" means ≤ 15 lines and a single obvious purpose. Larger
   methods should spell short names out descriptively (`colsLayoutParams`, `widthRowLp`, etc.).
 - **Don't stack abbreviations.** Compounds of two short tokens compound their opacity. Spell at least one side out:
-  `sourceGainmap` not `srcGm`, `gainmapBitmap` not `gmBmp`, `alphaLabel` not `lblA`. Especially important in files
-  ABOUT that data: a 350-line `CropEngine` with `cx`/`cy`/`cw`/`ch` locals is worse than the same file with
+  `sourceGainmap` not `srcGm`, `gainmapBitmap` not `gmBmp`, `alphaLabel` not `lblA`. Especially important in files ABOUT
+  that data: a 350-line `CropEngine` with `cx`/`cy`/`cw`/`ch` locals is worse than the same file with
   `centerX`/`centerY`/`cropW`/`cropH`, because the abbreviations are the main content.
 - **Cross-file consistency.** Pick one name per concept and use it everywhere. The image-axis midpoint is `imageMidX` /
   `imageMidY`, not `imgMidX` in one file and `imageMidX` in another; the un-rotated coordinate pair is `unrotatedX` /
@@ -671,11 +759,10 @@ Acronyms follow two different rules depending on where they appear:
   official casing. Plural forms use a lowercase trailing `s`: `IDs`, `JPEGs`, `URIs`.
 - **In code identifiers (class, method, variable, field names):** treat the acronym as a regular word in camelCase /
   PascalCase. Only the first letter is capitalised: `mediaStoreId`, `getExifOrientation`, `JpegSegment`, `UiSync`,
-  `uhdrInfo`, `safFileHelper`, `scanIfd`, `isXmp`, `findPrimaryEoi`. **Never** `mediaStoreID`,
-  `scanIFD`, or `getURL()` — those read as separate letters and break the camelCase word boundary that IDEs and humans
-  parse on.
-- **Constants (`SCREAMING_SNAKE_CASE`):** acronyms stay all-caps because the whole name is —
-  `APP1_MAX_TIFF_PAYLOAD`, `XMP_HEADER`, `TIFF_HEADER_OFFSET`.
+  `uhdrInfo`, `safFileHelper`, `scanIfd`, `isXmp`, `findPrimaryEoi`. **Never** `mediaStoreID`, `scanIFD`, or `getURL()`
+  — those read as separate letters and break the camelCase word boundary that IDEs and humans parse on.
+- **Constants (`SCREAMING_SNAKE_CASE`):** acronyms stay all-caps because the whole name is — `APP1_MAX_TIFF_PAYLOAD`,
+  `XMP_HEADER`, `TIFF_HEADER_OFFSET`.
 - **Protocol / spec literals** in comments keep the casing the spec uses even when it disagrees with this rule:
   `"Exif\0\0"` (the EXIF header string), `eXIf` (PNG chunk name), `JPEGInterchangeFormat` (EXIF/TIFF tag name). Leave
   them alone.

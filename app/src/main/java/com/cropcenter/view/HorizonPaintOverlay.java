@@ -16,6 +16,11 @@ import java.util.List;
  */
 final class HorizonPaintOverlay
 {
+	// Painted-stroke width = the visual brush DIAMETER: 2 × the screen-pixel brush radius CropEditorView feeds the
+	// detector (getHorizonBrushRadius), so the stroke the user sees is exactly the region HorizonDetector samples.
+	// Deriving (not hardcoding 60f) keeps the two in lockstep if the shared threshold changes.
+	private static final float STROKE_WIDTH_PX = 2f * CropEditorView.TOUCH_THRESHOLD_PX;
+
 	private final List<float[]> imagePoints = new ArrayList<>(); // image-pixel coords
 	private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
 	private final Path screenPath = new Path();
@@ -29,6 +34,37 @@ final class HorizonPaintOverlay
 	{
 		paint.setStrokeWidth(3f);
 		paint.setStyle(Paint.Style.STROKE);
+	}
+
+	/**
+	 * Decide whether a completed stroke is too short to carry directional information for the horizon line fit.
+	 * Measures the bounding-box diagonal of the painted points — endpoint distance would mis-classify a V-shaped
+	 * stroke whose ends coincide. Point count alone can't detect a degenerate stroke: a bare tap still contributes
+	 * two coincident begin / end points, so tap-strokes must be rejected by distance.
+	 *
+	 * @param points  painted polyline as {x, y} pairs in image-pixel coordinates
+	 * @param minSpan minimum bounding-box diagonal in image pixels; a stroke spanning exactly minSpan is
+	 *                accepted
+	 * @return true when the stroke has fewer than 2 points or its bounding-box diagonal is less than minSpan
+	 */
+	static boolean isStrokeTooShort(List<float[]> points, float minSpan)
+	{
+		if (points.size() < 2)
+		{
+			return true;
+		}
+		float minX = Float.POSITIVE_INFINITY;
+		float minY = Float.POSITIVE_INFINITY;
+		float maxX = Float.NEGATIVE_INFINITY;
+		float maxY = Float.NEGATIVE_INFINITY;
+		for (float[] point : points)
+		{
+			minX = Math.min(minX, point[0]);
+			minY = Math.min(minY, point[1]);
+			maxX = Math.max(maxX, point[0]);
+			maxY = Math.max(maxY, point[1]);
+		}
+		return Math.hypot(maxX - minX, maxY - minY) < minSpan;
 	}
 
 	/**
@@ -49,18 +85,16 @@ final class HorizonPaintOverlay
 	}
 
 	/**
-	 * Discard the in-progress stroke AND exit paint mode. Used for `MotionEvent.ACTION_CANCEL` — Android
-	 * dispatches that when the OS or a parent view claims the gesture (e.g. system back, multi-touch
-	 * disambiguation, scroll container intercept), which is NOT a user-initiated stroke completion.
-	 * Treating ACTION_CANCEL as if it were ACTION_UP would feed a truncated point list into
-	 * `HorizonDetector.detectFromPaintedRegion` and produce a wrong-angle auto-rotate the user never
-	 * asked for, so the detection callback is NOT invoked.
+	 * Discard the in-progress stroke AND exit paint mode. Used for `MotionEvent.ACTION_CANCEL` — Android dispatches
+	 * that when the OS or a parent view claims the gesture (e.g. system back, multi-touch disambiguation, scroll
+	 * container intercept), which is NOT a user-initiated stroke completion. Treating ACTION_CANCEL as if it were
+	 * ACTION_UP would feed a truncated point list into `HorizonDetector.detectFromPaintedRegion` and produce a
+	 * wrong-angle auto-rotate the user never asked for, so the detection callback is NOT invoked.
 	 *
-	 * Paint mode is exited (`active=false`) and the caller's `onCancel` runnable is fired so it can
-	 * reset external UI (e.g. AutoRotateBinder's "Cancel" → "Auto" button label). Exiting on CANCEL
-	 * (rather than staying active) avoids stranding the user in paint mode — where every subsequent
-	 * touch is consumed by the overlay — until they notice the Cancel button; they can re-tap Auto to
-	 * retry.
+	 * Paint mode is exited (`active=false`) and the caller's `onCancel` runnable is fired so it can reset external
+	 * UI (e.g. AutoRotateBinder's "Cancel" → "Auto" button label). Exiting on CANCEL (rather than staying active)
+	 * avoids stranding the user in paint mode — where every subsequent touch is consumed by the overlay — until
+	 * they notice the Cancel button; they can re-tap Auto to retry.
 	 */
 	void cancelStroke()
 	{
@@ -98,7 +132,7 @@ final class HorizonPaintOverlay
 		{
 			// Paint with the user's exact selection color — no extra blending.
 			paint.setStyle(Paint.Style.STROKE);
-			paint.setStrokeWidth(60f);
+			paint.setStrokeWidth(STROKE_WIDTH_PX);
 			paint.setColor(selColor);
 			paint.setStrokeCap(Paint.Cap.ROUND);
 			paint.setStrokeJoin(Paint.Join.ROUND);
@@ -117,9 +151,9 @@ final class HorizonPaintOverlay
 	}
 
 	/**
-	 * Record the final touch (image-space only; the screen-space path isn't extended for the ACTION_UP
-	 * point) and exit paint mode. The caller's onDrawn callback runs; the overlay stays non-active
-	 * until the next setActive(true, ...) call.
+	 * Record the final touch (image-space only; the screen-space path isn't extended for the ACTION_UP point) and
+	 * exit paint mode. The caller's onDrawn callback runs; the overlay stays non-active until the next
+	 * setActive(true, ...) call.
 	 *
 	 * @param imagePoint two-element image-pixel coordinate {x, y} for the ACTION_UP point
 	 */
@@ -135,8 +169,7 @@ final class HorizonPaintOverlay
 	}
 
 	/**
-	 * Append a mid-stroke touch — updates the displayed path and appends another image coordinate for
-	 * the detector.
+	 * Append a mid-stroke touch — updates the displayed path and appends another image coordinate for the detector.
 	 *
 	 * @param screenX    horizontal screen coordinate of the touch
 	 * @param screenY    vertical screen coordinate of the touch
@@ -177,9 +210,9 @@ final class HorizonPaintOverlay
 
 	/**
 	 * Enter paint mode with both completion and cancellation callbacks. `onCancelCallback` fires from
-	 * `cancelStroke` (ACTION_CANCEL) so the host can reset any UI tied to paint mode (e.g.
-	 * AutoRotateBinder's "Cancel" → "Auto" button label). The cancel callback runs ONCE then clears
-	 * itself, so a subsequent stroke completion via `end` doesn't double-fire it.
+	 * `cancelStroke` (ACTION_CANCEL) so the host can reset any UI tied to paint mode (e.g. AutoRotateBinder's
+	 * "Cancel" → "Auto" button label). The cancel callback runs ONCE then clears itself, so a subsequent stroke
+	 * completion via `end` doesn't double-fire it.
 	 *
 	 * @param on               true to enter paint mode, false to exit
 	 * @param onDrawnCallback  invoked from `end` when the user completes a stroke

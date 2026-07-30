@@ -18,8 +18,8 @@ public record GridConfig(boolean enabled, boolean includeInExport, boolean showP
 	int color, int columns, int pixelGridColor, int rows, int selectionColor)
 {
 	/**
-	 * Default configuration applied to every freshly-loaded image: grid visible at 4×4, pixel grid visible at
-	 * high zoom (~3dp per source pixel), grid NOT baked into exports, 50%-transparent blue selection overlay.
+	 * Default configuration applied to every freshly-loaded image: grid visible at 4×4, pixel grid visible at high
+	 * zoom (~3dp per source pixel), grid NOT baked into exports, 50%-transparent blue selection overlay.
 	 *
 	 * @return a new GridConfig carrying the default grid / pixel-grid / export / selection settings
 	 */

@@ -32,6 +32,8 @@ import android.widget.ProgressBar;
 import android.widget.TextView;
 
 import androidx.annotation.NonNull;
+import androidx.annotation.UiThread;
+import androidx.annotation.WorkerThread;
 import androidx.appcompat.widget.AppCompatImageView;
 import androidx.exifinterface.media.ExifInterface;
 import androidx.recyclerview.widget.GridLayoutManager;
@@ -52,6 +54,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
+import java.util.Optional;
 import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
@@ -62,49 +65,48 @@ import java.util.function.Consumer;
 import java.util.regex.Pattern;
 
 /**
- * Shared filesystem-browser UI used by both FolderPickerDialog (save flow) and OpenPickerDialog
- * (load flow). Owns the inlaid panel (title + breadcrumb + grid/list and sort-direction toggles +
- * a RecyclerView-backed content list with a draggable fast-scroll thumb), the navigation state
- * (rootDir + current folder), the bg work executor (enumeration + thumbnail decodes), and the
- * SharedPreference-backed view mode + sort direction.
+ * Shared filesystem-browser UI used by both FolderPickerDialog (save flow) and OpenPickerDialog (load flow). Owns the
+ * inlaid panel (title + breadcrumb + grid/list and sort-direction toggles + a RecyclerView-backed content list with a
+ * draggable fast-scroll thumb), the navigation state (rootDir + current folder), the bg work executor (enumeration +
+ * thumbnail decodes), and the SharedPreference-backed view mode + sort direction.
  *
- * Scales to huge folders: the RecyclerView recycles off-screen cells, so a 50k-photo Camera folder
- * only materialises the visible window (~10-30 cells) at a time. Enumeration (listFiles + sort) runs
- * on the bg executor, never the UI thread — refresh() clears the list, posts an enumeration task
- * (clearing the executor queue first so a rapid folder tap pre-empts the previous folder's pending
- * decodes), then re-populates the adapter when the result arrives. A generation counter discards
- * stale results so tapping A then B before A finishes only ever shows B.
+ * Scales to huge folders: the RecyclerView recycles off-screen cells, so a 50k-photo Camera folder only materialises
+ * the visible window (~10-30 cells) at a time. Enumeration (listFiles + sort) runs on the bg executor, never the UI
+ * thread — refresh() clears the list, posts an enumeration task (clearing the executor queue first so a rapid folder
+ * tap pre-empts the previous folder's pending decodes), then re-populates the adapter when the result arrives. A
+ * generation counter discards stale results so tapping A then B before A finishes only ever shows B.
  *
- * Sort direction (newest/oldest first) applies to FILES only; folders stay alphabetical, matching
- * file-manager convention.
+ * Sort direction (newest/oldest first) applies to FILES only; folders stay alphabetical, matching file-manager
+ * convention.
  *
- * Fast scroller: BrowserFastScroller is a custom right-edge overlay (FrameLayout z-order) with an
- * always-visible thumb and a 32dp minimum height, using position-based math (O(1) on
- * GridLayoutManager). AndroidX's built-in initFastScroller is unused — its thumb has no usable
- * minimum (collapses to a sliver on 50k folders) and its drag math is O(N).
+ * Fast scroller: BrowserFastScroller is a custom right-edge overlay (FrameLayout z-order) with an always-visible thumb
+ * and a 32dp minimum height, using position-based math (O(1) on GridLayoutManager). AndroidX's built-in
+ * initFastScroller is unused — its thumb has no usable minimum (collapses to a sliver on 50k folders) and its drag math
+ * is O(N).
  *
- * File-tap callback: both flows wire taps via `onFileTapped` — Open selects-and-dismisses, Save
- * populates the filename input and stays open. That callback is the only difference between them.
+ * File-tap callback: both flows wire taps via `onFileTapped` — Open selects-and-dismisses, Save populates the filename
+ * input and stays open. That callback is the only difference between them.
  *
- * Sizing: buildPanel sizes the card to a fixed height (screenHeight − `CARD_RESERVED_DP`, floored at
- * 240dp), measured EXACTLY (not wrap-to-content, because the adapter populates async after show() —
- * a wrap panel would measure an empty list and open squished). The file-list container is a
- * weight=1 / height=0 flex child, so footer rows the caller appends (Save's options + filename) keep
- * their height while the list fills the remainder and scrolls. `CARD_RESERVED_DP` is shared by all
- * three pickers so they open at the same size.
+ * Sizing: buildPanel sizes the card to a fixed height (screenHeight − `CARD_RESERVED_DP`, floored at 240dp), measured
+ * EXACTLY (not wrap-to-content, because the adapter populates async after show() — a wrap panel would measure an empty
+ * list and open squished). The file-list container is a weight=1 / height=0 flex child, so footer rows the caller
+ * appends (Save's options + filename) keep their height while the list fills the remainder and scrolls.
+ * `CARD_RESERVED_DP` is shared by all three pickers so they open at the same size.
  *
- * Lifecycle: the caller builds the tree with buildPanel(), then funnels through attachToDialog(...),
- * which owns the whole refresh + show + dismiss + shutdown chain (the dismiss listener calls
- * shutdown() so the executor doesn't outlive the dialog). Callers must NOT call refresh() / show() /
- * shutdown() themselves.
+ * Lifecycle: the caller builds the tree with buildPanel(), then funnels through attachToDialog(...), which owns the
+ * whole refresh + show + dismiss + shutdown chain (the dismiss listener calls shutdown() so the executor doesn't
+ * outlive the dialog). Callers must NOT call refresh() / show() / shutdown() themselves.
+ *
+ * The class is public solely for the static evictThumbnailCache hook, which ExportPipeline (different package) calls
+ * at export dispatch; the instance surface stays package-private to the two picker dialogs.
  */
-final class FolderBrowser
+public final class FolderBrowser
 {
 	/**
-	 * One row in the adapter's data model — either a folder (full-width navigation row) or a
-	 * file (cell, full-width in list mode, third-width in grid mode). The adapter inspects which
-	 * record type each item is and dispatches to the matching ViewHolder. Sealed so the
-	 * switch / pattern-match inside the adapter is exhaustive at compile time.
+	 * One row in the adapter's data model — either a folder (full-width navigation row) or a file (cell, full-width
+	 * in list mode, third-width in grid mode). The adapter inspects which record type each item is and dispatches
+	 * to the matching ViewHolder. Sealed so the switch / pattern-match inside the adapter is exhaustive at compile
+	 * time.
 	 */
 	private sealed interface BrowserItem permits FolderRow, FileRow {}
 
@@ -113,10 +115,9 @@ final class FolderBrowser
 	private record FileRow(File file) implements BrowserItem {}
 
 	/**
-	 * Bg-enumeration output bundle. Carries the assembled BrowserItem list together with the
-	 * count of FolderRow entries at the head so BrowserAdapter.setItems can install both in one
-	 * lockstep call — without the count, BrowserSpanSizeLookup couldn't tell where folders end
-	 * and files begin without a fresh O(N) walk.
+	 * Bg-enumeration output bundle. Carries the assembled BrowserItem list together with the count of FolderRow
+	 * entries at the head so BrowserAdapter.setItems can install both in one lockstep call — without the count,
+	 * BrowserSpanSizeLookup couldn't tell where folders end and files begin without a fresh O(N) walk.
 	 *
 	 * @param items       ordered list (folders first, then files in sort-mode order)
 	 * @param folderCount number of FolderRow entries at the head of items; index of the first
@@ -125,10 +126,10 @@ final class FolderBrowser
 	private record EnumerationResult(List<BrowserItem> items, int folderCount) {}
 
 	/**
-	 * Image file plus its lowercase-normalised name, captured at enumeration time so the sort
-	 * comparator can read a Java String field instead of re-extracting and re-lowercasing per
-	 * comparison. On a 50k-item Camera folder this drops sort cost from O(N log N) × 2
-	 * getName + toLowerCase calls (~hundreds of ms for 55k items) to a pure String compare.
+	 * Image file plus its lowercase-normalised name, captured at enumeration time so the sort comparator can read a
+	 * Java String field instead of re-extracting and re-lowercasing per comparison. On a 50k-item Camera folder
+	 * this drops sort cost from O(N log N) × 2 getName + toLowerCase calls (~hundreds of ms for 55k items) to a
+	 * pure String compare.
 	 *
 	 * @param file     image file as returned by File.listFiles + isImageFile filter
 	 * @param sortKey  file.getName().toLowerCase(Locale.ROOT) snapshot — used as the sort key
@@ -140,16 +141,15 @@ final class FolderBrowser
 	private record FileEntry(File file, String sortKey) {}
 
 	/**
-	 * Cached enumeration of a single folder. Held in cachedSnapshot so a sort-mode toggle re-uses
-	 * the already-paid listFiles + isDirectory syscalls instead of paying them again on a 50k-
-	 * photo folder. Folders are pre-sorted alphabetically at enumeration time (cheap — typically
-	 * a handful of subdirectories); files are kept in listFiles order with their lowercase name
-	 * cached as FileEntry.sortKey so sortAndAssemble can apply the requested SortMode in
-	 * O(N log N) of pure CPU.
+	 * Cached enumeration of a single folder. Held in cachedSnapshot so a sort-mode toggle re-uses the already-paid
+	 * listFiles + isDirectory syscalls instead of paying them again on a 50k-photo folder. Folders are pre-sorted
+	 * alphabetically at enumeration time (cheap — typically a handful of subdirectories); files are kept in
+	 * listFiles order with their lowercase name cached as FileEntry.sortKey so sortAndAssemble can apply the
+	 * requested SortMode in O(N log N) of pure CPU.
 	 *
-	 * Cache invalidates on folder change (cachedSnapshot.folder().equals(target) miss) and on
-	 * shutdown (memory release). A file added or removed from the folder while the picker is
-	 * open survives until the user navigates away and back; acceptable for a picker dialog.
+	 * Cache invalidates on folder change (cachedSnapshot.folder().equals(target) miss) and on shutdown (memory
+	 * release). A file added or removed from the folder while the picker is open survives until the user navigates
+	 * away and back; acceptable for a picker dialog.
 	 *
 	 * @param folder        the folder whose enumeration this snapshot represents
 	 * @param sortedFolders subdirectories of folder, already alphabetical
@@ -159,36 +159,34 @@ final class FolderBrowser
 	private record FolderSnapshot(File folder, List<File> sortedFolders, List<FileEntry> files) {}
 
 	/**
-	 * File-sort direction selected by the sort-toggle icon in the title row. Applies only to
-	 * FileRow positions — folders are always alphabetical so the user navigates by name. Persisted
-	 * to SharedPreferences via KEY_SORT_MODE; default is NEWEST_FIRST (matches Camera apps and
-	 * gallery apps where the user expects fresh shots on top).
+	 * File-sort direction selected by the sort-toggle icon in the title row. Applies only to FileRow positions —
+	 * folders are always alphabetical so the user navigates by name. Persisted to SharedPreferences via
+	 * KEY_SORT_MODE; default is NEWEST_FIRST (matches Camera apps and gallery apps where the user expects fresh
+	 * shots on top).
 	 */
 	private enum SortMode
 	{
-		NEWEST_FIRST,
-		OLDEST_FIRST
+		NEWEST_FIRST, OLDEST_FIRST
 	}
 
 	/**
-	 * RecyclerView adapter backing the content list. Dispatches each position to the matching
-	 * ViewHolder via getItemViewType (FOLDER vs FILE_LIST vs FILE_GRID), then onBindViewHolder
-	 * forwards to that ViewHolder's bind(File) so the per-cell setup (label text, click handler
-	 * wiring, thumbnail submission) happens against a fresh data row.
+	 * RecyclerView adapter backing the content list. Dispatches each position to the matching ViewHolder via
+	 * getItemViewType (FOLDER vs FILE_LIST vs FILE_GRID), then onBindViewHolder forwards to that ViewHolder's
+	 * bind(File) so the per-cell setup (label text, click handler wiring, thumbnail submission) happens against a
+	 * fresh data row.
 	 *
-	 * setItems is the only mutation entry point; refresh() calls it after enumerating the current
-	 * folder. notifyDataSetChanged is used (rather than DiffUtil) because folder navigations
-	 * fully replace the content — the user's mental model is "navigate = new list", not "diff
-	 * old list against new"; a DiffUtil pass on a 50,000-photo Camera folder would spend cycles
-	 * computing diffs the user can't perceive.
+	 * setItems is the only mutation entry point; refresh() calls it after enumerating the current folder.
+	 * notifyDataSetChanged is used (rather than DiffUtil) because folder navigations fully replace the content —
+	 * the user's mental model is "navigate = new list", not "diff old list against new"; a DiffUtil pass on a
+	 * 50,000-photo Camera folder would spend cycles computing diffs the user can't perceive.
 	 */
 	private final class BrowserAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder>
 	{
 		private final List<BrowserItem> items = new ArrayList<>();
-		// Count of FolderRow entries at the head of `items`. Folders always sort first in
-		// enumerateFolder, so the file segment starts at position `folderCount`. BrowserSpanSizeLookup
-		// reads this for O(1) span-index math instead of walking getSpanSize from position 0
-		// (which collapsed toggle/scroll performance on 50k-item folders).
+		// Count of FolderRow entries at the head of `items`. Folders always sort first in enumerateFolder, so
+		// the file segment starts at position `folderCount`. BrowserSpanSizeLookup reads this for O(1)
+		// span-index math instead of walking getSpanSize from position 0 (which collapsed toggle/scroll
+		// performance on 50k-item folders).
 		private int folderCount;
 
 		@Override
@@ -254,15 +252,15 @@ final class FolderBrowser
 	}
 
 	/**
-	 * Grid-mode file cell: a square thumbnail in a 3-column slot. Folder rows in grid mode span
-	 * the full row via the GridLayoutManager.SpanSizeLookup wired in buildPanel, so a grid cell
-	 * is always a file. The ImageView's CENTER_CROP scale type fills the cell with the bitmap's
-	 * central rectangle, matching the typical photo-picker grid look.
+	 * Grid-mode file cell: a square thumbnail in a 3-column slot. Folder rows in grid mode span the full row via
+	 * the GridLayoutManager.SpanSizeLookup wired in buildPanel, so a grid cell is always a file. The ImageView's
+	 * CENTER_CROP scale type fills the cell with the bitmap's central rectangle, matching the typical photo-picker
+	 * grid look.
 	 *
-	 * Tag-based rebind protection: bind() stamps the ImageView's tag with a path+lastModified
-	 * key before submitting the bg decode; on UI post the decode callback re-checks the tag
-	 * matches before painting, so a fast scroll that recycles the cell to a different file
-	 * doesn't end up with the old file's bitmap landing on the new file's cell.
+	 * Tag-based rebind protection: bind() stamps the ImageView's tag with the file's thumbCacheKey before
+	 * submitting the bg decode; on UI post the decode callback re-checks the tag matches before painting, so a
+	 * fast scroll that recycles the cell to a different file doesn't end up with the old file's bitmap landing on
+	 * the new file's cell.
 	 */
 	private final class FileGridViewHolder extends RecyclerView.ViewHolder
 	{
@@ -277,41 +275,15 @@ final class FolderBrowser
 
 		void bind(File file)
 		{
-			boolean supported = jpegOnly ? isJpegSourceFormat(file) : isSupportedSourceFormat(file);
-			thumb.setAlpha(supported ? 1f : 0.4f);
-			// TalkBack needs a per-cell label — image-only cells with no text would otherwise
-			// announce as "unlabeled". For supported files announce the filename (the action
-			// "select" is implicit from the clickable role); for unsupported files mark them as
-			// "not selectable" so users hear why tapping does nothing.
-			thumb.setContentDescription(supported ? file.getName()
-				: file.getName() + " (unsupported format, not selectable)");
-			if (supported)
-			{
-				thumb.setBackgroundResource(folderRowRippleResId);
-				thumb.setOnClickListener(view -> onFileTapped.accept(file));
-			}
-			else
-			{
-				thumb.setBackgroundColor(ThemeColors.SURFACE0);
-				thumb.setOnClickListener(null);
-				thumb.setClickable(false);
-			}
-			// Cancel the previous file's pending decode before submitting this file's — without
-			// cancellation, a fast scroll piles stale decode tasks behind the currently-visible
-			// ones, starving the user's view of the thumbnails they're actually looking at.
-			if (pendingDecode != null && !pendingDecode.isDone())
-			{
-				pendingDecode.cancel(false);
-			}
-			pendingDecode = submitDecodeForCell(file, thumb, !decodeDeferred);
+			pendingDecode = bindFileCell(file, thumb, thumb, pendingDecode,
+				() -> thumb.setBackgroundColor(ThemeColors.SURFACE0));
 		}
 	}
 
 	/**
-	 * List-mode file row: 40dp square thumbnail + filename label. Whole row is the tap target
-	 * (matches the original list-view UX where the row, not just the thumbnail, takes the
-	 * click). Same tag-based rebind protection as the grid cell — bind() stamps the thumb's
-	 * tag and the UI-post path verifies before painting.
+	 * List-mode file row: 40dp square thumbnail + filename label. Whole row is the tap target (matches the original
+	 * list-view UX where the row, not just the thumbnail, takes the click). Same tag-based rebind protection as the
+	 * grid cell — bind() stamps the thumb's tag and the UI-post path verifies before painting.
 	 */
 	private final class FileListViewHolder extends RecyclerView.ViewHolder
 	{
@@ -330,39 +302,14 @@ final class FolderBrowser
 		{
 			label.setText(file.getName());
 			LinearLayout row = (LinearLayout) itemView;
-			boolean supported = jpegOnly ? isJpegSourceFormat(file) : isSupportedSourceFormat(file);
-			row.setAlpha(supported ? 1f : 0.4f);
-			// TalkBack: the filename label already announces by virtue of being a TextView child,
-			// but mark the whole row's role explicitly so unsupported rows (which DON'T receive
-			// the click handler below) announce as non-selectable rather than silently being
-			// "clickable" in name only.
-			row.setContentDescription(supported ? file.getName()
-				: file.getName() + " (unsupported format, not selectable)");
-			if (supported)
-			{
-				row.setBackgroundResource(folderRowRippleResId);
-				row.setOnClickListener(view -> onFileTapped.accept(file));
-			}
-			else
-			{
-				row.setBackground(null);
-				row.setOnClickListener(null);
-				row.setClickable(false);
-			}
-			// Cancel previous decode — see FileGridViewHolder.bind for the rationale.
-			if (pendingDecode != null && !pendingDecode.isDone())
-			{
-				pendingDecode.cancel(false);
-			}
-			pendingDecode = submitDecodeForCell(file, thumb, !decodeDeferred);
+			pendingDecode = bindFileCell(file, row, thumb, pendingDecode, () -> row.setBackground(null));
 		}
 	}
 
 	/**
-	 * Folder row: 24dp folder icon + folder name. Tapping navigates into the folder if it still
-	 * passes isInsideRoot (symlink boundary guard mirrors the breadcrumb-tap site). Used in
-	 * both grid and list view modes — the GridLayoutManager.SpanSizeLookup ensures it spans the
-	 * full row width regardless of view mode.
+	 * Folder row: 24dp folder icon + folder name. Tapping navigates into the folder if it still passes isInsideRoot
+	 * (symlink boundary guard mirrors the breadcrumb-tap site). Used in both grid and list view modes — the
+	 * GridLayoutManager.SpanSizeLookup ensures it spans the full row width regardless of view mode.
 	 */
 	private final class FolderViewHolder extends RecyclerView.ViewHolder
 	{
@@ -391,21 +338,19 @@ final class FolderBrowser
 	}
 
 	/**
-	 * GridLayoutManager.SpanSizeLookup with O(1) span-index and span-group-index math, exploiting
-	 * the picker's two-segment layout: FolderRow positions [0..folderCount) each occupy a full
-	 * row, then FileRow positions [folderCount..itemCount) flow as 1-span cells across THE
-	 * THUMBNAIL_GRID_COLUMNS-column grid.
+	 * GridLayoutManager.SpanSizeLookup with O(1) span-index and span-group-index math, exploiting the picker's
+	 * two-segment layout: FolderRow positions [0..folderCount) each occupy a full row, then FileRow positions
+	 * [folderCount..itemCount) flow as 1-span cells across THE THUMBNAIL_GRID_COLUMNS-column grid.
 	 *
-	 * The default SpanSizeLookup implementation answers getSpanIndex / getSpanGroupIndex by
-	 * iterating getSpanSize from position 0 forward, accumulating spans until reaching the query
-	 * position. On a 50,000-item folder this is O(N) per call. RecyclerView calls these methods
-	 * during layout (and during scroll for grid mode) — a toggle from list to grid at scroll
-	 * position 25,000 would trigger ~25,000 iterations per layout-affecting frame. Caching helps
-	 * after the cache is warm, but invalidates on every setSpanCount / notifyDataSetChanged,
-	 * forcing a fresh O(N) build on each toggle.
+	 * The default SpanSizeLookup implementation answers getSpanIndex / getSpanGroupIndex by iterating getSpanSize
+	 * from position 0 forward, accumulating spans until reaching the query position. On a 50,000-item folder this
+	 * is O(N) per call. RecyclerView calls these methods during layout (and during scroll for grid mode) — a toggle
+	 * from list to grid at scroll position 25,000 would trigger ~25,000 iterations per layout-affecting frame.
+	 * Caching helps after the cache is warm, but invalidates on every setSpanCount / notifyDataSetChanged, forcing
+	 * a fresh O(N) build on each toggle.
 	 *
-	 * The closed-form override sidesteps the cache entirely: every call is O(1) regardless of
-	 * folder size or scroll position, so toggle/refresh on 50k folders feels instant.
+	 * The closed-form override sidesteps the cache entirely: every call is O(1) regardless of folder size or scroll
+	 * position, so toggle/refresh on 50k folders feels instant.
 	 */
 	private final class BrowserSpanSizeLookup extends GridLayoutManager.SpanSizeLookup
 	{
@@ -452,10 +397,9 @@ final class FolderBrowser
 	}
 
 	/**
-	 * RecyclerView spacing decoration for grid-mode file cells. Adds the inter-cell gap between
-	 * grid thumbnails. Skips folder rows (they span the full width — adding side margins would
-	 * shrink the row asymmetrically) and skips all rows in list mode (list rows have their own
-	 * vertical padding).
+	 * RecyclerView spacing decoration for grid-mode file cells. Adds the inter-cell gap between grid thumbnails.
+	 * Skips folder rows (they span the full width — adding side margins would shrink the row asymmetrically) and
+	 * skips all rows in list mode (list rows have their own vertical padding).
 	 */
 	private final class GridSpacingDecoration extends RecyclerView.ItemDecoration
 	{
@@ -481,20 +425,20 @@ final class FolderBrowser
 				return;
 			}
 			// Compare to folderCount instead of items.get(position) so we stay O(1) (matches
-			// BrowserSpanSizeLookup's closed-form approach) and stay safe if the adapter's items
-			// list is mid-transition during a refresh (a stale `position >= itemAt` lookup would
-			// throw IndexOutOfBoundsException).
+			// BrowserSpanSizeLookup's closed-form approach) and stay safe if the adapter's items list is
+			// mid-transition during a refresh (a stale `position >= itemAt` lookup would throw
+			// IndexOutOfBoundsException).
 			if (position < adapter.folderCount())
 			{
 				return;
 			}
 			int spanIndex = layoutManager.getSpanSizeLookup()
 				.getSpanIndex(position, THUMBNAIL_GRID_COLUMNS);
-			// Proportional distribution keeps cell widths (and heights — onMeasure forces square
-			// cells) equal across columns. The naive `left = spanIndex == 0 ? 0 : interGap` lets
-			// column 0 take its full slot while columns 1-2 lose interGap, leaving column 0 ~8dp
-			// taller. The (i*g/n, g-(i+1)*g/n) split spreads the gap evenly so every column's slot
-			// is equal while adjacent cells still see exactly interGap between them.
+			// Proportional distribution keeps cell widths (and heights — onMeasure forces square cells)
+			// equal across columns. The naive `left = spanIndex == 0 ? 0 : interGap` lets column 0 take its
+			// full slot while columns 1-2 lose interGap, leaving column 0 ~8dp taller. The (i*g/n,
+			// g-(i+1)*g/n) split spreads the gap evenly so every column's slot is equal while adjacent
+			// cells still see exactly interGap between them.
 			int interGap = gap * 2;
 			outRect.left = spanIndex * interGap / THUMBNAIL_GRID_COLUMNS;
 			outRect.right = interGap - (spanIndex + 1) * interGap / THUMBNAIL_GRID_COLUMNS;
@@ -505,17 +449,17 @@ final class FolderBrowser
 
 	private static final String TAG = "FolderBrowser";
 
-	// Process-wide bitmap cache shared between FolderPickerDialog and OpenPickerDialog. Survives
-	// dialog dismissals so re-opening the same folder (or switching between Save and Open at the
-	// same folder) hits the cache rather than re-decoding from disk. Bitmaps are NEVER explicitly
-	// recycled — cached bitmaps may still be referenced by ImageViews in the recycler's view pool,
-	// and recycling would corrupt the cache. Eviction releases the cache's reference; GC reclaims
-	// when no ImageView still holds the bitmap.
-	//
-	// 64 MB cap sized to comfortably hold a typical folder's working set at the THUMBNAIL_DECODE_DP
-	// target — typical Samsung 4000×3000 captures decode to 500×375 at ~750 KB ARGB, so 64 MB
-	// holds ~85 entries. Since RecyclerView only inflates cells in the visible window + a small
-	// pool, only cells the user actually scrolls through trigger decode; the cache absorbs them
+	// Process-wide bitmap cache shared between FolderPickerDialog and OpenPickerDialog. Lives only while a picker
+	// is open: shutdown() (every picker dismiss) and ExportPipeline's export dispatch both call
+	// evictThumbnailCache(), because up to 64 MB of strongly-referenced bitmaps held through a GB-class HDR export
+	// — or after the picker is gone — would shrink the headroom the export pipeline needs; re-entry decode latency
+	// is the cheaper cost. Within an open picker the cache still serves re-navigation and view-mode toggles.
+	// Bitmaps are NEVER explicitly recycled — cached bitmaps may still be referenced by
+	// ImageViews in the recycler's view pool, and recycling would corrupt the cache. Eviction releases the cache's
+	// reference; GC reclaims when no ImageView still holds the bitmap. 64 MB cap sized to comfortably hold a
+	// typical folder's working set at the THUMBNAIL_DECODE_DP target — typical Samsung 4000×3000 captures decode to
+	// 500×375 at ~750 KB ARGB, so 64 MB holds ~85 entries. Since RecyclerView only inflates cells in the visible
+	// window + a small pool, only cells the user actually scrolls through trigger decode; the cache absorbs them
 	// and serves cache hits on re-entry / view-mode toggle.
 	private static final LruCache<String, Bitmap> THUMBNAIL_CACHE =
 		new LruCache<>(64 * 1024 * 1024)
@@ -527,29 +471,35 @@ final class FolderBrowser
 			}
 		};
 
+	// Guards the thumbnail-cache eviction epoch protocol: evictThumbnailCache holds it across increment+evictAll,
+	// and decodeThumbnail's generation snapshot (snapshotCacheGeneration) and check+insert
+	// (putThumbnailIfCurrentGeneration) each hold it too — the decode itself runs outside the lock. One lock over
+	// both sides is what makes the protocol atomic: a decode can't pass its generation check and then land a stale
+	// insert after the evictAll, and a snapshot can't observe the bumped generation before the evictAll runs.
+	// Package-private so the headless atomicity pin can contend on it.
+	static final Object CACHE_LOCK = new Object();
 	private static final String BREADCRUMB_SEPARATOR = " › ";
 	private static final String KEY_GRID_MODE = "grid_mode";
 	private static final String KEY_SORT_MODE = "sort_mode";
 	private static final String PREFS_NAME = "cropcenter_picker_view";
 	private static final String ROOT_LABEL = "Internal storage";
-	// Screen-height reserve subtracted to size the browser card (screenHeight − this, measured EXACTLY
-	// by buildPanel; floored at 240dp). Shared by ALL pickers (Load / Graft via OpenPickerDialog, Save
-	// via FolderPickerDialog) so the three dialogs open at the same maximum size. Covers only the chrome
-	// BELOW the card — dialog frame + button row + system bars — because Save's options + filename rows
-	// live INSIDE the card as fixed children (the file list is the weighted flex child that shrinks for
-	// them), so the reserve doesn't need to budget them separately.
+	// Screen-height reserve subtracted to size the browser card (screenHeight − this, measured EXACTLY by
+	// buildPanel; floored at 240dp). Shared by ALL pickers (Load / Graft via OpenPickerDialog, Save via
+	// FolderPickerDialog) so the three dialogs open at the same maximum size. Covers only the chrome BELOW the card
+	// — dialog frame + button row + system bars — because Save's options + filename rows live INSIDE the card as
+	// fixed children (the file list is the weighted flex child that shrinks for them), so the reserve doesn't need
+	// to budget them separately.
 	static final int CARD_RESERVED_DP = 220;
-	// How many file rows from the top of a freshly-enumerated folder get their thumbnails
-	// pre-decoded during the bg pass. 30 covers a typical grid viewport (~10 rows × 3 cols),
-	// so the visible window paints from cache on first layout. Larger values would pre-decode
-	// off-screen cells too — diminishing returns relative to the bg-thread occupancy cost.
+	// How many file rows from the top of a freshly-enumerated folder get their thumbnails pre-decoded during the bg
+	// pass. 30 covers a typical grid viewport (~10 rows × 3 cols), so the visible window paints from cache on first
+	// layout. Larger values would pre-decode off-screen cells too — diminishing returns relative to the bg-thread
+	// occupancy cost.
 	private static final int PREFETCH_LIMIT = 30;
-	// Single decode target shared between grid mode and list mode. Routing both callers through
-	// the same target value is what makes the THUMBNAIL_CACHE actually pay off when the user
-	// toggles view modes — different decode targets would produce different cache keys, so each
-	// toggle would re-decode every file. Both view modes display scaled-down (grid cells are
-	// ~96dp ≈ 288px on a typical phone; list cells are 40dp ≈ 120px); 110dp ≈ 330px decode is
-	// sized so BitmapFactory's power-of-2 sampleSize lands in the 500-pixel range for typical
+	// Single decode target shared between grid mode and list mode. Routing both callers through the same target
+	// value is what makes the THUMBNAIL_CACHE actually pay off when the user toggles view modes — different decode
+	// targets would produce different cache keys, so each toggle would re-decode every file. Both view modes
+	// display scaled-down (grid cells are ~96dp ≈ 288px on a typical phone; list cells are 40dp ≈ 120px); 110dp ≈
+	// 330px decode is sized so BitmapFactory's power-of-2 sampleSize lands in the 500-pixel range for typical
 	// 4000-pixel-wide sources, producing ~750 KB ARGB bitmaps.
 	private static final int THUMBNAIL_DECODE_DP = 110;
 	private static final int THUMBNAIL_GRID_COLUMNS = 3;
@@ -558,41 +508,51 @@ final class FolderBrowser
 	private static final int VIEW_TYPE_FILE_LIST = 1;
 	private static final int VIEW_TYPE_FOLDER = 2;
 
+	// Bumped by evictThumbnailCache so its evictions stay terminal against in-flight decodes: shutdownNow can't
+	// interrupt a worker already inside a native BitmapFactory decode, and an unguarded straggler would
+	// re-populate the process-wide cache AFTER the picker-close / export-dispatch eviction reclaimed its memory.
+	// decodeThumbnail snapshots the value before decoding and skips its cache insert on a mismatch. Every read
+	// and write holds CACHE_LOCK — the lock provides both cross-thread visibility (UI thread and ExportPipeline's
+	// bg executor bump; the picker's 3 decode workers read) and the snapshot/check/insert-vs-increment+evict
+	// atomicity.
+	private static int cacheGeneration;
+
 	private final BrowserAdapter adapter = new BrowserAdapter();
-	// File-tap callback. Open flow's callback selects-and-dismisses; Save flow's callback
-	// populates the filename input. Always non-null — both pickers wire taps; a picker with
-	// no taps wouldn't be useful.
+	// File-tap callback. Open flow's callback selects-and-dismisses; Save flow's callback populates the filename
+	// input. Always non-null — both pickers wire taps; a picker with no taps wouldn't be useful.
 	private final Consumer<File> onFileTapped;
 	private final Context ctx;
 	private final File rootDir;
 	private final Handler uiHandler = new Handler(Looper.getMainLooper());
-	// When true, only JPEG files are tappable — PNGs render greyed-out (same treatment as unsupported
-	// formats like HEIC). Set by the graft caller; the load-an-image flow leaves it false so PNGs are
-	// selectable. The flag is the picker-level guard the Apply External Edit caller relies on so a tap
-	// on a PNG can't reach EditAligner.align (which would reject the bytes as non-SOI and surface
-	// "Selected file is not a JPEG" after the picker dismissed).
+	// When true, only JPEG files are tappable — PNGs render greyed-out (same treatment as unsupported formats like
+	// HEIC). Set by the graft caller; the load-an-image flow leaves it false so PNGs are selectable. The flag is
+	// the picker-level guard the Apply External Edit caller relies on so a tap on a PNG can't reach
+	// EditAligner.align (which would reject the bytes as non-SOI and surface "Selected file is not a JPEG" after
+	// the picker dismissed).
 	private final boolean jpegOnly;
 	private final float density;
+	// Decode target edge in pixels (THUMBNAIL_DECODE_DP at construction density). density is fixed per instance,
+	// so both decode-submission paths share this one precomputed value.
+	private final int thumbnailDecodePx;
 	private AppCompatImageView sortToggle;
 	private AppCompatImageView viewModeToggle;
 	private BrowserFastScroller fastScroller;
 	private BrowserRecyclerView recyclerView;
 	private File current;
-	// volatile because the bg executor runs with 3 threads — the enumeration task can race
-	// briefly against a stale-generation task that hasn't checked refreshGeneration yet, and
-	// volatile gives the cross-thread visibility for the atomic reference swap. Reads/writes
-	// of a reference field are atomic per JLS, so no synchronization needed beyond visibility.
+	// volatile because the bg executor runs with 3 threads — the enumeration task can race briefly against a
+	// stale-generation task that hasn't checked refreshGeneration yet, and volatile gives the cross-thread
+	// visibility for the atomic reference swap. Reads/writes of a reference field are atomic per JLS, so no
+	// synchronization needed beyond visibility.
 	private volatile FolderSnapshot cachedSnapshot;
 	private GridLayoutManager layoutManager;
-	// Spinner overlay shown while bg enumeration is in flight. Visibility toggle lives entirely in
-	// refresh() (show via a delayed runnable so cached / instant loads don't flash the spinner; hide
-	// in the UI post that lands the items). On the Camera album (50k+ entries) listFiles + sort
-	// takes ~700ms — without the spinner the user can't tell whether the dialog is loading or
-	// whether the folder is empty.
+	// Spinner overlay shown while bg enumeration is in flight. Visibility toggle lives entirely in refresh() (show
+	// via a delayed runnable so cached / instant loads don't flash the spinner; hide in the UI post that lands the
+	// items). On the Camera album (50k+ entries) listFiles + sort takes ~700ms — without the spinner the user can't
+	// tell whether the dialog is loading or whether the folder is empty.
 	private ProgressBar progressSpinner;
-	// Pending show-spinner runnable, posted with a 200ms delay so the spinner doesn't flash on
-	// cached / fast loads. Cleared in the UI post that lands items so it never fires after items
-	// arrive. Removed on shutdown so a posted show doesn't outlive the dialog.
+	// Pending show-spinner runnable, posted with a 200ms delay so the spinner doesn't flash on cached / fast loads.
+	// Cleared in the UI post that lands items so it never fires after items arrive. Removed on shutdown so a posted
+	// show doesn't outlive the dialog.
 	private Runnable pendingShowProgress;
 	private SortMode sortMode;
 	private TextView breadcrumbLabel;
@@ -601,26 +561,47 @@ final class FolderBrowser
 	private boolean decodeDeferred;
 	private boolean gridMode;
 	private int folderRowRippleResId;
-	// Generation counter bumped on each refresh(). Bg-thread enumeration and decode callbacks
-	// capture the value at submit time and re-check on UI post — a rapid folder tap moves the
-	// counter forward, so stale enumeration results / decoded bitmaps for the previous folder
-	// are dropped silently rather than painting into the new folder's cells. volatile so the
-	// bg threads (3 of them) see the latest write from the UI thread without going through
-	// synchronization — without volatile, the bg-side gen check could read a cached value and
-	// keep doing work that will be discarded at the UI gate anyway (correctness-safe, just
-	// wasted CPU on stale tasks).
+	// Generation counter bumped on each refresh(). Bg-thread enumeration and decode callbacks capture the value at
+	// submit time and re-check on UI post — a rapid folder tap moves the counter forward, so stale enumeration
+	// results / decoded bitmaps for the previous folder are dropped silently rather than painting into the new
+	// folder's cells. volatile so the bg threads (3 of them) see the latest write from the UI thread without going
+	// through synchronization — without volatile, the bg-side gen check could read a cached value and keep doing
+	// work that will be discarded at the UI gate anyway (correctness-safe, just wasted CPU on stale tasks).
 	private volatile int refreshGeneration;
 
 	/**
-	 * Walk the path chain from rootDir to current (inclusive), one File per segment — [rootDir] when
-	 * current equals rootDir, otherwise rootDir plus one File per "/"-separated segment below it.
-	 * Package-private static so the breadcrumb test can exercise it without an AlertDialog;
-	 * buildBreadcrumb delegates here for segment enumeration and keeps the spannable formatting.
+	 * Release every cached thumbnail bitmap. Two callers, both about memory headroom: shutdown() on every picker
+	 * dismiss (the cache serves visible picker cells — once the picker is gone, up to 64 MB of
+	 * strongly-referenced bitmaps has no consumer), and ExportPipeline at export dispatch (the export pipeline's
+	 * GB-class native allocations for 200 MP HDR sources need every MB the cache is pinning). Eviction only drops
+	 * the cache's references — a bitmap an ImageView still draws stays valid until GC reclaims it; nothing is
+	 * recycled (see the THUMBNAIL_CACHE comment). Terminal against in-flight decodes: the generation bump makes a
+	 * decode that started before this call skip its cache insert (see cacheGeneration), so a straggler can't
+	 * silently re-grow the cache after the eviction. Thread-safe: the bump and the evictAll happen atomically
+	 * under CACHE_LOCK against the decode side's snapshot and check+insert.
+	 */
+	public static void evictThumbnailCache()
+	{
+		// One CACHE_LOCK hold across bump + evictAll keeps the pair atomic against decodeThumbnail: a decode
+		// holding an old snapshot can't land its insert between the bump and the evictAll, and no snapshot can
+		// observe the bumped generation before the evictAll runs.
+		synchronized (CACHE_LOCK)
+		{
+			cacheGeneration++;
+			THUMBNAIL_CACHE.evictAll();
+		}
+	}
+
+	/**
+	 * Walk the path chain from rootDir to current (inclusive), one File per segment — [rootDir] when current equals
+	 * rootDir, otherwise rootDir plus one File per "/"-separated segment below it. Package-private static so the
+	 * breadcrumb test can exercise it without an AlertDialog; buildBreadcrumb delegates here for segment
+	 * enumeration and keeps the spannable formatting.
 	 *
 	 * Both paths are canonicalized before the relative slice so a symlinked input (e.g. /sdcard →
-	 * /storage/emulated/0) doesn't crash the substring with StringIndexOutOfBoundsException. The
-	 * startsWith check after canonicalization covers a stale `current` from a concurrent refresh that
-	 * is no longer a descendant — it degenerates to a root-only chain rather than throwing.
+	 * /storage/emulated/0) doesn't crash the substring with StringIndexOutOfBoundsException. The startsWith check
+	 * after canonicalization covers a stale `current` from a concurrent refresh that is no longer a descendant — it
+	 * degenerates to a root-only chain rather than throwing.
 	 *
 	 * @param rootDir absolute path of the breadcrumb's leftmost ("Internal storage") segment
 	 * @param current folder currently displayed; expected to be a descendant of rootDir
@@ -640,9 +621,8 @@ final class FolderBrowser
 		}
 		catch (IOException ignored)
 		{
-			// Symlink loop / unreadable parent / hostile filesystem entry — degenerate to a
-			// root-only chain rather than crashing the picker UI. The user can still navigate
-			// from the root label.
+			// Symlink loop / unreadable parent / hostile filesystem entry — degenerate to a root-only chain
+			// rather than crashing the picker UI. The user can still navigate from the root label.
 			return chain;
 		}
 		if (currentPath.equals(rootPath))
@@ -652,17 +632,16 @@ final class FolderBrowser
 		String prefix = rootPath + File.separator;
 		if (!currentPath.startsWith(prefix))
 		{
-			// current is no longer a descendant of root (concurrent refresh raced this call, or
-			// caller bypassed isInsideRoot). Without this guard the substring below would
-			// underflow or return a path with leading separator that split into a bogus first
-			// segment.
+			// current is no longer a descendant of root (concurrent refresh raced this call, or caller
+			// bypassed isInsideRoot). Without this guard the substring below would underflow or return a
+			// path with leading separator that split into a bogus first segment.
 			return chain;
 		}
 		String relative = currentPath.substring(prefix.length());
 		File walker = rootDir;
-		// Split on the platform's native File.separator. Android uses "/", JVM-on-Windows uses
-		// "\" — using the platform constant keeps the helper testable on both. Pattern.quote
-		// because "\" is a regex meta-character; without it the JVM throws PatternSyntaxException.
+		// Split on the platform's native File.separator. Android uses "/", JVM-on-Windows uses "\" — using the
+		// platform constant keeps the helper testable on both. Pattern.quote because "\" is a regex
+		// meta-character; without it the JVM throws PatternSyntaxException.
 		for (String part : relative.split(Pattern.quote(File.separator)))
 		{
 			walker = new File(walker, part);
@@ -672,153 +651,27 @@ final class FolderBrowser
 	}
 
 	/**
-	 * Decode a thumbnail for `file` at the target display size and apply EXIF orientation so a
-	 * sideways-stored JPEG (or PNG with an eXIf tag) renders upright. Checks the process-wide
-	 * THUMBNAIL_CACHE first (a hit skips all disk I/O); on miss, tries ExifInterface.getThumbnail()
-	 * for JPEGs (decodes in ms) then falls back to a subsampled BitmapFactory.decodeFile, caching
-	 * the result before returning.
+	 * Hidden-name rule applied to BOTH branches of enumerateFolder: any dot-prefixed file or folder is invisible to
+	 * the picker. For files this keeps Android MediaStore trash (".trashed-*.jpg" — purged by the OS within ~30
+	 * days), pending captures (".pending-*"), and the save pipeline's own crash-safe temps (SaveTempFiles'
+	 * ".cropcenter-tmp-*" shape) from appearing as normal openable photos — with MANAGE_EXTERNAL_STORAGE the raw
+	 * listFiles walk sees them all, and surfacing them invites the user to open / graft / overwrite a file the OS
+	 * or the save sweep is about to delete. Package-private so the test class can pin the rule directly.
 	 *
-	 * Cache key is path + lastModified + targetSize: lastModified invalidates the entry when the
-	 * file is replaced (Gallery edit, sync overwrite); targetSize is keyed defensively, though both
-	 * callers pass the same THUMBNAIL_DECODE_DP so grid and list mode share one entry.
-	 *
-	 * Caller MUST NOT recycle the returned bitmap — it lives in the LruCache and recycling would
-	 * corrupt it; eviction drops the cache's reference and GC reclaims once no ImageView draws it.
-	 *
-	 * @param file       image file to thumbnail
-	 * @param targetSize target display dimension in pixels
-	 * @return EXIF-oriented thumbnail bitmap (possibly cached), or null if all decode paths failed
+	 * @param name bare file or folder name (no path)
+	 * @return true when the name is dot-prefixed and must stay hidden from the browser
 	 */
-	static Bitmap decodeThumbnail(File file, int targetSize)
+	static boolean isHiddenName(String name)
 	{
-		String cacheKey = file.getAbsolutePath() + ":" + file.lastModified() + ":" + targetSize;
-		Bitmap cached = THUMBNAIL_CACHE.get(cacheKey);
-		if (cached != null && !cached.isRecycled())
-		{
-			return cached;
-		}
-		String path = file.getAbsolutePath();
-		Bitmap raw = null;
-		int orientation = ExifInterface.ORIENTATION_NORMAL;
-		Format format = Format.fromExtension(file.getName());
-		boolean isJpeg = format == Format.JPEG;
-		boolean isPng = format == Format.PNG;
-		if (isJpeg)
-		{
-			try
-			{
-				ExifInterface exif = new ExifInterface(path);
-				orientation = exif.getAttributeInt(ExifInterface.TAG_ORIENTATION,
-					ExifInterface.ORIENTATION_NORMAL);
-				byte[] thumbBytes = exif.getThumbnail();
-				if (thumbBytes != null)
-				{
-					// decodeByteArray can OOM on an adversarial JPEG with a multi-MB embedded
-					// thumbnail (spec-legal for PNG eXIf which is u31-uncapped; JPEG IFD1 is
-					// ~64 KB-capped but androidx.exifinterface returns the bytes verbatim with
-					// no client-side upper bound). Wrap in OOM+RuntimeException catch so a
-					// corrupt thumb falls through to the subsampled BitmapFactory.decodeFile
-					// path rather than crashing the bg executor.
-					try
-					{
-						raw = BitmapFactory.decodeByteArray(thumbBytes, 0, thumbBytes.length);
-					}
-					catch (RuntimeException | OutOfMemoryError e)
-					{
-						Log.w(TAG, "EXIF thumbnail decode failed for " + file.getName()
-							+ ": " + e.getMessage());
-					}
-				}
-			}
-			catch (IOException ignored)
-			{
-				// EXIF read failed (corrupt header, partial file) — fall through to BitmapFactory.
-			}
-		}
-		else if (isPng)
-		{
-			// PNG eXIf orientation — mirror ImageLoadController.chooseOrientationByFormat so a
-			// PNG with eXIf orientation=6 doesn't render sideways in the picker grid while loading
-			// upright in the editor. The cap inside readPngOrientationCapped keeps the bg thumbnail
-			// decoder from reading a multi-MB PNG into RAM just to look up the orientation tag.
-			orientation = readPngOrientationCapped(file);
-		}
-		if (raw == null)
-		{
-			BitmapFactory.Options bounds = new BitmapFactory.Options();
-			bounds.inJustDecodeBounds = true;
-			BitmapFactory.decodeFile(path, bounds);
-			if (bounds.outWidth <= 0 || bounds.outHeight <= 0)
-			{
-				return null;
-			}
-			int sampleSize = 1;
-			int maxDim = Math.max(bounds.outWidth, bounds.outHeight);
-			while (maxDim / sampleSize > targetSize * 2)
-			{
-				sampleSize *= 2;
-			}
-			BitmapFactory.Options opts = new BitmapFactory.Options();
-			opts.inSampleSize = sampleSize;
-			try
-			{
-				raw = BitmapFactory.decodeFile(path, opts);
-			}
-			catch (RuntimeException | OutOfMemoryError e)
-			{
-				Log.w(TAG, "decodeThumbnail failed for " + path + ": " + e.getMessage());
-				return null;
-			}
-			if (raw == null)
-			{
-				return null;
-			}
-		}
-		// Reject zero-dim decode (corrupt embedded thumbnail bytes that decode to a 0×0 Bitmap
-		// would crash Bitmap.createBitmap inside applyOrientation, leaking `raw`).
-		if (raw.getWidth() <= 0 || raw.getHeight() <= 0)
-		{
-			raw.recycle();
-			return null;
-		}
-		// Identity-orientation predicate matches BitmapUtils.applyOrientation / UltraHdrCompat:
-		// values ≤ 1 are upright (ExifInterface.ORIENTATION_NORMAL = 1; 0 is a malformed/missing
-		// tag that all three sites also treat as identity).
-		Bitmap result;
-		if (orientation <= ExifInterface.ORIENTATION_NORMAL)
-		{
-			result = raw;
-		}
-		else
-		{
-			try
-			{
-				result = BitmapUtils.applyOrientation(raw, orientation);
-			}
-			catch (RuntimeException | OutOfMemoryError e)
-			{
-				// applyOrientation calls Bitmap.createBitmap which can OOM on multi-MP
-				// intermediates. Its Javadoc recycles `raw` only when rotation SUCCEEDS — on
-				// throw, the input survives, so recycle here to avoid leaking the native pixel
-				// buffer until GC.
-				Log.w(TAG, "applyOrientation failed for " + file.getName() + ": " + e.getMessage());
-				raw.recycle();
-				return null;
-			}
-		}
-		// Cache before returning so a re-navigation to this folder reuses the bitmap instead of
-		// re-decoding from disk.
-		THUMBNAIL_CACHE.put(cacheKey, result);
-		return result;
+		return name.startsWith(".");
 	}
 
 	/**
-	 * Extension filter for the file-list pass in refresh() — decides which files in the picked
-	 * folder are visible in the grid / list view. Matches the broader image-format set
-	 * (JPEG / PNG / WebP / HEIC / HEIF) so users see all their photos in the picker; the
-	 * narrower isSupportedSourceFormat predicate then decides which of those are tappable for
-	 * loading vs greyed-out. Package-private rather than private so the test class can pin
-	 * the accepted extension set directly.
+	 * Extension filter for the file-list pass in refresh() — decides which files in the picked folder are visible
+	 * in the grid / list view. Matches the broader image-format set (JPEG / PNG / WebP / HEIC / HEIF) so users see
+	 * all their photos in the picker; the narrower isSupportedSourceFormat predicate then decides which of those
+	 * are tappable for loading vs greyed-out. Package-private rather than private so the test class can pin the
+	 * accepted extension set directly.
 	 *
 	 * @param file candidate file (only the name's lowercase suffix is inspected; the File doesn't
 	 *             need to exist)
@@ -828,33 +681,29 @@ final class FolderBrowser
 	static boolean isImageFile(File file)
 	{
 		String name = file.getName().toLowerCase(Locale.ROOT);
-		return name.endsWith(".jpg") || name.endsWith(".jpeg")
-			|| name.endsWith(".png")
-			|| name.endsWith(".webp")
-			|| name.endsWith(".heic") || name.endsWith(".heif");
+		return name.endsWith(".jpg") || name.endsWith(".jpeg") || name.endsWith(".png")
+			|| name.endsWith(".webp") || name.endsWith(".heic") || name.endsWith(".heif");
 	}
 
 	/**
-	 * Tighter form of isSupportedSourceFormat — accepts JPEG only. Used by the graft-mode tappability
-	 * gate (jpegOnly=true). PNG files pass isImageFile (visible in the picker) but fail this and so
-	 * render greyed-out, matching the way WebP / HEIC / HEIF are treated for the load flow.
+	 * Tighter form of isSupportedSourceFormat — accepts JPEG only. Used by the graft-mode tappability gate
+	 * (jpegOnly=true). PNG files pass isImageFile (visible in the picker) but fail this and so render greyed-out,
+	 * matching the way WebP / HEIC / HEIF are treated for the load flow.
 	 *
 	 * @param file candidate file (only the name's lowercase suffix is inspected)
 	 * @return true when the filename's lowercase suffix is `.jpg` or `.jpeg`; false otherwise
 	 */
 	static boolean isJpegSourceFormat(File file)
 	{
-		return Format.fromExtension(file.getName()) == Format.JPEG;
+		return Format.fromExtension(file.getName()).filter(format -> format == Format.JPEG).isPresent();
 	}
 
 	/**
-	 * Stricter filter than isImageFile — returns true only for formats the load pipeline
-	 * actually accepts (JPEG / PNG). WebP / HEIC / HEIF pass isImageFile (so they appear in
-	 * the picker as greyed-out non-tappable cells), but `ImageLoadController.applyBytes`
-	 * rejects them via magic-byte gate. Without this two-tier filter, tapping a HEIC in the
-	 * picker decoded a thumbnail successfully but then surfaced "Unsupported image format"
-	 * on load — confusing UX. Now the unsupported formats render at half alpha with no click
-	 * handler, communicating "visible but not selectable" at a glance.
+	 * Stricter filter than isImageFile — returns true only for formats the load pipeline actually accepts (JPEG /
+	 * PNG). WebP / HEIC / HEIF pass isImageFile (so they appear in the picker as greyed-out non-tappable cells),
+	 * but `ImageLoadController.applyBytes` rejects them via magic-byte gate. The two-tier filter renders
+	 * unsupported formats at half alpha with no click handler — "visible but not selectable" at a glance — instead
+	 * of letting a tap decode a thumbnail successfully only to surface "Unsupported image format" on load.
 	 *
 	 * Matches on extension via `Format.fromExtension` (the JPEG/PNG chokepoint), not magic bytes:
 	 * byte inspection would mean reading every file head, slow for a 60+ file grid, and the
@@ -865,22 +714,47 @@ final class FolderBrowser
 	 */
 	static boolean isSupportedSourceFormat(File file)
 	{
-		return Format.fromExtension(file.getName()) != null;
+		return Format.fromExtension(file.getName()).isPresent();
 	}
 
 	/**
-	 * Read the EXIF orientation tag (1..8) from a PNG file's eXIf chunk, reading only a capped
-	 * prefix of the file so the bg thumbnail decoder doesn't slurp a 100 MB PNG into RAM just for
-	 * the orientation lookup. The 64 KB cap covers any reasonable PNG — PNG spec requires the eXIf
-	 * chunk to appear before IDAT and typical phone / editor PNGs put IHDR + eXIf (+ any small
-	 * ancillary chunks) well under that bound. PNGs with eXIf placed past the cap, or with no eXIf
-	 * at all, return 1 (NORMAL) and the picker renders upright — the same behaviour as the
-	 * pre-fix code for those rare cases. The main load path
-	 * (ImageLoadController.chooseOrientationByFormat) reads the full file and would still find
-	 * orientation in the past-cap case, so the editor view stays correct.
+	 * Insert a decoded thumbnail into THUMBNAIL_CACHE only when decodeGeneration still matches the current
+	 * cacheGeneration — the check+insert half of the eviction epoch protocol. Holding CACHE_LOCK across the check
+	 * and the put means an eviction can never interleave between them: either the eviction lands first and the
+	 * stale insert is refused, or the insert lands first and the eviction's evictAll reclaims it. Package-private
+	 * static so the headless suite can pin the gate without driving a decode.
 	 *
-	 * Mirrors the JPEG path's catch-and-default-to-NORMAL on IOException so a file that vanished
-	 * between enumeration and decode doesn't crash the executor.
+	 * @param cacheKey         THUMBNAIL_CACHE key from thumbCacheKey
+	 * @param bmp              decoded thumbnail to cache
+	 * @param decodeGeneration snapshot taken via snapshotCacheGeneration before the decode work began
+	 * @return true when the insert landed; false when an eviction bumped the generation after the
+	 *         snapshot and the stale insert was refused (decodeThumbnail ignores the value — the
+	 *         bitmap is returned to the caller either way)
+	 */
+	static boolean putThumbnailIfCurrentGeneration(String cacheKey, Bitmap bmp, int decodeGeneration)
+	{
+		synchronized (CACHE_LOCK)
+		{
+			if (decodeGeneration != cacheGeneration)
+			{
+				return false;
+			}
+			THUMBNAIL_CACHE.put(cacheKey, bmp);
+			return true;
+		}
+	}
+
+	/**
+	 * Read the EXIF orientation tag (1..8) from a PNG file's eXIf chunk, reading only a capped prefix of the file
+	 * so the bg thumbnail decoder doesn't slurp a 100 MB PNG into RAM just for the orientation lookup. The 64 KB
+	 * cap covers any reasonable PNG — PNG spec requires the eXIf chunk to appear before IDAT and typical phone /
+	 * editor PNGs put IHDR + eXIf (+ any small ancillary chunks) well under that bound. PNGs with eXIf placed past
+	 * the cap, or with no eXIf at all, return 1 (NORMAL) and the picker renders upright — a cosmetic-only miss for
+	 * those rare cases. The main load path (ImageLoadController.chooseOrientationByFormat) reads the full file and
+	 * would still find orientation in the past-cap case, so the editor view stays correct.
+	 *
+	 * Mirrors the JPEG path's catch-and-default-to-NORMAL on IOException so a file that vanished between
+	 * enumeration and decode doesn't crash the executor.
 	 *
 	 * @param file PNG file to inspect
 	 * @return orientation 1..8, or 1 when the eXIf chunk is absent / past the cap / unreadable
@@ -893,35 +767,57 @@ final class FolderBrowser
 			// Too short to even hold the PNG signature — definitely no eXIf, skip the read.
 			return ExifInterface.ORIENTATION_NORMAL;
 		}
-		byte[] head = new byte[cap];
+		byte[] head;
 		try (FileInputStream in = new FileInputStream(file))
 		{
-			int read = 0;
-			while (read < head.length)
-			{
-				int n = in.read(head, read, head.length - read);
-				if (n < 0)
-				{
-					break;
-				}
-				read += n;
-			}
-			if (read < head.length)
-			{
-				// File shorter than the cap (or rare short read) — pass only the bytes we got so
-				// PngMetadataExtractor's chunk walker doesn't read past valid data.
-				byte[] truncated = new byte[read];
-				System.arraycopy(head, 0, truncated, 0, read);
-				head = truncated;
-			}
+			// readNBytes returns exactly the bytes read — shorter than cap when the file shrank under us —
+			// so PngMetadataExtractor's chunk walker never sees past-valid-data zeros.
+			head = in.readNBytes(cap);
 		}
 		catch (IOException ignored)
 		{
-			// File unreadable mid-stream (deleted between enumeration and decode, permission
-			// revoked) — default to NORMAL, matching the JPEG path's IOException fall-through.
+			// File unreadable mid-stream (deleted between enumeration and decode, permission revoked) —
+			// default to NORMAL, matching the JPEG path's IOException fall-through.
 			return ExifInterface.ORIENTATION_NORMAL;
 		}
 		return PngMetadataExtractor.extractOrientation(head);
+	}
+
+	/**
+	 * Snapshot the current cache generation under CACHE_LOCK — the snapshot half of the eviction epoch protocol.
+	 * Taking it under the same lock evictThumbnailCache holds across its increment+evictAll means the snapshot
+	 * can never land between the bump and the evictAll: it observes an epoch either fully before or fully after
+	 * an eviction. Package-private static so the headless suite can drive the protocol directly.
+	 *
+	 * @return the cache generation at the moment of the call
+	 */
+	static int snapshotCacheGeneration()
+	{
+		synchronized (CACHE_LOCK)
+		{
+			return cacheGeneration;
+		}
+	}
+
+	/**
+	 * Power-of-2 subsample factor for a thumbnail decode: the smallest power of 2 whose subsampled max
+	 * dimension lands at or below targetSize * 2. The single policy for BOTH decode paths in decodeThumbnail —
+	 * the EXIF-embedded thumbnail bytes and the full-file fallback — so an oversized embedded thumbnail cannot
+	 * bypass the cap discipline the fallback applies. Package-private static so the test class can pin the
+	 * policy headlessly.
+	 *
+	 * @param maxDim     larger of the bounds-decoded width / height, in pixels; non-positive returns 1
+	 * @param targetSize target display dimension in pixels
+	 * @return power-of-2 inSampleSize (≥ 1) for BitmapFactory.Options
+	 */
+	static int thumbnailSampleSize(int maxDim, int targetSize)
+	{
+		int sampleSize = 1;
+		while (maxDim / sampleSize > targetSize * 2)
+		{
+			sampleSize *= 2;
+		}
+		return sampleSize;
 	}
 
 	/**
@@ -940,20 +836,20 @@ final class FolderBrowser
 	 *                             the Apply External Edit graft picker (graft splices JPEG bytes
 	 *                             only) and false for the load-an-image flow which accepts both.
 	 */
-	FolderBrowser(Context ctx, float density, File startDir, Consumer<File> onFileTapped,
-		boolean jpegOnly)
+	FolderBrowser(Context ctx, float density, File startDir, Consumer<File> onFileTapped, boolean jpegOnly)
 	{
 		this.ctx = ctx;
 		this.density = density;
+		this.thumbnailDecodePx = Math.max(1, DpToPx.toPx(THUMBNAIL_DECODE_DP, density));
 		this.onFileTapped = onFileTapped;
 		this.jpegOnly = jpegOnly;
 		this.rootDir = Environment.getExternalStorageDirectory();
 		this.current = (startDir != null && isInsideRoot(startDir)) ? startDir : rootDir;
 		SharedPreferences prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
 		this.gridMode = prefs.getBoolean(KEY_GRID_MODE, true);
-		// Persist sort mode by enum name() rather than ordinal() so a future enum reordering
-		// doesn't silently flip every user's stored preference. Defaults to NEWEST_FIRST to
-		// match the Camera-app convention (latest captures on top).
+		// Persist sort mode by enum name() rather than ordinal() so a future enum reordering doesn't silently
+		// flip every user's stored preference. Defaults to NEWEST_FIRST to match the Camera-app convention
+		// (latest captures on top).
 		SortMode parsed;
 		try
 		{
@@ -961,20 +857,19 @@ final class FolderBrowser
 		}
 		catch (IllegalArgumentException ignored)
 		{
-			// Pref corrupted (legacy schema, manual edit) — fall back to the default rather than
-			// crashing the picker on first launch.
+			// Pref corrupted (legacy schema, manual edit) — fall back to the default rather than crashing
+			// the picker on first launch.
 			parsed = SortMode.NEWEST_FIRST;
 		}
 		this.sortMode = parsed;
 	}
 
 	/**
-	 * Install the composite OnDismissListener both pickers need (shutdown + onCancel-when-not-decided
-	 * + host transient-dialog cleanup), call refresh() to seed the initial display, and call
-	 * dialog.show() inside a try/catch that shuts the executor down on BadTokenException (the
-	 * config-change race between construction and first frame would otherwise leak its worker thread).
-	 * Caller funnels through this AFTER building the dialog so the listener + refresh + show ordering
-	 * is guaranteed.
+	 * Install the composite OnDismissListener both pickers need (shutdown + onCancel-when-not-decided + host
+	 * transient-dialog cleanup), call refresh() to seed the initial display, and call dialog.show() inside a
+	 * try/catch that shuts the executor down on BadTokenException (the config-change race between construction and
+	 * first frame would otherwise leak its worker thread). Caller funnels through this AFTER building the dialog so
+	 * the listener + refresh + show ordering is guaranteed.
 	 *
 	 * @param dialog              the dialog to attach to
 	 * @param decided             true once the user has committed a selection — drives whether onCancel
@@ -997,25 +892,23 @@ final class FolderBrowser
 		}
 		catch (RuntimeException e)
 		{
-			// BadTokenException (config-change race) — shut the executor down so its worker
-			// thread doesn't outlive the dialog that owned it.
+			// BadTokenException (config-change race) — shut the executor down so its worker thread doesn't
+			// outlive the dialog that owned it.
 			shutdown();
 			throw e;
 		}
 	}
 
 	/**
-	 * Build the inlaid panel: title block (folder name + breadcrumb + sort toggle + grid/list
-	 * toggle) followed by the RecyclerView-backed content list (inflated from
-	 * res/layout/folder_browser_recycler.xml, which overlays the custom BrowserFastScroller on
-	 * the RecyclerView's right edge via FrameLayout z-order — RecyclerView's built-in
-	 * fastScrollEnabled is deliberately NOT used; see BrowserFastScroller's class Javadoc for
-	 * the rationale). Also boots the bg executor as a side-effect — attachToDialog(...) installs
-	 * the composite OnDismissListener that calls shutdown() to clean it up, so callers funnel
-	 * buildPanel + attachToDialog rather than wiring shutdown themselves. Returns a single
-	 * SURFACE0-backed DialogCards panel ready to be added (with margins) to the dialog content;
-	 * the caller may also append additional rows (options / filename) onto the panel before it
-	 * goes on screen.
+	 * Build the inlaid panel: title block (folder name + breadcrumb + sort toggle + grid/list toggle) followed by
+	 * the RecyclerView-backed content list (inflated from res/layout/folder_browser_recycler.xml, which overlays
+	 * the custom BrowserFastScroller on the RecyclerView's right edge via FrameLayout z-order — RecyclerView's
+	 * built-in fastScrollEnabled is deliberately NOT used; see BrowserFastScroller's class Javadoc for the
+	 * rationale). Also boots the bg executor as a side-effect — attachToDialog(...) installs the composite
+	 * OnDismissListener that calls shutdown() to clean it up, so callers funnel buildPanel + attachToDialog rather
+	 * than wiring shutdown themselves. Returns a single SURFACE0-backed DialogCards panel ready to be added (with
+	 * margins) to the dialog content; the caller may also append additional rows (options / filename) onto the
+	 * panel before it goes on screen.
 	 *
 	 * @return the inlaid DialogCards panel (LinearLayout with SURFACE0 fill + rounded corners)
 	 *         containing the browser views; caller wraps in margins and adds to the dialog body
@@ -1027,12 +920,11 @@ final class FolderBrowser
 		ctx.getTheme().resolveAttribute(android.R.attr.selectableItemBackground, rippleAttr, true);
 		this.folderRowRippleResId = rippleAttr.resourceId;
 
-		// Inflate the FrameLayout container that holds the BrowserRecyclerView + the
-		// BrowserFastScroller overlay (the fast scroller draws on top of the recycler's right
-		// edge). The container is needed because the FastScroller is a sibling-overlay rather
-		// than an internal RecyclerView decoration — overlay placement is what lets it stay
-		// always-visible with a min thumb size and use position-based drag math (the built-in
-		// initFastScroller has neither min size nor O(1) drag math).
+		// Inflate the FrameLayout container that holds the BrowserRecyclerView + the BrowserFastScroller
+		// overlay (the fast scroller draws on top of the recycler's right edge). The container is needed
+		// because the FastScroller is a sibling-overlay rather than an internal RecyclerView decoration —
+		// overlay placement is what lets it stay always-visible with a min thumb size and use position-based
+		// drag math (the built-in initFastScroller has neither min size nor O(1) drag math).
 		FrameLayout container = (FrameLayout) LayoutInflater.from(ctx)
 			.inflate(R.layout.folder_browser_recycler, null, false);
 		recyclerView = container.findViewById(R.id.folder_browser_recycler);
@@ -1041,35 +933,34 @@ final class FolderBrowser
 		int reservedPx = DpToPx.toPx(CARD_RESERVED_DP, density);
 		int screenHeightPx = ctx.getResources().getDisplayMetrics().heightPixels;
 		final int panelMaxHeightPx = Math.max(DpToPx.toPx(240, density), screenHeightPx - reservedPx);
-		// RecyclerView self-cap bounds its own intrinsic-height report so a 50k-item folder doesn't
-		// claim an absurd base height during the panel's first measure pass; the panel cap below is
-		// the real layout governor (it's what shrinks the weighted container so the footer rows stay
-		// visible).
+		// RecyclerView self-cap bounds its own intrinsic-height report so a 50k-item folder doesn't claim an
+		// absurd base height during the panel's first measure pass; the panel cap below is the real layout
+		// governor (it's what shrinks the weighted container so the footer rows stay visible).
 		recyclerView.setMaxHeightPx(panelMaxHeightPx);
-		// BrowserSpanSizeLookup makes folder rows span the full width (full-width headers) while
-		// file rows flow as 1-span cells across the grid (3 columns in grid mode, 1 in list mode).
+		// BrowserSpanSizeLookup makes folder rows span the full width (full-width headers) while file rows flow
+		// as 1-span cells across the grid (3 columns in grid mode, 1 in list mode).
 		layoutManager = new GridLayoutManager(ctx, gridMode ? THUMBNAIL_GRID_COLUMNS : 1);
 		layoutManager.setSpanSizeLookup(new BrowserSpanSizeLookup());
 		recyclerView.setLayoutManager(layoutManager);
 		recyclerView.setAdapter(adapter);
 		recyclerView.addItemDecoration(new GridSpacingDecoration(DpToPx.toPx(4, density)));
-		// Cap the recycled-view pool — RecyclerView's default 5-per-type is fine for small folders,
-		// but a wider window (16) keeps fast-scroll smoother by reducing cell-inflation churn at the
-		// scroll-edge boundary on long folders.
+		// Cap the recycled-view pool — RecyclerView's default 5-per-type is fine for small folders, but a wider
+		// window (16) keeps fast-scroll smoother by reducing cell-inflation churn at the scroll-edge boundary
+		// on long folders.
 		recyclerView.getRecycledViewPool().setMaxRecycledViews(VIEW_TYPE_FOLDER, 16);
 		recyclerView.getRecycledViewPool().setMaxRecycledViews(VIEW_TYPE_FILE_LIST, 16);
 		recyclerView.getRecycledViewPool().setMaxRecycledViews(VIEW_TYPE_FILE_GRID, 16);
-		// Disable change/move animations — DefaultItemAnimator runs a 250ms cross-fade per
-		// changed cell on notifyDataSetChanged. For a folder-navigation refresh (which clears
-		// then repopulates) this means every visible cell animates twice; on huge folders the
-		// animation overhead is enough to feel like the dialog stutters. Pickers don't benefit
-		// from animations anyway — the user's mental model is "navigate = jump", not "morph".
+		// Disable change/move animations — DefaultItemAnimator runs a 250ms cross-fade per changed cell on
+		// notifyDataSetChanged. For a folder-navigation refresh (which clears then repopulates) this means
+		// every visible cell animates twice; on huge folders the animation overhead is enough to feel like the
+		// dialog stutters. Pickers don't benefit from animations anyway — the user's mental model is "navigate
+		// = jump", not "morph".
 		recyclerView.setItemAnimator(null);
 		fastScroller.attachTo(recyclerView);
-		// Pause decode submissions while the user is fast-scrolling so the bg threads aren't
-		// thrashing through stale decodes for cells that recycle past before paint. On drag end
-		// (listener fires with false), triggerDecodeForVisibleCells re-binds the visible window
-		// so cells decode normally for the final scroll position.
+		// Pause decode submissions while the user is fast-scrolling so the bg threads aren't thrashing through
+		// stale decodes for cells that recycle past before paint. On drag end (listener fires with false),
+		// triggerDecodeForVisibleCells re-binds the visible window so cells decode normally for the final
+		// scroll position.
 		fastScroller.setOnDragStateChangedListener(this::setDecodeDeferred);
 
 		// Fixed-height card sized to panelMaxHeightPx (or the dialog's available height, whichever is
@@ -1101,17 +992,16 @@ final class FolderBrowser
 		};
 		DialogCards.styleCard(panel, density);
 		panel.addView(buildTitleBlock(padSmall));
-		// height=0 + weight=1: the container takes ALL space left after the fixed title and footer
-		// rows are measured. It's the only weighted child, so footer rows the caller appends never
-		// shrink — the list does (and scrolls internally) when the content exceeds the region.
-		panel.addView(container, new LinearLayout.LayoutParams(
-			LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+		// height=0 + weight=1: the container takes ALL space left after the fixed title and footer rows are
+		// measured. It's the only weighted child, so footer rows the caller appends never shrink — the list
+		// does (and scrolls internally) when the content exceeds the region.
+		panel.addView(container, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
 
-		// 3-thread bg executor with an explicit queue so refresh() can clear pending decodes for the
-		// previous folder before pushing the new enumeration — without the clear, the new folder
-		// waits behind whatever decodes the user kicked off scrolling the previous one. Three threads
-		// keep the visible window painting quickly; ViewHolder Future cancellation + drag-deferred
-		// submission keep the queue from filling with stale decodes for cells already scrolled past.
+		// 3-thread bg executor with an explicit queue so refresh() can clear pending decodes for the previous
+		// folder before pushing the new enumeration — without the clear, the new folder waits behind whatever
+		// decodes the user kicked off scrolling the previous one. Three threads keep the visible window
+		// painting quickly; ViewHolder Future cancellation + drag-deferred submission keep the queue from
+		// filling with stale decodes for cells already scrolled past.
 		bgExecutor = new ThreadPoolExecutor(3, 3, 0L, TimeUnit.MILLISECONDS,
 			new LinkedBlockingQueue<>(), task ->
 			{
@@ -1124,8 +1014,8 @@ final class FolderBrowser
 	}
 
 	/**
-	 * Folder currently displayed by the browser. Used by the save flow's Save here button to
-	 * pass the target directory into the SaveChoices result.
+	 * Folder currently displayed by the browser. Used by the save flow's Save here button to pass the target
+	 * directory into the SaveChoices result.
 	 *
 	 * @return current folder; never null (constructor guarantees this lands at rootDir at
 	 *         minimum)
@@ -1136,19 +1026,18 @@ final class FolderBrowser
 	}
 
 	/**
-	 * Re-render the panel against `current`. Updates title + breadcrumb synchronously, clears
-	 * the adapter immediately so the user sees the navigation respond, then runs the
-	 * directory-enumeration + sort on the bg executor and pushes the resulting BrowserItem list
-	 * back to the adapter on the UI thread. For the Camera album (50k+ entries) the synchronous
-	 * version blocked the UI for ~700ms; bg dispatch keeps the dialog responsive while the
-	 * filesystem call runs.
+	 * Re-render the panel against `current`. Updates title + breadcrumb synchronously, clears the adapter
+	 * immediately so the user sees the navigation respond, then runs the directory-enumeration + sort on the bg
+	 * executor and pushes the resulting BrowserItem list back to the adapter on the UI thread. For the Camera album
+	 * (50k+ entries) listFiles + sort takes ~700ms — far too long to run on the UI thread; bg dispatch keeps the
+	 * dialog responsive while the filesystem call runs.
 	 *
-	 * Pre-emption: bumps refreshGeneration and clears the bg queue so a pending enumeration /
-	 * decode for the previous folder is dropped (in-flight bg tasks — up to 3 since bgExecutor
-	 * runs with 3 threads — finish their current work, but the bg-side and UI-side generation
-	 * checks discard their results). A user who taps folder A then folder B before A's
-	 * enumeration completes only sees B's content.
+	 * Pre-emption: bumps refreshGeneration and clears the bg queue so a pending enumeration / decode for the
+	 * previous folder is dropped (in-flight bg tasks — up to 3 since bgExecutor runs with 3 threads — finish their
+	 * current work, but the bg-side and UI-side generation checks discard their results). A user who taps folder A
+	 * then folder B before A's enumeration completes only sees B's content.
 	 */
+	@UiThread
 	void refresh()
 	{
 		int gen = ++refreshGeneration;
@@ -1157,16 +1046,14 @@ final class FolderBrowser
 		titleLabel.setText(targetFolder.getAbsolutePath().equals(rootDir.getAbsolutePath())
 			? ROOT_LABEL : targetFolder.getName());
 		breadcrumbLabel.setText(buildBreadcrumb());
-		// Clear immediately so the user sees the dialog respond to the tap, even on a slow
-		// filesystem where listFiles takes a beat. The new items appear once the bg enumeration
-		// posts back.
+		// Clear immediately so the user sees the dialog respond to the tap, even on a slow filesystem where
+		// listFiles takes a beat. The new items appear once the bg enumeration posts back.
 		adapter.setItems(Collections.emptyList(), 0);
-		// Schedule the progress spinner to appear after a short delay. Cached / instant loads will
-		// land items via the UI post below before this delay elapses (the runnable is cancelled
-		// there), so the spinner never flashes on fast navigations. Only the truly slow paths
-		// (uncached huge folders — Camera at 50k+ entries) end up actually showing it. The
-		// 200ms threshold is short enough that the user perceives the spinner as "the dialog
-		// noticed I'm waiting" rather than as a delayed reaction.
+		// Schedule the progress spinner to appear after a short delay. Cached / instant loads will land items
+		// via the UI post below before this delay elapses (the runnable is cancelled there), so the spinner
+		// never flashes on fast navigations. Only the truly slow paths (uncached huge folders — Camera at 50k+
+		// entries) end up actually showing it. The 200ms threshold is short enough that the user perceives the
+		// spinner as "the dialog noticed I'm waiting" rather than as a delayed reaction.
 		if (pendingShowProgress != null)
 		{
 			uiHandler.removeCallbacks(pendingShowProgress);
@@ -1184,101 +1071,52 @@ final class FolderBrowser
 			return;
 		}
 		bgExecutor.getQueue().clear();
-		bgExecutor.execute(() ->
-		{
-			if (gen != refreshGeneration)
-			{
-				return;
-			}
-			// Cache lookup: if we've already enumerated targetFolder this session, skip the
-			// expensive listFiles + isDirectory syscall storm and just re-run the cheap
-			// sortAndAssemble pass. This is what makes a sort-mode toggle on a 50k-photo
-			// Camera folder near-instant instead of a fresh ~500ms enumeration.
-			FolderSnapshot snap = cachedSnapshot;
-			if (snap == null || !snap.folder().equals(targetFolder))
-			{
-				snap = enumerateFolder(targetFolder);
-				cachedSnapshot = snap;
-			}
-			if (gen != refreshGeneration)
-			{
-				return;
-			}
-			EnumerationResult result = sortAndAssemble(snap, targetSort);
-			// Pre-submit decodes for the top-of-list cells so their bitmaps land in THUMBNAIL_CACHE
-			// before adapter.setItems runs — the visible cells then paint from cache on first bind
-			// instead of flashing blank while a fresh decode pass catches up.
-			prefetchInitialThumbnails(result.items(), gen);
-			uiHandler.post(() ->
-			{
-				if (gen != refreshGeneration)
-				{
-					return;
-				}
-				// Hide the spinner and cancel any pending show — items have arrived, so even if
-				// the delayed runnable hasn't fired yet, we don't want it to fire after items
-				// land. Re-check both because the post might race with a rapid folder tap that
-				// already bumped the generation.
-				if (pendingShowProgress != null)
-				{
-					uiHandler.removeCallbacks(pendingShowProgress);
-					pendingShowProgress = null;
-				}
-				if (progressSpinner != null)
-				{
-					progressSpinner.setVisibility(View.GONE);
-				}
-				adapter.setItems(result.items(), result.folderCount());
-				// Scroll to top — folder navigations should land the user at the first item, not
-				// wherever the previous folder's scroll left them. notifyDataSetChanged (inside
-				// setItems) preserves scroll position by default; the explicit scroll override
-				// is what gives the "new folder = new view" UX expectation.
-				recyclerView.scrollToPosition(0);
-			});
-		});
+		bgExecutor.execute(() -> refreshOnBg(targetFolder, targetSort, gen));
 	}
 
 	/**
-	 * Stop the bg work pipeline (enumeration + thumbnail decode) and release executor resources.
-	 * MUST be called by the host dialog's OnDismissListener — without it the executor's worker
-	 * thread stays alive holding ImageView references through its task closures until GC.
-	 * Tag-based rebind protection in submitDecodeForCell prevents a late-arriving decode from
-	 * painting onto a recycled ImageView whose tag no longer matches; shutdownNow stops further
-	 * submissions. Idempotent: safe to call from the BadTokenException catch in show() AND from
-	 * the normal dismiss path.
+	 * Stop the bg work pipeline (enumeration + thumbnail decode) and release executor resources. MUST be called by
+	 * the host dialog's OnDismissListener — without it the executor's worker thread stays alive holding ImageView
+	 * references through its task closures until GC. Tag-based rebind protection in submitDecodeForCell prevents a
+	 * late-arriving decode from painting onto a recycled ImageView whose tag no longer matches; shutdownNow stops
+	 * further submissions. Idempotent: safe to call from the BadTokenException catch in show() AND from the normal
+	 * dismiss path.
 	 */
+	@UiThread
 	void shutdown()
 	{
-		// Bump refreshGeneration FIRST so any UI post a bg task already enqueued (between its
-		// bg-thread gen check and the dismiss) sees gen != refreshGeneration on the UI side and
-		// bails out instead of mutating adapter / spinner / recycler views that are about to be
-		// destroyed. shutdownNow stops future submissions but can't recall a post that's already
-		// in uiHandler's queue; the gen-mismatch path is what catches that window deterministically.
+		// Bump refreshGeneration FIRST so any UI post a bg task already enqueued (between its bg-thread gen
+		// check and the dismiss) sees gen != refreshGeneration on the UI side and bails out instead of mutating
+		// adapter / spinner / recycler views that are about to be destroyed. shutdownNow stops future
+		// submissions but can't recall a post that's already in uiHandler's queue; the gen-mismatch path is
+		// what catches that window deterministically.
 		refreshGeneration++;
 		if (bgExecutor != null)
 		{
 			bgExecutor.shutdownNow();
 		}
-		// Drop the cached enumeration so its File / FileEntry list doesn't outlive the dialog.
-		// For a 50k Camera folder the snapshot holds ~50k FileEntry records (~1.2 MB) plus the
-		// File references themselves — small but no reason to keep it once the picker is closed.
+		// Drop the cached enumeration so its File / FileEntry list doesn't outlive the dialog. For a 50k Camera
+		// folder the snapshot holds ~50k FileEntry records (~1.2 MB) plus the File references themselves —
+		// small but no reason to keep it once the picker is closed.
 		cachedSnapshot = null;
-		// Cancel any pending show-spinner runnable so it doesn't fire on a destroyed dialog
-		// trying to flip visibility on a recycled view.
+		// Cancel any pending show-spinner runnable so it doesn't fire on a destroyed dialog trying to flip
+		// visibility on a recycled view.
 		if (pendingShowProgress != null)
 		{
 			uiHandler.removeCallbacks(pendingShowProgress);
 			pendingShowProgress = null;
 		}
+		// Release the process-wide thumbnail cache with the picker: its bitmaps have no consumer once the
+		// dialog is gone, and the next flow is often a save whose export pipeline needs the headroom.
+		evictThumbnailCache();
 	}
 
 	/**
 	 * Wrap the inlaid panel in 12dp margins inside a vertical LinearLayout suitable for
-	 * AlertDialog.Builder.setView. Use as `setView(browser.wrapInDialogMargins(panel))`. Caller
-	 * appends any extra child rows (FolderPickerDialog's options + filename row) to `panel`
-	 * BEFORE calling this — wrapInDialogMargins doesn't touch the panel's children, just wraps
-	 * the assembled panel in symmetric gutters so the dialog frame's visible border looks
-	 * identical top/bottom/left/right.
+	 * AlertDialog.Builder.setView. Use as `setView(browser.wrapInDialogMargins(panel))`. Caller appends any extra
+	 * child rows (FolderPickerDialog's options + filename row) to `panel` BEFORE calling this — wrapInDialogMargins
+	 * doesn't touch the panel's children, just wraps the assembled panel in symmetric gutters so the dialog frame's
+	 * visible border looks identical top/bottom/left/right.
 	 *
 	 * @param panel inlaid DialogCards panel — typically the result of buildPanel(), possibly
 	 *              with extra child rows appended
@@ -1297,10 +1135,219 @@ final class FolderBrowser
 	}
 
 	/**
-	 * Build the breadcrumb spannable. Every segment is bold; intermediate segments are clickable
-	 * mauve ClickableSpans that navigate to that level on tap; the current segment is
-	 * TEXT-colored and NOT clickable. The chevron separator (U+203A) renders in the muted
-	 * SUBTEXT0 the TextView is set to.
+	 * Decode a thumbnail for `file` at the target display size and apply EXIF orientation so a sideways-stored JPEG
+	 * (or PNG with an eXIf tag) renders upright. Checks the process-wide THUMBNAIL_CACHE first (a hit skips all
+	 * disk I/O); on miss, tries ExifInterface.getThumbnail() for JPEGs (decodes in ms) then falls back to a
+	 * subsampled BitmapFactory.decodeFile, caching the result before returning — unless evictThumbnailCache ran
+	 * while the decode was in flight, in which case the result is returned uncached so the eviction stays
+	 * terminal (see cacheGeneration). Both decode paths bounds-decode first and subsample via
+	 * thumbnailSampleSize, so an adversarial embedded thumbnail can't land a multi-MP bitmap in the cache.
+	 *
+	 * Cache key is path + lastModified + targetSize: lastModified invalidates the entry when the file is replaced
+	 * (Gallery edit, sync overwrite); targetSize is keyed defensively, though both callers pass the same
+	 * THUMBNAIL_DECODE_DP so grid and list mode share one entry.
+	 *
+	 * Caller MUST NOT recycle the returned bitmap — it lives in the LruCache and recycling would corrupt it;
+	 * eviction drops the cache's reference and GC reclaims once no ImageView draws it.
+	 *
+	 * @param file       image file to thumbnail
+	 * @param targetSize target display dimension in pixels
+	 * @return EXIF-oriented thumbnail bitmap (possibly cached); empty when all decode paths failed
+	 */
+	@WorkerThread
+	private static Optional<Bitmap> decodeThumbnail(File file, int targetSize)
+	{
+		String cacheKey = thumbCacheKey(file, targetSize);
+		Bitmap cached = THUMBNAIL_CACHE.get(cacheKey);
+		if (cached != null && !cached.isRecycled())
+		{
+			return Optional.of(cached);
+		}
+		// Snapshot the eviction generation before any decode work; the insert at the bottom re-checks it under
+		// CACHE_LOCK so a result whose decode straddled an eviction is never cached (see cacheGeneration).
+		int decodeGeneration = snapshotCacheGeneration();
+		String path = file.getAbsolutePath();
+		Bitmap raw = null;
+		int orientation = ExifInterface.ORIENTATION_NORMAL;
+		Optional<Format> format = Format.fromExtension(file.getName());
+		boolean isJpeg = format.filter(candidate -> candidate == Format.JPEG).isPresent();
+		boolean isPng = format.filter(candidate -> candidate == Format.PNG).isPresent();
+		if (isJpeg)
+		{
+			try
+			{
+				ExifInterface exif = new ExifInterface(path);
+				orientation = exif.getAttributeInt(ExifInterface.TAG_ORIENTATION,
+					ExifInterface.ORIENTATION_NORMAL);
+				byte[] thumbBytes = exif.getThumbnail();
+				if (thumbBytes != null)
+				{
+					// Bounds-decode + subsample the embedded thumbnail with the same
+					// thumbnailSampleSize policy as the decodeFile fallback below:
+					// androidx.exifinterface returns IFD1 thumbnail bytes verbatim with no
+					// client-side size bound, and even a ~64 KB APP1 can decode to a ~2500 px
+					// square (~25 MB ARGB) that thrashes the 64 MB LruCache and pins tens of MB
+					// per visible cell — allocation SUCCESS is the hazard, not just OOM. The
+					// OOM+RuntimeException catch stays so a corrupt thumb falls through to the
+					// subsampled BitmapFactory.decodeFile path rather than crashing the bg
+					// executor; a bounds pass reporting non-positive dims falls through the same
+					// way (raw stays null).
+					try
+					{
+						BitmapFactory.Options thumbBounds = new BitmapFactory.Options();
+						thumbBounds.inJustDecodeBounds = true;
+						BitmapFactory.decodeByteArray(thumbBytes, 0, thumbBytes.length,
+							thumbBounds);
+						if (thumbBounds.outWidth > 0 && thumbBounds.outHeight > 0)
+						{
+							BitmapFactory.Options thumbOpts = new BitmapFactory.Options();
+							thumbOpts.inSampleSize = thumbnailSampleSize(
+								Math.max(thumbBounds.outWidth, thumbBounds.outHeight),
+								targetSize);
+							raw = BitmapFactory.decodeByteArray(thumbBytes, 0,
+								thumbBytes.length, thumbOpts);
+						}
+					}
+					catch (RuntimeException | OutOfMemoryError e)
+					{
+						Log.w(TAG, "EXIF thumbnail decode failed for " + file.getName()
+							+ ": " + e.getMessage());
+					}
+				}
+			}
+			catch (IOException ignored)
+			{
+				// EXIF read failed (corrupt header, partial file) — fall through to BitmapFactory.
+			}
+		}
+		else if (isPng)
+		{
+			// PNG eXIf orientation — mirror ImageLoadController.chooseOrientationByFormat so a PNG with
+			// eXIf orientation=6 doesn't render sideways in the picker grid while loading upright in the
+			// editor. The cap inside readPngOrientationCapped keeps the bg thumbnail decoder from reading a
+			// multi-MB PNG into RAM just to look up the orientation tag.
+			orientation = readPngOrientationCapped(file);
+		}
+		if (raw == null)
+		{
+			BitmapFactory.Options bounds = new BitmapFactory.Options();
+			bounds.inJustDecodeBounds = true;
+			BitmapFactory.decodeFile(path, bounds);
+			if (bounds.outWidth <= 0 || bounds.outHeight <= 0)
+			{
+				return Optional.empty();
+			}
+			BitmapFactory.Options opts = new BitmapFactory.Options();
+			opts.inSampleSize = thumbnailSampleSize(
+				Math.max(bounds.outWidth, bounds.outHeight), targetSize);
+			try
+			{
+				raw = BitmapFactory.decodeFile(path, opts);
+			}
+			catch (RuntimeException | OutOfMemoryError e)
+			{
+				Log.w(TAG, "decodeThumbnail failed for " + path + ": " + e.getMessage());
+				return Optional.empty();
+			}
+			if (raw == null)
+			{
+				return Optional.empty();
+			}
+		}
+		// Reject zero-dim decode (corrupt embedded thumbnail bytes that decode to a 0×0 Bitmap would crash
+		// Bitmap.createBitmap inside applyOrientation, leaking `raw`).
+		if (raw.getWidth() <= 0 || raw.getHeight() <= 0)
+		{
+			raw.recycle();
+			return Optional.empty();
+		}
+		// Identity-orientation predicate matches BitmapUtils.applyOrientation / UltraHdrCompat:
+		// values ≤ 1 are upright (ExifInterface.ORIENTATION_NORMAL = 1; 0 is a malformed/missing
+		// tag that all three sites also treat as identity).
+		Bitmap result;
+		if (orientation <= ExifInterface.ORIENTATION_NORMAL)
+		{
+			result = raw;
+		}
+		else
+		{
+			try
+			{
+				result = BitmapUtils.applyOrientation(raw, orientation);
+			}
+			catch (RuntimeException | OutOfMemoryError e)
+			{
+				// applyOrientation calls Bitmap.createBitmap which can OOM on multi-MP intermediates.
+				// Its Javadoc recycles `raw` only when rotation SUCCEEDS — on throw, the input
+				// survives, so recycle here to avoid leaking the native pixel buffer until GC.
+				Log.w(TAG, "applyOrientation failed for " + file.getName() + ": " + e.getMessage());
+				raw.recycle();
+				return Optional.empty();
+			}
+		}
+		// Cache before returning so a re-navigation to this folder reuses the bitmap instead of re-decoding
+		// from disk — unless an eviction landed while this decode ran (shutdownNow can't interrupt a native
+		// decode, and an unguarded insert would re-grow the process-wide cache after the picker-close /
+		// export-dispatch eviction reclaimed its memory); the seam refuses the stale insert atomically under
+		// CACHE_LOCK. The stale result is still returned, never recycled: ownership passes to the caller's UI
+		// post, whose own generation / tag gates decide whether it paints, and GC reclaims it once nothing
+		// draws it.
+		putThumbnailIfCurrentGeneration(cacheKey, result, decodeGeneration);
+		return Optional.of(result);
+	}
+
+	private static String thumbCacheKey(File file, int targetSize)
+	{
+		// Path + lastModified + decode size, the single chokepoint for the THUMBNAIL_CACHE key shape (and the
+		// cell rebind tag). lastModified invalidates on file replace; any drift between assembly sites would
+		// silently defeat the cache with no error.
+		return file.getAbsolutePath() + ":" + file.lastModified() + ":" + targetSize;
+	}
+
+	/**
+	 * Shared file-cell bind tail for the grid and list ViewHolders: supported-format gating (alpha + TalkBack
+	 * description + ripple + click wiring on the tap target), then pending-decode cancel + resubmit. TalkBack
+	 * needs the per-cell description — unsupported cells announce why tapping does nothing instead of reading as
+	 * "clickable" in name only. The per-mode variance is which view takes the tap (thumbnail in grid, whole row
+	 * in list) and the unsupported-state background, passed as styleUnsupported.
+	 *
+	 * @param file             file being bound into the cell
+	 * @param tapTarget        view that carries alpha, content description, ripple, and the click handler
+	 * @param thumb            ImageView that receives the decoded thumbnail
+	 * @param pending          the cell's previous decode Future; cancelled here when still running — without
+	 *                         cancellation a fast scroll piles stale decode tasks behind the visible ones
+	 * @param styleUnsupported paints tapTarget's unsupported-state background (per-mode)
+	 * @return replacement pending-decode Future from submitDecodeForCell, or null when none was submitted
+	 */
+	private Future<?> bindFileCell(File file, View tapTarget, AppCompatImageView thumb, Future<?> pending,
+		Runnable styleUnsupported)
+	{
+		boolean supported = jpegOnly ? isJpegSourceFormat(file) : isSupportedSourceFormat(file);
+		tapTarget.setAlpha(supported ? 1f : 0.4f);
+		tapTarget.setContentDescription(supported ? file.getName()
+			: file.getName() + " (unsupported format, not selectable)");
+		if (supported)
+		{
+			tapTarget.setBackgroundResource(folderRowRippleResId);
+			tapTarget.setOnClickListener(view -> onFileTapped.accept(file));
+		}
+		else
+		{
+			styleUnsupported.run();
+			tapTarget.setOnClickListener(null);
+			tapTarget.setClickable(false);
+		}
+		if (pending != null && !pending.isDone())
+		{
+			pending.cancel(false);
+		}
+		return submitDecodeForCell(file, thumb, !decodeDeferred);
+	}
+
+	/**
+	 * Build the breadcrumb spannable. Every segment is bold; intermediate segments are clickable mauve
+	 * ClickableSpans that navigate to that level on tap; the current segment is TEXT-colored and NOT clickable. The
+	 * chevron separator (U+203A) renders in the muted SUBTEXT0 the TextView is set to.
 	 *
 	 * @return spannable for breadcrumbLabel.setText; LinkMovementMethod handles span taps
 	 */
@@ -1334,10 +1381,10 @@ final class FolderBrowser
 	}
 
 	/**
-	 * Build the title block — bold folder name on the left, sort-direction toggle + grid/list
-	 * view-mode toggle icons on the right, then the clickable breadcrumb underneath. Horizontal
-	 * padding lives on the enclosing DialogCards card; this block only supplies the small
-	 * vertical gap between the title row and the breadcrumb below it.
+	 * Build the title block — bold folder name on the left, sort-direction toggle + grid/list view-mode toggle
+	 * icons on the right, then the clickable breadcrumb underneath. Horizontal padding lives on the enclosing
+	 * DialogCards card; this block only supplies the small vertical gap between the title row and the breadcrumb
+	 * below it.
 	 *
 	 * @param padSmall vertical gap between the title row and the breadcrumb label
 	 * @return assembled title block ready to be added as the first child of the inlaid panel
@@ -1361,9 +1408,9 @@ final class FolderBrowser
 
 		int toggleSize = DpToPx.toPx(40, density);
 		int togglePad = DpToPx.toPx(8, density);
-		// Sort toggle. Shows the icon for the OTHER sort direction — clicking switches into that
-		// direction (parallels the grid/list toggle convention). Sort applies to file rows only;
-		// folders stay alphabetical irrespective of mode.
+		// Sort toggle. Shows the icon for the OTHER sort direction — clicking switches into that direction
+		// (parallels the grid/list toggle convention). Sort applies to file rows only; folders stay
+		// alphabetical irrespective of mode.
 		sortToggle = new AppCompatImageView(ctx);
 		sortToggle.setImageResource(sortIconForCurrentMode());
 		sortToggle.setContentDescription(sortToggleDescriptionForCurrentMode());
@@ -1372,8 +1419,8 @@ final class FolderBrowser
 		sortToggle.setOnClickListener(view -> toggleSortMode());
 		titleRow.addView(sortToggle, new LinearLayout.LayoutParams(toggleSize, toggleSize));
 
-		// Grid/list toggle. Shows the icon for the OTHER mode — clicking switches into that mode.
-		// Tap feedback via selectableItemBackground ripple; persists choice to SharedPreferences.
+		// Grid/list toggle. Shows the icon for the OTHER mode — clicking switches into that mode. Tap feedback
+		// via selectableItemBackground ripple; persists choice to SharedPreferences.
 		viewModeToggle = new AppCompatImageView(ctx);
 		viewModeToggle.setImageResource(gridMode ? R.drawable.ic_view_list : R.drawable.ic_view_grid);
 		viewModeToggle.setContentDescription(viewModeToggleDescriptionForCurrentMode());
@@ -1387,8 +1434,8 @@ final class FolderBrowser
 		breadcrumbLabel.setTextSize(13);
 		breadcrumbLabel.setTextColor(ThemeColors.SUBTEXT0);
 		breadcrumbLabel.setSingleLine(true);
-		// Ellipsize at START so a deep path keeps the CURRENT segment visible and clips the root
-		// prefix instead. Without this, a long breadcrumb hides the current segment.
+		// Ellipsize at START so a deep path keeps the CURRENT segment visible and clips the root prefix
+		// instead. Without this, a long breadcrumb hides the current segment.
 		breadcrumbLabel.setEllipsize(TextUtils.TruncateAt.START);
 		breadcrumbLabel.setPadding(0, padSmall, 0, 0);
 		breadcrumbLabel.setMovementMethod(LinkMovementMethod.getInstance());
@@ -1397,20 +1444,47 @@ final class FolderBrowser
 	}
 
 	/**
-	 * Read `folder` and produce a FolderSnapshot ready to be sorted. Designed to run on the bg
-	 * executor and to be the EXPENSIVE half of refresh() — listFiles on a 50k-entry Camera
-	 * folder is ~500ms cold, plus isDirectory syscall per entry. The result is meant to be
-	 * cached so a follow-up sort-mode toggle only needs the cheap sortAndAssemble pass on the
-	 * already-paid enumeration.
+	 * Bg-executor body of submitDecodeForCell: decode the thumbnail (populating THUMBNAIL_CACHE) and post the
+	 * paint to the UI thread. Generation-checked before decoding so queued decodes for a folder the user already
+	 * left are dropped without touching the filesystem; a failed decode (unsupported / corrupt file) exits
+	 * silently and leaves the cell's placeholder in place.
 	 *
-	 * Each file's lowercase name is captured here as FileEntry.sortKey so the subsequent sort
-	 * is a pure String compare with no per-call toLowerCase. Filename-based sort (rather than
-	 * lastModified) matches user expectations of "newest first" for camera-app filenames that
-	 * embed the capture date (20240101_*, PXL_20240101_*, IMG-20240101-WA0001.jpg) — and stays
-	 * correct even when a backup/restore touches lastModified on every file.
+	 * @param file          image file to decode
+	 * @param displayTarget decode target edge in pixels (THUMBNAIL_DECODE_DP at current density)
+	 * @param cellTag       tag stamped on the ImageView at submit time; forwarded to the UI-post rebind check
+	 * @param target        ImageView painted on the UI thread when its tag still matches cellTag
+	 * @param gen           generation stamp at submit time; stale stamps drop the decode
+	 */
+	@WorkerThread
+	private void decodeCellOnBg(File file, int displayTarget, String cellTag, AppCompatImageView target, int gen)
+	{
+		if (gen != refreshGeneration)
+		{
+			return;
+		}
+		Bitmap bmp = decodeThumbnail(file, displayTarget).orElse(null);
+		if (bmp == null)
+		{
+			return;
+		}
+		uiHandler.post(() -> paintDecodedCellOnUi(bmp, cellTag, target, gen));
+	}
+
+	/**
+	 * Read `folder` and produce a FolderSnapshot ready to be sorted. Designed to run on the bg executor and to be
+	 * the EXPENSIVE half of refresh() — listFiles on a 50k-entry Camera folder is ~500ms cold, plus isDirectory
+	 * syscall per entry. The result is meant to be cached so a follow-up sort-mode toggle only needs the cheap
+	 * sortAndAssemble pass on the already-paid enumeration.
 	 *
-	 * Folder list is pre-sorted alphabetically at this stage — sort mode applies only to FILE
-	 * rows, so the folder ordering is invariant across SortMode toggles.
+	 * Each file's lowercase name is captured here as FileEntry.sortKey so the subsequent sort is a pure String
+	 * compare with no per-call toLowerCase. Filename-based sort (rather than lastModified) matches user
+	 * expectations of "newest first" for camera-app filenames that embed the capture date (20240101_*,
+	 * PXL_20240101_*, IMG-20240101-WA0001.jpg) — and stays correct even when a backup/restore touches lastModified
+	 * on every file.
+	 *
+	 * Folder list is pre-sorted alphabetically at this stage — sort mode applies only to FILE rows, so the folder
+	 * ordering is invariant across SortMode toggles. Dot-prefixed entries, files and folders alike, are dropped via
+	 * the isHiddenName rule.
 	 *
 	 * @param folder directory to enumerate; snapshot is empty when listFiles returns null
 	 *               (folder unreadable / non-existent — happens on a folder that was deleted
@@ -1418,6 +1492,7 @@ final class FolderBrowser
 	 * @return FolderSnapshot holding the alphabetical folder list + the unsorted file list with
 	 *         the lowercase name cached per entry as the sort key
 	 */
+	@WorkerThread
 	private FolderSnapshot enumerateFolder(File folder)
 	{
 		File[] kids = folder.listFiles();
@@ -1429,14 +1504,23 @@ final class FolderBrowser
 		List<File> folders = new ArrayList<>();
 		List<FileEntry> files = new ArrayList<>();
 		int rejectedExt = 0;
+		int rejectedHidden = 0;
 		for (File f : kids)
 		{
 			if (f.isDirectory())
 			{
-				if (!f.getName().startsWith("."))
+				if (!isHiddenName(f.getName()))
 				{
 					folders.add(f);
 				}
+			}
+			else if (isHiddenName(f.getName()))
+			{
+				// Dot-prefixed files (MediaStore ".trashed-*" / ".pending-*", crash-safe save temps)
+				// are hidden like dot-prefixed folders — see isHiddenName. Counted apart from
+				// rejectedExt so the missing-JPGs diagnostic below doesn't lump OS trash into the
+				// extension-rejection bucket.
+				rejectedHidden++;
 			}
 			else if (isImageFile(f))
 			{
@@ -1448,26 +1532,55 @@ final class FolderBrowser
 			}
 		}
 		folders.sort((a, b) -> a.getName().compareToIgnoreCase(b.getName()));
-		// Diagnostic for the "JPGs missing from picker" reports — surfacing raw listFiles count
-		// vs filtered counts lets the user spot whether files are being dropped at enumeration
-		// (filesystem / permission), at the extension filter (unusual extension), or somewhere
-		// downstream (rendering / scroll). Filter logcat for FolderBrowser to compare against
-		// the Gallery app's file count for the same folder.
-		Log.d(TAG, "enumerateFolder " + folder.getAbsolutePath()
-			+ " kids=" + kids.length
-			+ " folders=" + folders.size()
-			+ " imageFiles=" + files.size()
-			+ " rejectedByExtension=" + rejectedExt);
+		// Diagnostic for the "JPGs missing from picker" reports — surfacing raw listFiles count vs filtered
+		// counts lets the user spot whether files are being dropped at enumeration (filesystem / permission),
+		// at the extension filter (unusual extension), or somewhere downstream (rendering / scroll). Filter
+		// logcat for FolderBrowser to compare against the Gallery app's file count for the same folder.
+		Log.d(TAG, "enumerateFolder " + folder.getAbsolutePath() + " kids=" + kids.length
+			+ " folders=" + folders.size() + " imageFiles=" + files.size()
+			+ " rejectedByExtension=" + rejectedExt + " rejectedHidden=" + rejectedHidden);
 		return new FolderSnapshot(folder, folders, files);
 	}
 
 	/**
-	 * Containment check used by every navigation entry point (folder-row tap, breadcrumb tap,
-	 * and the constructor's startDir clamp) — canonicalises both paths so a `/sdcard/...`
-	 * symlink against a rootDir of `/storage/emulated/0/...` resolves through. Rejects siblings
-	 * that share the same textual prefix (`/storage/emulated/0` vs `/storage/emulated/0abc`) by
-	 * requiring the path-separator boundary after the prefix. Returns false on IOException so a
-	 * hostile filesystem (symlink loop, unreadable parent) can't crash the picker UI.
+	 * UI-thread tail of refresh: cancel / hide the progress spinner, install the assembled items into the
+	 * adapter, and scroll to the top so a folder navigation lands the user at the first item (notifyDataSetChanged
+	 * inside setItems would otherwise preserve the previous folder's scroll position). Skipped entirely on a stale
+	 * generation — the post can race a rapid folder tap that already bumped refreshGeneration, and painting the
+	 * old folder's items over the newer navigation would show the wrong folder.
+	 *
+	 * @param result assembled item list + folder count from sortAndAssemble
+	 * @param gen    generation stamp of the bg task that produced result; stale stamps no-op
+	 */
+	@UiThread
+	private void installRefreshResultOnUi(EnumerationResult result, int gen)
+	{
+		if (gen != refreshGeneration)
+		{
+			return;
+		}
+		// Hide the spinner and cancel any pending show — items have arrived, so even if the delayed runnable
+		// hasn't fired yet, we don't want it to fire after items land.
+		if (pendingShowProgress != null)
+		{
+			uiHandler.removeCallbacks(pendingShowProgress);
+			pendingShowProgress = null;
+		}
+		if (progressSpinner != null)
+		{
+			progressSpinner.setVisibility(View.GONE);
+		}
+		adapter.setItems(result.items(), result.folderCount());
+		recyclerView.scrollToPosition(0);
+	}
+
+	/**
+	 * Containment check used by every navigation entry point (folder-row tap, breadcrumb tap, and the constructor's
+	 * startDir clamp) — canonicalises both paths so a `/sdcard/...` symlink against a rootDir of
+	 * `/storage/emulated/0/...` resolves through. Rejects siblings that share the same textual prefix
+	 * (`/storage/emulated/0` vs `/storage/emulated/0abc`) by requiring the path-separator boundary after the
+	 * prefix. Returns false on IOException so a hostile filesystem (symlink loop, unreadable parent) can't crash
+	 * the picker UI.
 	 *
 	 * @param candidate folder being navigated to
 	 * @return true when candidate sits at or below rootDir; false on out-of-tree or
@@ -1479,8 +1592,7 @@ final class FolderBrowser
 		{
 			String candidatePath = candidate.getCanonicalPath();
 			String rootPath = rootDir.getCanonicalPath();
-			return candidatePath.equals(rootPath)
-				|| candidatePath.startsWith(rootPath + File.separator);
+			return candidatePath.equals(rootPath) || candidatePath.startsWith(rootPath + File.separator);
 		}
 		catch (IOException ignored)
 		{
@@ -1490,8 +1602,8 @@ final class FolderBrowser
 	}
 
 	/**
-	 * Build the ClickableSpan for a single breadcrumb segment. On tap navigates to `target`
-	 * when it still passes isInsideRoot.
+	 * Build the ClickableSpan for a single breadcrumb segment. On tap navigates to `target` when it still passes
+	 * isInsideRoot.
 	 *
 	 * @param target folder this segment points at
 	 * @return ClickableSpan ready to apply via Spannable.setSpan
@@ -1521,10 +1633,9 @@ final class FolderBrowser
 	}
 
 	/**
-	 * Build a square thumbnail ImageView for a grid-mode file cell. The CENTER_CROP scale type
-	 * makes the bitmap fill the cell with central cropping (typical photo-picker look). The
-	 * anonymous-subclass onMeasure forces square height — without it the WRAP_CONTENT cell
-	 * collapses to zero height before the bitmap arrives.
+	 * Build a square thumbnail ImageView for a grid-mode file cell. The CENTER_CROP scale type makes the bitmap
+	 * fill the cell with central cropping (typical photo-picker look). The anonymous-subclass onMeasure forces
+	 * square height — without it the WRAP_CONTENT cell collapses to zero height before the bitmap arrives.
 	 *
 	 * @return fresh AppCompatImageView ready to be installed as a FileGridViewHolder's itemView
 	 */
@@ -1535,9 +1646,9 @@ final class FolderBrowser
 			@Override
 			protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec)
 			{
-				// Square cells: height tracks width so each thumbnail is 1:1 regardless of
-				// dialog width. Without this, height stays at WRAP_CONTENT and the bitmap
-				// renders into a zero-height row.
+				// Square cells: height tracks width so each thumbnail is 1:1 regardless of dialog
+				// width. Without this, height stays at WRAP_CONTENT and the bitmap renders into a
+				// zero-height row.
 				super.onMeasure(widthMeasureSpec, widthMeasureSpec);
 			}
 		};
@@ -1549,9 +1660,9 @@ final class FolderBrowser
 	}
 
 	/**
-	 * Build a list-mode file row: 40dp square thumbnail + filename label. Layout is fixed at
-	 * inflation time; FileListViewHolder.bind only updates the dynamic per-file state (label
-	 * text, alpha, click handler, thumbnail submission).
+	 * Build a list-mode file row: 40dp square thumbnail + filename label. Layout is fixed at inflation time;
+	 * FileListViewHolder.bind only updates the dynamic per-file state (label text, alpha, click handler, thumbnail
+	 * submission).
 	 *
 	 * @return fresh LinearLayout ready to be installed as a FileListViewHolder's itemView
 	 */
@@ -1563,9 +1674,9 @@ final class FolderBrowser
 		LinearLayout row = new LinearLayout(ctx);
 		row.setOrientation(LinearLayout.HORIZONTAL);
 		row.setGravity(Gravity.CENTER_VERTICAL);
-		// No setMinimumHeight: lets the row WRAP its natural content height so list view's
-		// row-to-row spacing matches grid view's. No horizontal padding — the row spans the
-		// full card-content width so list and grid views share the same outer-bound width.
+		// No setMinimumHeight: lets the row WRAP its natural content height so list view's row-to-row spacing
+		// matches grid view's. No horizontal padding — the row spans the full card-content width so list and
+		// grid views share the same outer-bound width.
 		row.setPadding(0, padSmall, 0, padSmall);
 		row.setLayoutParams(new RecyclerView.LayoutParams(
 			ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
@@ -1579,16 +1690,14 @@ final class FolderBrowser
 		label.setSingleLine(true);
 		label.setEllipsize(TextUtils.TruncateAt.MIDDLE);
 		label.setPadding(padInner, 0, 0, 0);
-		row.addView(label, new LinearLayout.LayoutParams(0,
-			LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+		row.addView(label, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
 		return row;
 	}
 
 	/**
-	 * Build a folder row: 24dp folder icon + folder name. Layout is fixed at inflation time;
-	 * FolderViewHolder.bind only updates the dynamic per-folder state (label text and the
-	 * navigation target captured by the row's existing click listener). 48dp minimum height
-	 * matches the standard Material list-item touch target.
+	 * Build a folder row: 24dp folder icon + folder name. Layout is fixed at inflation time; FolderViewHolder.bind
+	 * only updates the dynamic per-folder state (label text and the navigation target captured by the row's
+	 * existing click listener). 48dp minimum height matches the standard Material list-item touch target.
 	 *
 	 * @return fresh LinearLayout ready to be installed as a FolderViewHolder's itemView
 	 */
@@ -1602,8 +1711,8 @@ final class FolderBrowser
 		row.setOrientation(LinearLayout.HORIZONTAL);
 		row.setGravity(Gravity.CENTER_VERTICAL);
 		row.setMinimumHeight(rowMinHeight);
-		// No horizontal padding — folder rows align with the file list / grid rows and the
-		// options / filename rows below, spanning the full card-content width.
+		// No horizontal padding — folder rows align with the file list / grid rows and the options / filename
+		// rows below, spanning the full card-content width.
 		row.setPadding(0, 0, 0, 0);
 		row.setBackgroundResource(folderRowRippleResId);
 		row.setLayoutParams(new RecyclerView.LayoutParams(
@@ -1615,17 +1724,15 @@ final class FolderBrowser
 		label.setTextSize(16);
 		label.setTextColor(ThemeColors.TEXT);
 		label.setPadding(padInner + padSmall, 0, 0, 0);
-		row.addView(label, new LinearLayout.LayoutParams(0,
-			LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+		row.addView(label, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
 		return row;
 	}
 
 	/**
-	 * Composite dismiss handler — extracted out of the OnDismissListener lambda body installed
-	 * in attachToDialog so the lambda stays at one line (the 3-line lambda cap forbids the four
-	 * statements + paired ifs that the full body needs). Shuts down the bg executor, fires the
-	 * cancel callback if the user dismissed without selecting, then forwards to the host's
-	 * transient-dialog tracking cleanup.
+	 * Composite dismiss handler — extracted out of the OnDismissListener lambda body installed in attachToDialog so
+	 * the lambda stays at one line (the 3-line lambda cap forbids the four statements + paired ifs that the full
+	 * body needs). Shuts down the bg executor, fires the cancel callback if the user dismissed without selecting,
+	 * then forwards to the host's transient-dialog tracking cleanup.
 	 *
 	 * @param dismissed           the DialogInterface that fired the dismiss event
 	 * @param decided             whether the user committed a selection before dismiss
@@ -1647,25 +1754,45 @@ final class FolderBrowser
 	}
 
 	/**
-	 * Pre-submit decode tasks for the first viewport's worth of file rows so their bitmaps land
-	 * in THUMBNAIL_CACHE before the UI thread runs adapter.setItems. Called from the bg task
-	 * right after sortAndAssemble — the bg executor has 3 threads, so this prefetch occupies
-	 * the other 2 threads in parallel with the UI thread's layout pass. By the time
-	 * onBindViewHolder fires for visible cells, the cache hits paint immediately. Tasks that
-	 * find cellTag already cached (e.g., same file seen in a previous folder visit) are no-ops.
+	 * UI-thread tail of submitDecodeForCell: paint the decoded bitmap into the cell when it is still bound to the
+	 * file the decode was submitted for. The tag re-read detects a recycled cell (a fast scroll rebound the
+	 * ImageView to a different file) and the generation check detects a folder navigation; both skip the paint.
+	 * No recycle on the stale paths: the bitmap lives in THUMBNAIL_CACHE and a recycle would corrupt the cache
+	 * for any subsequent dialog or cache hit.
 	 *
-	 * Gen-guarded: tasks early-return if the user navigated away. Cached entries from a
-	 * cancelled prefetch are still valid (path+lastModified+targetSize key) — if the user
-	 * later navigates back to this folder, those entries serve cache hits.
+	 * @param bmp     decoded thumbnail, already resident in THUMBNAIL_CACHE
+	 * @param cellTag tag stamped at submit time; compared against the ImageView's current tag
+	 * @param target  ImageView to paint
+	 * @param gen     generation stamp at submit time; stale stamps skip the paint
+	 */
+	@UiThread
+	private void paintDecodedCellOnUi(Bitmap bmp, String cellTag, AppCompatImageView target, int gen)
+	{
+		if (gen == refreshGeneration && cellTag.equals(target.getTag()))
+		{
+			target.setImageBitmap(bmp);
+		}
+	}
+
+	/**
+	 * Pre-submit decode tasks for the first viewport's worth of file rows so their bitmaps land in THUMBNAIL_CACHE
+	 * before the UI thread runs adapter.setItems. Called from the bg task right after sortAndAssemble — the bg
+	 * executor has 3 threads, so this prefetch occupies the other 2 threads in parallel with the UI thread's layout
+	 * pass. By the time onBindViewHolder fires for visible cells, the cache hits paint immediately. Tasks that find
+	 * cellTag already cached (e.g., same file seen in a previous folder visit) are no-ops.
+	 *
+	 * Gen-guarded: tasks early-return if the user navigated away. Cached entries from a cancelled prefetch are
+	 * still valid (path+lastModified+targetSize key) — if the user later navigates back to this folder, those
+	 * entries serve cache hits.
 	 *
 	 * @param items items list from sortAndAssemble; only the first PREFETCH_LIMIT file rows
 	 *              get prefetched (folders are skipped since they have no thumbnail)
 	 * @param gen   generation captured by the parent bg task; tasks check it before decoding
 	 *              so a fast folder-tap chain doesn't waste bg cycles on stale folders
 	 */
+	@WorkerThread
 	private void prefetchInitialThumbnails(List<BrowserItem> items, int gen)
 	{
-		int displayTarget = Math.max(1, DpToPx.toPx(THUMBNAIL_DECODE_DP, density));
 		int submitted = 0;
 		for (BrowserItem item : items)
 		{
@@ -1678,22 +1805,21 @@ final class FolderBrowser
 				continue;
 			}
 			File file = fileRow.file();
-			String cacheKey = file.getAbsolutePath() + ":" + file.lastModified() + ":" + displayTarget;
-			if (THUMBNAIL_CACHE.get(cacheKey) != null)
+			if (THUMBNAIL_CACHE.get(thumbCacheKey(file, thumbnailDecodePx)) != null)
 			{
 				continue;
 			}
-			// safeBgSubmit catches RejectedExecutionException — the loop body runs from the bg
-			// enumeration task while UI-thread dismissal can call shutdownNow() between the entry
-			// check and any iteration's execute(). On rejection, stop submitting: the dialog is
-			// going away and the remaining prefetch work is moot.
+			// safeBgSubmit catches RejectedExecutionException — the loop body runs from the bg enumeration
+			// task while UI-thread dismissal can call shutdownNow() between the entry check and any
+			// iteration's execute(). On rejection, stop submitting: the dialog is going away and the
+			// remaining prefetch work is moot.
 			boolean accepted = safeBgSubmit(() ->
 			{
 				if (gen != refreshGeneration)
 				{
 					return;
 				}
-				decodeThumbnail(file, displayTarget);
+				decodeThumbnail(file, thumbnailDecodePx);
 			});
 			if (!accepted)
 			{
@@ -1704,13 +1830,53 @@ final class FolderBrowser
 	}
 
 	/**
-	 * Submit a Runnable to bgExecutor while tolerating a concurrent shutdown. The submit-into-executor
-	 * pattern has an inherent race: bgExecutor.execute() throws RejectedExecutionException when the
-	 * UI-thread dismiss path's shutdownNow() lands between an isShutdown() check and the actual submit
-	 * (or, in a loop of submits, between iterations). The wrapper folds the null / isShutdown / catch
-	 * legs into one place so callers — particularly the bg-thread loop in prefetchInitialThumbnails —
-	 * don't have to repeat the boilerplate. Returns false on any of the three reject paths so loop
-	 * callers can stop submitting once the executor has gone away.
+	 * Bg-executor body of refresh: enumerate targetFolder (or reuse the session's cached snapshot of it), sort +
+	 * assemble the BrowserItem list, prefetch top-of-list thumbnails, and post the result to the UI thread.
+	 * Generation-checked before the enumeration and again after it so a rapid folder-tap chain drops stale work
+	 * at both seams; installRefreshResultOnUi re-checks on the UI side.
+	 *
+	 * @param targetFolder folder captured on the UI thread at refresh() time; enumerated here unless
+	 *                     cachedSnapshot already holds its listing
+	 * @param targetSort   sort mode captured at refresh() time, applied by sortAndAssemble
+	 * @param gen          generation stamp from refresh(); compared against refreshGeneration to drop
+	 *                     results the user has navigated past
+	 */
+	@WorkerThread
+	private void refreshOnBg(File targetFolder, SortMode targetSort, int gen)
+	{
+		if (gen != refreshGeneration)
+		{
+			return;
+		}
+		// Cache lookup: if we've already enumerated targetFolder this session, skip the expensive
+		// listFiles + isDirectory syscall storm and just re-run the cheap sortAndAssemble pass. This is
+		// what makes a sort-mode toggle on a 50k-photo Camera folder near-instant instead of a fresh
+		// ~500ms enumeration.
+		FolderSnapshot snap = cachedSnapshot;
+		if (snap == null || !snap.folder().equals(targetFolder))
+		{
+			snap = enumerateFolder(targetFolder);
+			cachedSnapshot = snap;
+		}
+		if (gen != refreshGeneration)
+		{
+			return;
+		}
+		EnumerationResult result = sortAndAssemble(snap, targetSort);
+		// Pre-submit decodes for the top-of-list cells so their bitmaps land in THUMBNAIL_CACHE before
+		// adapter.setItems runs — the visible cells then paint from cache on first bind instead of
+		// flashing blank while a fresh decode pass catches up.
+		prefetchInitialThumbnails(result.items(), gen);
+		uiHandler.post(() -> installRefreshResultOnUi(result, gen));
+	}
+
+	/**
+	 * Submit a Runnable to bgExecutor while tolerating a concurrent shutdown. The submit-into-executor pattern has
+	 * an inherent race: bgExecutor.execute() throws RejectedExecutionException when the UI-thread dismiss path's
+	 * shutdownNow() lands between an isShutdown() check and the actual submit (or, in a loop of submits, between
+	 * iterations). The wrapper folds the null / isShutdown / catch legs into one place so callers — particularly
+	 * the bg-thread loop in prefetchInitialThumbnails — don't have to repeat the boilerplate. Returns false on any
+	 * of the three reject paths so loop callers can stop submitting once the executor has gone away.
 	 *
 	 * @param task work to submit on bgExecutor
 	 * @return true when accepted; false when bgExecutor is null, already shut down, or rejected the
@@ -1729,19 +1895,18 @@ final class FolderBrowser
 		}
 		catch (RejectedExecutionException ignored)
 		{
-			// Concurrent shutdownNow from the UI-thread dismiss path landed between the isShutdown
-			// check above and execute(). Treat the same as a pre-check shutdown — drop the task and
-			// let the caller fall through.
+			// Concurrent shutdownNow from the UI-thread dismiss path landed between the isShutdown check
+			// above and execute(). Treat the same as a pre-check shutdown — drop the task and let the
+			// caller fall through.
 			return false;
 		}
 	}
 
 	/**
-	 * Toggle whether bind() submits bg decodes (true = skip submit on cache miss, false =
-	 * submit normally). Called by the FastScroller drag-state callback so the bg threads
-	 * aren't churning on decode work for cells that will recycle out of view before they're
-	 * painted. On false (drag ended), re-binds the currently-visible cells so they decode
-	 * normally for the final scroll position.
+	 * Toggle whether bind() submits bg decodes (true = skip submit on cache miss, false = submit normally). Called
+	 * by the FastScroller drag-state callback so the bg threads aren't churning on decode work for cells that will
+	 * recycle out of view before they're painted. On false (drag ended), re-binds the currently-visible cells so
+	 * they decode normally for the final scroll position.
 	 *
 	 * @param deferred true when entering deferred mode (drag begin); false when leaving (drag
 	 *                 end) — false triggers the re-bind sweep for visible cells
@@ -1760,23 +1925,22 @@ final class FolderBrowser
 	}
 
 	/**
-	 * Sort the cached files in `snap` per the requested mode and assemble the BrowserItem list
-	 * with folders first. Cheap — reads the cached FileEntry.sortKey string without touching
-	 * the filesystem, so on 50k items this is pure-CPU ~10ms instead of the enumeration pass's
-	 * ~500ms+ disk read. This is the fast half that runs on every refresh; enumerateFolder is
-	 * the slow half that runs only on a cache miss (folder change).
+	 * Sort the cached files in `snap` per the requested mode and assemble the BrowserItem list with folders first.
+	 * Cheap — reads the cached FileEntry.sortKey string without touching the filesystem, so on 50k items this is
+	 * pure-CPU ~10ms instead of the enumeration pass's ~500ms+ disk read. This is the fast half that runs on every
+	 * refresh; enumerateFolder is the slow half that runs only on a cache miss (folder change).
 	 *
-	 * Sort key is the lowercase filename, NOT lastModified — for camera-app naming conventions that
-	 * prefix filenames with capture date (20240101_*, PXL_20240101_*, IMG-20240101-WA0001.jpg),
-	 * alphabetical filename order ≈ true chronological order, and unlike mtime it survives a
-	 * restore/copy that rewrites timestamps (which would otherwise cluster restored files at the
-	 * top). The approximation only holds for date-prefixed names; renamed / downloaded / grafted
-	 * files sort by name, not capture time.
+	 * Sort key is the lowercase filename, NOT lastModified — for camera-app naming conventions that prefix
+	 * filenames with capture date (20240101_*, PXL_20240101_*, IMG-20240101-WA0001.jpg), alphabetical filename
+	 * order ≈ true chronological order, and unlike mtime it survives a restore/copy that rewrites timestamps (which
+	 * would otherwise cluster restored files at the top). The approximation only holds for date-prefixed names;
+	 * renamed / downloaded / grafted files sort by name, not capture time.
 	 *
 	 * @param snap cached folder snapshot from enumerateFolder
 	 * @param mode active sort direction for FILE rows (folders are unaffected)
 	 * @return EnumerationResult bundling the items list and the folder-count head offset
 	 */
+	@WorkerThread
 	private EnumerationResult sortAndAssemble(FolderSnapshot snap, SortMode mode)
 	{
 		List<FileEntry> sortedFiles = new ArrayList<>(snap.files());
@@ -1797,10 +1961,10 @@ final class FolderBrowser
 	}
 
 	/**
-	 * Resolve the sort-toggle icon resource. The icon shows the direction a tap will switch INTO
-	 * (the inverse of the current mode), matching the grid/list toggle convention. NEWEST_FIRST is
-	 * descending filename order (name Z-to-A), OLDEST_FIRST ascending (A-to-Z); the icons read as
-	 * up/down arrows so the literal newest/oldest drawable names are just the asset labels.
+	 * Resolve the sort-toggle icon resource. The icon shows the direction a tap will switch INTO (the inverse of
+	 * the current mode), matching the grid/list toggle convention. NEWEST_FIRST is descending filename order (name
+	 * Z-to-A), OLDEST_FIRST ascending (A-to-Z); the icons read as up/down arrows so the literal newest/oldest
+	 * drawable names are just the asset labels.
 	 *
 	 * @return drawable resource ID for the inverse of the current sortMode
 	 */
@@ -1812,39 +1976,38 @@ final class FolderBrowser
 	}
 
 	/**
-	 * TalkBack label for the sort toggle. Like the icon, it advertises the ACTION a tap will
-	 * perform (switch to the OTHER direction) rather than the current state — accessibility
-	 * services then announce the same forward-looking text that the icon visually depicts.
+	 * TalkBack label for the sort toggle. Like the icon, it advertises the ACTION a tap will perform (switch to the
+	 * OTHER direction) rather than the current state — accessibility services then announce the same
+	 * forward-looking text that the icon visually depicts.
 	 *
 	 * @return action-describing description matching the sort-toggle icon currently shown
 	 */
 	private String sortToggleDescriptionForCurrentMode()
 	{
-		// Name-based wording (not "newest/oldest") because the comparator sorts by filename, not file
-		// timestamp — honest for renamed / downloaded / non-date-prefixed files. NEWEST_FIRST is
-		// descending filename order (Z-A), which approximates newest-first for date-prefixed camera names.
+		// Name-based wording (not "newest/oldest") because the comparator sorts by filename, not file timestamp
+		// — honest for renamed / downloaded / non-date-prefixed files. NEWEST_FIRST is descending filename
+		// order (Z-A), which approximates newest-first for date-prefixed camera names.
 		return sortMode == SortMode.NEWEST_FIRST
 			? "Sort by name A to Z"
 			: "Sort by name Z to A";
 	}
 
 	/**
-	 * Submit a bg thumbnail decode for `file` and post the resulting bitmap to `target` on the
-	 * UI thread, with tag-based rebind protection so a fast scroll that recycles the ImageView
-	 * to a different file doesn't end up painting the old file's bitmap onto the new cell.
+	 * Submit a bg thumbnail decode for `file` and post the resulting bitmap to `target` on the UI thread, with
+	 * tag-based rebind protection so a fast scroll that recycles the ImageView to a different file doesn't end up
+	 * painting the old file's bitmap onto the new cell.
 	 *
-	 * Cache-aware: the path-prefix cache lookup runs synchronously so a cache hit paints
-	 * immediately without scheduling a bg task. On miss, the bg decode posts the bitmap back
-	 * to the UI thread; the UI-thread post re-reads the tag and only paints when it still
-	 * matches the file we submitted for. Bitmaps live in the process-wide THUMBNAIL_CACHE, so
-	 * the stale-tag branch deliberately does NOT recycle — recycling a cached bitmap would
-	 * corrupt the cache (other dialog instances and future cache hits would read pixels from
-	 * a recycled native buffer).
+	 * Cache-aware: the path-prefix cache lookup runs synchronously so a cache hit paints immediately without
+	 * scheduling a bg task. On miss, the bg decode posts the bitmap back to the UI thread; the UI-thread post
+	 * re-reads the tag and only paints when it still matches the file we submitted for. Bitmaps live in the
+	 * process-wide THUMBNAIL_CACHE, so the stale-tag branch deliberately does NOT recycle — recycling a cached
+	 * bitmap would corrupt the cache (other dialog instances and future cache hits would read pixels from a
+	 * recycled native buffer).
 	 *
 	 * @param file           image file to decode
-	 * @param target         ImageView to paint into on success; tag is set to a path+lastModified
-	 *                       token before bg submission so the UI-post callback can detect a
-	 *                       recycled cell and skip the paint
+	 * @param target         ImageView to paint into on success; tag is set to the file's
+	 *                       thumbCacheKey before bg submission so the UI-post callback can detect
+	 *                       a recycled cell and skip the paint
 	 * @param allowBgSubmit  false when called from a bind that should NOT enqueue bg decode work
 	 *                       (used during a fast-scroller drag — see decodeDeferred). Cache hits
 	 *                       still paint immediately, but misses leave the cell blank; the
@@ -1854,10 +2017,9 @@ final class FolderBrowser
 	 */
 	private Future<?> submitDecodeForCell(File file, AppCompatImageView target, boolean allowBgSubmit)
 	{
-		int displayTarget = Math.max(1, DpToPx.toPx(THUMBNAIL_DECODE_DP, density));
-		String cellTag = file.getAbsolutePath() + ":" + file.lastModified();
+		String cellTag = thumbCacheKey(file, thumbnailDecodePx);
 		target.setTag(cellTag);
-		Bitmap cached = THUMBNAIL_CACHE.get(cellTag + ":" + displayTarget);
+		Bitmap cached = THUMBNAIL_CACHE.get(cellTag);
 		if (cached != null && !cached.isRecycled())
 		{
 			target.setImageBitmap(cached);
@@ -1869,41 +2031,21 @@ final class FolderBrowser
 			return null;
 		}
 		int gen = refreshGeneration;
-		// submit (not execute) so the caller gets a Future it can cancel on rebind — without
-		// cancellation, a fast scroll through a 50k-photo album queues hundreds of decode tasks
-		// for cells that recycle past long before their decode reaches the head of the queue,
-		// starving the currently-visible cells of decode budget. ViewHolders track the Future
-		// and cancel it before submitting the next file's decode.
-		return bgExecutor.submit(() ->
-		{
-			if (gen != refreshGeneration)
-			{
-				return;
-			}
-			Bitmap bmp = decodeThumbnail(file, displayTarget);
-			if (bmp == null)
-			{
-				return;
-			}
-			uiHandler.post(() ->
-			{
-				if (gen == refreshGeneration && cellTag.equals(target.getTag()))
-				{
-					target.setImageBitmap(bmp);
-				}
-				// No recycle on stale tag/generation: the bitmap lives in THUMBNAIL_CACHE and a
-				// recycle would corrupt the cache for any subsequent dialog or cache hit.
-			});
-		});
+		// submit (not execute) so the caller gets a Future it can cancel on rebind — without cancellation, a
+		// fast scroll through a 50k-photo album queues hundreds of decode tasks for cells that recycle past
+		// long before their decode reaches the head of the queue, starving the currently-visible cells of
+		// decode budget. ViewHolders track the Future and cancel it before submitting the next file's decode.
+		return bgExecutor.submit(() -> decodeCellOnBg(file, thumbnailDecodePx, cellTag, target, gen));
 	}
 
 	/**
-	 * Flip the file sort direction in response to the sort-toggle tap. Persists the new direction
-	 * to SharedPreferences, swaps the icon to advertise the next tap's action, and calls
-	 * refresh() so the bg enumeration re-sorts the file list. Folder ordering doesn't change
-	 * (always alphabetical) but going through refresh() keeps the rebuild path identical to a
-	 * folder navigation — the same loading-then-populated UX applies.
+	 * Flip the file sort direction in response to the sort-toggle tap. Persists the new direction to
+	 * SharedPreferences, swaps the icon to advertise the next tap's action, and calls refresh() so the bg
+	 * enumeration re-sorts the file list. Folder ordering doesn't change (always alphabetical) but going through
+	 * refresh() keeps the rebuild path identical to a folder navigation — the same loading-then-populated UX
+	 * applies.
 	 */
+	@UiThread
 	private void toggleSortMode()
 	{
 		sortMode = (sortMode == SortMode.NEWEST_FIRST)
@@ -1917,12 +2059,12 @@ final class FolderBrowser
 	}
 
 	/**
-	 * Flip the grid/list view mode in response to a toggle-icon tap. Swaps the layout
-	 * manager's span count (3 for grid, 1 for list), persists the choice to SharedPreferences,
-	 * and notifies the adapter so each visible cell re-binds against the new view-type
-	 * dispatch (file rows become FILE_GRID vs FILE_LIST). Folder rows are unaffected — the
-	 * SpanSizeLookup keeps them full-width in both modes.
+	 * Flip the grid/list view mode in response to a toggle-icon tap. Swaps the layout manager's span count (3 for
+	 * grid, 1 for list), persists the choice to SharedPreferences, and notifies the adapter so each visible cell
+	 * re-binds against the new view-type dispatch (file rows become FILE_GRID vs FILE_LIST). Folder rows are
+	 * unaffected — the SpanSizeLookup keeps them full-width in both modes.
 	 */
+	@UiThread
 	private void toggleViewMode()
 	{
 		gridMode = !gridMode;
@@ -1935,10 +2077,9 @@ final class FolderBrowser
 	}
 
 	/**
-	 * Iterate the RecyclerView's currently-visible cells and re-call bind() on each so
-	 * decodeDeferred=false picks up where the deferred-mode binds left off. Used by
-	 * setDecodeDeferred(false) (drag-end) to fill in the thumbnails for the final scroll
-	 * position without waiting for the user to scroll again.
+	 * Iterate the RecyclerView's currently-visible cells and re-call bind() on each so decodeDeferred=false picks
+	 * up where the deferred-mode binds left off. Used by setDecodeDeferred(false) (drag-end) to fill in the
+	 * thumbnails for the final scroll position without waiting for the user to scroll again.
 	 */
 	private void triggerDecodeForVisibleCells()
 	{
@@ -1978,9 +2119,8 @@ final class FolderBrowser
 	}
 
 	/**
-	 * TalkBack label for the grid/list toggle. Like the icon (which depicts the OTHER mode),
-	 * the description advertises the action a tap will perform so accessibility services
-	 * announce the same forward-looking text.
+	 * TalkBack label for the grid/list toggle. Like the icon (which depicts the OTHER mode), the description
+	 * advertises the action a tap will perform so accessibility services announce the same forward-looking text.
 	 *
 	 * @return action-describing description matching the view-mode-toggle icon currently shown
 	 */

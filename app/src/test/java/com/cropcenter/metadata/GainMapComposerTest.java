@@ -12,20 +12,19 @@ import org.junit.rules.TemporaryFolder;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
-import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.util.Arrays;
 
 /**
- * Tests for GainMapComposer.compose covering the four documented outcomes — three HDR-drop paths plus the
- * full-success path — and the ComposeResult.hdrAttached flag that disambiguates them for downstream callers.
+ * Tests for GainMapComposer.compose covering the four documented outcomes — three HDR-drop paths plus the full-success
+ * path — and the ComposeResult.hdrAttached flag that disambiguates them for downstream callers.
  *
- * The previous reference-equality contract (drop returns input array, success returns a fresh array) broke
- * once compose started returning the XMP-patched primary on the MPF-fail path: a freshly-allocated array
- * distinct from the input made `result != input` true on a drop, fooling CropExporter into reporting
- * "[HDR OK]" on a file with no gain map. Each test below now asserts both `bytes` content/identity AND
- * the explicit `hdrAttached` flag so the tagged contract can't drift back to reference-inequality.
+ * hdrAttached is the load-bearing signal: reference identity cannot stand in for it, because the MPF-fail drop path
+ * returns a freshly-allocated XMP-patched array distinct from the input — a `result != input` test reads that drop as
+ * success and reports "[HDR OK]" on a file with no gain map. Each test below asserts both `bytes` content/identity AND
+ * the explicit `hdrAttached` flag so the tagged contract can't drift to reference-inequality.
  */
 public final class GainMapComposerTest
 {
@@ -33,30 +32,74 @@ public final class GainMapComposerTest
 	public final TemporaryFolder tmp = new TemporaryFolder();
 
 	@Test
+	public void composeFileToFileCopiesVerbatimWhenXmpPatcherRefuses() throws IOException
+	{
+		// Streaming mirror of composeReturnsPrimaryWhenStandardItemLengthIsUnpatchable: when
+		// XmpItemLengthPatcher.patch returns empty (standard XMP carries Item:Length but with a malformed
+		// empty digit run), composeFileToFile must Files.copy the primary verbatim and return false. A
+		// regression returning true ships hdrAttached=true (plus the "[HDR OK]" toast) on a file whose XMP /
+		// MPF claim HDR with no gain map appended; removing the fail-closed check instead NPEs the bg save
+		// thread when it dereferences the absent patchedHead's length.
+		byte[] standardXmp = (JpegSegment.XMP_HEADER + "<rdf:Description Item:Length=\"\"/>")
+			.getBytes(StandardCharsets.US_ASCII);
+		byte[] primary = buildPrimary(standardXmp);
+		byte[] gainMap = new byte[40];
+		Arrays.fill(gainMap, (byte) 0x42);
+		File inFile = tmp.newFile("refused.jpg");
+		Files.write(inFile.toPath(), primary);
+		File outFile = tmp.newFile("refused-out.jpg");
+
+		boolean hdrAttached = GainMapComposer.composeFileToFile(inFile, gainMap, outFile);
+		assertFalse("XmpItemLengthPatcher refusal must report hdrAttached=false", hdrAttached);
+		assertArrayEquals("XmpItemLengthPatcher refusal must copy the primary verbatim (no gain map, "
+			+ "no XMP rewrite)", primary, Files.readAllBytes(outFile.toPath()));
+	}
+
+	@Test
+	public void composeFileToFileHandlesPrimaryLargerThanHeadReadLimit() throws IOException
+	{
+		// composeFileToFile loads only the first 16 MB (HEAD_READ_LIMIT) of the primary for XMP / MPF patching
+		// and streams the rest from disk. Push the file past that limit with entropy and assert the streaming
+		// output stays byte-identical to the in-memory compose — pinning the head / tail seam arithmetic
+		// (originalHeadSize vs the patched head's length after the Item:Length digit-count delta) that only
+		// engages once the head buffer is actually capped.
+		byte[] standardXmp = (JpegSegment.XMP_HEADER
+			+ "<rdf:Description Item:Length=\"100\" Item:Mime=\"image/jpeg\"/>")
+				.getBytes(StandardCharsets.US_ASCII);
+		byte[] primary = insertEntropyBeforeEoi(buildPrimary(standardXmp), 17 * 1024 * 1024);
+		byte[] gainMap = new byte[40];
+		Arrays.fill(gainMap, (byte) 0x42);
+
+		GainMapComposer.ComposeResult inMemory = GainMapComposer.compose(primary, gainMap);
+		assertTrue("in-memory compose on the oversized primary must attach HDR", inMemory.hdrAttached());
+		File inFile = tmp.newFile("oversized.jpg");
+		Files.write(inFile.toPath(), primary);
+		File outFile = tmp.newFile("oversized-out.jpg");
+		boolean hdrAttached = GainMapComposer.composeFileToFile(inFile, gainMap, outFile);
+		assertTrue("streaming compose on the oversized primary must attach HDR", hdrAttached);
+		assertArrayEquals("head-capped streaming compose must stay byte-identical to in-memory",
+			inMemory.bytes(), Files.readAllBytes(outFile.toPath()));
+	}
+
+	@Test
 	public void composeFileToFileProducesByteIdenticalOutputToInMemoryCompose() throws IOException
 	{
-		// Streaming-variant regression: composeFileToFile must produce a byte-for-byte identical
-		// output to `compose(primaryBytes, gainMap).bytes()` on the full-success path. Without this
-		// contract, a future divergence (different MpfPatcher invocation shape, different chunk
-		// boundary, head-truncation off-by-one) could silently ship different bytes for the
-		// streaming PNG-save path vs the in-memory JPEG-save path — a divergence that wouldn't
-		// surface until a user reported mismatched outputs across formats.
-		byte[] primary = buildPrimaryWithMpf();
+		// Streaming-variant regression: composeFileToFile must produce a byte-for-byte identical output to
+		// `compose(primaryBytes, gainMap).bytes()` on the full-success path. Without this contract, a future
+		// divergence (different MpfPatcher invocation shape, different chunk boundary, head-truncation
+		// off-by-one) could silently ship different bytes for the streaming PNG-save path vs the in-memory
+		// JPEG-save path — a divergence that wouldn't surface until a user reported mismatched outputs across
+		// formats.
+		byte[] primary = buildPrimary();
 		byte[] gainMap = new byte[40];
-		for (int i = 0; i < gainMap.length; i++)
-		{
-			gainMap[i] = 0x42;
-		}
+		Arrays.fill(gainMap, (byte) 0x42);
 		// In-memory baseline.
 		GainMapComposer.ComposeResult inMemory = GainMapComposer.compose(primary, gainMap);
 		assertTrue("in-memory full-success path must mark hdrAttached", inMemory.hdrAttached());
 		// Streaming variant — same input written to a tempfile, output to another tempfile.
 		File inFile = tmp.newFile("primary.jpg");
 		File outFile = tmp.newFile("composed.jpg");
-		try (FileOutputStream fos = new FileOutputStream(inFile))
-		{
-			fos.write(primary);
-		}
+		Files.write(inFile.toPath(), primary);
 		boolean hdrAttached = GainMapComposer.composeFileToFile(inFile, gainMap, outFile);
 		assertTrue("streaming full-success path must mark hdrAttached", hdrAttached);
 		byte[] streamingOutput = Files.readAllBytes(outFile.toPath());
@@ -65,31 +108,49 @@ public final class GainMapComposerTest
 	}
 
 	@Test
+	public void composeFileToFileUsesActualBytesWhenFileShorterThanReportedLength() throws IOException
+	{
+		// The head read sizes its buffer from File.length(), but the stream may return EOF earlier (file shrank
+		// between the length() call and the read). The truncation branch must shrink the head to the bytes
+		// actually read and carry on. On this SDR-shaped primary (no XMP, no MPF) the patchers pass through and
+		// MpfPatcher fails, so the well-defined output is the actual file bytes verbatim with hdrAttached=false
+		// — the phantom tail the lying length() promised must contribute nothing.
+		byte[] primary = JpegFixtures.concat(JpegFixtures.soi(), JpegFixtures.dqtStub(),
+			JpegFixtures.minimalScanAndEoi());
+		byte[] gainMap = { 0x42, 0x42 };
+		File realFile = tmp.newFile("shrunk.jpg");
+		Files.write(realFile.toPath(), primary);
+		File outFile = tmp.newFile("shrunk-out.jpg");
+		boolean hdrAttached = GainMapComposer.composeFileToFile(
+			JpegFixtures.fileReportingLength(realFile, primary.length + 64), gainMap, outFile);
+		assertFalse("MPF-less primary must not attach HDR", hdrAttached);
+		assertArrayEquals("short head read must ship the actual bytes, not a padded head",
+			primary, Files.readAllBytes(outFile.toPath()));
+	}
+
+	@Test
 	public void composeHdrAttachedFalseWhenXmpPatchedButMpfFails() throws IOException
 	{
 		// Regression for a detection-shape bug: when standard XMP carries a patchable Item:Length AND
-		// MpfPatcher subsequently fails (no MPF segment), GainMapComposer returns the XMP-patched primary
-		// (a freshly-allocated byte array because Item:Length was rewritten) — DIFFERENT reference from the
-		// input. The previous reference-inequality detection in CropExporter (`withGainMap != withFullMeta`)
-		// wrongly fired hdrAttached=true on this path, skipped stripHdrSegments, and toasted "[HDR OK]" on
-		// a file that ships with no gain map but XMP that still claims one. The ComposeResult.hdrAttached
-		// flag must be false here regardless of byte-array identity.
+		// MpfPatcher subsequently fails (no MPF segment), GainMapComposer returns the XMP-patched primary (a
+		// freshly-allocated byte array because Item:Length was rewritten) — DIFFERENT reference from the input.
+		// The previous reference-inequality detection in CropExporter (`withGainMap != withFullMeta`) wrongly
+		// fired hdrAttached=true on this path, skipped stripHdrSegments, and toasted "[HDR OK]" on a file that
+		// ships with no gain map but XMP that still claims one. The ComposeResult.hdrAttached flag must be
+		// false here regardless of byte-array identity.
 		byte[] standardXmp = (JpegSegment.XMP_HEADER
 			+ "<rdf:Description Item:Length=\"100\" Item:Mime=\"image/jpeg\"/>")
 				.getBytes(StandardCharsets.US_ASCII);
 		// Build a primary with a patchable XMP segment but NO MPF segment. XmpItemLengthPatcher will rewrite
-		// "100" to the gain-map size (40), producing a new byte array; MpfPatcher will then fail because no
-		// MPF segment exists.
+		// "100" to the gain-map size (40), producing a new byte array; MpfPatcher will then fail because no MPF
+		// segment exists.
 		ByteArrayOutputStream out = new ByteArrayOutputStream();
 		out.write(JpegFixtures.soi());
 		out.write(JpegFixtures.appSegment(0xE1, standardXmp));
 		out.write(JpegFixtures.minimalScanAndEoi());
 		byte[] primary = out.toByteArray();
 		byte[] gainMap = new byte[40];
-		for (int i = 0; i < gainMap.length; i++)
-		{
-			gainMap[i] = 0x42;
-		}
+		Arrays.fill(gainMap, (byte) 0x42);
 
 		GainMapComposer.ComposeResult result = GainMapComposer.compose(primary, gainMap);
 		assertFalse("MPF-fail-after-XMP-patch must mark hdrAttached=false even when bytes != primary",
@@ -102,12 +163,9 @@ public final class GainMapComposerTest
 		// Build a minimal Ultra-HDR-shaped primary (SOI + MPF APP2 + minimal scan + EOI), append a fake gain
 		// map, and verify compose returns the combined bytes (length > primary.length) — i.e., the MPF patch
 		// succeeded and anchored the gain map at the right offset.
-		byte[] primary = buildPrimaryWithMpf();
+		byte[] primary = buildPrimary();
 		byte[] gainMap = new byte[40];
-		for (int i = 0; i < gainMap.length; i++)
-		{
-			gainMap[i] = 0x42;
-		}
+		Arrays.fill(gainMap, (byte) 0x42);
 
 		GainMapComposer.ComposeResult result = GainMapComposer.compose(primary, gainMap);
 		assertTrue("full-success path must mark hdrAttached=true", result.hdrAttached());
@@ -119,19 +177,16 @@ public final class GainMapComposerTest
 		assertEquals((byte) 0xFF, bytes[0]);
 		assertEquals((byte) 0xD8, bytes[1]);
 		// Last gainMap.length bytes should be our 0x42 padding.
-		for (int i = 0; i < gainMap.length; i++)
-		{
-			assertEquals("gain map byte " + i + " should be appended verbatim",
-				(byte) 0x42, bytes[primary.length + i]);
-		}
+		assertArrayEquals("gain map should be appended verbatim",
+			gainMap, Arrays.copyOfRange(bytes, primary.length, primary.length + gainMap.length));
 	}
 
 	@Test
 	public void composeReturnsPrimaryUnchangedForAbsentGainMap()
 	{
-		// Single guard: `gainMap == null || gainMap.length == 0` short-circuits both cases through the
-		// same early-return. Pin both inputs against the same path so a regression that split the guard
-		// (e.g., only null → return, empty → fall through) surfaces here.
+		// Single guard: `gainMap == null || gainMap.length == 0` short-circuits both cases through the same
+		// early-return. Pin both inputs against the same path so a regression that split the guard (e.g., only
+		// null → return, empty → fall through) surfaces here.
 		byte[] primary = { 1, 2, 3, 4 };
 		GainMapComposer.ComposeResult nullResult = GainMapComposer.compose(primary, null);
 		assertFalse("null gain map must mark hdrAttached=false", nullResult.hdrAttached());
@@ -147,11 +202,11 @@ public final class GainMapComposerTest
 		// Without a valid MPF segment in primary, MpfPatcher.patch returns false. compose must DROP the gain
 		// map — appending orphaned gain-map bytes that no MPF entry points at would either crash strict
 		// decoders' Revert pre-flight (Samsung Gallery) or render with the wrong offset in lenient decoders.
-		// hdrAttached=false in the ComposeResult is what CropExporter uses to set ExportResult.hdrAttached
-		// and toast "[HDR dropped]" instead of "[HDR OK]". On this primary (no XMP, no MPF), the
+		// hdrAttached=false in the ComposeResult is what CropExporter uses to set ExportResult.hdrAttached and
+		// toast "[HDR dropped]" instead of "[HDR OK]". On this primary (no XMP, no MPF), the
 		// XmpItemLengthPatcher passes through with the input array unchanged, so the returned bytes are also
-		// the input reference — pinning that with assertSame protects against an inadvertent re-allocation
-		// that would also still be wrong-but-undetectable.
+		// the input reference — pinning that with assertSame protects against an inadvertent re-allocation that
+		// would also still be wrong-but-undetectable.
 		byte[] primary = { 0x10, 0x20, 0x30 };
 		byte[] gainMap = { 0x40, 0x50 };
 		GainMapComposer.ComposeResult result = GainMapComposer.compose(primary, gainMap);
@@ -162,26 +217,23 @@ public final class GainMapComposerTest
 	@Test
 	public void composeReturnsPrimaryWhenItemLengthInExtendedXmp() throws IOException
 	{
-		// When XmpItemLengthPatcher.patch returns null (Item:Length lives in Extended
-		// XMP, which can't be safely patched in-place across the per-chunk reassembly headers), compose
-		// must drop the gain map and ship primary verbatim. Without this null-handling integration, the
-		// composer would either NPE on the null `patched` array or ship a file with stale Item:Length —
-		// silent HDR-boost loss in strict GContainer-respecting decoders. Build a primary with valid MPF
-		// (so MPF patching would succeed if reached) and Extended XMP carrying Item:Length, verify the
-		// patcher's null short-circuits before MpfPatcher runs.
+		// When XmpItemLengthPatcher.patch returns empty (Item:Length lives in Extended XMP, which can't be
+		// safely patched in-place across the per-chunk reassembly headers), compose must drop the gain map and
+		// ship primary verbatim. Without this fail-closed integration, the composer would either NPE on the
+		// absent `patched` array or ship a file with stale Item:Length — silent HDR-boost loss in strict
+		// GContainer-respecting decoders. Build a primary with valid MPF (so MPF patching would succeed if
+		// reached) and Extended XMP carrying Item:Length, verify the patcher's empty return short-circuits
+		// before MpfPatcher runs.
 		byte[] standardXmp = (JpegSegment.XMP_HEADER + "<x:xmpmeta><hdrgm:Version>1.0</hdrgm:Version>"
 			+ "</x:xmpmeta>").getBytes(StandardCharsets.US_ASCII);
-		// Extended XMP chunk: namespace prefix (35 bytes) + 32-byte GUID + 4-byte total-length + 4-byte
-		// offset + body containing Item:Length=. The patcher's reassembly fallback OR the per-chunk scan
-		// will detect Item:Length= and return null.
+		// Extended XMP chunk: namespace prefix (35 bytes) + 32-byte GUID + 4-byte total-length + 4-byte offset
+		// + body containing Item:Length=. The patcher's reassembly fallback OR the per-chunk scan will detect
+		// Item:Length= and return empty.
 		byte[] extXmp = buildExtendedXmpChunk(
 			"<rdf:Description Item:Length=\"43099\" Item:Mime=\"image/jpeg\"/>");
-		byte[] primary = buildPrimaryWithMpfAndExtraXmp(standardXmp, extXmp);
+		byte[] primary = buildPrimary(standardXmp, extXmp);
 		byte[] gainMap = new byte[40];
-		for (int i = 0; i < gainMap.length; i++)
-		{
-			gainMap[i] = 0x42;
-		}
+		Arrays.fill(gainMap, (byte) 0x42);
 
 		GainMapComposer.ComposeResult result = GainMapComposer.compose(primary, gainMap);
 		assertFalse("Item:Length-in-Extended-XMP must mark hdrAttached=false", result.hdrAttached());
@@ -195,8 +247,7 @@ public final class GainMapComposerTest
 		// Variant of the patch-failure test using a real-looking JPEG (SOI + DQT + minimal scan + EOI) that has
 		// NO MPF segment. patch returns false; compose must drop the gain map. This pin closes the hardest
 		// case: a valid SDR JPEG (not Ultra HDR) being passed to compose — the gain map shouldn't hitch a ride.
-		byte[] primary = JpegFixtures.concat(
-			JpegFixtures.soi(), new byte[] { (byte) 0xFF, (byte) 0xDB, 0x00, 0x04, 0x00, 0x00 },
+		byte[] primary = JpegFixtures.concat(JpegFixtures.soi(), JpegFixtures.dqtStub(),
 			JpegFixtures.minimalScanAndEoi());
 		byte[] gainMap = { 0x42, 0x42, 0x42 };
 		GainMapComposer.ComposeResult result = GainMapComposer.compose(primary, gainMap);
@@ -215,173 +266,64 @@ public final class GainMapComposerTest
 		// Extended XMP case (or NPEs on null `patched.length`) gets caught.
 		byte[] standardXmp = (JpegSegment.XMP_HEADER + "<rdf:Description Item:Length=\"\"/>")
 			.getBytes(StandardCharsets.US_ASCII);
-		byte[] primary = buildPrimaryWithStandardXmpAndMpf(standardXmp);
+		byte[] primary = buildPrimary(standardXmp);
 		byte[] gainMap = new byte[40];
-		for (int i = 0; i < gainMap.length; i++)
-		{
-			gainMap[i] = 0x42;
-		}
+		Arrays.fill(gainMap, (byte) 0x42);
 
 		GainMapComposer.ComposeResult result = GainMapComposer.compose(primary, gainMap);
-		assertFalse("standard-XMP unpatchable Item:Length must mark hdrAttached=false",
-			result.hdrAttached());
+		assertFalse("standard-XMP unpatchable Item:Length must mark hdrAttached=false", result.hdrAttached());
 		assertSame("standard-XMP unpatchable Item:Length must drop the gain map (patcher null return)",
 			primary, result.bytes());
 	}
 
 	private static byte[] buildExtendedXmpChunk(String inner) throws IOException
 	{
-		ByteArrayOutputStream body = new ByteArrayOutputStream();
-		body.write("http://ns.adobe.com/xmp/extension/\0".getBytes(StandardCharsets.US_ASCII));
-		body.write("0123456789abcdef0123456789abcdef".getBytes(StandardCharsets.US_ASCII));
-		body.write(new byte[] { 0, 0, 0x10, 0 });
-		body.write(new byte[] { 0, 0, 0, 0 });
-		body.write(inner.getBytes(StandardCharsets.US_ASCII));
-		return body.toByteArray();
+		return JpegFixtures.extendedXmpChunk("0123456789abcdef0123456789abcdef", 0x1000L, 0L,
+			inner.getBytes(StandardCharsets.US_ASCII));
 	}
 
 	/**
-	 * Build a Ultra-HDR-shaped primary JPEG: SOI + MPF APP2 with a 2-image MP Entries table + minimal scan + EOI.
-	 * The MP Entries table sits inside the APP2 segment; primarySize passed to MpfPatcher.patch is set to the total
+	 * Build an Ultra-HDR-shaped primary JPEG: SOI + the given APP1 payloads in order + MPF APP2 with the canonical
+	 * 2-image MP Entries table + minimal scan + EOI. primarySize passed to MpfPatcher.patch is set to the total
 	 * primary length so relativeOffset = primarySize - mpfStart is non-negative and the gain-map entry can be
-	 * patched. Mirrors the layout produced by MpfPatcherTest.buildMpfFile but condensed to just what compose needs.
+	 * patched. The standard-XMP-unpatchable tests pass only a standard XMP payload (Extended XMP must NOT be
+	 * present so the patcher's empty return is unambiguously triggered by the standard-XMP body).
+	 *
+	 * @param app1Payloads zero or more APP1 payload bodies (standard XMP, Extended XMP) emitted before the MPF
+	 *                     APP2 segment
+	 * @return complete primary JPEG bytes with stale MP Entry size/offset fields for the compose pass to rewrite
+	 * @throws IOException never from the in-memory streams; declared by the OutputStream write contract
 	 */
-	private static byte[] buildPrimaryWithMpf() throws IOException
+	private static byte[] buildPrimary(byte[]... app1Payloads) throws IOException
 	{
-		ByteArrayOutputStream payload = new ByteArrayOutputStream();
-		// MP Endian header: "II*\0" + IFD offset = 8.
-		payload.write('I');
-		payload.write('I');
-		payload.write('*');
-		payload.write(0);
-		writeU32Le(payload, 8L);
-
-		// IFD: 2 entries (Version, MPEntries) + 4-byte next-IFD = 0.
-		writeU16Le(payload, 2);
-		// Entry: tag 0xB000 Version, type UNDEFINED, count 4, value "0100".
-		writeU16Le(payload, 0xB000);
-		writeU16Le(payload, 7);
-		writeU32Le(payload, 4L);
-		payload.write(new byte[] { '0', '1', '0', '0' });
-		// Entry: tag 0xB002 MPEntries, type UNDEFINED, count = numImages * 16, dataOffset = 38 (after IFD).
-		writeU16Le(payload, 0xB002);
-		writeU16Le(payload, 7);
-		writeU32Le(payload, 2L * 16L);
-		writeU32Le(payload, 38L);
-		writeU32Le(payload, 0L); // next IFD
-
-		// MP Entries: entry[0] primary (attr 0x20000000 / size placeholder / offset 0), entry[1] gain map (attr
-		// 0x010005 = Original Preservation).
-		writeU32Le(payload, 0x20000000L);
-		writeU32Le(payload, 999L);
-		writeU32Le(payload, 0L);
-		writeU32Le(payload, 0L);
-		writeU32Le(payload, 0x00010005L);
-		writeU32Le(payload, 0L);
-		writeU32Le(payload, 0L);
-		writeU32Le(payload, 0L);
-
 		ByteArrayOutputStream out = new ByteArrayOutputStream();
 		out.write(JpegFixtures.soi());
-		out.write(JpegFixtures.appSegment(0xE2, prefixMpfMagic(payload.toByteArray())));
+		for (byte[] app1Payload : app1Payloads)
+		{
+			out.write(JpegFixtures.appSegment(0xE1, app1Payload));
+		}
+		out.write(JpegFixtures.appSegment(0xE2, MpfFixtures.prefixMpfMagic(MpfFixtures.ultraHdrMpfPayload())));
 		out.write(JpegFixtures.minimalScanAndEoi());
 		return out.toByteArray();
 	}
 
-	private static byte[] buildPrimaryWithMpfAndExtraXmp(byte[] standardXmp, byte[] extXmp)
-		throws IOException
+	/**
+	 * Grow a JPEG by splicing extra entropy bytes into its scan, immediately before the trailing EOI. The 0x42
+	 * filler contains no 0xFF, so no stray markers appear in the entropy walk and the APP-segment head of the input
+	 * is untouched — the resulting file differs from the input only in scan length.
+	 *
+	 * @param jpeg         complete JPEG bytes ending with FF D9
+	 * @param entropyBytes number of filler bytes to splice in before the EOI
+	 * @return new array of jpeg.length + entropyBytes bytes
+	 */
+	private static byte[] insertEntropyBeforeEoi(byte[] jpeg, int entropyBytes)
 	{
-		// Same shape as buildPrimaryWithMpf but interleaves a standard XMP APP1 + Extended XMP APP1
-		// before the MPF segment, so the patcher exercises its standard-XMP-miss → Extended-XMP path
-		// and returns null.
-		ByteArrayOutputStream payload = new ByteArrayOutputStream();
-		payload.write('I'); payload.write('I'); payload.write('*'); payload.write(0);
-		writeU32Le(payload, 8L);
-		writeU16Le(payload, 2);
-		writeU16Le(payload, 0xB000);
-		writeU16Le(payload, 7);
-		writeU32Le(payload, 4L);
-		payload.write(new byte[] { '0', '1', '0', '0' });
-		writeU16Le(payload, 0xB002);
-		writeU16Le(payload, 7);
-		writeU32Le(payload, 2L * 16L);
-		writeU32Le(payload, 38L);
-		writeU32Le(payload, 0L);
-		writeU32Le(payload, 0x20000000L);
-		writeU32Le(payload, 999L);
-		writeU32Le(payload, 0L);
-		writeU32Le(payload, 0L);
-		writeU32Le(payload, 0x00010005L);
-		writeU32Le(payload, 0L);
-		writeU32Le(payload, 0L);
-		writeU32Le(payload, 0L);
-
-		ByteArrayOutputStream out = new ByteArrayOutputStream();
-		out.write(JpegFixtures.soi());
-		out.write(JpegFixtures.appSegment(0xE1, standardXmp));
-		out.write(JpegFixtures.appSegment(0xE1, extXmp));
-		out.write(JpegFixtures.appSegment(0xE2, prefixMpfMagic(payload.toByteArray())));
-		out.write(JpegFixtures.minimalScanAndEoi());
-		return out.toByteArray();
-	}
-
-	private static byte[] buildPrimaryWithStandardXmpAndMpf(byte[] standardXmp) throws IOException
-	{
-		// Variant of buildPrimaryWithMpfAndExtraXmp that adds only a single standard XMP segment +
-		// the MPF segment. Used by the standard-XMP-unpatchable test where Extended XMP must NOT be
-		// present so the patcher's null return is unambiguously triggered by the standard-XMP body.
-		ByteArrayOutputStream payload = new ByteArrayOutputStream();
-		payload.write('I'); payload.write('I'); payload.write('*'); payload.write(0);
-		writeU32Le(payload, 8L);
-		writeU16Le(payload, 2);
-		writeU16Le(payload, 0xB000);
-		writeU16Le(payload, 7);
-		writeU32Le(payload, 4L);
-		payload.write(new byte[] { '0', '1', '0', '0' });
-		writeU16Le(payload, 0xB002);
-		writeU16Le(payload, 7);
-		writeU32Le(payload, 2L * 16L);
-		writeU32Le(payload, 38L);
-		writeU32Le(payload, 0L);
-		writeU32Le(payload, 0x20000000L);
-		writeU32Le(payload, 999L);
-		writeU32Le(payload, 0L);
-		writeU32Le(payload, 0L);
-		writeU32Le(payload, 0x00010005L);
-		writeU32Le(payload, 0L);
-		writeU32Le(payload, 0L);
-		writeU32Le(payload, 0L);
-
-		ByteArrayOutputStream out = new ByteArrayOutputStream();
-		out.write(JpegFixtures.soi());
-		out.write(JpegFixtures.appSegment(0xE1, standardXmp));
-		out.write(JpegFixtures.appSegment(0xE2, prefixMpfMagic(payload.toByteArray())));
-		out.write(JpegFixtures.minimalScanAndEoi());
-		return out.toByteArray();
-	}
-
-	private static byte[] prefixMpfMagic(byte[] body)
-	{
-		// 4-byte MPF magic: 'M','P','F',NUL. String literal getBytes drops the trailing null, so build the
-		// signature byte-by-byte.
-		byte[] sig = { 'M', 'P', 'F', 0 };
-		byte[] result = new byte[sig.length + body.length];
-		System.arraycopy(sig, 0, result, 0, sig.length);
-		System.arraycopy(body, 0, result, sig.length, body.length);
+		byte[] result = new byte[jpeg.length + entropyBytes];
+		System.arraycopy(jpeg, 0, result, 0, jpeg.length - 2);
+		Arrays.fill(result, jpeg.length - 2, jpeg.length - 2 + entropyBytes, (byte) 0x42);
+		result[result.length - 2] = jpeg[jpeg.length - 2];
+		result[result.length - 1] = jpeg[jpeg.length - 1];
 		return result;
 	}
 
-	private static void writeU16Le(ByteArrayOutputStream out, int value)
-	{
-		out.write(value & 0xFF);
-		out.write((value >> 8) & 0xFF);
-	}
-
-	private static void writeU32Le(ByteArrayOutputStream out, long value)
-	{
-		out.write((int) (value & 0xFF));
-		out.write((int) ((value >> 8) & 0xFF));
-		out.write((int) ((value >> 16) & 0xFF));
-		out.write((int) ((value >> 24) & 0xFF));
-	}
 }

@@ -8,8 +8,8 @@ import com.cropcenter.view.RotationRulerView;
 
 /**
  * Host surface consumed by ToolbarBinder. Adds toolbar-specific operations (lock mode / ensureCropCenter /
- * recenterOnSelection / recomputeForLockChange / setCurrentPref / view accessors) on top of EditorHost's shared
- * busy / progress / toast / transient-dialog plumbing.
+ * recenterOnSelection / recomputeForLockChange / setCurrentPref / view accessors) on top of EditorHost's shared busy /
+ * progress / toast / transient-dialog plumbing.
  */
 interface ToolbarHost extends EditorHost
 {
@@ -19,8 +19,8 @@ interface ToolbarHost extends EditorHost
 	void applyLockMode();
 
 	/**
-	 * Seed a crop center at the image midpoint when none exists yet. Called from the AR popup / Custom AR
-	 * dialog flows so an aspect-ratio change takes immediate effect.
+	 * Seed a crop center at the image midpoint when none exists yet. Called from the AR popup / Custom AR dialog
+	 * flows so an aspect-ratio change takes immediate effect.
 	 */
 	void ensureCropCenter();
 
@@ -48,7 +48,9 @@ interface ToolbarHost extends EditorHost
 	/**
 	 * Update the lock-mode preference for the currently-active editor mode.
 	 *
-	 * @param pref new center-lock preference (BOTH / HORIZONTAL / VERTICAL / LOCKED)
+	 * @param pref new axis preference (BOTH / HORIZONTAL / VERTICAL). LOCKED is never passed — it is the
+	 *             Pin sentinel on centerMode, not an axis preference, and writing it here would corrupt
+	 *             the stored axis pref (ToolbarBinder.syncFromState explicitly skips it)
 	 */
 	void setCurrentPref(CenterMode pref);
 }

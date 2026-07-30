@@ -19,15 +19,17 @@ import android.widget.TextView;
 import com.cropcenter.util.DpToPx;
 import com.cropcenter.util.ThemeColors;
 
+import java.util.HexFormat;
 import java.util.Locale;
+import java.util.Optional;
 
 /**
  * Color picker: grid of preset colors, alpha slider, and hex input. The hex field always reflects the current selection
  * and its background acts as the live preview.
  *
- * Each call to show() builds and shows a single dialog. The class itself is instance-scoped (one instance per
- * dialog open) so the per-dialog mutable state (current selection, hex-watcher suppression flag, view references) lives
- * as ordinary fields rather than being smuggled through 1-element arrays into static helper signatures.
+ * Each call to show() builds and shows a single dialog. The class itself is instance-scoped (one instance per dialog
+ * open) so the per-dialog mutable state (current selection, hex-watcher suppression flag, view references) lives as
+ * ordinary fields rather than being smuggled through 1-element arrays into static helper signatures.
  */
 public final class ColorPickerDialog
 {
@@ -49,10 +51,10 @@ public final class ColorPickerDialog
 			void onTap(int color);
 		}
 
-		// Two-tile alpha checkerboard for the transparent-color visualisation. Light tile fills the cell,
-		// dark tile diagonals overlay (top-left + bottom-right quadrants) — same pattern as Photoshop's
-		// transparency grid so users immediately read the cell as "alpha < 255". Class-private so a future
-		// theme tweak lands in one spot rather than four `0xFF...` literals scattered through onDraw.
+		// Two-tile alpha checkerboard for the transparent-color visualisation. Light tile fills the cell, dark
+		// tile diagonals overlay (top-left + bottom-right quadrants) — same pattern as Photoshop's transparency
+		// grid so users immediately read the cell as "alpha < 255". Class-private so a future theme tweak lands
+		// in one spot rather than four `0xFF...` literals scattered through onDraw.
 		private static final int CHECKERBOARD_DARK = 0xFF999999;
 		private static final int CHECKERBOARD_LIGHT = 0xFFCCCCCC;
 
@@ -86,10 +88,10 @@ public final class ColorPickerDialog
 				int col = (int) (event.getX() / (getWidth() / (float) cols));
 				int row = (int) (event.getY() / (getHeight() / (float) rows));
 				// Hard-reject out-of-grid coords. A touch at exactly event.getX() == getWidth() yields
-				// col == cols, which folds into the next row's first cell via row-major
-				// (idx = row * cols + cols still satisfies `idx < colors.length` for any row except the
-				// last). Bottom edge is symmetric. Without the explicit col/row range check, the
-				// boundary tap selects an unintended swatch instead of being ignored.
+				// col == cols, which folds into the next row's first cell via row-major (idx = row *
+				// cols + cols still satisfies `idx < colors.length` for any row except the last).
+				// Bottom edge is symmetric. Without the explicit col/row range check, the boundary tap
+				// selects an unintended swatch instead of being ignored.
 				if (col < 0 || col >= cols || row < 0 || row >= rows)
 				{
 					return true;
@@ -162,6 +164,8 @@ public final class ColorPickerDialog
 		 * slider). Re-invalidates so the mauve ring moves off the previously-tapped swatch and onto whichever
 		 * palette entry matches the new color, or off the grid entirely when no swatch matches. Without this,
 		 * the grid's ring goes stale and the user sees a UI that lies about which color is active.
+		 *
+		 * @param color new active ARGB color; a value not present in the palette clears the ring
 		 */
 		void setSelectedColor(int color)
 		{
@@ -177,8 +181,10 @@ public final class ColorPickerDialog
 	private static final int LUMA_CONTRAST_CUTOFF = 140; // above this → dark text on the swatch
 	private static final int ROWS = 6;
 
-	// Standard 8x6 palette: mostly opaque colors, with a row of common translucents at bottom.
-	public static final int[] PALETTE_OPAQUE = {
+	// Standard 8x6 palette: mostly opaque colors, with a row of common translucents at bottom. Package-private —
+	// SettingsDialog (same package) is the only external consumer, and narrowing the scope removes the app-wide
+	// mutation surface a public mutable array exposes.
+	static final int[] PALETTE_OPAQUE = {
 		0xFFFF0000, 0xFFFF8000, 0xFFFFFF00, 0xFF00FF00, 0xFF00FFFF, 0xFF0080FF, 0xFF0000FF, 0xFFFF00FF,
 		0xFFCC0000, 0xFFCC6600, 0xFFCCCC00, 0xFF00CC00, 0xFF00CCCC, 0xFF0066CC, 0xFF0000CC, 0xFFCC00CC,
 		0xFF993333, 0xFF996633, 0xFF999933, 0xFF339933, 0xFF339999, 0xFF336699, 0xFF333399, 0xFF993399,
@@ -187,9 +193,10 @@ public final class ColorPickerDialog
 		0x80FFFFFF, 0x80FF0000, 0x80FFFF00, 0x8000FF00, 0x8000FFFF, 0x800000FF, 0x80FF00FF, 0x80000000,
 	};
 
-	// Translucent-first palette for selection / paint overlays. All saturated colors at 50% alpha so
-	// selections don't obscure the image. Bottom row offers opaque fallbacks.
-	public static final int[] PALETTE_TRANSLUCENT = {
+	// Translucent-first palette for selection / paint overlays. All saturated colors at 50% alpha so selections
+	// don't obscure the image. Bottom row offers opaque fallbacks. Package-private for the same scope-minimization
+	// reason as PALETTE_OPAQUE.
+	static final int[] PALETTE_TRANSLUCENT = {
 		0x80FF0000, 0x80FF8000, 0x80FFFF00, 0x8000FF00, 0x8000FFFF, 0x800080FF, 0x800000FF, 0x80FF00FF,
 		0x80CC0000, 0x80CC6600, 0x80CCCC00, 0x8000CC00, 0x8000CCCC, 0x800066CC, 0x800000CC, 0x80CC00CC,
 		0x80993333, 0x80996633, 0x80999933, 0x80339933, 0x80339999, 0x80336699, 0x80333399, 0x80993399,
@@ -208,6 +215,11 @@ public final class ColorPickerDialog
 	private EditText hexInput;
 	private SeekBar alphaSeekBar;
 	private TextView alphaValueText;
+	// Set while the hex watcher pushes a typed alpha into the slider (same re-entrancy idiom as
+	// MainActivity.applyingStateToUi). onProgressChanged skips its hex-field rewrite when set — suppressHexWatcher
+	// only stops watcher RE-ENTRY, not the setText itself, so without this flag typing the 6th hex digit while the
+	// slider sits at any non-255 alpha replaces the text mid-typing.
+	private boolean applyingHexToSlider;
 	private boolean suppressHexWatcher;
 	private int selected;
 
@@ -221,9 +233,9 @@ public final class ColorPickerDialog
 	}
 
 	/**
-	 * Build and show the picker. Returns the AlertDialog so the caller can track it for forced-cancel
-	 * propagation — SettingsDialog needs to cancel any open picker when its parent dialog is cancelled
-	 * so a stale picker can't fire its OK listener after the parent is gone.
+	 * Build and show the picker. Returns the AlertDialog so the caller can track it for forced-cancel propagation —
+	 * SettingsDialog needs to cancel any open picker when its parent dialog is cancelled so a stale picker can't
+	 * fire its OK listener after the parent is gone.
 	 *
 	 * @param context      Activity context for inflation
 	 * @param currentColor initial color (ARGB) to highlight + show in the hex input
@@ -238,8 +250,51 @@ public final class ColorPickerDialog
 	}
 
 	/**
+	 * Pure hex-field parser behind the hex↔alpha mediation: normalizes what the user typed into an ARGB color int,
+	 * or empty when the text isn't (yet) a complete color. Accepts "#AARRGGBB", "AARRGGBB", "#RRGGBB", and
+	 * "RRGGBB" (6-digit forms get an opaque FF alpha), case-insensitive, surrounding whitespace ignored.
+	 * afterTextChanged fires per keystroke, so partial states ("F", "#1Z") are routine — empty tells the watcher
+	 * to wait rather than react. Package-private so the test class can pin the accepted shapes without an Android
+	 * view hierarchy.
+	 *
+	 * @param text raw hex-field content (may carry surrounding whitespace and a leading '#')
+	 * @return ARGB color int; empty when the text is not a complete 6- or 8-digit hex value
+	 */
+	static Optional<Integer> parseHexColor(String text)
+	{
+		String hex = text.trim();
+		if (hex.startsWith("#"))
+		{
+			hex = hex.substring(1);
+		}
+		if (hex.length() == 6)
+		{
+			hex = "FF" + hex;
+		}
+		if (hex.length() != 8)
+		{
+			return Optional.empty();
+		}
+		// HexFormat.isHexDigit is ASCII-strict (0-9 A-F a-f), so sign characters, routine "#1Z34AB" keystroke
+		// states, and any non-ASCII digit an IME might insert are rejected up front — the parse below cannot
+		// throw.
+		for (int i = 0; i < hex.length(); i++)
+		{
+			if (!HexFormat.isHexDigit(hex.charAt(i)))
+			{
+				return Optional.empty();
+			}
+		}
+		// fromHexDigits reads the 8 digits as an unsigned 32-bit value, so alpha >= 0x80 colors (bit patterns
+		// above Integer.MAX_VALUE) parse without Integer.parseInt's signed ceiling.
+		return Optional.of(HexFormat.fromHexDigits(hex));
+	}
+
+	/**
 	 * Paint the hex EditText's background with the current color and pick a contrasting text color (ITU-R BT.601
 	 * luma: Y' = 0.299R + 0.587G + 0.114B).
+	 *
+	 * @param color ARGB color to preview (alpha painted as-is by the swatch background)
 	 */
 	private void applySwatchPreview(int color)
 	{
@@ -258,6 +313,8 @@ public final class ColorPickerDialog
 	/**
 	 * Build and attach the "Opacity" slider row. Stores `alphaSeekBar` and `alphaValueText` as fields so the wire
 	 * methods can reach them without an explicit return value.
+	 *
+	 * @param root dialog's vertical root layout the row is appended to
 	 */
 	private void buildAlphaRow(LinearLayout root)
 	{
@@ -327,6 +384,8 @@ public final class ColorPickerDialog
 
 	/**
 	 * Build and attach the hex-code EditText. Background acts as the live swatch preview.
+	 *
+	 * @param root dialog's vertical root layout the field is appended to
 	 */
 	private void buildHexInput(LinearLayout root)
 	{
@@ -369,7 +428,14 @@ public final class ColorPickerDialog
 			{
 				selected = (selected & 0x00FFFFFF) | (progress << 24);
 				alphaValueText.setText(String.valueOf(progress));
-				syncHexDisplay();
+				// Skip the hex-field rewrite when this progress change is the hex watcher's own echo
+				// (SeekBar fires onProgressChanged for programmatic setProgress too) — rewriting the
+				// field mid-typing corrupts continued input. The watcher already updated the swatch
+				// preview and grid from the typed value.
+				if (!applyingHexToSlider)
+				{
+					syncHexDisplay();
+				}
 				// Alpha change produces a new ARGB value that may or may not still match a palette
 				// entry. Keep the grid's highlighted swatch honest.
 				grid.setSelectedColor(selected);
@@ -419,40 +485,33 @@ public final class ColorPickerDialog
 				{
 					return;
 				}
-				try
+				Optional<Integer> parsedOpt = parseHexColor(editable.toString());
+				if (parsedOpt.isEmpty())
 				{
-					String hex = editable.toString().trim();
-					if (hex.startsWith("#"))
+					// Partial or malformed input mid-typing — wait for a complete hex value.
+					return;
+				}
+				int parsed = parsedOpt.orElseThrow();
+				selected = parsed;
+				int alpha = Color.alpha(parsed);
+				if (alphaSeekBar.getProgress() != alpha)
+				{
+					applyingHexToSlider = true;
+					try
 					{
-						hex = hex.substring(1);
+						alphaSeekBar.setProgress(alpha);
 					}
-					if (hex.length() == 6)
+					finally
 					{
-						hex = "FF" + hex;
-					}
-					if (hex.length() == 8)
-					{
-						int parsed = (int) Long.parseLong(hex, 16);
-						selected = parsed;
-						int alpha = Color.alpha(parsed);
-						if (alphaSeekBar.getProgress() != alpha)
-						{
-							alphaSeekBar.setProgress(alpha);
-						}
-						// Preview-only update — don't overwrite what the user is typing.
-						applySwatchPreview(parsed);
-						// Keep the grid's highlighted swatch in sync with the typed color.
-						// Without this, the mauve ring stays on the last-tapped palette entry
-						// even after the user types a different color — the grid visually lies
-						// about which color is active.
-						grid.setSelectedColor(parsed);
+						applyingHexToSlider = false;
 					}
 				}
-				catch (NumberFormatException ignored)
-				{
-					// afterTextChanged fires per keystroke; partial states ("F", "FF", "#1Z") are
-					// expected — wait for a full 6- or 8-digit hex before reflecting any change.
-				}
+				// Preview-only update — don't overwrite what the user is typing.
+				applySwatchPreview(parsed);
+				// Keep the grid's highlighted swatch in sync with the typed color. Without this, the
+				// mauve ring stays on the last-tapped palette entry even after the user types a
+				// different color — the grid visually lies about which color is active.
+				grid.setSelectedColor(parsed);
 			}
 		});
 	}
